@@ -94,7 +94,9 @@ accepted in place of this exchange.
 Frames are bounded to 256KiB, original binding/helper manifests to 32KiB and
 receipt reads to 64KiB. The owner has absolute frame deadlines. These deadlines
 only refuse a connection; they never release a VM, task, desktop or unknown owner.
-The only operations are `observe`, `accountReceipt` and `keyReceipt`. Receipt
+The fixed operations are `observe`, `accountReceipt`, `keyReceipt` and
+`guestObservation`. Version-2 account/key admission refuses until genuine helper
+authentication is available. Receipt
 names are fixed inside the original writable share. No request can choose a
 filename, host endpoint, VM, share, account, input action or termination target.
 
@@ -133,11 +135,20 @@ capability, spawns a second owner, clears a lock, signals a PID or promotes trus
 An owned-child waiter records exit through the retained original directory
 descriptor; exit is historical evidence, never replacement authorization.
 
-The retained `owner-helper-plan.json` is an internal expected-input seam, not a
-guest proof. Its production writer remains unavailable because authenticated
-guest-side mount acquisition and seamless helper delivery remain missing. Fixtures
-supply synthetic plans. Their validation and candidate receipts cannot construct
-the helper's production `Channel` or grant account/SSH trust.
+The internal version-2 writer now derives `owner-helper-plan.json` from host-only
+intent, the original restore target and account plan. It persists epoch/nonce/share
+IDs before effects and adds actual host share pins during preparation. No guest
+mount inode, UID or OS-build observation is needed before launch. Existing v1
+operations retain their exact original manifests/history. Production parent/human
+approval and helper catalog acquisition remain gated; intent files are not proof.
+
+The candidate adds a real VM-scoped VZ socket listener and a guest-side Darwin
+vsock connector, with no arbitrary endpoint. Native cross-language fixtures test
+framing, fresh challenges, original-intent journaling and a bounded share round
+trip. A completed observation remains explicitly unauthenticated for account and
+helper identity; the owner control channel can re-read it without guest replay.
+The final executable helper manifest and `Channel::acquire` remain unavailable.
+See [the verified transport contract and precise authentication gap](../../docs/LOCAL-VM-GUEST-CHANNEL.md).
 
 ## Host receipt admission
 

@@ -9,5 +9,5 @@
     "src/VM/VM.swift": "fef4b8760d61947078575931a37bda0b2625104363f915c8a0d46712696b5b15",
     "src/Virtualization/VMVirtualizationService.swift": "93b81a4d30d5cfe15ee893ba675d9b0fb2a4ac9b1976cb7dee976708847c88e0"
   },
-  "candidatePatchSha256": "7cee65d57f73f4a830a8d84e7a3a2f1c8c51bf0d4f459f4576e327c39c90e632"
+  "candidatePatchSha256": "5a4cfd72b2292235c08190eadd957d6b92e1bf7bfac31e60b670ff5d5f9a8cd7"
 }

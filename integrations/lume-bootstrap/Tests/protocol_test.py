@@ -201,4 +201,84 @@ class ProtocolTests(unittest.TestCase):
             s.connect(str(f.op/'owner.sock'));s.sendall(struct.pack('!I',999999))
         f.call()
 
+class GuestTests(unittest.TestCase):
+    def guest(self):
+        f=Fixture();self.addCleanup(f.finish)
+        b=f.binding;b['version']=2
+        node=lambda role:{k:b['paths'][role][k] for k in ['device','inode']}
+        plan={'version':2,'macosMajor':26,'accountName':'personal','accountHome':'/Users/personal',
+          'helperSha256':'b'*64,'runtimeSha256':b['runtimeSha256'],'accountIntentDigest':'c'*64,
+          'binding':{k:b[k] for k in ['bootstrapId','ownerEpoch','nonce','parentSession','parentTab','parentConversation']}}
+        plan['binding']['target']={k:b[k] for k in ['environmentId','generation','vmFingerprint','restoreSha256','macosMajor']}
+        plan['binding']['input']={'id':b['inputShareId'],'host':node('input'),'readOnly':True}
+        plan['binding']['output']={'id':b['outputShareId'],'host':node('output'),'readOnly':False}
+        data=wire(plan);b['helperManifestSha256']=digest(data)
+        private(f.op/'expected-helper.json',data);private(f.op/'input/host-plan.json',data)
+        private(f.op/'owner-intent.json',wire(b));f.bd=digest(wire(b))
+        a,c=socket.socketpair();g,h=socket.socketpair();g.settimeout(5)
+        f.process=subprocess.Popen([str(BINARY),str(c.fileno()),'guest-observe',str(h.fileno())],pass_fds=[c.fileno(),h.fileno()],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        c.close();h.close();send(a,{'binding':b64(wire(b)),'capability':b64(f.secret)});self.addCleanup(a.close)
+        self.addCleanup(g.close)
+        send(g,{'version':1,'clientNonce':'d'*64})
+        try:offer=read(g)
+        except EOFError:
+            _,err=f.process.communicate(timeout=5);raise RuntimeError(err.decode())
+        challenge=base64.b64decode(offer['challenge']);parsed=json.loads(challenge)
+        self.assertEqual(parsed['bindingDigest'],f.bd);self.assertEqual(parsed['clientNonce'],'d'*64)
+        self.assertEqual(parsed['ownerEpoch'],b['ownerEpoch']);self.assertEqual(base64.b64decode(offer['hostPlan']),data)
+        self.assertNotIn(b64(f.secret),json.dumps(offer));self.assertNotIn(f.secret.hex(),json.dumps(offer))
+        claims={'accountName':'personal','accountHome':'/Users/personal','uid':501,'osVersion':'26.0','osBuild':'25A001',
+          'helperSha256':'b'*64,'input':{'device':51,'inode':81},'output':{'device':51,'inode':82}}
+        return f,g,challenge,claims
+    def test_guest_observation_stays_untrusted_and_original_attempt_is_exclusive(self):
+        f,g,challenge,claims=self.guest()
+        private(f.op/'receipt/guest-mount-echo.json',challenge)
+        send(g,{'challengeSha256':digest(challenge),'claims':claims});result=read(g)
+        self.assertTrue(result['vmRouteObserved']);self.assertTrue(result['shareRoundTripObserved'])
+        for k in ['accountAuthenticated','helperAuthenticated','trustAccepted','ready']:self.assertFalse(result[k])
+        retained=(f.op/'guest-observation.json').read_bytes()
+        send(g,{'version':1,'clientNonce':'e'*64})
+        with self.assertRaises((EOFError,ConnectionResetError)):read(g)
+        self.assertEqual((f.op/'guest-observation-intent.json').read_bytes(),challenge)
+        self.assertEqual((f.op/'guest-observation.json').read_bytes(),retained)
+        self.assertFalse((f.op/'input/account-manifest.json').exists())
+    def test_guest_changed_partial_or_forged_identity_never_creates_plan(self):
+        for fault in ['challenge','epoch','nonce','share','alias','partial','uid','account','home','helper','nodes','field','view']:
+            with self.subTest(fault=fault):
+                f,g,challenge,claims=self.guest()
+                echo=challenge
+                if fault in ['epoch','nonce']:
+                    changed=json.loads(challenge);changed['ownerEpoch' if fault=='epoch' else 'serverNonce']='f'*64;echo=wire(changed)
+                if fault=='share':echo=b'wrong share'
+                if fault=='partial':echo=challenge[:10]
+                if fault=='alias':
+                    private(f.op/'retained-echo',echo);(f.op/'receipt/guest-mount-echo.json').symlink_to(f.op/'retained-echo')
+                else:private(f.op/'receipt/guest-mount-echo.json',echo)
+                if fault=='uid':claims['uid']=0
+                if fault=='account':claims['accountName']='other'
+                if fault=='home':claims['accountHome']='/Users/other'
+                if fault=='helper':claims['helperSha256']='e'*64
+                if fault=='nodes':claims['output']=claims['input']
+                if fault=='field':claims['proof']=True
+                if fault=='view':f.view['shares'][0]['readOnly']=False;f.store_view()
+                send(g,{'challengeSha256':'f'*64 if fault=='challenge' else digest(challenge),'claims':claims})
+                with self.assertRaises((EOFError,ConnectionResetError)):read(g)
+                self.assertFalse((f.op/'guest-observation.json').exists())
+                self.assertEqual((f.op/'guest-observation-intent.json').read_bytes(),challenge)
+                self.assertFalse((f.op/'input/account-manifest.json').exists())
+                g.close();f.process.communicate(timeout=5)
+    def test_lost_guest_reply_retains_owner_observation_without_replay(self):
+        f,g,challenge,claims=self.guest()
+        private(f.op/'receipt/guest-mount-echo.json',challenge)
+        send(g,{'challengeSha256':digest(challenge),'claims':claims})
+        # Never read the reply. Observe the disposable journal before closing to
+        # distinguish lost result from an attempt interrupted before completion.
+        deadline=time.monotonic()+5
+        while not (f.op/'guest-observation.json').exists() and time.monotonic()<deadline:time.sleep(.01)
+        self.assertTrue((f.op/'guest-observation.json').exists());g.close()
+        f.process.communicate(timeout=5)
+        self.assertEqual((f.op/'guest-observation-intent.json').read_bytes(),challenge)
+        result=json.loads((f.op/'guest-observation.json').read_bytes())
+        self.assertFalse(result['helperAuthenticated']);self.assertFalse(result['ready'])
+
 if __name__=='__main__':unittest.main()

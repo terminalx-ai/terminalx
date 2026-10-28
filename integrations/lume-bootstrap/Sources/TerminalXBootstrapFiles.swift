@@ -67,7 +67,7 @@ final class TXPinnedPath: @unchecked Sendable {
         return bytes
     }
     func receipt(_ name: String) throws -> Data {
-        try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json"].contains(name))
+        try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json"].contains(name))
         try check()
         let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         try txRequire(child >= 0)
@@ -81,9 +81,11 @@ final class TXPinnedPath: @unchecked Sendable {
         try check()
         return data
     }
-    func arm(_ bytes: Data) throws {
+    func arm(_ bytes: Data) throws { try writeNew("owner-started.json", bytes) }
+    func writeNew(_ name: String, _ bytes: Data) throws {
+        try txRequire(directory && ["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json"].contains(name) && bytes.count <= 64 * 1024)
         try check()
-        let file = try TXDescriptor(openat(fd, "owner-started.json", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
+        let file = try TXDescriptor(openat(fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
         let written = bytes.withUnsafeBytes { Darwin.write(file.raw, $0.baseAddress, $0.count) }
         try txRequire(written == bytes.count && fsync(file.raw) == 0 && fsync(fd) == 0)
         try check()
@@ -119,7 +121,7 @@ struct TXBinding: Codable {
         try txRequire(Set(paths.keys) == roles)
         for pin in paths.values { try txRequire(Set(pin.keys) == ["path", "device", "inode"]) }
         let binding = try JSONDecoder().decode(Self.self, from: bytes)
-        try txRequire(binding.version == 1 && binding.macosMajor == 26 && !binding.parentConversation.isEmpty && binding.parentConversation.utf8.count <= 256
+        try txRequire([1, 2].contains(binding.version) && binding.macosMajor == 26 && !binding.parentConversation.isEmpty && binding.parentConversation.utf8.count <= 256
             && binding.parentConversation.utf8.allSatisfy { $0 >= 32 && $0 < 127 })
         for id in [binding.bootstrapId, binding.ownerEpoch, binding.environmentId, binding.generation,
                    binding.parentSession, binding.parentTab, binding.inputShareId, binding.outputShareId] {

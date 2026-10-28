@@ -66,6 +66,14 @@ enum TXWire {
             length = socklen_t(MemoryLayout<pid_t>.size)
             try txRequire(fd > STDERR_FILENO && getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0 && pid == getppid())
         }
+        try configureStream(fd)
+    }
+    // VZ transports do not expose Unix peer UID/PID. Never use this as account
+    // authentication; the exact VZ device owns transport admission separately.
+    static func configureStream(_ fd: Int32) throws {
+        var kind: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        try txRequire(getsockopt(fd, SOL_SOCKET, SO_TYPE, &kind, &length) == 0 && kind == SOCK_STREAM)
         try txRequire(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0)
         let flags = fcntl(fd, F_GETFL)
         try txRequire(flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0)

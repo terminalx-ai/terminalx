@@ -79,14 +79,17 @@ impl Fixture {
             },
         )
         .unwrap();
-        let (mut manifest, _, _, _) =
-            macos_bootstrap_helper::owner_test_receipts((100, 200), (100, 201));
-        manifest["binding"]["bootstrapId"] = json!(key);
-        manifest["binding"]["target"] = json!(target);
-        private(
-            &provision.join("owner-helper-plan.json"),
-            &serde_json::to_vec(&manifest).unwrap(),
-        );
+        super::super::plan::retain_host_intent(
+            &open(&provision).unwrap(),
+            &super::super::plan::HostIntent {
+                parent_session: journal::new_id(),
+                parent_tab: journal::new_id(),
+                parent_conversation: "original".into(),
+                helper_sha256: "b".repeat(64),
+                runtime_sha256: "c".repeat(64),
+            },
+        )
+        .unwrap();
         let sha = journal::digest(&bytes);
         let artifact_path = root.join("bootstrap-artifacts").join(&sha).join("lume");
         directory(artifact_path.parent().unwrap());
@@ -185,6 +188,19 @@ fn native_original_launch_sanitizes_process_and_reopens_same_owner() {
     assert_eq!(result["stage"], "originalOwnerConnected");
     assert_eq!(result["ready"], false);
     assert_eq!(result["trustAccepted"], false);
+    let plan: Value =
+        serde_json::from_slice(&std::fs::read(f.op().join("expected-helper.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["version"], 2);
+    assert!(plan["binding"]["input"].get("mounted").is_none());
+    assert!(plan.get("osBuild").is_none());
+    assert!(!f.op().join("input/account-manifest.json").exists());
+    assert!(Reference::reopen(&f.op())
+        .unwrap()
+        .admit("accountReceipt")
+        .unwrap_err()
+        .to_string()
+        .contains("cannot authenticate"));
     let cap = std::fs::read(f.op().join("control.capability")).unwrap();
     assert_eq!(cap, [23; 32]);
     assert_eq!(
@@ -193,6 +209,27 @@ fn native_original_launch_sanitizes_process_and_reopens_same_owner() {
             .mode()
             & 0o777,
         0o600
+    );
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let observation = json!({"version":1,"bindingDigest":journal::digest(&reference.raw),"ownerEpoch":reference.binding.owner_epoch,
+        "challengeSha256":"a".repeat(64),"claims":{"accountName":plan["accountName"],"accountHome":plan["accountHome"],"helperSha256":plan["helperSha256"]},
+        "vmRouteObserved":true,"shareRoundTripObserved":true,"accountAuthenticated":false,"helperAuthenticated":false,"trustAccepted":false,"ready":false});
+    private(
+        &f.op().join("guest-observation.json"),
+        &canonical(&observation).unwrap(),
+    );
+    assert_eq!(reference.guest_observation().unwrap(), observation);
+    assert_eq!(reference.guest_observation().unwrap(), observation);
+    let mut forged = observation.clone();
+    forged["helperAuthenticated"] = json!(true);
+    private(
+        &f.op().join("guest-observation.json"),
+        &canonical(&forged).unwrap(),
+    );
+    assert!(reference.guest_observation().is_err());
+    private(
+        &f.op().join("guest-observation.json"),
+        &canonical(&observation).unwrap(),
     );
     let before = std::fs::read(f.op().join("spawned.json")).unwrap();
     let observed: Value =

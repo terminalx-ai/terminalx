@@ -90,7 +90,7 @@ struct Channel {
 }
 impl Channel {
     fn acquire() -> Result<Self> {
-        bail!("Authenticated original VM-owner/share broker is unavailable; no account, host-key or authorized_keys path was accessed")
+        guest_channel::acquire_authenticated()
     }
     fn check(&self) -> Result<()> {
         self.binding.validate()?;
@@ -167,6 +167,15 @@ struct Source {
 impl Source {
     fn system(channel: &Channel) -> Result<Self> {
         channel.check()?;
+        let (source, home) = Self::observe_current()?;
+        if home.node()? != channel.home.node()? {
+            bail!("OS account is not the owned guest home")
+        }
+        Ok(source)
+    }
+    // Local observation needs no pre-launch guest manifest or Channel. This is
+    // NOT host-authenticated identity; production launch/acquisition stays gated.
+    fn observe_current() -> Result<(Self, Directory)> {
         if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             bail!("macOS arm64 guest required")
         }
@@ -179,8 +188,9 @@ impl Source {
             bail!("Dedicated pinned bootstrap helper required")
         }
         let home = Directory::open(Path::new(&user.home), user.uid, false)?;
-        if home.node()? != channel.home.node()? {
-            bail!("OS account is not the owned guest home")
+        macos_account_name(&user.short_name, &user.home)?;
+        if user.uid < 501 || user.gid == 0 {
+            bail!("Personalized guest account required")
         }
         fn version(flag: &str) -> Result<String> {
             let result = super::process::run(
@@ -197,17 +207,20 @@ impl Source {
         }
         // These paths contain public OS/host-key data only; never open a private
         // SSH host key, personal credential, password database field or agent.
-        Ok(Self {
-            user,
-            os_version: version("-productVersion")?,
-            os_build: version("-buildVersion")?,
-            host_keys: Directory::open(Path::new("/private/etc/ssh"), 0, false)?,
-            helper: Directory::open(
-                executable.parent().context("Helper parent missing")?,
-                uid,
-                false,
-            )?,
-        })
+        Ok((
+            Self {
+                user,
+                os_version: version("-productVersion")?,
+                os_build: version("-buildVersion")?,
+                host_keys: Directory::open(Path::new("/private/etc/ssh"), 0, false)?,
+                helper: Directory::open(
+                    executable.parent().context("Helper parent missing")?,
+                    uid,
+                    false,
+                )?,
+            },
+            home,
+        ))
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -675,3 +688,6 @@ pub(super) fn validate_manifest_content(manifest: &Value) -> Result<()> {
     }
     Ok(())
 }
+
+#[path = "macos_guest_channel.rs"]
+mod guest_channel;

@@ -123,15 +123,6 @@ fn original_plan(
     provision: &Directory,
     source: &Value,
 ) -> Result<(Value, String)> {
-    // This plan is retained by a future authenticated helper preparation path.
-    // Its absence is a gate, never permission to invent guest mount identities.
-    let manifest: Value = fs::json(provision, "owner-helper-plan.json", 32 * 1024)?;
-    macos_bootstrap_helper::validate_manifest_content(&manifest)?;
-    if manifest["binding"]["bootstrapId"] != key
-        || manifest["binding"]["target"] != source["target"]
-    {
-        bail!("Original helper preparation belongs to another restore")
-    }
     let personalization = open(&root.join("macos-personalization").join(key))?;
     let record: Value = fs::json(&personalization, "record.json", 64 * 1024)?;
     let plan: macos_personalization::AccountPlan =
@@ -143,15 +134,48 @@ fn original_plan(
     }
     if record["inputDigest"] != journal::digest(&serde_json::to_vec(&record["intent"])?)
         || record["intent"]["target"] != source["target"]
-        || manifest["accountName"] != plan.short_name
-        || manifest["accountHome"] != format!("/Users/{}", plan.short_name)
     {
         bail!("Original account preparation changed")
     }
-    Ok((
-        manifest,
-        journal::digest(&serde_json::to_vec(&record["intent"])?),
-    ))
+    let digest = journal::digest(&serde_json::to_vec(&record["intent"])?);
+    // Legacy operations retain their original v1 manifest and history.
+    if provision.exists("restricted-owner-intent.json")? {
+        let retained: Value = fs::json(provision, "owner-helper-plan.json", 32 * 1024)?;
+        if retained["accountName"] != plan.short_name
+            || retained["accountHome"] != format!("/Users/{}", plan.short_name)
+            || retained["binding"]["bootstrapId"] != key
+            || retained["binding"]["target"] != source["target"]
+        {
+            bail!("Original helper/account preparation changed")
+        }
+        if retained["version"] == 2 {
+            let context: super::plan::HostIntent =
+                fs::json(provision, "owner-host-intent.json", 32 * 1024)?;
+            context.validate()?;
+            if retained["binding"]["parentSession"] != context.parent_session
+                || retained["binding"]["parentTab"] != context.parent_tab
+                || retained["binding"]["parentConversation"] != context.parent_conversation
+                || retained["helperSha256"] != context.helper_sha256
+                || retained["runtimeSha256"] != context.runtime_sha256
+                || retained["accountIntentDigest"] != digest
+            {
+                bail!("Original host intent changed")
+            }
+        } else {
+            macos_bootstrap_helper::validate_manifest_content(&retained)?;
+        }
+        return Ok((retained, digest));
+    }
+    // Guest account/mount/OS observations are neither required nor invented.
+    let context: super::plan::HostIntent =
+        fs::json(provision, "owner-host-intent.json", 32 * 1024)?;
+    super::plan::retain_host_intent(provision, &context)?;
+    if provision.exists("owner-helper-plan.json")? {
+        bail!("Incomplete original host plan remains fenced")
+    }
+    let manifest = super::plan::create(key, &source["target"], &plan, &digest, &context)?;
+    provision.write_new("owner-helper-plan.json", &serde_json::to_vec(&manifest)?)?;
+    Ok((manifest, digest))
 }
 fn prepare(
     root: &Path,
@@ -194,14 +218,14 @@ fn prepare(
         manifest["binding"][share]["host"] =
             json!({"device":paths[role].device,"inode":paths[role].inode});
     }
-    macos_bootstrap_helper::validate_manifest_content(&manifest)?;
-    let helper_bytes = serde_json::to_vec(&manifest)?;
+    super::plan::validate(&manifest)?;
+    let helper_bytes = canonical(&manifest)?;
     let h = &manifest["binding"];
     let text = |v: &Value| -> Result<String> {
         Ok(v.as_str().context("Original typed field missing")?.into())
     };
     let binding = Binding {
-        version: 1,
+        version: 2,
         macos_major: 26,
         bootstrap_id: key.into(),
         owner_epoch: text(&h["ownerEpoch"])?,
@@ -225,7 +249,7 @@ fn prepare(
     op.write_new("owner-intent.json", &raw)?;
     op.write_new("expected-helper.json", &helper_bytes)?;
     op.child("input", false)?
-        .write_new("account-manifest.json", &helper_bytes)?;
+        .write_new("host-plan.json", &helper_bytes)?;
     let secret = entropy();
     op.write_new("control.capability", &secret)?;
     op.write_new("prepared.json",&serde_json::to_vec(&json!({"bindingDigest":journal::digest(&raw),"capabilityDigest":journal::digest(&secret),"ready":false}))?)?;
@@ -315,7 +339,15 @@ fn reconcile(reference: &Reference) -> Result<Value> {
         return Ok(state("originalChildExited"));
     }
     match reference.recover_launch(pid) {
-        Ok(()) => Ok(state("originalOwnerConnected")),
+        Ok(()) => {
+            let mut result = state("originalOwnerConnected");
+            if reference.binding.version == 2 {
+                result["guestObservation"] = reference.guest_observation().unwrap_or_else(
+                    |_| json!({"stage":"unavailableOrRefused","ready":false,"trustAccepted":false}),
+                );
+            }
+            Ok(result)
+        }
         Err(_) => Ok(state("ownerOutcomeUnknown")),
     }
 }

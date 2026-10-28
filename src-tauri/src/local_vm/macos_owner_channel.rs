@@ -54,7 +54,7 @@ struct Binding {
     config_sha256: String,
     paths: BTreeMap<String, Pin>,
 }
-fn canonical(value: &Value) -> Result<Vec<u8>> {
+pub(super) fn canonical(value: &Value) -> Result<Vec<u8>> {
     fn encode(value: &Value) -> Result<String> {
         Ok(match value {
             Value::Object(map) => {
@@ -332,7 +332,7 @@ impl Reference {
             "storage",
             "vm",
         ];
-        if b.version != 1
+        if ![1, 2].contains(&b.version)
             || b.macos_major != 26
             || b.paths.keys().map(String::as_str).collect::<Vec<_>>() != roles
             || b.paths["operation"].path != path
@@ -375,6 +375,9 @@ impl Reference {
                 .all(|c| (32..127).contains(&c))
         {
             bail!("Invalid parent conversation")
+        }
+        if b.version == 2 {
+            plan::validate(&self.manifest)?;
         }
         let h = &self.manifest["binding"];
         if h["bootstrapId"] != b.bootstrap_id
@@ -489,7 +492,14 @@ impl Reference {
         Ok(path)
     }
     fn observe(&self, action: &str, request_id: &str) -> Result<AuthenticatedReceipt> {
-        if !["observe", "accountReceipt", "keyReceipt"].contains(&action) {
+        if ![
+            "observe",
+            "accountReceipt",
+            "keyReceipt",
+            "guestObservation",
+        ]
+        .contains(&action)
+        {
             bail!("Unsupported owner operation")
         }
         journal::validate_id(request_id)?;
@@ -557,7 +567,63 @@ impl Reference {
         self.socket(handshake)?;
         Ok(AuthenticatedReceipt { bytes: receipt })
     }
+    fn guest_observation(&self) -> Result<Value> {
+        if self.binding.version != 2 {
+            bail!("Host-only plan required")
+        }
+        let receipt = self.observe("guestObservation", &journal::new_id())?;
+        let value: Value = serde_json::from_slice(&receipt.bytes)?;
+        let keys = [
+            "accountAuthenticated",
+            "bindingDigest",
+            "challengeSha256",
+            "claims",
+            "helperAuthenticated",
+            "ownerEpoch",
+            "ready",
+            "shareRoundTripObserved",
+            "trustAccepted",
+            "version",
+            "vmRouteObserved",
+        ];
+        if value
+            .as_object()
+            .map(|v| v.keys().map(String::as_str).collect::<Vec<_>>())
+            != Some(keys.to_vec())
+            || value["version"] != 1
+            || value["bindingDigest"] != journal::digest(&self.raw)
+            || value["ownerEpoch"] != self.binding.owner_epoch
+            || [
+                "accountAuthenticated",
+                "helperAuthenticated",
+                "ready",
+                "trustAccepted",
+            ]
+            .iter()
+            .any(|k| value[k] != false)
+            || value["vmRouteObserved"] != true
+            || value["shareRoundTripObserved"] != true
+            || value["claims"]["accountName"] != self.manifest["accountName"]
+            || value["claims"]["accountHome"] != self.manifest["accountHome"]
+            || value["claims"]["helperSha256"] != self.manifest["helperSha256"]
+        {
+            bail!("Original owner observation changed or incorrectly asserted account trust")
+        }
+        super::transport::validate_runtime_sha(
+            value["challengeSha256"]
+                .as_str()
+                .context("Original challenge missing")?,
+        )?;
+        self.root
+            .publish("retained-guest-observation.json", &receipt.bytes)?;
+        // Owner authentication describes the source of these claims. It cannot
+        // create the helper Channel or the post-acquisition account manifest.
+        Ok(value)
+    }
     fn admit(&self, action: &str) -> Result<Value> {
+        if self.binding.version == 2 {
+            bail!("VM-scoped observations cannot authenticate a helper/account; signed acquisition and launch evidence required")
+        }
         if !["accountReceipt", "keyReceipt"].contains(&action) {
             bail!("Fixed helper receipt operation required")
         }
@@ -627,6 +693,9 @@ impl Reference {
 struct AuthenticatedReceipt {
     bytes: Vec<u8>,
 }
+
+#[path = "macos_owner_plan.rs"]
+pub(super) mod plan;
 
 #[path = "macos_owner_launch.rs"]
 pub(super) mod launch;

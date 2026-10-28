@@ -117,6 +117,7 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
     private let socket: TXPathPin
     private let state = NSLock()
     private var closed = false
+    private var guestListener: AnyObject?
     // The original config lock's open description is held, never re-created.
     private let configLease: TXDescriptor
     private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32) throws {
@@ -179,7 +180,7 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         let requestId = try txString(request, "requestId")
         let clientNonce = try txString(request, "clientNonce")
         _ = try txHex(clientNonce)
-        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt"].contains(action)
+        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation"].contains(action)
             && txString(request, "bindingDigest") == launch.bindingDigest)
         let nonce = txNonce()
         let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
@@ -189,7 +190,9 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         try txRequire(txEqualTag(txString(auth, "mac"), txTag(launch.capability, "host", parts)))
         try check()
         let receipt: Data
+        if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
         switch action {
+        case "guestObservation": receipt = try launch.pins["operation"]!.receipt("guest-observation.json")
         case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
         case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
         default: receipt = Data()
@@ -251,7 +254,15 @@ extension TerminalXBootstrapOwner {
                 try launch.validateMountedShares(shares.directories.map { ($0.key, $0.value.url.path, $0.value.isReadOnly) })
             }
         }
-        return try start(launch: launch, view: view, configLease: configLease)
+        let owner = try start(launch: launch, view: view, configLease: configLease)
+        if launch.binding.version == 2 {
+            let guestView = TXOwnedVM { [weak owner] in
+                guard let owner else { throw TXBootstrapError.refused }
+                try owner.check()
+            }
+            owner.guestListener = try TXGuestListener.install(launch: launch, view: guestView, service: service)
+        }
+        return owner
     }
 }
 #endif

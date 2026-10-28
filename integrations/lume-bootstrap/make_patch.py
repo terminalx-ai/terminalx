@@ -116,6 +116,7 @@ def render(base):
     edit(service, "    let networkMode: NetworkMode\n}", "    let networkMode: NetworkMode\n    var terminalXBootstrapMode: Bool = false\n}")
     edit(service, "            withLiveUpdatePlaceholder: true\n        )", "            withLiveUpdatePlaceholder: !config.terminalXBootstrapMode\n        )")
     edit(service, "        if !directorySharingDevices.contains(where: {", "        if !config.terminalXBootstrapMode && !directorySharingDevices.contains(where: {")
+    edit(service, "        vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]", "        vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]\n        if config.terminalXBootstrapMode { vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()] }", count=2)
     result = []
     for path in PINS:
         if original[path] != changed[path]:

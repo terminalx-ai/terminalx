@@ -10,6 +10,27 @@ import Darwin
         }
     }
     static func execute() throws {
+        if CommandLine.arguments.count == 4, CommandLine.arguments[2] == "guest-observe",
+           let control = Int32(CommandLine.arguments[1]), let guest = Int32(CommandLine.arguments[3]) {
+            let launch = try TerminalXBootstrapLaunch.receive(control)
+            let view = TXOwnedVM.fixture {
+                let path = launch.binding.paths["operation"]!.path + "/fixture-view.json"
+                let data = try txObject(Data(contentsOf: URL(fileURLWithPath:path)), keys:["running", "shares"])
+                try txRequire(data["running"] as? Bool == true)
+                guard let values = data["shares"] as? [[String:Any]] else { throw TXBootstrapError.refused }
+                try launch.validateMountedShares(values.map {
+                    guard let ro = $0["readOnly"] as? Bool else { throw TXBootstrapError.refused }
+                    return (try txString($0,"name"),try txString($0,"path"),ro)
+                })
+            }
+            // Repeated connection on this one fixture descriptor exercises the
+            // durable fence; real VZ delegate also rejects a competing actor.
+            for _ in 0..<2 {
+                do { try TXGuestProtocol.observe(fd:guest,launch:launch,view:view) }
+                catch { FileHandle.standardError.write(Data("guest fixture refusal: \(error)\n".utf8)); break }
+            }
+            return
+        }
         if CommandLine.arguments.count == 15, CommandLine.arguments[1] == "run" {
             let a = CommandLine.arguments
             try txRequire(a[3] == "--display" && a[4] == "none" && a[5] == "--vnc" && a[6] == "disabled"
