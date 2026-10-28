@@ -29,5 +29,9 @@ mod macos_endpoint;
 pub(crate) mod macos_delivery;
 pub(crate) mod macos_provision;
 mod macos_tools;
+#[allow(dead_code)] // Shared storage for the gated helper and candidate owner channel.
+mod macos_helper_fs;
 #[allow(dead_code)] // No broker/CLI route until authenticated owner/share acquisition exists.
 mod macos_bootstrap_helper;
+#[allow(dead_code)] // Candidate only; no approved profile or production launch route.
+mod macos_owner_channel;

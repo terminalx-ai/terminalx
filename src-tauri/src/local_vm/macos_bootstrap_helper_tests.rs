@@ -665,3 +665,24 @@ fn rejects_oversized_unexpected_manifests_and_duplicate_preexisting_keys() {
     assert!(f.call("installPublicKey").is_err());
     assert!(!f.home.join(".ssh").exists());
 }
+
+pub(super) fn owner_receipts(
+    input: (u64, u64),
+    output: (u64, u64),
+) -> (Value, Value, Value, Value) {
+    let mut f = Fixture::new();
+    f.manifest.binding.input.host = Node {
+        device: input.0,
+        inode: input.1,
+    };
+    f.manifest.binding.output.host = Node {
+        device: output.0,
+        inode: output.1,
+    };
+    f.channel.binding = f.manifest.binding.clone();
+    f.manifest(&f.manifest);
+    let key = f.observe_and_key();
+    let account = f.call("observe").unwrap();
+    let installed = f.call("installPublicKey").unwrap();
+    (json!(f.manifest), account, json!(key), installed)
+}

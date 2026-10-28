@@ -2,12 +2,14 @@
 //! The source performs real bounded filesystem work, but has no production
 //! channel constructor/CLI/RPC. Only disposable tests can construct a channel.
 //! Receipts are local observations, not authenticated owner/share trust proofs.
+use super::macos_helper_fs as fs;
 use super::{
     journal,
     macos_account::{Account, User},
     macos_personalization::{self, Target},
 };
 use anyhow::{bail, Context, Result};
+use fs::{Directory, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -16,9 +18,6 @@ use std::{
     path::Path,
     time::Duration,
 };
-#[path = "macos_helper_fs.rs"]
-mod fs;
-use fs::{Directory, Node};
 
 const MANIFEST_LIMIT: u64 = 32 * 1024;
 const KEYS_LIMIT: u64 = 64 * 1024;
@@ -542,6 +541,128 @@ pub(super) fn run(action: &str) -> Result<Value> {
     let channel = Channel::acquire()?;
     let source = Source::system(&channel)?;
     execute(&channel, &source, action, |_| Ok(()))
+}
+
+/// Strict local-content validation only. The candidate owner client must first
+/// authenticate the original process/share channel; this function grants no
+/// trust capability and is never exposed as a production receipt constructor.
+pub(super) fn validate_owner_receipt(
+    bytes: &[u8],
+    manifest: &Value,
+    original_account: Option<&Value>,
+    original_key: Option<&Value>,
+) -> Result<Value> {
+    if bytes.len() > 64 * 1024 {
+        bail!("Helper receipt exceeds bound")
+    }
+    let expected: Manifest = serde_json::from_value(manifest.clone())?;
+    expected.binding.validate()?;
+    macos_account_name(&expected.account_name, &expected.account_home)?;
+    validate_os(&expected.os_version, &expected.os_build)?;
+    if expected.version != 1 {
+        bail!("Unsupported helper manifest")
+    }
+    for hash in [&expected.helper_sha256, &expected.runtime_sha256] {
+        super::transport::validate_runtime_sha(hash)?;
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct AccountReceipt {
+        version: u32,
+        stage: String,
+        observation: Observation,
+        observation_digest: String,
+        ready: bool,
+        trust_accepted: bool,
+    }
+    if original_account.is_none() {
+        let receipt: AccountReceipt = serde_json::from_slice(bytes)?;
+        let observation = &receipt.observation;
+        observation.account.validate()?;
+        if receipt.version != 1
+            || receipt.stage != "accountObserved"
+            || receipt.ready
+            || receipt.trust_accepted
+            || observation.manifest != expected
+            || receipt.observation_digest != digest(observation)?
+            || observation.account.short_name != expected.account_name
+            || observation.account.home != expected.account_home
+            || macos_personalization::public_key(&observation.host_public_key)?
+                != observation.host_fingerprint
+            || observation.host_key_node.inode == 0
+            || observation.helper_node.inode == 0
+        {
+            bail!("Original helper account observation differs")
+        }
+        super::transport::validate_runtime_sha(&observation.host_key_file_sha256)?;
+    } else {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct KeyReceipt {
+            version: u32,
+            stage: String,
+            binding: Binding,
+            account: Account,
+            observation_digest: String,
+            key_reference: String,
+            public_key: String,
+            host_public_key: String,
+            host_fingerprint: String,
+            input_digest: String,
+            file: Node,
+            ssh: Node,
+            before_sha256: String,
+            after_sha256: String,
+            effect_evidence: String,
+            ready: bool,
+            trust_accepted: bool,
+        }
+        let account = original_account.context("Original account receipt missing")?;
+        validate_owner_receipt(&serde_json::to_vec(account)?, manifest, None, None)?;
+        let receipt: KeyReceipt = serde_json::from_slice(bytes)?;
+        let key: KeyManifest = serde_json::from_value(
+            original_key
+                .context("Original public key intent missing")?
+                .clone(),
+        )?;
+        let observed: Observation = serde_json::from_value(account["observation"].clone())?;
+        journal::validate_id(&key.key_reference)?;
+        macos_personalization::public_key(&key.public_key)?;
+        if key.version != 1
+            || key.binding != expected.binding
+            || key.observation_digest != digest(&observed)?
+            || key.public_key == observed.host_public_key
+            || receipt.version != 1
+            || receipt.stage != "publicKeyInstalled"
+            || receipt.binding != expected.binding
+            || receipt.account != observed.account
+            || receipt.observation_digest != digest(&observed)?
+            || receipt.key_reference != key.key_reference
+            || receipt.public_key != key.public_key
+            || receipt.host_public_key != observed.host_public_key
+            || receipt.host_fingerprint != observed.host_fingerprint
+            || receipt.input_digest != digest(&key)?
+            || receipt.file.inode == 0
+            || receipt.ssh.inode == 0
+            || receipt.effect_evidence != "originalFileAtExpectedBytesUnderLock"
+            || receipt.ready
+            || receipt.trust_accepted
+        {
+            bail!("Original helper key installation observation differs")
+        }
+        for hash in [&receipt.before_sha256, &receipt.after_sha256] {
+            super::transport::validate_runtime_sha(hash)?;
+        }
+    }
+    Ok(serde_json::from_slice(bytes)?)
+}
+
+#[cfg(test)]
+pub(super) fn owner_test_receipts(
+    input: (u64, u64),
+    output: (u64, u64),
+) -> (Value, Value, Value, Value) {
+    tests::owner_receipts(input, output)
 }
 
 #[cfg(test)]

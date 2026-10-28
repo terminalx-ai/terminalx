@@ -7,9 +7,12 @@ receipt**. No VM, account, credential, installed profile or production artifact
 was changed. Linux/macOS choice and the separate **Attach desktop tools** and
 **Run task in VM** actions remain the working defaults.
 
-The follow-on source slice implements the bounded helper filesystem engine and
-disposable native tests described below. It does not adopt this dependency
-proposal or supply the missing authenticated owner/share channel.
+Follow-on source implements the bounded helper filesystem engine and, at the
+user's subsequent authorization, a reviewable restricted-Lume owner/channel
+candidate. See [candidate source and exact contract](../integrations/lume-bootstrap/README.md).
+The candidate is patched against the exact baseline below; it is not an adopted
+dependency/profile or enabled production channel. Its real VZ adapter is
+typechecked and its native IPC is fixture-tested, without creating a VM.
 
 ## Recommended choice
 
@@ -74,8 +77,10 @@ RFB clipboard event is part of this proposal.
 
 ## Required Lume delta and exact console contract
 
-The following are **new TerminalX contracts**, not claims about existing CLI flags
-or Apple methods. Implement them only in the separately reviewed profile:
+The following are **new TerminalX contracts**, not claims about installed CLI
+flags or undocumented Apple methods. The candidate implements private inherited
+control, original-owner reconnect and fixed share-receipt reads. Console streaming
+and input remain unavailable. Adoption requires separate profile/artifact review:
 
 1. Disable all fixed-account SSH probes/writes, native SSH clipboard integration,
    VNC credential sharing to the guest and secret-bearing logging in bootstrap
@@ -184,11 +189,15 @@ constructed solely by disposable tests):
 
 Every receipt explicitly reports `ready:false` and `trustAccepted:false`. A local
 `publicKeyInstalled` observation describes file bytes, not authentication or
-serving readiness. The broker's authentic owner/share proof, read-only mount
-enforcement and live lease, receipt admission into the host trust ledger, signed
-helper packaging, and seamless guest launch remain unimplemented. Filesystem
-fixtures do not establish those properties, real macOS26 provisioning or live
-SSH acceptance. No profile or dependency was installed to run these tests.
+serving readiness. The restricted-Lume candidate now inspects the owning VM's
+actual runtime shares and serves receipts through authenticated private IPC;
+the Rust client validates and journals them in a separate candidate admission
+ledger. It does not promote production account/SSH trust. Approved launcher/profile
+integration, the helper's authenticated guest-side channel acquisition, signed
+helper packaging, and seamless guest launch remain missing. Fixtures do not prove
+live owner/share behavior, macOS26 provisioning or SSH acceptance. No profile or
+dependency was installed to run these tests. VNC is disabled in this candidate
+because its private server's listener binding remains unverified.
 
 ## Human steps and background behavior
 
@@ -270,9 +279,10 @@ catalog entry was made.
 
 **Recommended decision:** accept the source direction of a separately signed
 `lume-terminalx-bootstrap-v1` extension on the exact base above, reusing noVNC1.7.0
-and the two-share receipt protocol. This would authorize source development and
-artifact review, not installation, live activation, owner replacement or a change
-to the default-account legacy profile. The alternative is a TerminalX-owned
+and the two-share receipt protocol. The user has now authorized reversible source
+development in that direction, and the concrete candidate is linked above.
+Dependency/profile adoption, artifact approval, installation, live activation and
+owner replacement remain separate decisions. The alternative is a TerminalX-owned
 Virtualization runner/console, a larger dependency replacement; it also requires
 background input and signing/distribution acceptance and is not presumed approved.
 

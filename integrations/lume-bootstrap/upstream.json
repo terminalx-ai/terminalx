@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/trycua/cua",
+  "commit": "3350f504014c85416009a90fcb339fe556ce02fc",
+  "profileAdopted": false,
+  "upstreamFileSha256": {
+    "Package.swift": "2c0520b2c097ace92be3a8312c7a3ca722141f825e9281807df7a9396a42cb7b",
+    "src/Commands/Run.swift": "f7946c96b086115f92ea3dde118249417624ccb1e94c211fe7c9a4c5e38c229e",
+    "src/LumeController.swift": "dc492065d56dec99ac1e6224c03f0486eb3252e088b44a47cdeac052cb82edcb",
+    "src/VM/VM.swift": "fef4b8760d61947078575931a37bda0b2625104363f915c8a0d46712696b5b15",
+    "src/Virtualization/VMVirtualizationService.swift": "93b81a4d30d5cfe15ee893ba675d9b0fb2a4ac9b1976cb7dee976708847c88e0"
+  },
+  "candidatePatchSha256": "7cee65d57f73f4a830a8d84e7a3a2f1c8c51bf0d4f459f4576e327c39c90e632"
+}
