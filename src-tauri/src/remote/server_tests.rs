@@ -1648,6 +1648,94 @@ fn installed_agents() -> Vec<crate::harness::HarnessInfo> {
         .collect()
 }
 
+#[test]
+fn selected_repository_sessions_preserve_blank_root_and_use_the_child_checkout() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    f.rpc.set_offered_for_tests(installed_agents());
+    crate::cloud_agents::launch::init_blank_repository(&f.root, "main").unwrap();
+    let old = seed_session(&f.root, "Old blank session", None);
+    let root_head = crate::git::head_commit(&f.root).unwrap();
+    let child = f.root.join("demo-repository");
+    crate::cloud_agents::launch::init_blank_repository(&child, "main").unwrap();
+    // init_blank_repository detects the parent's Git; initialize the nested checkout explicitly.
+    crate::git::run(&child, &["init", "-q"]).unwrap();
+    std::fs::write(child.join("README.md"), "Selected repository\n").unwrap();
+    crate::git::run(&child, &["add", "README.md"]).unwrap();
+    crate::git::run(&child, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "Selected repository"]).unwrap();
+    crate::git::run(&child, &["remote", "add", "origin", "https://github.com/acme/demo-repository.git"]).unwrap();
+    let child_head = crate::git::head_commit(&child).unwrap();
+    let target = json!({"identity":"github.com/acme/demo-repository","directory":"demo-repository"});
+    let created = f.rpc.session_create(json!({"agent":"codex","useWorktree":true,"title":"Selected child","repository":target})).unwrap();
+    let entry = index::get(created["sessionId"].as_str().unwrap()).unwrap();
+    assert_eq!(entry.project_path, child.to_string_lossy());
+    assert_eq!(crate::git::head_commit(Path::new(&entry.cwd)), Some(child_head.clone()));
+    assert!(Path::new(&entry.cwd).join("README.md").is_file());
+    assert_eq!(crate::git::head_commit(&f.root), Some(root_head.clone()));
+    assert!(crate::git::remote_url(&f.root).is_none());
+    let sessions = f.rpc.workspace_sessions().unwrap();
+    assert!(sessions.iter().any(|session| session.id == old.id));
+    assert!(sessions.iter().any(|session| session.id == entry.id));
+    let ops = crate::cloud_agents::ManagerOps { manager, root: f.root.to_string_lossy().into_owned() };
+    assert!(crate::cloud_agents::AgentOps::session(&ops, &entry.id).is_some());
+    assert!(f.rpc.git.repositories().0.contains(&"demo-repository".to_string()));
+    let absolute = f.rpc.session_create(json!({
+        "agent":"codex","useWorktree":true,"title":"Absolute selected child",
+        "repository":{"identity":"github.com/acme/demo-repository","directory":child.join(".")}
+    })).unwrap();
+    let absolute_entry = index::get(absolute["sessionId"].as_str().unwrap()).unwrap();
+    assert_eq!(absolute_entry.project_path, child.to_string_lossy());
+    assert_eq!(crate::git::head_commit(Path::new(&absolute_entry.cwd)), Some(child_head));
+    assert!(Path::new(&absolute_entry.cwd).join("README.md").is_file());
+    assert!(f.rpc.workspace_sessions().unwrap().iter().any(|session| session.id == absolute_entry.id));
+    let before = index::load().unwrap().len();
+    for repository in [
+        json!({"identity":"github.com/acme/demo-repository","directory":"missing"}),
+        json!({"identity":"github.com/acme/wrong","directory":"demo-repository"}),
+        json!({"identity":"github.com/acme/wrong","directory":child}),
+        json!({"identity":"github.com/acme/demo-repository","directory":"."}),
+        json!({"identity":"github.com/acme/demo-repository","directory":"../outside"}),
+    ] {
+        let error = f.rpc.session_create(json!({"agent":"codex","useWorktree":true,"repository":repository})).unwrap_err();
+        assert_eq!(error.code, "repository_checkout_unavailable");
+        assert_eq!(index::load().unwrap().len(), before);
+    }
+    assert_eq!(crate::git::head_commit(&f.root), Some(root_head));
+}
+
+#[test]
+fn genuine_blank_session_still_initializes_its_own_root() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager)).unwrap();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let created = f.rpc.session_create(json!({"agent":"codex","useWorktree":true,"title":"Blank"})).unwrap();
+    let entry = index::get(created["sessionId"].as_str().unwrap()).unwrap();
+    assert_eq!(entry.project_path, f.root.to_string_lossy());
+    assert!(entry.worktree_name.is_some());
+    assert!(crate::git::remote_url(&f.root).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_session_target_requires_negotiated_capability_and_manager_authority() {
+    let f = fixture();
+    let params = json!({"agent":"codex","clientRequestId":"repository-session-1","repository":{"identity":"github.com/acme/api","directory":"api"}});
+    let (old, _events) = manager_peer(&f.rpc).await;
+    assert_eq!(code(call(&f.rpc, &old, "session.create", params.clone()).await), "capability_not_granted");
+    let (viewer, _events) = hello_with(&f.rpc, "repository-viewer", Authority::Participate, &["session/1", "session-repository/1"]).await;
+    assert!(call(&f.rpc, &viewer, "session.create", params).await.is_err());
+    assert!(!f.root.join(".git").exists());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_model_validation_covers_session_creation_new_tabs_and_configuration() {
     let _home = crate::store::temp_home();

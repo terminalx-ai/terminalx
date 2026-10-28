@@ -9,6 +9,13 @@
   Explain when the account service has not reported support; shared activity
   still requires a supported backend. (#642)
 
+### Cloud workspaces
+
+- Route new sessions to the selected, verified repository checkout and keep child
+  checkout sessions visible. Require the runtime's `session-repository/1`
+  capability; refuse unavailable or mismatched checkouts instead of using the
+  blank workspace root. (#656)
+
 ## 0.2.21
 
 ### Sessions and workspace
