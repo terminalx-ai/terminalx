@@ -155,4 +155,36 @@ describe("a compaction", () => {
     expect(screen.getByText(/Context compacted from 220k to 14k tokens/)).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  it("preserves reported zero and small counts and leaves missing counts absent", () => {
+    const view = render(<TurnBlock turn={compacted({ preTokens: 17, postTokens: 0 })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Context compacted from 17 to 0 tokens")).toBeDefined();
+    view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Context compacted")).toBeDefined();
+  });
+
+  it("renders stopped and uncertain work without claiming successful compaction", () => {
+    const lifecycle = { turnId: "turn", itemId: "item", generation: 1, retrying: false, state: "stopped", stoppedBy: "interrupted" };
+    const view = render(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined, lifecycle })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Compaction stopped: turn interrupted")).toBeDefined();
+    view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined, lifecycle: { ...lifecycle, state: "unknown" }, uncertain: true })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Compaction status unknown: could not save status")).toBeDefined();
+    expect(screen.queryByText(/Context compacted/)).toBeNull();
+  });
+});
+
+it("lists the files a finished turn changed, folding the rest, and hides them when turned off", () => {
+  setPrefs({ turnChanges: true, foldToolCalls: false });
+  const value = turn([]);
+  const edit = (path: string) => ({ kind: "tool", key: path, call: { callId: path, name: "Edit", toolType: "file_edit", input: { file_path: path }, edits: [{ path, kind: "update", oldText: "a", newText: "b\nc" }], result: { text: "" } } });
+  value.work = ["/repo/a.css", "/repo/b.html", "/repo/c.ts", "/repo/d.ts"].map(edit) as Turn["work"];
+  value.completed = { status: "ok", ts: "2026-10-03T00:00:01Z" };
+  const { rerender } = render(<TooltipProvider><TurnBlock turn={value} sessionId="s" cwd="/repo" stream={[]} working={false} /></TooltipProvider>);
+  const row = screen.getByTestId("turn-changes");
+  expect(row.textContent).toBe("a.css+2 −1b.html+2 −1+2 more+4 −2");
+  fireEvent.click(screen.getByText("+2 more"));
+  expect(screen.getByTestId("turn-changes").textContent).toContain("d.ts");
+  setPrefs({ turnChanges: false });
+  rerender(<TooltipProvider><TurnBlock turn={{ ...value }} sessionId="s" cwd="/repo" stream={[]} working={false} /></TooltipProvider>);
+  expect(screen.queryByTestId("turn-changes")).toBeNull();
 });

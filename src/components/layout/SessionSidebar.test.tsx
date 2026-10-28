@@ -341,6 +341,80 @@ describe("the conversation list", () => {
   });
 });
 
+describe("renaming from the sidebar", () => {
+  const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+  const tree = (name: string, branch: string, placeholder = false) => ({ path: `/repos/web/.worktrees/${name}`, name, branch, head: "abc1234", isMain: false, managed: true, placeholder, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 });
+  const withTrees = (labels?: Record<string, string>) => {
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_projects") return { projects: [{ ...projects[0], branchLabels: labels }], lastSelected: null };
+      if (command === "list_workspaces") return [...(await base(command, args)), tree("calm-ember-panda", "dc/calm-ember-panda", true), tree("crane", "dc/crane")];
+      if (command === "rename_branch") return { branch: "Pricing-research", project: { ...projects[0], branchLabels: { "Pricing-research": "Pricing research" } }, sessions: [] };
+      if (command === "update_project") return { ...projects[0] };
+      return base(command, args);
+    });
+  };
+  const bootTwo = () =>
+    boot([
+      session("panda", "/repos/web", at(2), { branch: "dc/calm-ember-panda", worktreeName: "calm-ember-panda", cwd: "/repos/web/.worktrees/calm-ember-panda" }),
+      session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+    ]);
+
+  it("offers a developer's few actions on a right-click", async () => {
+    withTrees();
+    await bootTwo();
+    mount();
+    fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Archive", "Delete…"]);
+  });
+
+  it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
+    withTrees();
+    await bootTwo();
+    mount();
+    fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
+    expect(name.value).toBe("dc/crane");
+    fireEvent.change(name, { target: { value: "Pricing research" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Also rename branch" }));
+    expect(screen.getByText("dc/crane → Pricing-research")).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
+    expect(mocks.invoke).toHaveBeenCalledWith("rename_branch", { projectPath: "/repos/web", from: "dc/crane", to: "Pricing-research" });
+    expect(mocks.invoke).toHaveBeenCalledWith("update_project", { path: "/repos/web", patch: { branchLabel: { branch: "Pricing-research", label: "Pricing research" } } });
+  });
+
+  it("shows a branch's label in place of its name, and only relabels it when the branch is left alone", async () => {
+    withTrees({ "dc/crane": "Payments" });
+    await bootTwo();
+    mount();
+    const row = screen.getByRole("button", { name: "Payments, Talk crane" });
+    fireEvent.doubleClick(row);
+    const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
+    expect(name.value).toBe("Payments");
+    fireEvent.change(name, { target: { value: "Billing" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "rename_branch")).toBe(false);
+    expect(mocks.invoke).toHaveBeenCalledWith("update_project", { path: "/repos/web", patch: { branchLabel: { branch: "dc/crane", label: "Billing" } } });
+  });
+
+  it("renames a conversation by its title where the row shows its title", async () => {
+    withTrees();
+    await bootTwo();
+    const { useDialogs } = await import("@/lib/dialogs");
+    let opened: string | null = null;
+    const Probe = () => {
+      opened = useDialogs().renameSession;
+      return null;
+    };
+    render(<Probe />);
+    mount();
+    fireEvent.doubleClick(screen.getByRole("button", { name: /^Talk panda/ }));
+    expect(opened).toBe("panda");
+  });
+});
+
 describe("ordering conversations", () => {
   it("puts pinned ones first, then the newest, and keeps the open one even when archived", () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();

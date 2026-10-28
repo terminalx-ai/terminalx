@@ -620,3 +620,33 @@ fn a_sign_in_during_logout_is_not_fenced_when_the_old_logout_returns() {
         assert!(requests[1].starts_with("PUT "));
     }
 }
+
+#[test]
+fn capability_recovery_republishes_real_sessions_without_reviving_unsupported_claims() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    index::save(&[linked_session(project.path())]).unwrap();
+    let (base, requests) = serve(r#"{"claims":1,"refreshAfterSeconds":120}"#);
+    let claims = service(&base);
+    let linker = Linker::default();
+    claims.account.set_capability_for_test(CAPABILITY, false);
+    assert!(claims.publish(&linker));
+    assert!(requests.lock().unwrap().is_empty());
+    let answer = claims.list("unused", "github", &[]);
+    assert_eq!(answer.reason.as_deref(), Some("unsupported"));
+    assert!(!answer.available && answer.claims.is_empty());
+    claims.account.set_capability_for_test(CAPABILITY, true);
+    assert!(claims.publish(&linker));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    claims.account.set_capability_for_test(CAPABILITY, false);
+    assert!(claims.publish(&linker));
+    assert!(claims.state.lock().unwrap().sent.is_none());
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    claims.account.set_capability_for_test(CAPABILITY, true);
+    claims.state.lock().unwrap().last_put = Instant::now().checked_sub(MIN_GAP);
+    assert!(claims.publish(&linker));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(body(&requests[1])["claims"][0]["sessionId"], "s1");
+    assert_eq!(body(&requests[0])["claims"][0]["issue"], body(&requests[1])["claims"][0]["issue"]);
+}

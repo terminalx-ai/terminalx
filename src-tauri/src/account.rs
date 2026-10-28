@@ -22,6 +22,8 @@ use zeroize::Zeroizing;
 use crate::desktop_links::DesktopLinks;
 use crate::keychain::{Keychain, SecretStore};
 
+pub(crate) mod organization_delete;
+
 pub const STATUS_EVENT: &str = "account_status";
 
 /// The server authorizes desktop cloud routes by membership in the path
@@ -127,6 +129,8 @@ pub struct AccountStatus {
     member_workspaces: bool,
     /// The server takes `wake: false` on an agent command (PRO-89).
     agent_command_wake: bool,
+    /// The account service implements shared issue work status.
+    work_claims: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -308,6 +312,13 @@ struct SessionBody {
     #[serde(default)]
     organizations: Vec<Organization>,
     capabilities: Capabilities,
+}
+
+#[derive(Deserialize)]
+struct SelectionBody {
+    cloud: CloudIdentity,
+    #[serde(default)]
+    organizations: Vec<Organization>,
 }
 
 /// The account status after [`AccountManager::refresh_roles`], and whether the
@@ -567,6 +578,11 @@ impl AccountManager {
                 }
                 (rotated, generation, changed, Some(REFRESH_NOT_SAVED))
             } else {
+                // Keep the capability snapshot/request/application in the same
+                // gate as explicit selection. Otherwise a delayed no-selection
+                // response after deletion can overwrite a newer selection.
+                // roles_refreshed is always acquired before refresh_gate.
+                let _selection_gate = self.refresh_gate.lock().unwrap();
                 if !roles_refresh_due(*refreshed, now, force) {
                     return false;
                 }
@@ -805,18 +821,21 @@ impl AccountManager {
     }
 
     fn select_organization(&self, organization_id: &str, context: &AccountContext) -> Result<()> {
-        #[derive(Deserialize)]
-        struct SelectionBody {
-            cloud: CloudIdentity,
-            #[serde(default)]
-            organizations: Vec<Organization>,
-        }
-        let body: SelectionBody = post_authenticated(
+        self.select_organization_with(organization_id, context, || post_authenticated(
             ACTIVE_ORGANIZATION_PATH,
             json!({ "orgId": organization_id }),
             Some(&context.access_token),
             None,
-        )?;
+        ))
+    }
+
+    fn select_organization_with(&self, organization_id: &str, context: &AccountContext,
+        request: impl FnOnce() -> Result<SelectionBody>) -> Result<()> {
+        // Deletion uses this same gate: a selection response fetched before a
+        // committed removal must not restore that organization's membership.
+        let _gate = self.refresh_gate.lock().unwrap();
+        if !self.is_current(context) { return Err(anyhow!("account context changed while selecting organization")); }
+        let body = request()?;
         if !selection_matches(organization_id, body.cloud.active_org_id.as_deref()) {
             return Err(anyhow!("account service selected a different organization"));
         }
@@ -839,6 +858,7 @@ impl AccountManager {
             }
             inner.set_session(Some(session));
         }
+        drop(_gate);
         self.store().map_err(StoreError::into_error).context("save selected organization")
     }
 
@@ -1362,6 +1382,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
         agent_command_wake: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(AGENT_COMMAND_WAKE_CAPABILITY) == Some(&true)),
+        work_claims: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(crate::work_claims::CAPABILITY) == Some(&true)),
     }
 }
 
@@ -1910,6 +1931,37 @@ mod tests {
         assert!(!manager.apply_refresh(4, &refreshed, Ok(refreshed.clone())));
         // A refresh for an older generation is dropped.
         assert!(!manager.apply_refresh(3, &refreshed, Ok(stored)));
+    }
+
+    #[test]
+    fn work_claims_only_session_body_changes_are_announced_without_changing_account() {
+        let manager = signed_in("org-a");
+        let stored = manager.inner.lock().unwrap().session.clone().unwrap();
+        let account = manager.current_account_key();
+        assert!(!manager.snapshot().work_claims);
+        let mut body: SessionBody = serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
+        body.capabilities.flags.insert(crate::work_claims::CAPABILITY.into(), true);
+        assert_eq!(manager.apply_session_body(7, &stored, body.clone()), (true, true));
+        assert!(manager.snapshot().work_claims);
+        assert_eq!(manager.current_account_key(), account);
+        assert_eq!(manager.apply_session_body(7, &stored, body.clone()), (true, false));
+        body.capabilities.flags.remove(crate::work_claims::CAPABILITY);
+        assert_eq!(manager.apply_session_body(7, &stored, body), (true, true));
+        assert!(!manager.snapshot().work_claims);
+    }
+
+    #[test]
+    fn work_claims_only_token_refresh_changes_are_announced() {
+        let manager = signed_in("org-a");
+        let stored = manager.inner.lock().unwrap().session.clone().unwrap();
+        let mut refreshed = stored.clone();
+        refreshed.capabilities.flags.insert(crate::work_claims::CAPABILITY.into(), true);
+        assert!(manager.apply_refresh(7, &stored, Ok(refreshed.clone())));
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["workClaims"], true);
+        assert!(!manager.apply_refresh(7, &refreshed, Ok(refreshed.clone())));
+        refreshed.capabilities.flags.insert(crate::work_claims::CAPABILITY.into(), false);
+        assert!(manager.apply_refresh(7, &stored, Ok(refreshed)));
+        assert!(!manager.snapshot().work_claims);
     }
 
     #[test]

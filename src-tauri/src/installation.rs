@@ -223,16 +223,17 @@ mod tests {
         install_skills_at(home.path()).unwrap();
         let status = skill_status_at(home.path());
         assert!(status.installed);
-        assert_eq!(status.targets.len(), 4);
+        assert_eq!(status.targets.len(), 6);
         for (path, stub) in skill_targets(home.path()) {
             let text = path.to_string_lossy();
-            assert!(text.contains("/terminalx-cli/SKILL.md") || text.contains("/computer-use/SKILL.md"));
+            assert!(["/terminalx-cli/SKILL.md", "/computer-use/SKILL.md", "/local-vm/SKILL.md"].iter().any(|name| text.contains(name)));
             assert_eq!(std::fs::read_to_string(path).unwrap(), stub);
         }
         assert_eq!(
             std::fs::read_to_string(home.path().join(".claude/skills/computer-use/SKILL.md")).unwrap(),
             crate::cli::COMPUTER_SKILL_STUB
         );
+        assert_eq!(std::fs::read_to_string(home.path().join(".agents/skills/local-vm/SKILL.md")).unwrap(), crate::cli::VM_SKILL_STUB);
     }
 
     #[test]

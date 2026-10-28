@@ -1,10 +1,25 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
-import { Archive, ChevronDown, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Palette, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
+import { Archive, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
+import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/menu";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
@@ -15,7 +30,10 @@ import { usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { branchMerged, checkoutLabel, worktreeCheckout } from "@/lib/checkout";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
-import { addProject, archiveSession, openProjectOverview, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
+import { addProject, archiveSession, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
+import { copyText } from "@/lib/clipboard";
+import { openRenameSession } from "@/lib/dialogs";
+import { copyShareLink } from "@/lib/localSharing";
 import { ContinuationDialog } from "@/components/session/ContinuationDialog";
 import { openSettle } from "@/lib/dialogs";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
@@ -29,17 +47,15 @@ import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
 import { AgentMark } from "@/components/AgentMark";
+import { RenameBranchDialog } from "./RenameBranchDialog";
+import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
 import { compareMessageActivity, conversationTime } from "@/lib/messageActivity";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
-/** A conversation's name: its agent's title for it once there is one. */
-export function conversationTitle(session: SessionEntry): string {
-  const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
-  return tab?.title?.trim() || session.title;
-}
+export { conversationTitle };
 
 const byRecency = (a: SessionEntry, b: SessionEntry) => compareMessageActivity(a, b, a.id, b.id);
 
@@ -297,6 +313,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
           <AccountSidebarEntry onOpenAccount={onOpenAccount} />
         </div>
         <div className="flex-1" />
+        <UpdateButton />
         <WithTooltip label="Settings" shortcut="app.settings" side="top">
           <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Settings" onClick={() => onOpenSettings()}>
             <Settings />
@@ -410,7 +427,18 @@ function ProjectGroup({
   // Branches whose checkout has its commits in the default branch, as git knows it here without a fetch.
   const merged = useMemo(() => new Set(workspaces.flatMap((workspace) => (branchMerged(workspace, group.sessions) ? [workspace.branch!] : []))), [workspaces, group.sessions]);
   // Branches still on the name drawn for their worktree: nobody named them, so their row goes by its conversation's title.
-  const placeholders = useMemo(() => new Set(workspaces.flatMap((workspace) => (workspace.placeholder && workspace.branch ? [workspace.branch] : []))), [workspaces]);
+  // What the reader named each branch; a branch with a label goes by it, placeholder or not.
+  const labels = group.project?.branchLabels ?? {};
+  // The project's own checkout is never a placeholder, whatever its branch is called.
+  const mainBranch = workspaces.find((workspace) => workspace.isMain)?.branch ?? null;
+  // Told from the branch's name alone, so a row is drawn by its final name from the first paint, not once the checkouts load.
+  const placeholders = useMemo(
+    () => new Set(Object.values(group.branches).filter((branch) => branch && branch !== mainBranch && isPlaceholderBranch(branch) && !group.project?.branchLabels?.[branch])),
+    [group.branches, mainBranch, group.project?.branchLabels],
+  );
+  // The branch whose Rename dialog is open. The project's own checkout keeps its branch; its label can still change.
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const renameBranch = (branch: string) => (branch && group.project && group.project.kind !== "folder" ? () => setRenaming(branch) : null);
   const nav = useSessionStore();
   const overviewOpen = nav.view === "project" && !!nav.selectedProject && canon(nav.selectedProject) === canon(group.path);
   const [all, toggleAll] = useFold(`project-all:${canon(group.path)}`, false);
@@ -541,10 +569,23 @@ function ProjectGroup({
               named={!sessions[0].worktreeRemoved && placeholders.has(branch) ? "title" : "branch"}
               merged={!sessions[0].worktreeRemoved && merged.has(branch)}
               onNewSession={newSessionOn(branch, sessions)}
+              label={labels[branch]}
+              onRenameBranch={renameBranch(branch)}
               linkTo={null}
             />
           ) : (
-            <BranchRow key={key} path={group.path} branch={branch} sessions={sessions} selectedId={selectedId} opened={filtered} merged={!sessions[0].worktreeRemoved && merged.has(branch)} onNewSession={newSessionOn(branch, sessions)} />
+            <BranchRow
+              key={key}
+              path={group.path}
+              branch={branch}
+              label={labels[branch]}
+              sessions={sessions}
+              selectedId={selectedId}
+              opened={filtered}
+              merged={!sessions[0].worktreeRemoved && merged.has(branch)}
+              onNewSession={newSessionOn(branch, sessions)}
+              onRename={renameBranch(branch)}
+            />
           ),
         )}
         {branches.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">No chats yet</li>}
@@ -562,6 +603,16 @@ function ProjectGroup({
       </ul>
         </div>
       </div>
+      {renaming !== null && (
+        <RenameBranchDialog
+          key={renaming}
+          projectPath={group.path}
+          branch={renaming}
+          label={labels[renaming]}
+          canRenameBranch={renaming !== mainBranch}
+          onClose={() => setRenaming(null)}
+        />
+      )}
     </div>
   );
 }
@@ -570,14 +621,19 @@ function ProjectGroup({
 function BranchRow({
   path,
   branch,
+  label: named,
   sessions,
   selectedId,
   opened,
   merged,
   onNewSession,
+  onRename,
 }: {
   path: string;
   branch: string;
+  /** What the reader named the branch, shown instead of it. */
+  label?: string;
+  onRename: (() => void) | null;
   sessions: SessionEntry[];
   selectedId: string | null;
   /** Open whatever its fold: the sidebar's filter is on. */
@@ -591,15 +647,17 @@ function BranchRow({
   const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
   const [open, toggle] = useFold(`branch:${canon(path)}:${foldKey}`, false);
   const expanded = open || holdsSelected || opened;
-  const label = `${branch || "No branch"}${removed ? " (workspace removed)" : ""}`;
+  const label = `${named ?? (branch || "No branch")}${removed ? " (workspace removed)" : ""}`;
   return (
     <li>
+      <ContextMenu>
+      <ContextMenuTrigger asChild>
       <div className={cn(actionRow, "relative flex h-8 items-center rounded-md pr-1 text-foreground/85 hover:bg-selected/50")}>
         <button
           type="button"
           onClick={toggle}
           aria-expanded={expanded}
-          title={label}
+          title={named ? `${named} · ${branch}` : label}
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <BranchGlyph merged={merged} />
@@ -614,6 +672,20 @@ function BranchRow({
           </RowActions>
         )}
       </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-56">
+        {onRename && (
+          <ContextMenuItem onSelect={onRename}>
+            <Pencil /> Rename…
+          </ContextMenuItem>
+        )}
+        {branch && (
+          <ContextMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
+            <GitBranch /> Copy branch name
+          </ContextMenuItem>
+        )}
+      </ContextMenuContent>
+      </ContextMenu>
       {expanded && (
         <ul className="ml-[13px] flex flex-col gap-px pl-1.5">
           {sessions.map((session) => (
@@ -681,6 +753,45 @@ function NewSessionButton({ action }: { action: NewSessionAction }) {
   );
 }
 
+/** A conversation row's right-click menu: what a developer reaches for on one, and nothing more. */
+export function RowContextMenu({ session, branch, rename }: { session: SessionEntry; branch: string | null; rename: (() => void) | null }) {
+  const copy = (text: string) => void copyText(text).catch(() => {});
+  return (
+    <ContextMenuContent className="w-56">
+      {rename && (
+        <ContextMenuItem onSelect={rename}>
+          <Pencil /> Rename…
+        </ContextMenuItem>
+      )}
+      <ContextMenuItem onSelect={() => void pinSession(session.id, !session.pinned)}>
+        <Pin /> {session.pinned ? "Unpin" : "Pin"}
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
+        <FolderOpen /> Reveal in Finder
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => copy(session.cwd)}>
+        <Copy /> Copy path
+      </ContextMenuItem>
+      {branch && (
+        <ContextMenuItem onSelect={() => copy(branch)}>
+          <GitBranch /> Copy branch name
+        </ContextMenuItem>
+      )}
+      <ContextMenuItem onSelect={() => void copyShareLink(session.id).catch(() => {})}>
+        <Link /> Copy link
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
+        <Archive /> {session.archived ? "Unarchive" : "Archive"}
+      </ContextMenuItem>
+      <ContextMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
+        <Trash2 /> Delete…
+      </ContextMenuItem>
+    </ContextMenuContent>
+  );
+}
+
 /** The state that matters most among several: a question waiting, then work in progress, then work done. */
 function pressingStatus(statuses: TabStatus[]): TabStatus {
   const order: TabStatus[] = ["waiting", "in_progress", "completed", "idle"];
@@ -695,6 +806,8 @@ function ConversationRow({
   named = "title",
   merged = false,
   onNewSession = null,
+  label,
+  onRenameBranch = null,
   linkTo,
 }: {
   session: SessionEntry;
@@ -707,6 +820,10 @@ function ConversationRow({
   merged?: boolean;
   /** Start another session on the row's branch, where it is checked out (or a workspace from it). */
   onNewSession?: NewSessionAction | null;
+  /** What the reader named the branch, shown instead of it on a row named by its branch. */
+  label?: string;
+  /** Open the branch's Rename dialog; a row named by its branch renames that, any other its conversation. */
+  onRenameBranch?: (() => void) | null;
   /** The branch it works on, named at the row's end; without one the row shows when it was last active. */
   branch: string | null;
   /** For a chat linked to nothing: the projects it may be linked to. */
@@ -718,25 +835,31 @@ function ConversationRow({
   const status = pressingStatus(peers.map(sessionStatus));
   const agent = useContext(ShowAgents) ? conversationAgent(session) : null;
   const mark = agent && <AgentMark id={agent} className={cn("size-3 text-faint", yieldsToRowActions)} />;
+  const branchName = label ?? branch;
+  // Rename is of what the row shows: its branch's label, or its conversation's title.
+  const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
     <li>
       <DropdownMenu>
+        <ContextMenu>
+        <ContextMenuTrigger asChild>
         <div
           className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md pl-2 pr-1", selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50")}
-          title={location ?? (branch ? `${branch} · ${title}` : title)}
+          title={location ?? (branchName ? `${branchName} · ${title}` : title)}
         >
           <button
             type="button"
             onClick={() => selectSession(session.id)}
+            onDoubleClick={rename ?? undefined}
             aria-current={selected ? "true" : undefined}
-            aria-label={named === "branch" ? `${branch ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
+            aria-label={named === "branch" ? `${branchName ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             {named === "branch" ? (
               <>
                 <BranchGlyph merged={merged} />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch ?? "No branch"}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchName ?? "No branch"}</span>
                 {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {mark}
                 {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
@@ -768,7 +891,15 @@ function ConversationRow({
             </DropdownMenuTrigger>
           </RowActions>
         </div>
+        </ContextMenuTrigger>
+        <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} />
+        </ContextMenu>
         <DropdownMenuContent align="end" className="w-56">
+          {rename && (
+            <DropdownMenuItem onSelect={rename}>
+              <Pencil /> Rename…
+            </DropdownMenuItem>
+          )}
           {linkTo && (
             <>
               <DropdownMenuSub>

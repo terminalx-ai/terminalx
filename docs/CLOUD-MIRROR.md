@@ -117,6 +117,10 @@ runtime lists `git ls-files --cached --others --exclude-standard`: tracked
 files, and untracked files Git does not ignore. A workspace with no
 repository has nothing to mirror.
 
+Discovery includes child checkouts even when the workspace root is itself a
+repository. A child's directory entry in the parent's listing is not a file
+to copy; the child's own listing supplies its files, with the same exclusions.
+
 Left out, and counted by reason in the manifest's `skipped`:
 
 | Reason | What |
@@ -125,7 +129,7 @@ Left out, and counted by reason in the manifest's `skipped`:
 | `excluded` | The repository's own `.terminalx-mirror-ignore` at its root (gitignore syntax). |
 | `toolConfig`, `gitDirectory` | The dangerous-content policy above. |
 | `symlink` | Every symbolic link, and every file reached through a linked folder. Links are never followed and never recreated locally. Git lists what its index names, so a folder replaced by a link (`d -> .git`, `d -> .aws`) would otherwise serve another place's files under an innocent name. |
-| `unsupported` | Sockets, devices, nested repositories and submodules, `.git` itself, and names a desktop cannot hold (a backslash, a drive letter). |
+| `unsupported` | Sockets, devices, directory entries (including nested checkouts and submodules in a parent's listing), `.git` itself, and names a desktop cannot hold (a backslash, a drive letter). Discovered checkouts' files are listed separately. |
 | `tooLarge` | Files over 32 MiB, the largest `fs.read` serves. |
 
 The rules are in `mirror_rules.rs`, compiled into both the runtime and the

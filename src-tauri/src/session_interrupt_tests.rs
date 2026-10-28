@@ -569,7 +569,7 @@ fn live_acp_escape_stops_the_turn_and_the_queued_message_goes_on() {
 
 /// The rig's session shared, with one admitted driver: what a guest's
 /// requests go through, over the same tab and the same pane.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 fn shared_with_a_driver(rig: &Rig) -> crate::pairing::PairingManager {
     use crate::local_sharing::{tests as fixtures, Role};
     let harness = match rig.cli().0 {
@@ -598,7 +598,7 @@ fn shared_with_a_driver(rig: &Rig) -> crate::pairing::PairingManager {
 }
 
 /// One request from the guest, as the share's router takes it.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 fn guest_asks(pairing: &crate::pairing::PairingManager, rig: &Rig, method: &str, extra: serde_json::Value) -> Result<serde_json::Value> {
     // The share lets a guest write four times a second; the test is not about that.
     if let Some(guest) = rig.manager.sharing.lock().unwrap().sessions.get_mut(SESSION).and_then(|share| share.guests.get_mut("connection")) {
@@ -637,7 +637,7 @@ fn share_activity(rig: &Rig) -> Vec<String> {
 /// and put "Session closed" over the host's tab. It is Escape, as the host's
 /// own Stop is, and what guests queued behind the turn is kept. The stop that
 /// ends the process is the one that says `force`.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn a_guest_s_stop_is_an_escape_and_only_a_forced_one_ends_the_process() {
     for kind in BOTH {
@@ -668,7 +668,7 @@ fn a_guest_s_stop_is_an_escape_and_only_a_forced_one_ends_the_process() {
 }
 
 /// With nothing running a guest's Stop types nothing and ends nothing.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn a_guest_s_stop_with_nothing_running_does_nothing() {
     let rig = with_a_cli_that_names_its_first_byte(CliKind::Claude);
@@ -688,7 +688,7 @@ fn a_guest_s_stop_with_nothing_running_does_nothing() {
 /// steering prompt. It is Escape and then that prompt as the next message:
 /// kept on the host, ahead of what was already waiting, and sent to the same
 /// process once the interrupted turn has ended.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn a_guest_s_steer_interrupts_and_goes_next_to_the_same_process() {
     for kind in BOTH {

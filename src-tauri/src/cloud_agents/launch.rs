@@ -1000,6 +1000,7 @@ impl Starter for ManagerStarter {
                 title: Some(title.to_string()),
                 use_worktree: false,
                 on_main: true,
+                checkout_branch: None,
                 base_ref: None,
                 worktree_name: None,
                 issue: None,

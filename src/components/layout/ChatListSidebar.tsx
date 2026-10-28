@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
-import { Archive, Ellipsis, GitBranch, Pin, Settings, SquarePen, Trash2 } from "@/icons";
+import { Archive, Ellipsis, GitBranch, Pencil, Pin, Settings, SquarePen, Trash2 } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
+import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { ContextMenu, ContextMenuTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
@@ -15,7 +16,7 @@ import { isUnread } from "@/lib/dashboard";
 import { usePrefs } from "@/lib/prefs";
 import { addProject, archiveSession, pinSession, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
-import { openSettle } from "@/lib/dialogs";
+import { openRenameSession, openSettle } from "@/lib/dialogs";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { relativeTime } from "@/lib/time";
 import type { Project } from "@/types/session";
@@ -23,7 +24,7 @@ import { sessionStatus, type SessionEntry } from "@/types/session";
 import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { PROJECT_COLORS, colorCss } from "./PixelMascot";
 import { BotFace } from "./BotFace";
-import { FilteredEmpty, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { FilteredEmpty, RowContextMenu, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations } from "./CloudOrganizations";
@@ -126,6 +127,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           <AccountSidebarEntry onOpenAccount={onOpenAccount} />
         </div>
         <div className="flex-1" />
+        <UpdateButton />
         <WithTooltip label="Settings" shortcut="app.settings" side="top">
           <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Settings" onClick={() => onOpenSettings()}>
             <Settings />
@@ -154,13 +156,18 @@ function ChatRow({
   const status = sessionStatus(session);
   const { animations } = usePrefs();
   const summary = summaries.get(session.id);
-  const preview = chatPreview(session, summary, link ? { name: link.name, branch: link.branch } : null);
+  // A branch goes by the label the reader gave it, as on the project list.
+  const branchName = link?.branch ? (link.project?.branchLabels?.[link.branch] ?? link.branch) : null;
+  const preview = chatPreview(session, summary, link ? { name: link.name, branch: branchName } : null);
+  const rename = () => openRenameSession(session.id);
   // The last thing said stays within reach, on hover.
   const said = (summary?.waitingOn ?? summary?.lastReply ?? summary?.lastPrompt)?.replace(/\s+/g, " ").trim();
   const agent = showAgent ? conversationAgent(session) : null;
   return (
     <li>
       <DropdownMenu>
+        <ContextMenu>
+        <ContextMenuTrigger asChild>
         <div
           className={cn(actionRow, "relative flex items-center gap-3 rounded-lg py-1.5 pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
           title={[title, session.worktreeRemoved ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null, preview.text, said && said !== preview.text ? said : null].filter(Boolean).join("\n")}
@@ -168,6 +175,7 @@ function ChatRow({
           <button
             type="button"
             onClick={() => selectSession(session.id)}
+            onDoubleClick={rename}
             aria-current={selected ? "true" : undefined}
             aria-label={title}
             className="flex min-w-0 flex-1 items-center gap-3 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
@@ -198,7 +206,13 @@ function ChatRow({
             </DropdownMenuTrigger>
           </RowActions>
         </div>
+        </ContextMenuTrigger>
+        <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
+        </ContextMenu>
         <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuItem onSelect={rename}>
+            <Pencil /> Rename…
+          </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => void pinSession(session.id, !session.pinned)}>
             <Pin /> {session.pinned ? "Unpin" : "Pin"}
           </DropdownMenuItem>

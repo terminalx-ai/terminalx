@@ -130,8 +130,12 @@ async fn secrets_links_and_special_entries_are_left_out_and_counted() {
         std::os::unix::fs::symlink("/etc/passwd", f.root.join("outside-link")).unwrap();
         std::os::unix::fs::symlink("src/app.ts", f.root.join("inside-link")).unwrap();
     }
-    // A nested repository is one entry to Git, and not a file.
-    repository(&f.root.join("vendor-copy"));
+    // Git still lists this tracked path after it becomes an empty directory.
+    // Exercise a non-file entry independently of repository discovery.
+    write(&f.root, "special-entry", "was a file\n");
+    git(&f.root, &["add", "special-entry"]);
+    std::fs::remove_file(f.root.join("special-entry")).unwrap();
+    std::fs::create_dir(f.root.join("special-entry")).unwrap();
 
     let viewer = peer(&f.rpc, Authority::Participate, &["mirror/1"]).await;
     let manifest = call(&f.rpc, &viewer, "mirror.manifest", json!({})).await.unwrap();
@@ -139,6 +143,31 @@ async fn secrets_links_and_special_entries_are_left_out_and_counted() {
     assert_eq!(manifest["skipped"]["secret"], 4);
     #[cfg(unix)]
     assert_eq!(manifest["skipped"]["symlink"], 2);
+    assert_eq!(manifest["skipped"]["unsupported"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkout_beside_a_root_repository_is_mirrored_with_the_same_safety_rules() {
+    let f = fixture();
+    repository(&f.root);
+    let child = f.root.join("vendor-copy");
+    repository(&child);
+    write(&child, ".env", "TOKEN=1\n");
+    git(&child, &["add", ".env"]);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("/etc/passwd", child.join("outside-link")).unwrap();
+
+    let viewer = peer(&f.rpc, Authority::Participate, &["mirror/1"]).await;
+    let manifest = call(&f.rpc, &viewer, "mirror.manifest", json!({})).await.unwrap();
+    assert_eq!(paths(&manifest), ["README.md", "vendor-copy/README.md"]);
+    assert_eq!(manifest["total"], 2);
+    let repositories: Vec<_> = manifest["repositories"].as_array().unwrap().iter().map(|repo| repo["repo"].as_str().unwrap()).collect();
+    assert_eq!(repositories, [".", "vendor-copy"]);
+    assert_eq!(manifest["skipped"]["secret"], 1);
+    #[cfg(unix)]
+    assert_eq!(manifest["skipped"]["symlink"], 1);
+    // The parent's listing names the child directory, which remains unsupported
+    // as a file. Its safe contents come only from the child's own Git listing.
     assert_eq!(manifest["skipped"]["unsupported"], 1);
 }
 

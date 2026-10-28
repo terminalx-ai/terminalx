@@ -717,6 +717,23 @@ describe("workspace RPC client", () => {
       before.close();
     });
 
+    it("negotiates repository session targets and never sends them to an older runtime", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      const repository = { identity: "github.com/acme/api", directory: "api" };
+      await client.createAgentTab({ agent: "codex", useWorktree: true, repository });
+      expect(runtime.sent.find((frame) => frame.method === "session.create")?.params).toMatchObject({ repository });
+      client.close();
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect(WORKSPACE_CAPABILITIES.filter((capability) => capability !== "session-repository/1"));
+      expect(() => before.createAgentTab({ agent: "codex", repository })).toThrow("cloud_repository_session_runtime_update_required");
+      expect(old.sent.some((frame) => frame.method === "session.create")).toBe(false);
+      await before.createAgentTab({ agent: "codex" });
+      before.close();
+    });
+
     it("pipeline/1: the runtime's pipelines are read and steered, a merge is only ever noted, and an older runtime is never asked", async () => {
       const runtime = new FakeRuntime();
       const client = new WorkspaceRpcClient(runtime, ids);

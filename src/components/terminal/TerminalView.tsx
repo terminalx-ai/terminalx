@@ -184,12 +184,15 @@ export function TerminalView({
   create,
   fit = true,
   dropRefusal,
+  redraw = true,
 }: {
   id: string;
   visible: boolean;
   create?: (mode: "dark" | "light") => TerminalInstance;
   fit?: boolean;
   dropRefusal?: TerminalDropRefusal;
+  /** The "Redraw terminal" control above it; a compact view leaves it out. */
+  redraw?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -300,7 +303,7 @@ export function TerminalView({
 
   return (
     <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
-      <div className="flex h-6 shrink-0 justify-end px-3">
+      {redraw && <div className="flex h-6 shrink-0 justify-end px-3">
         <button
           type="button"
           className="rounded px-2 text-xs text-muted-foreground hover:text-foreground"
@@ -310,7 +313,7 @@ export function TerminalView({
         >
           Redraw terminal
         </button>
-      </div>
+      </div>}
       <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
       <TerminalDropHint drop={drop} />
     </div>

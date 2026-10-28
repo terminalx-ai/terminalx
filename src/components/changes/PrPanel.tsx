@@ -70,7 +70,8 @@ export function PrPanel({
   const [landed, setLanded] = useState<Pick<Landed, "safe" | "head" | "branch"> | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [checkedWorkspace, setCheckedWorkspace] = useState<{ key: string; disposition: WorkspaceDisposition } | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Loading from the start: no pull requests is only said once they have been read.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
