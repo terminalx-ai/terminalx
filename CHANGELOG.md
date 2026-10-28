@@ -11,6 +11,9 @@
 
 ### Cloud workspaces
 
+- Treat enabled cloud control as consent for routine cloud workspace starts,
+  resumes and session launches without repeated native confirmations. Preserve
+  destructive confirmations and security checks. (#658)
 - Route new sessions to the selected, verified repository checkout and keep child
   checkout sessions visible. Require the runtime's `session-repository/1`
   capability; refuse unavailable or mismatched checkouts instead of using the
