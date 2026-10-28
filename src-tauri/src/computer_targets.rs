@@ -31,7 +31,7 @@ impl Target {
             Self::MacosGuest { environment_id, generation } if !environment_id.is_empty() && !generation.is_empty() => {},
             _ => bail!("Invalid computer identity; select an existing environment again"),
         }
-        if !matches!((self, capability), (Self::LinuxContainer { .. }, Capability::AttachedDesktop) | (Self::MacosGuest { .. } | Self::LinuxGuest { .. }, Capability::GuestTask)) {
+        if !matches!((self, capability), (Self::LinuxContainer { .. } | Self::MacosGuest { .. }, Capability::AttachedDesktop) | (Self::MacosGuest { .. } | Self::LinuxGuest { .. }, Capability::GuestTask)) {
             bail!("This environment does not support the requested agent route; no operation was routed");
         }
         Ok(())
@@ -78,7 +78,7 @@ pub fn inventory() -> Result<Inventory> {
         for env in state.environments.values().filter(|env| env.deleted_at.is_none()) {
             entries.push(Entry {
                 target: env.transport.target(&env.id, &env.generation),
-                name: format!("{} · {}", if env.transport.container().is_some() { "Linux tasks" } else { "macOS" }, env.name), capabilities: vec![Capability::GuestTask],
+                name: format!("{} · {}", if env.transport.container().is_some() { "Linux tasks" } else { "macOS" }, env.name), capabilities: if env.transport.is_macos() {vec![Capability::GuestTask,Capability::AttachedDesktop]} else {vec![Capability::GuestTask]},
                 state: if state.enabled { "requiresCapabilityCheck" } else { "disabled" }.into(),
             });
         }
@@ -119,11 +119,17 @@ pub fn save(tab: &mut TabEntry, conversation: Option<String>, target: Option<Tar
     Ok(selection)
 }
 
-pub fn launch_args(tab: &TabEntry, appends_prompt: bool) -> Result<String> {
+pub fn launch_args(session_id:&str, tab: &TabEntry, appends_prompt: bool) -> Result<String> {
     match selected(tab)?.target {
+        Some(target @ Target::MacosGuest {..}) => crate::local_vm::attachment::launch_args(session_id,tab,&target,appends_prompt),
         Some(target) => crate::container_vm::launch_selected(&target, &tab.harness, appends_prompt),
         None => Ok(String::new()),
     }
+}
+
+pub fn validate_attachment(target:&Target, session_id:&str, tab_id:&str, conversation:Option<String>)->Result<()> {
+    match target { Target::MacosGuest {..}=>crate::local_vm::attachment::check(target,session_id,tab_id,conversation).map(|_|()),
+        _=>crate::container_vm::selected_runtime(target).map(|_|()) }
 }
 
 #[derive(Deserialize)]
@@ -134,8 +140,16 @@ pub fn request(manager: &crate::session::SessionManager, method: &str, params: s
     use serde_json::to_value;
     match method {
         "computer.inventory" => to_value(inventory()?).map_err(Into::into),
+        "computer.checkAttachment" => {
+            let target:Target=serde_json::from_value(params["target"].clone())?;
+            crate::local_vm::attachment::check(&target,params["sessionId"].as_str().context("Parent session required")?,params["tabId"].as_str().context("Parent tab required")?,serde_json::from_value(params["conversation"].clone())?)
+        }
         "computer.attachment" | "computer.reconcileAttachment" => {
             let target: Target = serde_json::from_value(params["target"].clone())?;
+            if matches!(target,Target::MacosGuest {..}) {
+                if method=="computer.attachment" {return crate::local_vm::attachment::inspect(&target);}
+                return crate::local_vm::attachment::reconcile(&target,serde_json::from_value(params["binding"].clone())?,params["confirm"]==true);
+            }
             let root = crate::local_vm::host::root()?;
             if method == "computer.attachment" { return crate::local_vm::admission::inspect(&root, &target); }
             crate::local_vm::admission::reconcile(&root, &target,
@@ -169,7 +183,7 @@ mod tests {
     #[test]
     fn selection_reopens_exact_identity_and_refuses_corruption_or_conversation_change() {
         let mut tab: TabEntry = serde_json::from_value(json!({"id":"tab","harness":"codex","created":"now","unrelated":"kept"})).unwrap();
-        assert!(launch_args(&tab, false).unwrap().is_empty());
+        assert!(launch_args("session", &tab, false).unwrap().is_empty());
         let target = Target::LinuxContainer { runtime: Runtime::Podman, id: "a".repeat(64) };
         save(&mut tab, None, Some(target.clone())).unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -179,19 +193,20 @@ mod tests {
         assert_eq!(selected(&reopened).unwrap().target, Some(target));
         assert_eq!(reopened.unknown["unrelated"], "kept");
         reopened.follow.conversation = Some("next".into());
-        assert!(launch_args(&reopened, false).is_err());
+        assert!(launch_args("session", &reopened, false).is_err());
         assert!(save(&mut reopened, None, None).is_err());
         save(&mut reopened, Some("next".into()), None).unwrap();
-        assert!(launch_args(&reopened, false).unwrap().is_empty());
+        assert!(launch_args("session", &reopened, false).unwrap().is_empty());
         reopened.unknown.insert(SELECTION.into(), json!({"version":999,"target":null,"conversation":"next"}));
-        assert!(launch_args(&reopened, false).is_err());
+        assert!(launch_args("session", &reopened, false).is_err());
     }
 
     #[test]
     fn routes_are_exclusive_and_unknown_targets_fail_closed() {
         let mac = Target::MacosGuest { environment_id: "env".into(), generation: "generation".into() };
         let linux = Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) };
-        assert!(mac.require(Capability::AttachedDesktop).is_err());
+        assert!(mac.require(Capability::AttachedDesktop).is_ok());
+        assert!(crate::container_vm::selected_runtime(&mac).is_err());
         assert!(linux.require(Capability::GuestTask).is_err());
         assert!(mac.guest("env", "replacement").is_err());
         assert!(serde_json::from_value::<Target>(json!({"kind":"linuxContainer","runtime":"docker","id":"a".repeat(64),"fallback":"host"})).is_err());

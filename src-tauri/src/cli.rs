@@ -149,6 +149,8 @@ struct Parsed {
 /// desktop app continue into Tauri.
 pub fn run_cli() -> Option<i32> {
     #[cfg(unix)]
+    if let Some(code) = crate::local_vm::attachment::run_stdio_cli() { return Some(code); }
+    #[cfg(unix)]
     if let Some(code) = crate::container_vm::run_stdio_cli() { return Some(code); }
     let all: Vec<String> = std::env::args().collect();
     let invoked = all

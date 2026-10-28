@@ -14,13 +14,14 @@ let saved: Selection;
 beforeEach(() => {
   inventory = { entries: [
     { target: linux, name: "Linux · podman", capabilities: ["attachedDesktop"], state: "running" },
-    { target: mac, name: "macOS · guest", capabilities: ["guestTask"], state: "requiresCapabilityCheck" },
+    { target: mac, name: "macOS · guest", capabilities: ["guestTask", "attachedDesktop"], state: "requiresCapabilityCheck" },
   ], notices: [] };
   saved = { version: 1, conversation: context.conversation, target: null };
   mocks.invoke.mockReset().mockImplementation(async (_command, { method, params }) => {
     if (method === "computer.inventory") return inventory;
     if (method === "computer.selection") return saved;
     if (method === "computer.select") return saved = { ...saved, target: params.target };
+    if (method === "computer.checkAttachment") return { target: params.target, available: true, detail: "Guest route verified" };
     throw new Error(`Unexpected ${method}`);
   });
 });
@@ -52,11 +53,16 @@ it("retains a missing target without displaying or attaching its replacement", a
   expect(mocks.invoke.mock.calls.some(([, args]) => args.method === "computer.select")).toBe(false);
 });
 
-it("shows macOS capabilities without displaying Linux or attaching an unsupported route", async () => {
+it("requires an exact macOS capability check before attachment and never shows the Linux viewer", async () => {
   show(); await select(mac);
-  expect(screen.getByText(/Attached macOS desktop tools are not available/)).toBeTruthy();
+  expect(screen.getByText(/Desktop attachment stays in the background/)).toBeTruthy();
   expect(screen.queryByTestId("viewer")).toBeNull();
   expect((screen.getByRole("button", { name: "Attach desktop tools to this tab" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Check macOS desktop tools" }));
+  await screen.findByText("Guest route verified");
+  fireEvent.click(screen.getByRole("button", { name: "Attach desktop tools to this tab" }));
+  await screen.findByText(/This tab's desktop attachment: macOS/);
+  expect(saved.target).toEqual(mac);
 });
 
 it("preserves the existing attachment when the owner refuses a live-agent change", async () => {

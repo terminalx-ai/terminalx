@@ -116,22 +116,25 @@ from container boot, or enable tasks in an unprepared stock XFCE container.
 Attached MCP lifetimes and pending guest tasks have exclusive host admission;
 unknown proxy exit retains a fence instead of releasing it on a timer.
 
-This is not complete Linux onboarding or demonstrated parity. Remaining work:
+This is not complete Linux onboarding or demonstrated parity. The guided UI now
+covers an already-enrolled runtime's guest-owned Codex account readiness and
+explicit device login, plus exact-container ownership inspection/reconciliation.
+The macOS attachment route and Linux preparation boundaries described below are
+implemented and fixture-tested. Remaining delivery work:
 
-1. Produce and verify Linux runtime artifacts for the exact source/architecture.
-   The local x86_64 cross-target check currently stops in `openssl-sys` because a
-   Linux OpenSSL sysroot is unavailable. No packages/profile were installed to
-   bypass that constraint; no container was started for a build.
-2. Implement the guided runtime/profile installer and expose the existing
-   supported device-login flow for Linux. Enrollment of a prepared runtime is an
-   internal boundary, not the promised out-of-box product setup.
-3. Implement explicit reconciliation for interrupted attached MCP operations,
-   proving the old remote process is stopped before clearing an unknown fence.
-4. Validate the Linux Driver/tool contract and integrate task desktop support
+1. Produce and verify native Linux runtime artifacts for the exact source and
+   architecture. The cross-target check is blocked in `openssl-sys` by the absent
+   Linux OpenSSL sysroot; no package or build container was installed.
+2. Wire a supported container installer to the prepared-artifact receipt
+   boundary, verify the dedicated account and runtime binding, and support
+   interrupted installer reconciliation. The trusted production catalog is empty.
+3. Validate the Linux Driver/tool contract and integrate task desktop support
    through the guest workflow lease before advertising full guest-task parity.
-5. Implement the macOS attached-desktop lease/proxy using guest ownership and
-   manual-control rules; never graft direct Cua tools onto an active guest task.
-6. Keep live activation, disruptive acceptance, PR and merge readiness held.
+4. Implement the macOS26 personalized first-account bootstrap and authenticated
+   account-bound transport described above. The legacy profile is unchanged.
+5. Validate the new attachment/setup/reopen routes with aligned host/guest/Dev
+   artifacts after the human handoff. Live activation, disruptive acceptance, PR
+   and merge readiness remain held.
 
 
 ## Linux native artifact gate and proposed build preparation
@@ -163,9 +166,22 @@ source commit, target architecture, runtime protocol and SHA256. The installer
 must verify the ELF architecture and full artifact digest before executing it,
 then verify the nonroot cua account, private installation and immutable
 container/environment/generation through the authenticated guest RPC. Existing
-histories and unknown ownership outcomes must block replacement. This installer
-and trusted artifact catalog remain implementation work; the UI does not offer a
-fake successful install or ask the user for an arbitrary runtime binary path.
+histories and unknown ownership outcomes must block replacement. The source now verifies trusted catalog entries, exact ELF64 architecture, size
+and full SHA256 before private host staging. The compiled catalog deliberately
+has no entries until native evidence is available. Staging never executes the
+artifact. An opaque verified artifact carries its provenance into a retained
+request bound to the full container ID, environment and generation. A changed
+key/input is refused, staged bytes are reverified, and existing enrollment/history
+blocks fresh installation.
+
+The executor seam records intent and reserves the exact container before delivery.
+Unknown delivery is retained across reopen and is never replayed; desktop exit
+reconciliation cannot clear an installation reservation. Only an exact bound
+runtime receipt clears a completed install reservation, and runtime binding alone
+keeps readiness false. Disposable fixture executors exercise this lifecycle; no
+production container installer is wired, no download/install was performed, and
+no runtime artifact is supplied by an arbitrary caller digest. The UI continues to
+report that a verified Linux installer is unavailable.
 
 ## Ownership reconciliation and macOS attachment source boundary
 
@@ -185,13 +201,44 @@ The private-namespace exit rule follows Linux's termination of the namespace's
 remaining processes when its PID 1 exits.
 [Linux PID namespace lifetime](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
 
-The new macOS guest attachment boundary retains exact environment/generation and
-parent session/tab/conversation leases. Tool input is restricted to the existing
-Driver capability allowlist; each keyed call is journaled before delivery and
-its receipt is retained. An unknown call blocks new input and same-boot release;
-reopening the owner returns the original receipt without replay. Explicit release
-requires either all call receipts or a different current kernel boot, retaining
-any unknown earlier outcome. Tasks, manual takeover, setup actions and provisioning
-evidence account for this lease. This source seam is not advertised as an attached
-macOS capability yet: the host MCP adapter, exact-target selection admission,
-discovery catalog and end-to-end UI/recovery fixtures still need integration.
+The macOS host MCP adapter is now wired to exact environment/generation and
+parent session/tab/conversation bindings. The source capability is gated by a
+fresh guest protocol/identity/artifact check, a real allowed-tool catalog, and
+confirmed discovery-helper exit. Discovery itself uses a retained temporary
+lease, so startup or exit uncertainty cannot disappear with a host process.
+Selecting the route never moves the parent's shell/files; Run task in VM remains
+a separate action. Missing/replaced targets, changed parent conversations and
+unsupported capabilities refuse routing without fallback.
+
+One guest-owned Driver MCP connection is kept for the attachment lifetime,
+preserving opaque tool references. It uses the existing sanitized guest process
+wrapper, pinned Driver digest/signature, bounded stdio and owned-helper cleanup.
+Initialization, tools/list and tools/call follow the fixed MCP 2025-06-18 contract;
+only existing allowlisted desktop tools are exposed. No browser/Driver daemon is
+restarted, no host provider credentials are copied, and neither permissions nor
+application attestation are weakened.
+[MCP lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle),
+[MCP tools](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
+
+Host and guest retain keyed intent before input delivery and retain the returned
+receipt. Repeated input with the same ID returns its known receipt; changed input
+or an unknown result is refused. Parent identity is rechecked on every MCP frame.
+A lost original connection cannot be recreated on reopen. Host admission covers
+attached tools, task submission, setup, manual control and lifecycle operations.
+Unknown reservations also prevent an idle host owner from exiting.
+
+Normal EOF releases only known calls and a confirmed owned-helper exit. Explicit
+recovery requires the exact displayed binding and fresh guest release proof.
+Missing acquisitions receive a durable release tombstone, preventing delayed
+acquisition from reopening an old lease. A same-boot unknown call or helper exit
+stays fenced; an actual later kernel boot can prove the old process lifetime
+ended while retaining the unknown action outcome. Host receipts and guest history
+are retained before removing the admission marker. No timeout, missing PID,
+replayed input or force-unlock establishes release.
+
+Disposable fixtures cover adapter-to-real-guest lease/receipt routing, JSON-RPC
+stdio, lost host replies, keyed duplicate calls, task exclusion, unknown discovery
+exit, recovery identity mismatch, tombstones, persistent MCP connection sequencing
+and UI capability gating/confirmation. These are source checks on macOS, not live
+end-to-end acceptance. The prepared 5689b35b runtime/Dev artifacts are preserved
+and do not contain these changes. Neither live VM was operated for this slice.

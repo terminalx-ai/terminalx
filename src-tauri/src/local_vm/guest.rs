@@ -227,6 +227,7 @@ pub struct Guest {
     runtime_sha256: String,
     recovery_receipts: Mutex<Vec<RecoveryReceipt>>,
     setup_actor: setup::Actor,
+    attachment_peers: Mutex<BTreeMap<String, setup::desktop_mcp::Peer>>,
     _lock: File,
 }
 
@@ -390,6 +391,7 @@ impl Guest {
             runtime_sha256: super::bootstrap::owner_runtime_sha256()?,
             recovery_receipts: Mutex::new(vec![]),
             setup_actor: setup::Actor::default(),
+            attachment_peers: Mutex::new(BTreeMap::new()),
             _lock: lock,
         })
     }
@@ -439,6 +441,9 @@ impl Guest {
             "environment.provisionEvidence" => self.provision_evidence(),
             "desktop.state" => Ok(desktop_state(&self.state.lock().unwrap())),
             "desktop.attachmentAcquire" => self.attachment_acquire(&request.params),
+            "desktop.attachmentCapabilities" => self.attachment_capabilities(),
+            "desktop.attachmentTools" => self.attachment_tools(&request.params),
+            "desktop.attachmentClose" => self.attachment_close(&request.params),
             "desktop.attachmentRead" => self.attachment_read(&request.params),
             "desktop.attachmentCall" => self.attachment_call(&request.params),
             "desktop.attachmentRelease" => self.attachment_release(&request.params),
@@ -2667,6 +2672,108 @@ mod tests {
         );
         let guest = Guest::open(base, manager, sink).unwrap();
         (home, guest, task)
+    }
+
+    #[test]
+    fn macos_host_adapter_routes_real_guest_leases_and_recovers_lost_receipts_without_replay() {
+        use super::super::attachment::{Adapter,Binding,recover_using};
+        let (_home,guest,task)=setup();
+        let root=crate::store::root().unwrap().join("host-journal");let journal=Journal::open_existing(&root).unwrap();
+        journal.cancel(&task.target).unwrap();journal.transaction(|state|{state.enabled=true;Ok(())}).unwrap();
+        let binding=Binding {environment_id:task.target.environment_id.clone(),generation:task.target.generation.clone(),lease_id:new_id(),session_id:task.input.parent_session_id.clone(),tab_id:task.input.parent_tab_id.clone(),conversation:Some("parent-fixture".into())};
+        let target=crate::computer_targets::Target::MacosGuest {environment_id:binding.environment_id.clone(),generation:binding.generation.clone()};
+        let catalog:Value=serde_json::from_str(include_str!("fixtures/cua-driver-0.28.0-list-windows.json")).unwrap();
+        let effects=std::cell::Cell::new(0);let lose=std::cell::Cell::new(false);
+        let mut rpc=|env:&super::super::journal::Environment,method:&str,params:Value|->Result<Value>{
+            assert_eq!(env.id,binding.environment_id);assert_eq!(env.generation,binding.generation);
+            match method {
+                "desktop.attachmentCapabilities"=>Ok(json!({"attachmentProtocol":1,"platform":"macos","available":true,"runtimeSha256":"b".repeat(64),"environmentId":env.id,"generation":env.generation,"tools":[catalog["tool"]]})),
+                "desktop.attachmentTools"=>Ok(json!({"binding":params,"tools":[catalog["tool"]]})),
+                "desktop.attachmentCall"=>{let receipt=guest.attachment_call_using(&params,|_,_|{effects.set(effects.get()+1);Ok(json!({"content":[{"type":"text","text":"fixture window state"}]}))})?;if lose.get(){bail!("fixture transport lost receipt");}Ok(receipt)},
+                _=>guest.dispatch(request(&guest,method,params)),
+            }
+        };
+        let mut adapter=Adapter::begin(&root,&journal,binding.clone(),&mut rpc).unwrap();
+        assert_eq!(adapter.tools(&mut rpc).unwrap()["tools"],json!([catalog["tool"]]));
+        assert!(journal.submit("blocked-new-task",task.input.clone()).is_err());
+        let call=json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_windows","arguments":{}}});
+        let result=adapter.call(&call,&mut rpc).unwrap();assert_eq!(adapter.call(&call,&mut rpc).unwrap(),result);assert_eq!(effects.get(),1);
+        let mut changed=call.clone();changed["params"]["arguments"]=json!({"pid":44});assert!(adapter.call(&changed,&mut rpc).is_err());
+        let mut lost=call;lost["id"]=json!(2);lose.set(true);
+        assert!(adapter.call(&lost,&mut rpc).is_err());assert!(adapter.call(&lost,&mut rpc).is_err());assert_eq!(effects.get(),2);
+        drop(adapter);lose.set(false);
+        let inspected=recover_using(&root,&journal,&target,None,&mut rpc).unwrap();assert_eq!(inspected["status"],"releaseAvailable");
+        let mut wrong=binding.clone();wrong.tab_id=new_id();assert!(recover_using(&root,&journal,&target,Some(wrong),&mut rpc).is_err());
+        let released=recover_using(&root,&journal,&target,Some(binding.clone()),&mut rpc).unwrap();assert_eq!(released["status"],"released");assert_eq!(effects.get(),2);
+        let retained:Value=serde_json::from_slice(&fs::read(root.join("macos-attachments").join(format!("{}.json",binding.lease_id))).unwrap()).unwrap();
+        assert_eq!(retained["calls"].as_object().unwrap().len(),2);assert_eq!(retained["guestLease"]["calls"].as_object().unwrap().len(),2);
+        assert!(retained["calls"].as_object().unwrap().values().any(|call|call["status"]=="outcomeUnknown"));
+        let mut next=binding.clone();next.lease_id=new_id();
+        let frames=[json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_windows","arguments":{}}})];
+        let input=frames.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n";let mut output=Vec::new();
+        super::super::attachment::serve_using(&root,&journal,next.clone(),&mut std::io::Cursor::new(input),&mut output,&mut rpc,&mut |actual|{assert_eq!(actual,&next);Ok(())}).unwrap();
+        let replies:Vec<Value>=String::from_utf8(output).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(replies.len(),3);assert_eq!(replies[0]["result"]["protocolVersion"],"2025-06-18");
+        assert_eq!(replies[1]["result"]["tools"],json!([catalog["tool"]]));assert!(replies[2]["result"]["content"].is_array());
+        assert_eq!(effects.get(),3);
+        journal.submit("after-release",task.input).unwrap();
+    }
+
+    #[test]
+    fn discovery_uses_retained_ownership_and_unknown_helper_exit_cannot_advertise_capability() {
+        use super::super::attachment::{Binding,probe_using,recover_using};
+        let (_home,guest,task)=setup();
+        let root=crate::store::root().unwrap().join("host-journal"); let journal=Journal::open_existing(&root).unwrap();
+        journal.cancel(&task.target).unwrap();journal.transaction(|s|{s.enabled=true;Ok(())}).unwrap();
+        let binding=Binding {environment_id:task.target.environment_id.clone(),generation:task.target.generation.clone(),lease_id:new_id(),session_id:task.input.parent_session_id.clone(),tab_id:task.input.parent_tab_id.clone(),conversation:None};
+        let target=crate::computer_targets::Target::MacosGuest {environment_id:binding.environment_id.clone(),generation:binding.generation.clone()};
+        let unknown=std::cell::Cell::new(false);
+        let mut rpc=|env:&super::super::journal::Environment,method:&str,params:Value|->Result<Value>{
+            match method {
+                "desktop.attachmentCapabilities"=>Ok(json!({"attachmentProtocol":1,"platform":"macos","available":true,"runtimeSha256":"b".repeat(64),"environmentId":env.id,"generation":env.generation})),
+                "desktop.attachmentTools"=>{
+                    assert!(require_queue_control(&guest.state.lock().unwrap()).is_err());
+                    if unknown.get() {
+                        let mut state=serde_json::to_value(durable(&guest))?;
+                        state["attachments"][params["leaseId"].as_str().unwrap()]["connectionStarted"]=json!(true);
+                        let state:State=serde_json::from_value(state)?;guest.save(&state)?;*guest.state.lock().unwrap()=state;
+                        bail!("fixture discovery helper exit unknown");
+                    }
+                    Ok(json!({"binding":params,"tools":[{"name":"list_windows","inputSchema":{"type":"object"}}]}))
+                },
+                _=>guest.dispatch(request(&guest,method,params)),
+            }
+        };
+        assert_eq!(probe_using(&root,&journal,binding.clone(),&mut rpc).unwrap()["available"],true);
+        assert!(!journal.has_desktop_reservations().unwrap());
+        let retained:Value=serde_json::from_slice(&fs::read(root.join("macos-attachments").join(format!("{}.json",binding.lease_id))).unwrap()).unwrap();
+        assert_eq!(retained["status"],"released");
+        let mut next=binding;next.lease_id=new_id();unknown.set(true);
+        assert!(probe_using(&root,&journal,next.clone(),&mut rpc).is_err());
+        assert!(journal.has_desktop_reservations().unwrap());
+        assert_eq!(recover_using(&root,&journal,&target,None,&mut rpc).unwrap()["status"],"fenced");
+        assert!(recover_using(&root,&journal,&target,Some(next),&mut rpc).is_err());
+        assert!(journal.submit("unknown-discovery-blocks-task",task.input).is_err());
+    }
+
+    #[test]
+    fn release_tombstone_blocks_late_acquisition_and_missing_mcp_exit_stays_fenced() {
+        let (_home,guest,_task)=setup();let identity=guest.state.lock().unwrap().identity.clone();
+        let binding=json!({"environmentId":identity.environment_id,"generation":identity.generation,"leaseId":new_id(),"sessionId":new_id(),"tabId":new_id(),"conversation":null});
+        assert_eq!(guest.attachment_read(&binding).unwrap()["missing"],true);
+        let mut release=binding.clone();release["confirm"]=json!(true);
+        let tombstone=guest.attachment_release(&release).unwrap();assert_eq!(tombstone["releaseProof"]["kind"],"neverAcquiredTombstone");
+        assert_eq!(guest.attachment_acquire(&binding).unwrap(),tombstone);
+        require_queue_control(&guest.state.lock().unwrap()).unwrap();
+        let mut binding=binding;binding["leaseId"]=json!(new_id());guest.attachment_acquire(&binding).unwrap();
+        let mut state=serde_json::to_value(durable(&guest)).unwrap();state["attachments"][binding["leaseId"].as_str().unwrap()]["connectionStarted"]=json!(true);
+        let state:State=serde_json::from_value(state).unwrap();guest.save(&state).unwrap();*guest.state.lock().unwrap()=state;
+        let mut release=binding.clone();release["confirm"]=json!(true);
+        assert_eq!(guest.attachment_read(&binding).unwrap()["releaseAvailable"],false);
+        assert!(guest.attachment_close(&binding).is_err());assert!(guest.attachment_release(&release).is_err());
+        assert!(guest.attachment_tools(&binding).is_err());
     }
 
     #[test]

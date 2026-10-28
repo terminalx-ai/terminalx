@@ -1365,7 +1365,7 @@ impl SessionManager {
         if runtime.child.is_some() || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id)) {
             bail!("Stop this tab's agent before changing its desktop attachment. Its current tools remain bound to the original computer.");
         }
-        if let Some(target) = &target { crate::container_vm::selected_runtime(target)?; }
+        if let Some(target) = &target { crate::computer_targets::validate_attachment(target,session_id,tab_id,conversation.clone())?; }
         index::update_tab(session_id, tab_id, |tab| crate::computer_targets::save(tab, conversation, target))
     }
 
@@ -2898,7 +2898,7 @@ impl SessionManager {
         #[cfg(not(unix))]
         let guest = crate::cloud_config::LaunchConfig::default();
         let config = computer_launch_config(config, guest, |appends_prompt| {
-            crate::computer_targets::launch_args(tab, appends_prompt)
+            crate::computer_targets::launch_args(&rt.session_id, tab, appends_prompt)
         })?;
         env.extend(config.env);
         // The agent credentials read above; names to unset are dropped after

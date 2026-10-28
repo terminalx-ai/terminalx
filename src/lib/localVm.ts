@@ -5,8 +5,9 @@ import type { LocalVmStatus } from "@/lib/api";
 import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 
 interface Requests {
+  "computer.checkAttachment": { params: ComputerContext & { target: ComputerTarget }; result: { target: ComputerTarget; available: boolean; detail: string } };
   "computer.attachment": { params: { target: ComputerTarget }; result: AttachmentReport };
-  "computer.reconcileAttachment": { params: { target: ComputerTarget; markerDigest: string; confirm: true }; result: AttachmentReport };
+  "computer.reconcileAttachment": { params: { target: ComputerTarget; markerDigest?: string; binding?: AttachmentBinding; confirm: true }; result: AttachmentReport };
   "computer.inventory": { params: Record<string, never>; result: ComputerInventory };
   "computer.selection": { params: ComputerContext; result: ComputerSelection };
   "computer.select": { params: ComputerContext & { target: ComputerTarget | null }; result: ComputerSelection };
@@ -42,12 +43,14 @@ interface Requests {
 }
 
 export interface AttachmentReport {
+  binding?: AttachmentBinding;
   target: ComputerTarget;
   status: "unreserved" | "fenced" | "releaseAvailable" | "released";
   markerDigest?: string;
   detail?: string;
   priorOutcome?: "unknown";
 }
+export interface AttachmentBinding { environmentId: string; generation: string; leaseId: string; sessionId: string; tabId: string; conversation: string | null }
 
 export function submissionUnavailable(description: LocalVmDescription | null, settings: Pick<LocalVmTask["input"], "harness" | "model" | "effort" | "permissionMode">, mode: "desktop" | "shellFiles" = "desktop"): string | null {
   if (!description?.available) return description?.reason || "Guest runtime capabilities are unavailable. Check this environment in Settings.";

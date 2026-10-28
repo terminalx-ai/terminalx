@@ -96,7 +96,7 @@ pub fn queue(journal: &Journal, params: Value) -> Result<Value> {
     validate_harness(&request.harness)?;
     validate_key(&request.idempotency_key)?;
     let current = env(journal, &params)?;
-    let _admission = journal.container_admission(&current)?;
+    let _admission = journal.desktop_admission(&current)?;
     // Keep typed identity fields part of the immutable request, even though
     // the environment lookup has already checked them.
     if current.id != request.environment_id || current.generation != request.generation {
@@ -337,7 +337,7 @@ fn action_using(
     if current.transport.container().is_some() && !request.action.starts_with("provider.codex") {
         bail!("Linux shell task setup supports only guest-owned Codex account actions");
     }
-    let _admission = journal.container_admission(&current)?;
+    let _admission = journal.desktop_admission(&current)?;
     let digest = journal::digest(&serde_json::to_vec(&params)?);
     let prior=journal.transaction(|state| {
         let unfinished=state.tasks.values().any(|t|t.target.environment_id==current.id && !t.status.terminal());
@@ -493,7 +493,7 @@ pub fn auth(journal: &Journal, params: Value) -> Result<Value> {
 pub fn advance(journal: &Journal, target: &Environment) -> Result<()> {
     if target.transport.container().is_some() {
         // An attachment is an independent workflow, not a failed setup effect.
-        let Ok(_admission) = journal.container_admission(target) else { return Ok(()); };
+        let Ok(_admission) = journal.desktop_admission(target) else { return Ok(()); };
         refresh_actions(journal, target)?;
         let state = journal.read()?;
         if state.tasks.values().any(|task|task.target.environment_id==target.id && !task.status.terminal()) { return Ok(()); }
@@ -503,6 +503,7 @@ pub fn advance(journal: &Journal, target: &Environment) -> Result<()> {
             .is_some_and(|at|chrono::Utc::now().signed_duration_since(at).num_seconds()<5) { return Ok(()); }
         return inspect(journal, json!({"environmentId":target.id,"generation":target.generation,"harness":"codex"})).map(|_| ());
     }
+    let Ok(_attachment_admission)=journal.desktop_admission(target) else { return Ok(()); };
     if super::creation::hold_queued(journal, target)? {
         return Ok(());
     }

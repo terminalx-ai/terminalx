@@ -67,6 +67,9 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
     if !journal.read()?.enabled {
         bail!("Enable Local Cua in Settings → Environments first");
     }
+    let _attachment_admission = if matches!(method,"environment.start"|"environment.stop"|"environment.delete"|"environment.install"|"environment.awake"|"environment.desktop"|"environment.releaseDesktop"|"environment.reconcileProvision") {
+        let current=environment(&journal,&params)?;journal.desktop_admission(&current)?
+    } else { None };
     if method.starts_with("environment.") && !matches!(method, "environment.setup" | "environment.setupReadiness" | "environment.setupAction" | "environment.setupAuth") {
         if let Some(id) = params.get("environmentId").and_then(Value::as_str) {
             if let Some(env) = journal.read()?.environments.get(id) {
@@ -176,6 +179,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 serde_json::from_value(params.get("target").cloned().context("target required")?)?;
             let (task, env) = bound_environment(&journal, &target)?;
             env.transport.require_macos()?;
+            let _attachment_admission=journal.desktop_admission(&env)?;
             let mut request = params;
             request["after"] = json!(task.last_event_seq);
             let response = guest_rpc(&env, "desktop.takeover", request)?;

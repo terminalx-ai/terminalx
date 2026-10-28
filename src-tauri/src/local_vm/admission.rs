@@ -12,9 +12,18 @@ use crate::computer_targets::{Capability, Target};
 use super::journal::{atomic_private_write, private_directory, Journal};
 
 #[derive(Debug)]
-pub struct Guard { _file: File, marker: PathBuf }
+pub struct Guard { _file: File, pub(super) marker: PathBuf }
 
-fn read_marker(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn has_reservations(root:&Path)->Result<bool> {
+    let directory=root.join("computer-admission");
+    if !directory.try_exists()? { return Ok(false); }
+    for entry in std::fs::read_dir(directory)? {
+        if entry?.path().extension().is_some_and(|ext|ext=="json") { return Ok(true); }
+    }
+    Ok(false)
+}
+
+pub(super) fn read_marker(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?
         .take(64 * 1024 + 1).read_to_end(&mut bytes)?;
@@ -23,35 +32,53 @@ fn read_marker(path: &Path) -> Result<Vec<u8>> {
 }
 
 impl Guard {
+    /// Short journal transactions may race the same keyed submission. Allow
+    /// those admissions to serialize, without waiting indefinitely on a proxy.
+    pub(super) fn for_task(root:&Path,target:&Target)->Result<Self> {
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);
+        loop {
+            match Self::acquire(root,target) {
+                Ok(guard)=>return Ok(guard),
+                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|e|e.kind()==std::io::ErrorKind::WouldBlock)
+                    && std::time::Instant::now()<deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error)=>return Err(error),
+            }
+        }
+    }
     pub fn acquire(root: &Path, target: &Target) -> Result<Self> {
         let guard = Self::lock(root, target)?;
         if guard.marker.try_exists()? {
-            bail!("An attached container operation has no confirmed exit receipt. Retain its history and reconcile it before changing routes");
+            bail!("An attached desktop operation has no confirmed exit receipt. Retain its history and reconcile it before changing routes");
         }
         Ok(guard)
     }
 
-    fn lock(root: &Path, target: &Target) -> Result<Self> {
-        let (runtime, id) = match target {
-            Target::LinuxContainer { runtime, id } | Target::LinuxGuest { runtime, id, .. } => (runtime, id),
-            _ => bail!("Container admission requires an exact container target"),
+    pub(super) fn lock(root: &Path, target: &Target) -> Result<Self> {
+        let name = match target {
+            Target::LinuxContainer { runtime, id } | Target::LinuxGuest { runtime, id, .. } => {
+                Target::LinuxContainer { runtime: *runtime, id: id.clone() }.require(Capability::AttachedDesktop)?;
+                format!("{}-{id}",runtime.name())
+            },
+            Target::MacosGuest { environment_id,generation } => {
+                super::journal::validate_id(environment_id)?;super::journal::validate_id(generation)?;
+                format!("macos-{environment_id}-{generation}")
+            },
         };
-        Target::LinuxContainer { runtime: *runtime, id: id.clone() }.require(Capability::AttachedDesktop)?;
         let directory = root.join("computer-admission");
         private_directory(&directory)?;
-        let name = format!("{}-{id}", runtime.name());
         let file = OpenOptions::new().create(true).truncate(false).write(true)
             .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(directory.join(format!("{name}.lock")))?;
         // SAFETY: file owns the descriptor throughout this guard's lifetime.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            bail!("This container is in use by attached desktop tools; stop that attachment before running a task");
+            return Err(std::io::Error::last_os_error()).context("This environment is in use by attached desktop tools; stop that attachment before running a task");
         }
         let marker = directory.join(format!("{name}.json"));
         Ok(Self { _file: file, marker })
     }
 
     pub fn attach(root: &Path, target: &Target, journal: &Journal) -> Result<Self> {
+        if !matches!(target,Target::LinuxContainer {..}) { bail!("Container proxy requires an exact Linux desktop target"); }
         let guard = Self::acquire(root, target)?;
         let state = journal.read()?;
         for env in state.environments.values().filter(|e| e.transport.container().as_ref() == Some(target)) {
@@ -86,6 +113,7 @@ fn inspect_using(root: &Path, target: &Target, observe: impl FnOnce(&Target) -> 
     if !guard.marker.try_exists()? { return Ok(serde_json::json!({"target":target,"status":"unreserved"})); }
     let bytes = read_marker(&guard.marker)?;
     let retained: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if retained["kind"]=="linuxRuntimeInstall" { bail!("An interrupted Linux installation requires its own bound installation receipt; desktop recovery cannot release it"); }
     if retained["target"] != serde_json::to_value(target)? { bail!("Attached-operation identity changed"); }
     let mut result = serde_json::json!({"target":target,"status":"fenced","markerDigest":super::journal::digest(&bytes),
         "detail":"The prior desktop operation has no exit receipt. A timeout or missing host process cannot release it."});
@@ -108,6 +136,7 @@ fn reconcile_using(root: &Path, target: &Target, marker_digest: &str, confirm: b
     let bytes = read_marker(&guard.marker)?;
     if super::journal::digest(&bytes) != marker_digest { bail!("Attachment receipt changed; inspect again"); }
     let retained: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if retained["kind"]=="linuxRuntimeInstall" { bail!("An interrupted Linux installation requires its own bound installation receipt; desktop recovery cannot release it"); }
     if retained["target"] != serde_json::to_value(target)? { bail!("Attached-operation identity changed"); }
     let evidence = observe(target)?; // Never trust evidence supplied by the UI.
     let receipt = serde_json::json!({"target":target,"status":"released","priorOutcome":"unknown",

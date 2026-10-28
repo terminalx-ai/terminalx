@@ -124,6 +124,7 @@ pub(super) fn state_busy(state: &journal::State) -> bool {
 }
 
 fn journal_busy(root: &Path, initialized: bool) -> Result<bool> {
+    if super::admission::has_reservations(root)? { return Ok(true); }
     if !root.join("journal.json").try_exists()? {
         return Ok(initialized);
     }

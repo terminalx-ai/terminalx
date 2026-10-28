@@ -167,8 +167,9 @@ pub struct Journal {
 }
 
 impl Journal {
-    pub(super) fn container_admission(&self, env: &Environment) -> Result<Option<super::admission::Guard>> {
-        env.transport.container().map(|target| super::admission::Guard::acquire(&self.dir, &target)).transpose()
+    pub(super) fn has_desktop_reservations(&self)->Result<bool> { super::admission::has_reservations(&self.dir) }
+    pub(super) fn desktop_admission(&self, env: &Environment) -> Result<Option<super::admission::Guard>> {
+        super::admission::Guard::acquire(&self.dir, &env.transport.target(&env.id,&env.generation)).map(Some)
     }
 
     pub fn open(dir: &Path) -> Result<Self> {
@@ -338,7 +339,7 @@ impl Journal {
             return Ok(existing.clone());
         }
         let _admission = match selected {
-            Some(target @ crate::computer_targets::Target::LinuxGuest { .. }) => Some(super::admission::Guard::acquire(&self.dir, target)?),
+            Some(target @ (crate::computer_targets::Target::LinuxGuest { .. } | crate::computer_targets::Target::MacosGuest { .. })) => Some(super::admission::Guard::for_task(&self.dir, target)?),
             _ => None,
         };
         self.transaction(|state| {

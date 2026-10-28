@@ -125,7 +125,7 @@ pub fn run_cli() -> Option<i32> {
 fn allowed(name: &str) -> bool {
     ALLOWED.contains(&name)
 }
-fn filter_response(mut value: Value) -> Value {
+pub(super) fn filter_response(mut value: Value) -> Value {
     if let Some(tools) = value
         .pointer_mut("/result/tools")
         .and_then(Value::as_array_mut)

@@ -16,3 +16,5 @@ pub mod setup;
 mod linux_setup;
 pub mod transport;
 pub(crate) mod admission;
+pub(crate) mod attachment;
+pub mod linux_profile;

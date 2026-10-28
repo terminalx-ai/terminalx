@@ -18,6 +18,7 @@ pub(super) fn verify_using(
     journal: &Journal,
     mut inspect: impl FnMut(&Environment) -> Result<Value>,
 ) -> Result<()> {
+    if journal.has_desktop_reservations()? { bail!("An attached desktop reservation is unresolved; retain the host owner and inspect its exact guest receipt"); }
     let state = journal.read()?;
     let before = serde_json::to_value(&state)?;
     if state.tasks.values().any(|task| !task.status.terminal()) {
@@ -28,6 +29,7 @@ pub(super) fn verify_using(
         .values()
         .filter(|env| env.deleted_at.is_none())
     {
+        let _desktop_admission=journal.desktop_admission(env)?;
         if env.manual_control || !host::provision_settled(env) {
             bail!("Resolve VM provisioning and return manual desktop control before stopping the host owner");
         }

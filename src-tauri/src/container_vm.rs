@@ -192,7 +192,7 @@ pub fn identity(path: &Path, runtime: Runtime) -> Result<(Target, bool)> {
 
 pub(crate) fn validate_at(path: &Path, target: &Target, timeout: Duration) -> Result<()> {
     target.require(Capability::AttachedDesktop)?;
-    let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
+    let Target::LinuxContainer { runtime, id } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     let (actual, running) = inspect_identity(path, *runtime, id, timeout).context("Selected container unavailable; no fallback")?;
     if &actual != target || !running { bail!("Selected container changed or stopped; no fallback"); }
     Ok(())
@@ -200,7 +200,7 @@ pub(crate) fn validate_at(path: &Path, target: &Target, timeout: Duration) -> Re
 
 pub fn selected_runtime(target: &Target) -> Result<PathBuf> {
     target.require(Capability::AttachedDesktop)?;
-    let Target::LinuxContainer { runtime, .. } = target else { unreachable!() };
+    let Target::LinuxContainer { runtime, .. } = target else { bail!("This route requires an exact Linux desktop container; no OS fallback"); };
     let path = crate::binpath::resolve(runtime.name()).context("Selected container runtime is unavailable; no fallback")?;
     validate_at(&path, target, Duration::from_secs(3))?;
     Ok(path)
@@ -210,7 +210,7 @@ pub fn selected_runtime(target: &Target) -> Result<PathBuf> {
 /// an exit receipt for an earlier exact target.
 pub(crate) fn exit_evidence(target: &Target) -> Result<serde_json::Value> {
     target.require(Capability::AttachedDesktop)?;
-    let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
+    let Target::LinuxContainer { runtime, id } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     let path = crate::binpath::resolve(runtime.name()).context("Selected container runtime is unavailable")?;
     let output = run(&path, &["inspect", "--format", "{{json .}}", id], Duration::from_secs(3))?;
     parse_exit_evidence(target, &serde_json::from_str(&output)?)
@@ -218,7 +218,7 @@ pub(crate) fn exit_evidence(target: &Target) -> Result<serde_json::Value> {
 
 pub(crate) fn parse_exit_evidence(target: &Target, value: &serde_json::Value) -> Result<serde_json::Value> {
     target.require(Capability::AttachedDesktop)?;
-    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     if value["Id"].as_str() != Some(id) || value["Config"]["Labels"][LABEL] != "1" {
         bail!("Exact owned container identity was not confirmed; ownership remains fenced");
     }
@@ -239,7 +239,7 @@ pub(crate) fn parse_exit_evidence(target: &Target, value: &serde_json::Value) ->
 
 pub fn selected_status(target: &Target) -> Result<VmStatus> {
     let path = selected_runtime(target)?;
-    let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
+    let Target::LinuxContainer { runtime, id } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     let port = parse_port(&run(&path, &["port", id, "6901/tcp"], QUICK)?).context("Selected viewer has no loopback binding")?;
     Ok(VmStatus { state: VmState::Running, runtime: Some(runtime.name().into()), colima: false, viewer: Some(Viewer { port, password: password()? }) })
 }
@@ -417,7 +417,7 @@ pub fn call(target: &Target, tool: &str, arguments: &str) -> Result<String> {
     }
     serde_json::from_str::<serde_json::Value>(arguments).context("the tool's arguments must be JSON")?;
     let path = selected_runtime(target)?;
-    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     #[cfg(unix)]
     let admission = attach(target)?;
     let result = run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], Duration::from_secs(120))?;
@@ -429,7 +429,7 @@ pub fn call(target: &Target, tool: &str, arguments: &str) -> Result<String> {
 /// The driver's tools, or one tool's description and argument schema.
 pub fn tools(target: &Target, tool: Option<&str>) -> Result<String> {
     let path = selected_runtime(target)?;
-    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     match tool {
         Some(tool) if !tool.is_empty() && tool.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
             run(&path, &["exec", "-u", "cua", id, "cua-driver", "describe", tool], QUICK)
@@ -442,7 +442,7 @@ pub fn tools(target: &Target, tool: Option<&str>) -> Result<String> {
 /// The VM's whole screen as a PNG on this machine, at `out` or in `~/.raccoon/computer/screens`.
 pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
     let path = selected_runtime(target)?;
-    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     let out = match out {
         // Absolute, so `docker cp` never reads it as `container:path` or `-` (stdout).
         Some(out) => std::path::absolute(&out).context("where to save the screenshot")?,
@@ -470,14 +470,14 @@ const AGENT_NOTE: &str = "A Linux desktop (the TerminalX Local VM) is available 
 pub fn launch_selected(target: &Target, harness: &str, appends_prompt: bool) -> Result<String> {
     if !matches!(harness, "claude" | "codex") { bail!("This agent does not support attached desktop tools"); }
     let path = selected_runtime(target)?;
-    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     #[cfg(unix)]
     {
         let _ = (path, id);
         let executable = std::env::current_exe()?;
         let serialized = serde_json::to_string(target)?;
         let home = crate::store::root()?;
-        Ok(mcp_args(harness, &executable.to_string_lossy(), &["container-computer-stdio", &serialized, &home.to_string_lossy()], appends_prompt))
+        Ok(mcp_args(harness, &executable.to_string_lossy(), &["container-computer-stdio", &serialized, &home.to_string_lossy()], appends_prompt, AGENT_NOTE))
     }
     #[cfg(not(unix))]
     Ok(agent_args(harness, &path.to_string_lossy(), id, appends_prompt))
@@ -486,16 +486,16 @@ pub fn launch_selected(target: &Target, harness: &str, appends_prompt: bool) -> 
 #[cfg(any(test, not(unix)))]
 pub fn agent_args(harness: &str, runtime: &str, id: &str, appends_prompt: bool) -> String {
     let args = ["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"];
-    mcp_args(harness, runtime, &args, appends_prompt)
+    mcp_args(harness, runtime, &args, appends_prompt, AGENT_NOTE)
 }
 
-fn mcp_args(harness: &str, runtime: &str, args: &[&str], appends_prompt: bool) -> String {
+pub(crate) fn mcp_args(harness: &str, runtime: &str, args: &[&str], appends_prompt: bool, agent_note: &str) -> String {
     match harness {
         "claude" => {
             let config = serde_json::json!({ "mcpServers": { "computer": { "command": runtime, "args": args } } });
             let mut out = format!(" --mcp-config {}", shell_quote(&config.to_string()));
             if !appends_prompt {
-                out.push_str(&format!(" --append-system-prompt {}", shell_quote(AGENT_NOTE)));
+                out.push_str(&format!(" --append-system-prompt {}", shell_quote(agent_note)));
             }
             out
         }
@@ -539,7 +539,7 @@ pub fn run_stdio_cli() -> Option<i32> {
         std::env::set_var("TERMINALX_HOME", &args[2]);
         let target: Target = serde_json::from_str(&args[1])?;
         let path = selected_runtime(&target)?;
-        let Target::LinuxContainer { id, .. } = &target else { unreachable!() };
+        let Target::LinuxContainer { id, .. } = &target else { bail!("An exact Linux desktop container is required; no OS fallback") };
         let admission = attach(&target)?;
         let status = Command::new(path).args(["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"])
             .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()?;

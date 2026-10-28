@@ -19,6 +19,8 @@ use zeroize::Zeroize as _;
 
 #[path = "guest_desktop_check.rs"]
 mod desktop_check;
+#[path = "guest_attachment_mcp.rs"]
+pub(super) mod desktop_mcp;
 
 const DRIVER: &str = "/Applications/CuaDriver.app/Contents/MacOS/cua-driver";
 const APP: &str = "/Applications/CuaDriver.app";
@@ -1004,6 +1006,7 @@ impl Paths {
 }
 
 struct OwnedChild {
+    line_limit: usize,
     child: Child,
     group: Option<u32>,
     lifetime: Option<OwnedFd>,
@@ -1091,6 +1094,7 @@ impl OwnedChild {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let owned = Self {
+            line_limit: 1024 * 1024,
             child,
             group,
             lifetime: Some(write),
@@ -1169,7 +1173,7 @@ impl OwnedChild {
         loop {
             self.pump()?;
             if let Some(n) = self.out.iter().position(|b| *b == b'\n') {
-                if n > 1024 * 1024 {
+                if n > self.line_limit {
                     bail!("Setup JSON line limit");
                 }
                 let mut line: Vec<_> = self.out.drain(..=n).collect();
