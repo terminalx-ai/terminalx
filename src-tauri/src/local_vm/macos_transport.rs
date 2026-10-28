@@ -99,10 +99,8 @@ pub fn rpc(env: &Environment, method: &str, params: Value, budget: Duration) -> 
     )
 }
 
-fn observed_endpoint(_env: &Environment) -> Result<Endpoint> {
-    // No production endpoint provider exists yet. In particular, a Cua name/IP
-    // is not accepted as an immutable Lume VM/config observation.
-    bail!("Authenticated personalized endpoint observation is unavailable")
+fn observed_endpoint(env: &Environment) -> Result<Endpoint> {
+    super::macos_endpoint::observe(&super::host::root()?,env)
 }
 
 /// One delivery, no retry. Callers retain their task/setup/attachment intent

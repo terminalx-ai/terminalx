@@ -139,6 +139,7 @@ struct SelectionRequest { session_id: String, tab_id: String, conversation: Opti
 pub fn request(manager: &crate::session::SessionManager, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     use serde_json::to_value;
     match method {
+        "computer.activateLinuxRuntime" | "computer.reconcileLinuxActivation" | "computer.cancelLinuxActivation" => crate::local_vm::linux_activation::request(method,params),
         "computer.linuxInstaller" | "computer.prepareLinuxRuntime" | "computer.deliverLinuxRuntime" | "computer.reconcileLinuxRuntime" | "computer.enrollInstalledLinuxRuntime" => crate::local_vm::linux_install::request(method,params),
         "computer.inventory" => to_value(inventory()?).map_err(Into::into),
         "computer.checkAttachment" => {

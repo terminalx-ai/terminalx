@@ -23,3 +23,6 @@ pub mod macos_personalization;
 pub mod macos_account;
 pub mod macos_transport;
 mod macos_keys;
+
+pub(crate) mod linux_activation;
+mod macos_endpoint;

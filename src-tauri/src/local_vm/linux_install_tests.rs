@@ -1,15 +1,15 @@
 use super::*;
 use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
 
-struct Fixture {
-    dir: tempfile::TempDir,
-    driver: std::path::PathBuf,
-    journal: Journal,
-    binding: InstallBinding,
-    artifact: linux_profile::VerifiedArtifact,
+pub(crate) struct Fixture {
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) driver: std::path::PathBuf,
+    pub(crate) journal: Journal,
+    pub(crate) binding: InstallBinding,
+    pub(crate) artifact: linux_profile::VerifiedArtifact,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("guest");
         std::fs::create_dir(&home).unwrap();
@@ -84,13 +84,13 @@ print(json.dumps({'ok':True,'result':result}))
             artifact,
         }
     }
-    fn root(&self) -> std::path::PathBuf {
+    pub(crate) fn root(&self) -> std::path::PathBuf {
         self.dir.path().join("host")
     }
-    fn prepare(&self, key: &str) -> Value {
+    pub(crate) fn prepare(&self, key: &str) -> Value {
         linux_profile::prepare(&self.root(), key, &self.binding, &self.artifact).unwrap()
     }
-    fn deliver(&self, key: &str) -> Value {
+    pub(crate) fn deliver(&self, key: &str) -> Value {
         linux_profile::execute_prepared(
             &self.root(),
             &self.journal,

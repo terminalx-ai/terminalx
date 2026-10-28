@@ -288,6 +288,13 @@ pub struct Guest {
     _lock: File,
 }
 
+fn linux_activation_identity() -> Option<Value> {
+    let id = std::env::var("TERMINALX_LINUX_ACTIVATION").ok()?;
+    let instance = std::env::var("TERMINALX_LINUX_INSTANCE").ok()?;
+    if validate_id(&id).is_err() || validate_id(&instance).is_err() { return None }
+    Some(json!({"id":id,"instance":instance}))
+}
+
 impl Guest {
     pub fn installation_present() -> Result<bool> {
         installation_present_at(&installation()?)
@@ -735,7 +742,7 @@ impl Guest {
         let identity = &state.identity;
         Ok(
             json!({"available":available,"reason":if !desktop && !cfg!(target_os = "linux") {Some("Guest desktop MCP binding is unavailable")} else if !available {Some("Install and authenticate a supported guest harness")} else {None},
-            "protocol":PROTOCOL,"identity":identity,"runtimeSha256":self.runtime_sha256,"platform":std::env::consts::OS,"environmentId":identity.environment_id,
+            "protocol":PROTOCOL,"identity":identity,"activation":linux_activation_identity(),"runtimeSha256":self.runtime_sha256,"platform":std::env::consts::OS,"environmentId":identity.environment_id,
             "generation":identity.generation,"capabilities":capabilities,"harnesses":harnesses,
             "desktopAvailable":desktop,"taskMode":if cfg!(target_os = "linux") {"shellFiles"} else {"desktop"},"manualControl":state.manual_lease.is_some(),
             "credentials":"Guest-installed provider/repository credentials only; no host credentials are copied"}),

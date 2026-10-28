@@ -64,3 +64,57 @@ it("finishes interrupted host staging with the original key and no delivery call
   expect(mocks.invoke.mock.calls[1][1]).toEqual({ method: "computer.prepareLinuxRuntime", params: { target, profileId: "native", idempotencyKey: "original", confirm: true } });
   expect(mocks.invoke.mock.calls.some(([, value]) => value.method === "computer.deliverLinuxRuntime")).toBe(false);
 });
+
+it("keeps activation disabled despite installed files and an available artifact catalog", async () => {
+  mocks.invoke.mockResolvedValueOnce({ ...view, operations: [{ ...operation, status: "installed" }], activation: { available: false, reason: "Live supervision acceptance missing." } });
+  render(<LinuxRuntimeInstaller target={target} enabled />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect runtime installation" }));
+  const activate = await screen.findByRole("button", { name: "Activate installed runtime" });
+  expect(activate.hasAttribute("disabled")).toBe(true);
+  expect(screen.getByText("Live supervision acceptance missing.")).toBeTruthy();
+  expect(mocks.invoke).toHaveBeenCalledTimes(1);
+});
+it("reopens an unknown activation with its original request and offers no second start", async () => {
+  const unknown = { ...operation, status: "installed", activation: { id: "activation", status: "outcomeUnknown", ready: false } };
+  mocks.invoke.mockResolvedValueOnce({ ...view, operations: [unknown], activation: { available: true, reason: "fixture only" } })
+    .mockResolvedValueOnce({ ...unknown, activation: { ...unknown.activation, status: "owned" } });
+  render(<LinuxRuntimeInstaller target={target} enabled />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect runtime installation" }));
+  const recover = await screen.findByRole("button", { name: "Reconcile original activation" });
+  expect(screen.queryByRole("button", { name: "Activate installed runtime" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Verify serving runtime and continue" })).toBeNull();
+  fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(recover);
+  await screen.findByRole("button", { name: "Verify serving runtime and continue" });
+  expect(mocks.invoke.mock.calls[1][1]).toEqual({ method: "computer.reconcileLinuxActivation", params: { target, idempotencyKey: "original", inputDigest: "retained", confirm: true } });
+  expect(screen.queryByText(/account and artifact verified/)).toBeNull();
+});
+it("verifies enrollment identity before continuing to guest provider setup", async () => {
+  const owned = { ...operation, status: "installed", activation: { id: "activation", status: "owned", ready: false } };
+  const environment = { id: "environment", generation: "generation", transport: { kind: "linuxContainer", runtime: "docker", id: target.id, runtimeSha256: "digest" } };
+  const onEnrolled = vi.fn().mockResolvedValue(undefined);
+  mocks.invoke.mockResolvedValueOnce({ ...view, operations: [owned], activation: { available: true, reason: "fixture only" } })
+    .mockResolvedValueOnce({ ...owned, enrollment: { status: "verified", ready: false, environment: { ...environment, generation: "replaced" } } })
+    .mockResolvedValueOnce({ ...owned, enrollment: { status: "verified", ready: false, environment } });
+  render(<LinuxRuntimeInstaller target={target} enabled onEnrolled={onEnrolled} />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect runtime installation" }));
+  const enroll = await screen.findByRole("button", { name: "Verify serving runtime and continue" });
+  fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(enroll);
+  await screen.findByText(/Serving enrollment returned a different/);
+  expect(onEnrolled).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(enroll);
+  await screen.findByText(/enrollment alone is not Ready/);
+  expect(onEnrolled).toHaveBeenCalledTimes(1);
+  expect(mocks.invoke.mock.calls[2][1].method).toBe("computer.enrollInstalledLinuxRuntime");
+});
+it("keeps a changed activation response fenced and cancellation bound to the original request", async () => {
+  const unknown = { ...operation, status: "installed", activation: { id: "activation", status: "outcomeUnknown", ready: false } };
+  mocks.invoke.mockResolvedValueOnce({ ...view, operations: [unknown], activation: { available: true, reason: "fixture only" } })
+    .mockResolvedValueOnce({ ...unknown, activation: { ...unknown.activation, id: "replacement", status: "stopped" } });
+  render(<LinuxRuntimeInstaller target={target} enabled />);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect runtime installation" }));
+  const cancel = await screen.findByRole("button", { name: "Request original activation cancellation" });
+  fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(cancel);
+  await screen.findByText(/Original activation identity changed/);
+  expect(screen.queryByText(/The original activation stopped/)).toBeNull();
+  expect(mocks.invoke.mock.calls[1][1]).toEqual({ method: "computer.cancelLinuxActivation", params: { target, idempotencyKey: "original", inputDigest: "retained", confirm: true } });
+});

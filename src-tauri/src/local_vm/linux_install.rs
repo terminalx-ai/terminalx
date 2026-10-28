@@ -22,7 +22,7 @@ fn container(target: &Target) -> Result<&str> {
     };
     Ok(id)
 }
-fn inspect_at(binary: &Path, target: &Target) -> Result<()> {
+pub(super) fn inspect_at(binary: &Path, target: &Target) -> Result<()> {
     let id = container(target)?;
     let mut command = Command::new(binary);
     command.args(["inspect", "--format", "{{json .}}", id]);
@@ -81,13 +81,13 @@ fn invoke(target: &Target, header: &Value, artifact: Option<&[u8]>) -> Result<Va
     let binary = crate::container_vm::selected_runtime(target)?;
     invoke_at(&binary, target, header, artifact)
 }
-fn header(action: &str, key: &str, intent: &Value) -> Result<Value> {
+pub(super) fn header(action: &str, key: &str, intent: &Value) -> Result<Value> {
     Ok(
         json!({"action":action,"requestDigest":journal::digest(key.as_bytes()),
         "inputDigest":journal::digest(&serde_json::to_vec(intent)?),"intent":intent}),
     )
 }
-fn validate_target(record: &Value, target: &Target, digest: Option<&str>) -> Result<()> {
+pub(super) fn validate_target(record: &Value, target: &Target, digest: Option<&str>) -> Result<()> {
     if record["intent"]["binding"]["target"] != json!(target)
         || digest.is_some_and(|digest| record["inputDigest"] != digest)
     {
@@ -105,6 +105,7 @@ fn status(root: &Path, target: &Target) -> Result<Value> {
     container(target)?;
     let mut result = linux_profile::capability();
     result["target"] = json!(target);
+    result["activation"] = super::linux_activation::capability();
     let mut operations = Vec::new();
     let directory = root.join("linux-runtime-preparation");
     if directory.try_exists()? {
@@ -190,7 +191,7 @@ fn deliver(root: &Path, journal: &Journal, key: &str) -> Result<Value> {
 
 /// Verify a currently serving owner after installation. This never starts an
 /// owner or provider and does not infer readiness from installed files.
-fn enroll_serving_using(
+pub(super) fn enroll_serving_using(
     root: &Path,
     journal: &Journal,
     key: &str,
@@ -204,7 +205,14 @@ fn enroll_serving_using(
         .as_ref()
         .context("Installed dedicated account binding missing")?;
     account.validate()?;
-    let _guard = Guard::acquire(root, &binding.target)?;
+    let guard = Guard::lock(root, &binding.target)?;
+    let activation_reserved = guard.marker.try_exists()?;
+    if activation_reserved {
+        let marker: Value = serde_json::from_slice(&super::admission::read_marker(&guard.marker)?)?;
+        if !super::linux_activation::marker_matches(&marker, &record) {
+            bail!("Competing ownership prevents enrollment")
+        }
+    }
     if record["status"] != "installed"
         || record["inputDigest"] != journal::digest(&serde_json::to_vec(&record["intent"])?)
     {
@@ -267,6 +275,7 @@ fn enroll_serving_using(
     {
         bail!("Serving guest account/identity differs from the original installed runtime");
     }
+    super::linux_activation::verify_enrollment(&record, &observed)?;
     let enrolled = journal.enroll_container(&env.name, &target, sha)?;
     record["enrollment"] = json!({"status":"verified","environment":enrolled,"description":observed,"checkedAt":journal::now(),"ready":false});
     record["ready"] = json!(false);
@@ -275,6 +284,9 @@ fn enroll_serving_using(
         &linux_profile::directory(root, key)?.join("receipt.json"),
         &serde_json::to_vec(&record)?,
     )?;
+    if activation_reserved {
+        guard.completed()?;
+    }
     Ok(record)
 }
 pub(crate) fn request(method: &str, params: Value) -> Result<Value> {
@@ -318,6 +330,18 @@ pub(crate) fn request(method: &str, params: Value) -> Result<Value> {
     )?;
     match method {
         "computer.enrollInstalledLinuxRuntime" => {
+            if record.get("activation").is_some() {
+                if super::linux_activation::capability()["available"] != true {
+                    bail!("Linux activation live acceptance is unavailable")
+                }
+                super::linux_activation::change_using(
+                    &root,
+                    &journal,
+                    key,
+                    "status",
+                    super::linux_activation::invoke,
+                )?;
+            }
             enroll_serving_using(&root, &journal, key, |env| {
                 super::transport::linux_rpc(env, "describe", json!({}), Duration::from_secs(45))
             })
@@ -334,4 +358,4 @@ pub(crate) fn request(method: &str, params: Value) -> Result<Value> {
 
 #[cfg(test)]
 #[path = "linux_install_tests.rs"]
-mod tests;
+pub(crate) mod tests;

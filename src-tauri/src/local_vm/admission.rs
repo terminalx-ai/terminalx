@@ -113,7 +113,7 @@ fn inspect_using(root: &Path, target: &Target, observe: impl FnOnce(&Target) -> 
     if !guard.marker.try_exists()? { return Ok(serde_json::json!({"target":target,"status":"unreserved"})); }
     let bytes = read_marker(&guard.marker)?;
     let retained: serde_json::Value = serde_json::from_slice(&bytes)?;
-    if retained["kind"]=="linuxRuntimeInstall" { bail!("An interrupted Linux installation requires its own bound installation receipt; desktop recovery cannot release it"); }
+    if matches!(retained["kind"].as_str(),Some("linuxRuntimeInstall"|"linuxRuntimeActivation")) { bail!("An interrupted Linux installation or activation requires its own bound operation receipt; desktop recovery cannot release it"); }
     if retained["target"] != serde_json::to_value(target)? { bail!("Attached-operation identity changed"); }
     let mut result = serde_json::json!({"target":target,"status":"fenced","markerDigest":super::journal::digest(&bytes),
         "detail":"The prior desktop operation has no exit receipt. A timeout or missing host process cannot release it."});
@@ -136,7 +136,7 @@ fn reconcile_using(root: &Path, target: &Target, marker_digest: &str, confirm: b
     let bytes = read_marker(&guard.marker)?;
     if super::journal::digest(&bytes) != marker_digest { bail!("Attachment receipt changed; inspect again"); }
     let retained: serde_json::Value = serde_json::from_slice(&bytes)?;
-    if retained["kind"]=="linuxRuntimeInstall" { bail!("An interrupted Linux installation requires its own bound installation receipt; desktop recovery cannot release it"); }
+    if matches!(retained["kind"].as_str(),Some("linuxRuntimeInstall"|"linuxRuntimeActivation")) { bail!("An interrupted Linux installation or activation requires its own bound operation receipt; desktop recovery cannot release it"); }
     if retained["target"] != serde_json::to_value(target)? { bail!("Attached-operation identity changed"); }
     let evidence = observe(target)?; // Never trust evidence supplied by the UI.
     let receipt = serde_json::json!({"target":target,"status":"released","priorOutcome":"unknown",
