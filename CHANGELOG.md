@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Chat
+
+- Recognize completed Codex context compaction and preserve scoped compaction
+  history and status across conversation changes. The live compaction producer
+  remains inactive. (#644)
+
 ### Cloud workspaces
 
 - Route new sessions to the selected, verified repository checkout and keep child
