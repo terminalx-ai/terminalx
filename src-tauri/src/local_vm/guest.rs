@@ -57,6 +57,9 @@ pub const MAX_RPC_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FILES_BYTES: usize = 11 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 12 * 1024 * 1024;
 const PAGE_BYTES: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
+const INSTALL: &str = super::transport::LINUX_INSTALL;
+#[cfg(not(target_os = "linux"))]
 const INSTALL: &str = "/Users/lume/.terminalx-local";
 const STATE: &str = "local-vm-guest/state.json";
 const PRIOR_OUTCOME_UNKNOWN: &str = "The previous worker has stopped, but its earlier external actions remain outcome unknown. Recovery sends only the explicitly confirmed new instructions.";
@@ -99,9 +102,18 @@ impl Identity {
     }
 }
 
+fn check_runtime(expected: Option<&str>, actual: &str) -> Result<()> {
+    if expected.is_some_and(|expected| expected != actual) || (cfg!(target_os = "linux") && expected.is_none()) {
+        bail!("Guest runtime artifact changed or is unbound; no operation was routed");
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    #[serde(default, rename = "expectedRuntimeSha256")]
+    pub expected_runtime_sha256: Option<String>,
     pub method: String,
     pub params: Value,
 }
@@ -212,8 +224,18 @@ impl Guest {
             return Ok(false);
         }
         Identity::load(base)?;
-        if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            bail!("Local VM guest execution requires macOS arm64");
+        if !cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64")))) {
+            bail!("Unsupported local guest platform");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // Linux host runtimes cannot become guests via a home override.
+            // Identity ownership and the pinned installation/root are checked
+            // independently; a root-owned default account is never accepted.
+            // SAFETY: geteuid has no arguments or memory preconditions.
+            if unsafe { libc::geteuid() } == 0 || dirs::home_dir().as_deref() != Some(Path::new("/home/cua")) {
+                bail!("Linux task runtime requires the dedicated non-root cua account");
+            }
         }
         if fs::canonicalize(root)? != fs::canonicalize(base.join("runtime"))? {
             bail!("Guest runtime must use the installed private runtime directory");
@@ -372,6 +394,7 @@ impl Guest {
     }
 
     pub fn dispatch(&self, request: Request) -> Result<Value> {
+        check_runtime(request.expected_runtime_sha256.as_deref(), &self.runtime_sha256)?;
         if self.stopped.load(Ordering::Acquire) {
             bail!("Guest runtime is stopping; no task operation was routed");
         }
@@ -579,7 +602,7 @@ impl Guest {
         let (harnesses, desktop) = std::thread::scope(|scope| {
             let desktop = scope.spawn(desktop_ready);
             let probes: Vec<_> = crate::harness::offered().into_iter()
-                .filter(|h| h.available && matches!(h.id.as_str(), "codex" | "claude"))
+                .filter(|h| h.available && matches!(h.id.as_str(), "codex" | "claude") && (!cfg!(target_os = "linux") || h.id == "codex"))
                 .map(|h| scope.spawn(move || {
                     let models = match discover_models(&h.id) {
                         Ok(models) => models,
@@ -595,7 +618,7 @@ impl Guest {
                 desktop.join().unwrap_or(false),
             )
         });
-        let available = desktop
+        let available = (desktop || cfg!(target_os = "linux"))
             && harnesses
                 .iter()
                 .any(|h| h["models"].as_array().is_some_and(|m| !m.is_empty()));
@@ -614,16 +637,20 @@ impl Guest {
             "desktop.takeover",
             "desktop.release",
         ];
+        if cfg!(target_os = "linux") {
+            capabilities.retain(|capability| !matches!(*capability,
+                "environment.setupReadiness" | "environment.setupAction" | "environment.setupAuth" | "desktop.takeover" | "desktop.release"));
+        }
         if available {
-            capabilities.push("task.submit");
+            capabilities.push(if cfg!(target_os = "linux") { "task.submitShell" } else { "task.submit" });
         }
         let state = self.state.lock().unwrap();
         let identity = &state.identity;
         Ok(
-            json!({"available":available,"reason":if !desktop {Some("Guest desktop MCP binding is unavailable")} else if !available {Some("Install and authenticate a supported guest harness")} else {None},
-            "protocol":PROTOCOL,"environmentId":identity.environment_id,
+            json!({"available":available,"reason":if !desktop && !cfg!(target_os = "linux") {Some("Guest desktop MCP binding is unavailable")} else if !available {Some("Install and authenticate a supported guest harness")} else {None},
+            "protocol":PROTOCOL,"runtimeSha256":self.runtime_sha256,"platform":std::env::consts::OS,"environmentId":identity.environment_id,
             "generation":identity.generation,"capabilities":capabilities,"harnesses":harnesses,
-            "desktopAvailable":desktop,"manualControl":state.manual_lease.is_some(),
+            "desktopAvailable":desktop,"taskMode":if cfg!(target_os = "linux") {"shellFiles"} else {"desktop"},"manualControl":state.manual_lease.is_some(),
             "credentials":"Guest-installed provider/repository credentials only; no host credentials are copied"}),
         )
     }
@@ -659,9 +686,7 @@ impl Guest {
         // Retrying an existing task above is always allowed, even when a
         // provider or desktop is presently unavailable.
         require_queue_control(&state)?;
-        if !desktop_ready() {
-            bail!("Guest desktop MCP binding is unavailable; task submission is disabled");
-        }
+        task_capability(&self.base, &task)?;
         let mut task = task;
         task.status = TaskStatus::Queued;
         task.worker_session_id = None;
@@ -776,9 +801,7 @@ impl Guest {
     }
 
     fn launch(&self, record: &mut Record) -> Result<()> {
-        if !desktop_ready() {
-            bail!("Guest desktop binding became unavailable");
-        }
+        task_capability(&self.base, &record.task)?;
         let models = discover_models(&record.task.input.harness)?;
         validate_model(&record.task, &models)?;
         if record.task.input.harness == "codex"
@@ -1947,8 +1970,31 @@ fn boot_identity() -> Option<String> {
             .ok()?;
         uuid::Uuid::parse_str(value).ok().map(|id| id.to_string())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // A new PID namespace/PID 1 proves the old container processes are
+        // gone; restarting only terminalx-serve keeps the same identity.
+        linux_boot_identity(
+            &std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?,
+            std::fs::metadata("/proc/self/ns/pid").ok()?.ino(),
+            &std::fs::read_to_string("/proc/1/stat").ok()?,
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     None
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_boot_identity(kernel_boot: &str, namespace: u64, init_stat: &str) -> Option<String> {
+    let boot = uuid::Uuid::parse_str(kernel_boot.trim()).ok()?;
+    if namespace == 0 || !init_stat.starts_with("1 (") { return None; }
+    // comm may contain spaces and parentheses. starttime is field 22; field 3
+    // follows the final closing parenthesis. Never use a wall-clock timeout.
+    let (_, fields) = init_stat.rsplit_once(") ")?;
+    let start = fields.split_whitespace().nth(19)?.parse::<u64>().ok()?;
+    if start == 0 { return None; }
+    let hash = digest(format!("{boot}:{namespace}:{start}").as_bytes());
+    uuid::Uuid::parse_str(&hash[..32]).ok().map(|id| id.to_string())
 }
 
 fn require_boot_change(previous: Option<&str>, current: Option<&str>) -> Result<()> {
@@ -2087,6 +2133,14 @@ fn validate_task(identity: &Identity, base: &Path, task: &Task, files: &[FileInp
     {
         bail!("Task is bound to another guest identity");
     }
+    if let Some(computer) = &task.computer {
+        computer.guest(&identity.environment_id, &identity.generation)?;
+        if matches!(computer, crate::computer_targets::Target::LinuxGuest { .. }) != cfg!(target_os = "linux") {
+            bail!("Task computer belongs to a different guest OS");
+        }
+    } else if cfg!(target_os = "linux") {
+        bail!("Linux tasks require a retained exact container binding");
+    }
     if task.input.parent_message_id.is_empty()
         || task.idempotency_key.is_empty()
         || task.idempotency_key.len() > 200
@@ -2141,6 +2195,7 @@ fn validate_task(identity: &Identity, base: &Path, task: &Task, files: &[FileInp
 }
 
 fn discover_models(harness: &str) -> Result<Vec<crate::models::Model>> {
+    if cfg!(target_os = "linux") { require_shell_account(Path::new(INSTALL), harness)?; }
     if !crate::harness::offered()
         .iter()
         .any(|h| h.id == harness && h.available)
@@ -2334,6 +2389,7 @@ pub fn launch_config(
         });
     }
     let state: State = serde_json::from_slice(&fs::read(path)?)?;
+    if Identity::load(Path::new(INSTALL))? != state.identity { bail!("Guest identity changed before provider launch"); }
     let record = state
         .records
         .values()
@@ -2357,10 +2413,45 @@ pub fn launch_config(
             bail!("Guest provider resume binding changed");
         }
     }
-    if !desktop_ready() {
-        bail!("Guest desktop adapter binding unavailable");
+    task_capability(Path::new(INSTALL), &record.task)?;
+    if !record.task.input.desktop {
+        return shell_launch_config(&state.identity, harness);
     }
     task_launch_config(&state.identity, &record.task.target, harness)
+}
+
+fn require_shell_account(base: &Path, harness: &str) -> Result<()> {
+    if harness != "codex" { bail!("Linux task execution currently requires guest-owned Codex authorization"); }
+    let home = base.parent().context("Guest home missing")?;
+    let provider = readiness::inspect_provider(home, readiness::Harness::Codex);
+    if provider.check.state != "authenticated" {
+        bail!("Sign in to Codex inside this Linux guest using its own file-backed account; host credentials are never imported ({})", provider.check.reason_code);
+    }
+    Ok(())
+}
+
+fn task_capability(base: &Path, task: &Task) -> Result<()> {
+    if task.input.desktop {
+        if !desktop_ready() { bail!("Guest desktop MCP binding is unavailable; task submission is disabled"); }
+    } else {
+        if !cfg!(target_os = "linux") { bail!("Linux shell/files task cannot run on another OS"); }
+        if !matches!(task.computer, Some(crate::computer_targets::Target::LinuxGuest { .. })) {
+            bail!("Shell/files task requires an exact Linux guest binding");
+        }
+        require_shell_account(base, &task.input.harness)?;
+    }
+    Ok(())
+}
+
+fn shell_launch_config(identity: &Identity, harness: &str) -> Result<crate::cloud_config::LaunchConfig> {
+    if harness != "codex" { bail!("Unsupported Linux guest task provider"); }
+    Ok(crate::cloud_config::LaunchConfig {
+        env: vec![("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), identity.environment_id.clone()),
+            ("TERMINALX_LOCAL_VM_GENERATION".into(), identity.generation.clone())],
+        // A nonempty, explicit empty table prevents the shared launch hook
+        // from probing/attaching a host container or inheriting its desktop.
+        args: " -c 'mcp_servers={}'".into(),
+    })
 }
 
 fn task_launch_config(
@@ -2451,6 +2542,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
             bail!("RPC request exceeds 16 MiB");
         }
         let request: Request = serde_json::from_slice(&bytes)?;
+        check_runtime(request.expected_runtime_sha256.as_deref(), &super::bootstrap::owner_runtime_sha256()?)?;
         let identity = Identity::load(Path::new(INSTALL))?;
         identity.check(&request.params)?;
         std::env::set_var("TERMINALX_HOME", format!("{INSTALL}/runtime"));
@@ -2464,7 +2556,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
         }
         crate::control::call(
             "local_vm.guest",
-            json!({"method":request.method,"params":request.params}),
+            json!({"method":request.method,"params":request.params,"expectedRuntimeSha256":request.expected_runtime_sha256}),
             Duration::from_secs(40),
         )
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
@@ -3301,6 +3393,7 @@ mod tests {
         params["environmentId"] = json!(identity.environment_id);
         params["generation"] = json!(identity.generation);
         Request {
+            expected_runtime_sha256: None,
             method: method.into(),
             params,
         }
@@ -3424,6 +3517,7 @@ mod tests {
             let response: Task = serde_json::from_value(
                 guest
                     .dispatch(Request {
+                        expected_runtime_sha256: None,
                         method: req.method.clone(),
                         params: req.params.clone(),
                     })
@@ -3449,6 +3543,7 @@ mod tests {
         changed["text"] = json!("Different input");
         assert!(guest
             .dispatch(Request {
+                        expected_runtime_sha256: None,
                 method: req.method.clone(),
                 params: changed
             })
@@ -3459,6 +3554,7 @@ mod tests {
         wrong["target"]["workspaceId"] = json!(new_id());
         assert!(guest
             .dispatch(Request {
+                        expected_runtime_sha256: None,
                 method: req.method,
                 params: wrong
             })
@@ -3483,6 +3579,7 @@ mod tests {
         assert!(retained.prior_external_outcome_unknown);
         guest
             .dispatch(Request {
+                        expected_runtime_sha256: None,
                 method: req.method.clone(),
                 params: req.params.clone(),
             })
@@ -3537,6 +3634,7 @@ mod tests {
         );
         assert!(guest
             .dispatch(Request {
+                        expected_runtime_sha256: None,
                 method: req.method.clone(),
                 params: req.params.clone()
             })
@@ -3801,6 +3899,35 @@ mod tests {
     }
 
     #[test]
+    fn artifact_mismatch_refuses_before_guest_dispatch_and_keeps_retained_state() {
+        let (_home, guest, _task) = setup();
+        let before = std::fs::read(guest.base.join("runtime").join(STATE)).unwrap();
+        let mut call = request(&guest, "desktop.state", json!({}));
+        call.expected_runtime_sha256 = Some("wrong-artifact".into());
+        assert!(guest.dispatch(call).unwrap_err().to_string().contains("artifact changed"));
+        assert_eq!(before, std::fs::read(guest.base.join("runtime").join(STATE)).unwrap());
+        let mut call = request(&guest, "desktop.state", json!({}));
+        call.expected_runtime_sha256 = Some(guest.runtime_sha256.clone());
+        assert!(guest.dispatch(call).is_ok());
+    }
+
+    #[test]
+    fn linux_recovery_requires_a_new_kernel_or_container_lifetime_not_runtime_restart() {
+        let boot = new_id();
+        let stat = |start: u64| format!("1 (init (fixture)) S {} {start} 0 0", "0 ".repeat(18));
+        let before = linux_boot_identity(&boot, 4026533000, &stat(120)).unwrap();
+        assert_eq!(before, linux_boot_identity(&boot, 4026533000, &stat(120)).unwrap());
+        assert!(require_boot_change(Some(&before), Some(&before)).is_err());
+        let after = linux_boot_identity(&boot, 4026533001, &stat(180)).unwrap();
+        require_boot_change(Some(&before), Some(&after)).unwrap();
+        assert_ne!(before, linux_boot_identity(&new_id(), 4026533000, &stat(120)).unwrap());
+        assert!(linux_boot_identity(&boot, 4026533000, "1 (init) S malformed").is_none());
+        assert!(linux_boot_identity("unknown", 4026533000, &stat(120)).is_none());
+        assert!(linux_boot_identity(&boot, 0, &stat(120)).is_none());
+        assert!(linux_boot_identity(&boot, 4026533000, &stat(0)).is_none());
+    }
+
+    #[test]
     fn guest_boot_identity_is_kernel_backed_and_stable_during_this_process() {
         #[cfg(target_os = "macos")]
         {
@@ -3808,7 +3935,9 @@ mod tests {
             validate_id(&first).unwrap();
             assert_eq!(Some(first), boot_identity());
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        assert_eq!(boot_identity().unwrap(), boot_identity().unwrap());
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         assert!(boot_identity().is_none());
     }
 

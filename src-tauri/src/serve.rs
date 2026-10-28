@@ -144,6 +144,8 @@ fn parse(args: &[String]) -> Result<Command> {
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
     #[cfg(unix)]
+    if let Some(code) = crate::container_vm::run_stdio_cli() { return code; }
+    #[cfg(unix)]
     if let Some(code) = crate::local_vm::desktop::run_cli() { return code; }
     // A hook process is short lived and answers before anything else starts.
     if crate::hooks::run_statusline_cli() || crate::hooks::run_hook_cli() {

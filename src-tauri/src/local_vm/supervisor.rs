@@ -510,7 +510,7 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
         if !description
             .get("capabilities")
             .and_then(Value::as_array)
-            .is_some_and(|a| a.iter().any(|c| c == "task.submit"))
+            .is_some_and(|a| a.iter().any(|c| c == if task.input.desktop { "task.submit" } else { "task.submitShell" }))
         {
             bail!(
                 "{}",
@@ -550,7 +550,8 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
         )?
     };
     let guest: Task = serde_json::from_value(result).context("Guest task protocol mismatch")?;
-    if guest.target != task.target
+    if guest.computer != task.computer
+        || guest.target != task.target
         || guest.input != task.input
         || guest.idempotency_key != task.idempotency_key
         || guest.input_digest != task.input_digest
@@ -912,6 +913,7 @@ mod tests {
     #[test]
     fn launchagents_have_independent_lifetimes_and_no_display_assertion() {
         let env = Environment {
+            transport: Default::default(),
             id: journal::new_id(),
             name: "Guest".into(),
             sandbox: "local:test".into(),

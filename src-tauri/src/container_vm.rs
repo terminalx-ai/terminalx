@@ -190,7 +190,7 @@ pub fn identity(path: &Path, runtime: Runtime) -> Result<(Target, bool)> {
     inspect_identity(path, runtime, CONTAINER, Duration::from_secs(3))
 }
 
-fn validate_at(path: &Path, target: &Target, timeout: Duration) -> Result<()> {
+pub(crate) fn validate_at(path: &Path, target: &Target, timeout: Duration) -> Result<()> {
     target.require(Capability::AttachedDesktop)?;
     let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
     let (actual, running) = inspect_identity(path, *runtime, id, timeout).context("Selected container unavailable; no fallback")?;
@@ -280,6 +280,8 @@ pub fn start() -> Result<VmStatus> {
     if !daemon_up(&path) {
         bail!("{name} is not running");
     }
+    #[cfg(unix)]
+    let admission = lifecycle_admission(&path, false)?;
     if run(&path, &["image", "inspect", IMAGE], QUICK).is_err() {
         run(&path, &["pull", IMAGE], PULL).context("download the desktop image")?;
     }
@@ -323,30 +325,40 @@ pub fn start() -> Result<VmStatus> {
         }
     }
     set_enabled(true)?;
+    #[cfg(unix)]
+    if let Some(guard) = admission { guard.completed()?; }
     Ok(status())
 }
 
 /// Stop the VM; it keeps its state for the next start. Agents are no longer offered it.
 pub fn stop() -> Result<VmStatus> {
-    set_enabled(false)?;
     if let Some(path) = runtime() {
+        #[cfg(unix)]
+        let admission = lifecycle_admission(&path, false)?;
         if container_running(&path) == Some(true) {
             ours(&path)?;
             run(&path, &["stop", "-t", "5", CONTAINER], QUICK).context("stop the Local VM")?;
         }
+        #[cfg(unix)]
+        if let Some(guard) = admission { guard.completed()?; }
     }
+    set_enabled(false)?;
     Ok(status())
 }
 
 /// Throw the VM away; the next start makes a fresh one.
 pub fn reset() -> Result<VmStatus> {
-    set_enabled(false)?;
     if let Some(path) = runtime() {
+        #[cfg(unix)]
+        let admission = lifecycle_admission(&path, true)?;
         if container_running(&path).is_some() {
             ours(&path)?;
             run(&path, &["rm", "-f", CONTAINER], QUICK).context("remove the Local VM")?;
         }
+        #[cfg(unix)]
+        if let Some(guard) = admission { guard.completed()?; }
     }
+    set_enabled(false)?;
     Ok(status())
 }
 
@@ -375,7 +387,12 @@ pub fn call(target: &Target, tool: &str, arguments: &str) -> Result<String> {
     serde_json::from_str::<serde_json::Value>(arguments).context("the tool's arguments must be JSON")?;
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { id, .. } = target else { unreachable!() };
-    run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], Duration::from_secs(120))
+    #[cfg(unix)]
+    let admission = attach(target)?;
+    let result = run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], Duration::from_secs(120))?;
+    #[cfg(unix)]
+    admission.completed()?;
+    Ok(result)
 }
 
 /// The driver's tools, or one tool's description and argument schema.
@@ -400,9 +417,13 @@ pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
         Some(out) => std::path::absolute(&out).context("where to save the screenshot")?,
         None => crate::store::ensure_dir(crate::store::root()?.join("computer").join("screens"))?.join(format!("screen-{}.png", chrono::Utc::now().format("%Y%m%d-%H%M%S%3f"))),
     };
+    #[cfg(unix)]
+    let admission = attach(target)?;
     let inside = "/tmp/terminalx-screen.png";
     run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK).context("capture the screen")?;
     run(&path, &["cp", &format!("{id}:{inside}"), &out.to_string_lossy()], QUICK).context("copy the screenshot out")?;
+    #[cfg(unix)]
+    admission.completed()?;
     Ok(out)
 }
 
@@ -419,11 +440,25 @@ pub fn launch_selected(target: &Target, harness: &str, appends_prompt: bool) -> 
     if !matches!(harness, "claude" | "codex") { bail!("This agent does not support attached desktop tools"); }
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    #[cfg(unix)]
+    {
+        let _ = (path, id);
+        let executable = std::env::current_exe()?;
+        let serialized = serde_json::to_string(target)?;
+        let home = crate::store::root()?;
+        Ok(mcp_args(harness, &executable.to_string_lossy(), &["container-computer-stdio", &serialized, &home.to_string_lossy()], appends_prompt))
+    }
+    #[cfg(not(unix))]
     Ok(agent_args(harness, &path.to_string_lossy(), id, appends_prompt))
 }
 
+#[cfg(any(test, not(unix)))]
 pub fn agent_args(harness: &str, runtime: &str, id: &str, appends_prompt: bool) -> String {
     let args = ["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"];
+    mcp_args(harness, runtime, &args, appends_prompt)
+}
+
+fn mcp_args(harness: &str, runtime: &str, args: &[&str], appends_prompt: bool) -> String {
     match harness {
         "claude" => {
             let config = serde_json::json!({ "mcpServers": { "computer": { "command": runtime, "args": args } } });
@@ -442,6 +477,46 @@ pub fn agent_args(harness: &str, runtime: &str, id: &str, appends_prompt: bool) 
         }
         _ => String::new(),
     }
+}
+
+#[cfg(unix)]
+fn lifecycle_admission(path: &Path, deleting: bool) -> Result<Option<crate::local_vm::admission::Guard>> {
+    if container_running(path).is_none() { return Ok(None); }
+    let runtime = match runtime_name(path).as_str() { "docker" => Runtime::Docker, "podman" => Runtime::Podman, _ => bail!("Unknown container runtime") };
+    let (target, _) = identity(path, runtime)?;
+    let journal = crate::local_vm::host::journal()?;
+    if deleting && journal.read()?.environments.values().any(|e| e.transport.container().as_ref() == Some(&target)) {
+        bail!("This container has retained guest task history. Reset requires explicit guest disposition; it cannot remove that history through the desktop shortcut");
+    }
+    Ok(Some(attach(&target)?))
+}
+
+#[cfg(unix)]
+fn attach(target: &Target) -> Result<crate::local_vm::admission::Guard> {
+    crate::local_vm::admission::Guard::attach(&crate::local_vm::host::root()?, target, &crate::local_vm::host::journal()?)
+}
+
+/// The attached MCP proxy holds admission for its entire lifetime. A crash or
+/// transport failure retains an unknown-operation record instead of releasing
+/// the container to a queued task merely because a host process disappeared.
+#[cfg(unix)]
+pub fn run_stdio_cli() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) != Some("container-computer-stdio") { return None; }
+    let result = (|| -> Result<()> {
+        if args.len() != 3 || !Path::new(&args[2]).is_absolute() { bail!("An exact container target and owner home are required"); }
+        std::env::set_var("TERMINALX_HOME", &args[2]);
+        let target: Target = serde_json::from_str(&args[1])?;
+        let path = selected_runtime(&target)?;
+        let Target::LinuxContainer { id, .. } = &target else { unreachable!() };
+        let admission = attach(&target)?;
+        let status = Command::new(path).args(["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"])
+            .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()?;
+        if !status.success() { bail!("Attached desktop transport exited without a successful guest exit receipt; route remains reserved"); }
+        admission.completed()
+    })();
+    if let Err(error) = &result { eprintln!("Container desktop: {error:#}"); }
+    Some(if result.is_ok() { 0 } else { 1 })
 }
 
 #[cfg(test)]
@@ -532,7 +607,7 @@ mod tests {
         assert!(std::net::TcpStream::connect(("127.0.0.1", viewer.port)).is_ok());
         let docker = runtime().unwrap();
         let (target, _) = identity(&docker, Runtime::Docker).unwrap();
-        assert!(launch_selected(&target, "claude", false).unwrap().contains("cua-driver"));
+        assert!(launch_selected(&target, "claude", false).unwrap().contains("container-computer-stdio"));
         // What an agent's CLI runs, spoken to as MCP.
         let docker = runtime().unwrap();
         let mut child = Command::new(&docker)

@@ -8,6 +8,7 @@ use crate::store::index::TabEntry;
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Target {
     LinuxContainer { runtime: Runtime, id: String },
+    LinuxGuest { runtime: Runtime, id: String, environment_id: String, generation: String },
     MacosGuest { environment_id: String, generation: String },
 }
 
@@ -26,18 +27,23 @@ impl Target {
     pub fn require(&self, capability: Capability) -> Result<()> {
         match self {
             Self::LinuxContainer { id, .. } if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) => {},
+            Self::LinuxGuest { id, environment_id, generation, .. } if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) && !environment_id.is_empty() && !generation.is_empty() => {},
             Self::MacosGuest { environment_id, generation } if !environment_id.is_empty() && !generation.is_empty() => {},
             _ => bail!("Invalid computer identity; select an existing environment again"),
         }
-        if !matches!((self, capability), (Self::LinuxContainer { .. }, Capability::AttachedDesktop) | (Self::MacosGuest { .. }, Capability::GuestTask)) {
+        if !matches!((self, capability), (Self::LinuxContainer { .. }, Capability::AttachedDesktop) | (Self::MacosGuest { .. } | Self::LinuxGuest { .. }, Capability::GuestTask)) {
             bail!("This environment does not support the requested agent route; no operation was routed");
         }
         Ok(())
     }
     pub fn guest(&self, environment_id: &str, generation: &str) -> Result<()> {
         self.require(Capability::GuestTask)?;
-        if self != &(Self::MacosGuest { environment_id: environment_id.into(), generation: generation.into() }) {
-            bail!("The selected macOS environment was replaced or changed; select it again. No host fallback");
+        let (actual_env, actual_generation) = match self {
+            Self::MacosGuest { environment_id, generation } | Self::LinuxGuest { environment_id, generation, .. } => (environment_id, generation),
+            _ => unreachable!(),
+        };
+        if actual_env != environment_id || actual_generation != generation {
+            bail!("The selected environment was replaced or changed; select it again. No host fallback");
         }
         Ok(())
     }
@@ -71,8 +77,8 @@ pub fn inventory() -> Result<Inventory> {
         let state = crate::local_vm::host::journal()?.read()?;
         for env in state.environments.values().filter(|env| env.deleted_at.is_none()) {
             entries.push(Entry {
-                target: Target::MacosGuest { environment_id: env.id.clone(), generation: env.generation.clone() },
-                name: format!("macOS · {}", env.name), capabilities: vec![Capability::GuestTask],
+                target: env.transport.target(&env.id, &env.generation),
+                name: format!("{} · {}", if env.transport.container().is_some() { "Linux tasks" } else { "macOS" }, env.name), capabilities: vec![Capability::GuestTask],
                 state: if state.enabled { "requiresCapabilityCheck" } else { "disabled" }.into(),
             });
         }

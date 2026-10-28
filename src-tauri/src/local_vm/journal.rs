@@ -102,6 +102,9 @@ pub struct Artifact {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
+    /// Exact transport as selected at submission, retained after replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<crate::computer_targets::Target>,
     pub target: TaskTarget,
     pub input: TaskInput,
     pub idempotency_key: String,
@@ -127,6 +130,8 @@ pub struct Task {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
+    #[serde(default, skip_serializing_if = "super::transport::Transport::is_macos")]
+    pub transport: super::transport::Transport,
     pub id: String,
     pub name: String,
     /// Exact Cua reference, not a user-supplied tool selector.
@@ -220,6 +225,7 @@ impl Journal {
                 bail!("This VM is already enrolled");
             }
             let env = Environment {
+                transport: Default::default(),
                 id: new_id(),
                 name: name.trim().into(),
                 sandbox: sandbox.into(),
@@ -237,6 +243,36 @@ impl Journal {
         })
     }
 
+    /// Called only after the host verifies the installed guest identity via
+    /// the exact container transport. Enrollment never installs an account.
+    pub(super) fn enroll_container(&self, name: &str, target: &crate::computer_targets::Target, runtime_sha256: &str) -> Result<Environment> {
+        use crate::computer_targets::{Capability, Target};
+        target.require(Capability::GuestTask)?;
+        let Target::LinuxGuest { runtime, id, environment_id, generation } = target else { anyhow::bail!("An exact Linux guest target is required"); };
+        validate_id(environment_id)?;
+        validate_id(generation)?;
+        if name.trim().is_empty() || name.len() > 120 { bail!("Provide an environment name of 1–120 bytes"); }
+        super::transport::validate_runtime_sha(runtime_sha256)?;
+        let transport = super::transport::Transport::LinuxContainer { runtime: *runtime, id: id.clone(), runtime_sha256: runtime_sha256.into() };
+        self.transaction(|state| {
+            if let Some(existing) = state.environments.get(environment_id) {
+                if existing.deleted_at.is_none() && existing.transport.target(&existing.id, &existing.generation) == *target && existing.transport == transport { return Ok(existing.clone()); }
+                bail!("Guest identity already has retained history; it cannot be rebound");
+            }
+            if state.environments.values().any(|env| env.transport.container() == transport.container()) {
+                bail!("Container already has a retained guest timeline; reconcile it before reenrollment");
+            }
+            let env = Environment {
+                transport, id: environment_id.clone(), name: name.trim().into(),
+                sandbox: format!("container:{}:{id}", runtime.name()), generation: generation.clone(),
+                created_at: now(), deleted_at: None, keep_awake: false, owned: false,
+                provision: None, manual_control: false, setup: None,
+            };
+            state.environments.insert(env.id.clone(), env.clone());
+            Ok(env)
+        })
+    }
+
     /// Persist before starting any external operation. The same key after an
     /// acknowledgement is lost returns precisely the same immutable target.
     #[cfg(test)]
@@ -245,7 +281,7 @@ impl Journal {
         // submissions must supply the identity observed by their picker.
         let state = self.read()?;
         let env = state.environments.get(&input.environment_id).context("Environment unavailable")?;
-        let target = crate::computer_targets::Target::MacosGuest { environment_id: env.id.clone(), generation: env.generation.clone() };
+        let target = env.transport.target(&env.id, &env.generation);
         self.submit_selected(key, input, Some(&target))
     }
 
@@ -271,9 +307,6 @@ impl Journal {
         ) {
             bail!("Unsupported permission mode");
         }
-        if !input.desktop {
-            bail!("Initial local VM tasks require a workflow desktop lease");
-        }
         if input.files.len() > 64 {
             bail!("Select at most 64 context files");
         }
@@ -293,6 +326,17 @@ impl Journal {
             }
         }
         let digest = digest(&serde_json::to_vec(&input)?);
+        // Receipt recovery does not acquire a new workflow or contact a guest.
+        // It remains possible even after that computer is replaced or held.
+        if let Some(existing) = self.read()?.tasks.values().find(|task| task.idempotency_key == key) {
+            if existing.input_digest != digest { bail!("Idempotency key already names a different task input"); }
+            check_submission_computer(existing, selected)?;
+            return Ok(existing.clone());
+        }
+        let _admission = match selected {
+            Some(target @ crate::computer_targets::Target::LinuxGuest { .. }) => Some(super::admission::Guard::acquire(&self.dir, target)?),
+            _ => None,
+        };
         self.transaction(|state| {
             if let Some(existing) = state
                 .tasks
@@ -302,7 +346,7 @@ impl Journal {
                 if existing.input_digest != digest {
                     bail!("Idempotency key already names a different task input");
                 }
-                if let Some(selected) = selected { selected.guest(&existing.target.environment_id, &existing.target.generation)?; }
+                check_submission_computer(existing, selected)?;
                 return Ok(existing.clone());
             }
             let env = state
@@ -311,6 +355,13 @@ impl Journal {
                 .filter(|env| env.deleted_at.is_none())
                 .context("Local environment unavailable; no host fallback")?;
             selected.context("An exact environment selection is required for a new task; check retained history before retrying an older submission")?.guest(&env.id, &env.generation)?;
+            match env.transport {
+                super::transport::Transport::MacosLume if !input.desktop => bail!("macOS tasks require the desktop workflow route"),
+                super::transport::Transport::LinuxContainer { .. } if input.desktop => bail!("Linux task desktop support is not prepared; use the separate attached desktop route"),
+                _ => {},
+            }
+            let computer = env.transport.target(&env.id, &env.generation);
+            if selected != Some(&computer) { bail!("Selected task transport changed; no fallback"); }
             if super::setup::busy(env) {
                 bail!("Finish this environment's guided setup and desktop verification before submitting a task");
             }
@@ -321,9 +372,12 @@ impl Journal {
                 generation: env.generation.clone(),
             };
             let task = Task {
+                // Keep the original macOS wire record compatible with the
+                // already-installed protocol-1 guest. Linux is always explicit.
+                computer: env.transport.container().map(|_| computer),
                 guest_cwd: format!(
-                    "/Users/lume/.terminalx-local/workspaces/{}",
-                    target.workspace_id
+                    "{}/workspaces/{}",
+                    env.transport.installation(), target.workspace_id
                 ),
                 target,
                 input,
@@ -411,6 +465,15 @@ impl Journal {
     }
 }
 
+fn check_submission_computer(task: &Task, selected: Option<&crate::computer_targets::Target>) -> Result<()> {
+    if let Some(selected) = selected {
+        selected.guest(&task.target.environment_id, &task.target.generation)?;
+        let retained = task.computer.clone().unwrap_or_else(|| super::transport::Transport::MacosLume.target(&task.target.environment_id, &task.target.generation));
+        if selected != &retained { bail!("Submission retry names a different computer; retained task was not replayed"); }
+    }
+    Ok(())
+}
+
 pub fn bound<'a>(state: &'a mut State, target: &TaskTarget) -> Result<&'a mut Task> {
     let task = state
         .tasks
@@ -425,6 +488,10 @@ pub fn bound<'a>(state: &'a mut State, target: &TaskTarget) -> Result<&'a mut Ta
         .context("Environment not found")?;
     if env.deleted_at.is_some() || env.generation != target.generation {
         bail!("Environment deleted or timeline changed; retained task history is read-only");
+    }
+    let retained = task.computer.clone().unwrap_or_else(|| super::transport::Transport::MacosLume.target(&target.environment_id, &target.generation));
+    if retained != env.transport.target(&env.id, &env.generation) {
+        bail!("Task transport changed; retained history is read-only and no operation was routed");
     }
     Ok(task)
 }

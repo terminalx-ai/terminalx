@@ -29,6 +29,11 @@ pub fn command(program: &str) -> Result<Command> {
         command.env_remove("LUME_API");
     }
     command.env("PATH", std::env::join_paths(path)?);
+    remove_control_credentials(&mut command);
+    Ok(command)
+}
+
+pub(super) fn remove_control_credentials(command: &mut Command) {
     for key in [
         crate::hooks::CONTROL_TOKEN_ENV,
         crate::hooks::CONTROL_SOCKET_ENV,
@@ -40,7 +45,6 @@ pub fn command(program: &str) -> Result<Command> {
     ] {
         command.env_remove(key);
     }
-    Ok(command)
 }
 
 pub fn run(command: &mut Command, input: &[u8], timeout: Duration) -> Result<Vec<u8>> {

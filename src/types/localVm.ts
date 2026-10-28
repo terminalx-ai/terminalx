@@ -47,6 +47,7 @@ export interface LocalVmArtifact {
 }
 
 export interface LocalVmTask {
+  computer?: import("./computer").ComputerTarget;
   target: LocalVmTaskTarget;
   input: LocalVmTaskInput;
   idempotencyKey: string;
@@ -66,6 +67,7 @@ export interface LocalVmTask {
 }
 
 export interface LocalVmEnvironment {
+  transport?: { kind: "macosLume" } | { kind: "linuxContainer"; runtime: "docker" | "podman"; id: string; runtimeSha256?: string };
   id: string;
   name: string;
   sandbox: string;

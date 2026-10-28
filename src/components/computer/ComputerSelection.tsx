@@ -32,7 +32,7 @@ export function ComputerSelection({ context, active, children }: {
   return <div className="flex h-full flex-col">
     <div className="space-y-2 border-b border-hairline p-3 text-xs">
       <EnvironmentPicker entries={inventory?.entries ?? []} value={target} disabled={busy} onChange={setTarget} />
-      <p>Linux: attached desktop tools. macOS: selected guest tasks from the conversation. The agent's shell and project files stay where they are.</p>
+      <p>Linux: attached desktop tools, or selected tasks after guest runtime setup. macOS: selected guest tasks from the conversation. The agent's shell and project files stay where they are.</p>
       <p>{!loaded ? "Desktop attachment has not been read." : selection?.target ? `This tab's desktop attachment: ${selection.target.kind === "linuxContainer" ? `${selection.target.runtime} · ${selection.target.id.slice(0, 12)}` : "unsupported target"}.` : "No desktop attachment is selected for this tab."} Changes require this tab's agent to be stopped.</p>
       <div className="flex flex-wrap gap-2">
         <Button size="xs" disabled={busy || !entry?.capabilities.includes("attachedDesktop") || entry.state !== "running"} onClick={() => void attach(target)}>Attach desktop tools to this tab</Button>
@@ -43,6 +43,6 @@ export function ComputerSelection({ context, active, children }: {
       {error || inventoryError ? <p role="alert" className="text-destructive">{error || inventoryError}</p> : null}
       {inventory?.notices.map((notice) => <p key={notice} className="text-muted-foreground">{notice}</p>)}
     </div>
-    <div className="min-h-0 flex-1">{!loaded || target?.kind === "macosGuest" ? null : target && !entry ? <p className="p-3 text-xs">Selected environment unavailable. Refresh and select again; no other desktop is shown.</p> : children(target)}</div>
+    <div className="min-h-0 flex-1">{!loaded || (target && target.kind !== "linuxContainer") ? null : target && !entry ? <p className="p-3 text-xs">Selected environment unavailable. Refresh and select again; no other desktop is shown.</p> : children(target)}</div>
   </div>;
 }

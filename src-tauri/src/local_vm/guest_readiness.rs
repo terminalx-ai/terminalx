@@ -663,7 +663,7 @@ fn permission(value: &Value, field: &str, reason: &'static str) -> Check {
     }
 }
 
-fn inspect_provider(home: &Path, harness: Harness) -> Provider {
+pub(super) fn inspect_provider(home: &Path, harness: Harness) -> Provider {
     let mut result = Provider {
         harness,
         check: Check::new(

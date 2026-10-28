@@ -39,9 +39,9 @@ interface Requests {
   "task.applyPatch": { params: { target: LocalVmTaskTarget; artifactId: string; destinationRoot: string; confirm: true }; result: LocalVmPatchResult };
 }
 
-export function submissionUnavailable(description: LocalVmDescription | null, settings: Pick<LocalVmTask["input"], "harness" | "model" | "effort" | "permissionMode">): string | null {
+export function submissionUnavailable(description: LocalVmDescription | null, settings: Pick<LocalVmTask["input"], "harness" | "model" | "effort" | "permissionMode">, mode: "desktop" | "shellFiles" = "desktop"): string | null {
   if (!description?.available) return description?.reason || "Guest runtime capabilities are unavailable. Check this environment in Settings.";
-  if (!description.capabilities?.includes("task.submit")) return "The guest has not reported support for selected tasks.";
+  if (!description.capabilities?.includes(mode === "shellFiles" ? "task.submitShell" : "task.submit")) return "The guest has not reported support for selected tasks.";
   const harness = description.harnesses?.find((candidate) => candidate.id === settings.harness);
   if (!harness) return `The guest has not reported support for ${settings.harness}.`;
   const model = harness.models?.find((candidate) => candidate.id === settings.model);
@@ -62,7 +62,7 @@ export function localVmRequest<M extends keyof Requests>(method: M, params: Requ
 }
 
 export const LOCAL_VM_STATUS = {
-  queued: "Queued for desktop", starting: "Starting", running: "Running", waiting: "Needs attention",
+  queued: "Queued for guest", starting: "Starting", running: "Running", waiting: "Needs attention",
   canceling: "Stopping", completed: "Completed", failed: "Failed", canceled: "Canceled", outcomeUnknown: "Outcome unknown",
 } satisfies Record<LocalVmTask["status"], string>;
 

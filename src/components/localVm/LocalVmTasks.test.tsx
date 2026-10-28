@@ -18,7 +18,7 @@ vi.mock("./useLocalVmState", async () => {
   };
 });
 import { LocalVmTasks } from "./LocalVmTasks";
-import { computerKey } from "@/types/computer";
+import { computerKey, type ComputerTarget } from "@/types/computer";
 import { submissionStorageKey } from "./submission";
 
 const mount = (conversation: string | null = null, parent = session, parentTab = tab) => {
@@ -51,6 +51,61 @@ async function selectTask() {
 }
 
 describe("selected local VM tasks", () => {
+  it.each(["complete", "lost", "replaced"])("runs the exact Linux shell/files route and retains %s acknowledgment safely", async (receipt) => {
+    const target: ComputerTarget = { kind: "linuxGuest", runtime: "podman", id: "a".repeat(64), environmentId: environment.id, generation: environment.generation };
+    mocks.state = { enabled: true, environments: { env: { ...environment, transport: { kind: "linuxContainer", runtime: "podman", id: target.id } } }, tasks: {} };
+    let attempt = 0;
+    mocks.invoke.mockImplementation(async (_command, { method, params }) => {
+      if (method === "computer.inventory") return { entries: [{ target, name: "Linux tasks · Fixture", capabilities: ["guestTask"], state: "requiresCapabilityCheck" }], notices: [] };
+      if (method === "describe") return { ...description, capabilities: ["task.submitShell"] };
+      if (method === "task.submit") {
+        attempt++;
+        if (receipt === "lost" && attempt === 1) throw new Error("Acknowledgment lost");
+        return task({ input: params.input, idempotencyKey: params.idempotencyKey, computer: receipt === "replaced" ? { ...target, id: "b".repeat(64) } : target });
+      }
+      return null;
+    });
+    const view = mount();
+    await screen.findByRole("option", { name: "Linux tasks · Fixture" });
+    fireEvent.change(screen.getByLabelText("Environment"), { target: { value: computerKey(target) } });
+    fireEvent.click(screen.getByRole("button", { name: "Check guest capabilities" }));
+    await screen.findByText("Guest reports support for these inherited task settings.");
+    fireEvent.click(screen.getByRole("button", { name: "Use current composer text" }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit selected task" }));
+    await waitFor(() => expect(calls("task.submit")).toHaveLength(1));
+    const first = calls("task.submit")[0][1].params;
+    expect(first.target).toEqual(target);
+    expect(first.input.desktop).toBe(false);
+    if (receipt === "complete") {
+      await screen.findByRole("article", { name: "Local VM task task" });
+      expect(screen.queryByRole("button", { name: "Open desktop" })).toBeNull();
+      expect(localStorage.getItem(submissionStorageKey(session.id, tab.id, null))).toBeNull();
+    } else {
+      await screen.findByRole("button", { name: "Retry same submission" });
+      const saved = localStorage.getItem(submissionStorageKey(session.id, tab.id, null));
+      expect(JSON.parse(saved!).target).toEqual(target);
+      view.unmount(); mount();
+      fireEvent.click(await screen.findByRole("button", { name: "Retry same submission" }));
+      await waitFor(() => expect(calls("task.submit")).toHaveLength(2));
+      expect(calls("task.submit")[1][1].params).toEqual(first);
+      if (receipt === "replaced") expect(localStorage.getItem(submissionStorageKey(session.id, tab.id, null))).toBe(saved);
+      else await waitFor(() => expect(localStorage.getItem(submissionStorageKey(session.id, tab.id, null))).toBeNull());
+    }
+  });
+
+  it("does not mistake desktop capability for Linux task support", async () => {
+    const target: ComputerTarget = { kind: "linuxGuest", runtime: "docker", id: "b".repeat(64), environmentId: environment.id, generation: environment.generation };
+    mocks.state = { enabled: true, environments: { env: { ...environment, transport: { kind: "linuxContainer", runtime: "docker", id: target.id } } }, tasks: {} };
+    mocks.invoke.mockImplementation(async (_command, { method }) => method === "computer.inventory"
+      ? { entries: [{ target, name: "Linux tasks · Fixture", capabilities: ["guestTask"], state: "requiresCapabilityCheck" }], notices: [] } : description);
+    mount(); await screen.findByRole("option", { name: "Linux tasks · Fixture" });
+    fireEvent.change(screen.getByLabelText("Environment"), { target: { value: computerKey(target) } });
+    fireEvent.click(screen.getByRole("button", { name: "Check guest capabilities" }));
+    await screen.findByText("The guest has not reported support for selected tasks.");
+    expect((screen.getByRole("button", { name: "Submit selected task" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(calls("task.submit")).toHaveLength(0);
+  });
+
   it("invalidates a checked generation after journal refresh without selecting its replacement", async () => {
     const view = mount(); await selectTask();
     expect(calls("describe")[0][1].params).toEqual({ environmentId: environment.id, generation: environment.generation });

@@ -67,7 +67,18 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
     if !journal.read()?.enabled {
         bail!("Enable Local Cua in Settings → Environments first");
     }
+    if method.starts_with("environment.") {
+        if let Some(id) = params.get("environmentId").and_then(Value::as_str) {
+            if let Some(env) = journal.read()?.environments.get(id) {
+                // macOS provisioner/lifecycle commands must never interpret a
+                // container binding as a Cua selector. Linux lifecycle setup
+                // remains explicit until its prepared profile is installed.
+                env.transport.require_macos()?;
+            }
+        }
+    }
     match method {
+        "enrollContainer" => super::transport::enroll(&journal, params),
         "enroll" => {
             compatible()?;
             let sandbox = field(&params, "sandbox")?;
@@ -164,6 +175,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             let target: TaskTarget =
                 serde_json::from_value(params.get("target").cloned().context("target required")?)?;
             let (task, env) = bound_environment(&journal, &target)?;
+            env.transport.require_macos()?;
             let mut request = params;
             request["after"] = json!(task.last_event_seq);
             let response = guest_rpc(&env, "desktop.takeover", request)?;
@@ -351,7 +363,8 @@ pub(crate) fn cancel_provision(journal: &Journal, env: &Environment) -> Result<V
 fn recovery_receipt(task: &Task, response: &Value) -> Result<Task> {
     let recovered: Task =
         serde_json::from_value(response.clone()).context("Invalid guest recovery receipt")?;
-    if recovered.target != task.target
+    if recovered.computer != task.computer
+        || recovered.target != task.target
         || recovered.input != task.input
         || recovered.idempotency_key != task.idempotency_key
         || recovered.input_digest != task.input_digest
@@ -459,6 +472,7 @@ fn manual_control_receipt(
     record_manual_control(journal, env, response)
 }
 pub fn guest_rpc(env: &Environment, method: &str, params: Value) -> Result<Value> {
+    if env.transport.container().is_some() { return super::transport::linux_rpc(env, method, params, BUDGET); }
     journal::validate_sandbox(&env.sandbox)?;
     let info = inspect_sandbox(&env.sandbox)?;
     guest_rpc_ready(env, method, params, &info, BUDGET)
@@ -471,6 +485,7 @@ pub(super) fn guest_rpc_ready(
     info: &Value,
     budget: Duration,
 ) -> Result<Value> {
+    env.transport.require_macos()?;
     validate_macos_vm(info)?;
     if info["id"] != env.sandbox {
         bail!("Cua returned a different VM identity; no guest request was sent");
@@ -704,6 +719,7 @@ fn reserve_creation(
             bail!("VM identity is already enrolled");
         }
         let mut env = Environment {
+            transport: Default::default(),
             id: journal::new_id(),
             name: name.trim().into(),
             sandbox: sandbox.into(),
@@ -1825,6 +1841,9 @@ mod tests {
             recovery_receipt(&task, &response).unwrap().status,
             journal::TaskStatus::Starting
         );
+        let mut different_computer = response.clone();
+        different_computer["computer"] = json!({"kind":"linuxGuest","runtime":"docker","id":"a".repeat(64),"environmentId":task.target.environment_id,"generation":task.target.generation});
+        assert!(recovery_receipt(&task, &different_computer).is_err());
         for field in [
             "idempotencyKey",
             "inputDigest",

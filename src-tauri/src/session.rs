@@ -4672,7 +4672,7 @@ mod tests {
     #[test]
     fn a_bound_guest_provider_never_receives_or_probes_the_host_container() {
         use crate::cloud_config::LaunchConfig;
-        for args in [" --strict-mcp-config --mcp-config 'guest binding'", " -c 'mcp_servers={guest_computer={}}'"] {
+        for args in [" --strict-mcp-config --mcp-config 'guest binding'", " -c 'mcp_servers={guest_computer={}}'", " -c 'mcp_servers={}'"] {
             let cloud = LaunchConfig { env: vec![("CLOUD_SETTING".into(), "kept".into())], args: " --model configured".into() };
             let guest = LaunchConfig { env: vec![("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), "bound".into())], args: args.into() };
             let merged = computer_launch_config(cloud, guest, |_| panic!("must not inspect or route the host container")).unwrap();
