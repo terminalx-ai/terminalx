@@ -22,6 +22,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
+#[path = "session_compaction.rs"]
+#[allow(dead_code)] // Admission is intentionally not connected to a producer yet.
+mod compaction;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -491,6 +494,7 @@ pub struct TabRuntime {
     source_timestamp: Option<String>,
     /// First text chunk per block, retained until its committed event is saved.
     message_times: HashMap<String, String>,
+    compaction: compaction::Admission,
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
@@ -1044,6 +1048,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
+                compaction: compaction::Admission::default(),
                 turn_started_at: None,
                 turn_by_command: false,
                 last_activity: Instant::now(),
@@ -1239,9 +1244,19 @@ impl SessionManager {
         let path = store::log_path(session_id, tab_id)?;
         let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
         self.reconcile_lapsed_events(session_id, tab_id, &mut events)?;
-        for event in &mut events { recovery::sanitize(&mut event.payload); }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        // Lifecycle reads and admission share the existing per-tab ordering
+        // gate. A backend restart must not replay unresolved starts as live.
+        let mut latest: Vec<AgentEvent> = store::read_lines(&path)?;
+        let seen: std::collections::HashSet<_> = latest.iter().map(|event| event.id.clone()).collect();
+        // Preserve in-memory lapsed decisions even if their legacy append
+        // failed. This feature does not change that publication contract.
+        latest.extend(events.into_iter().filter(|event| !seen.contains(&event.id)));
+        latest.sort_by_key(|event| event.seq);
+        events = latest;
+        self.reconcile_compactions(&mut rt, &mut events)?;
+        for event in &mut events { recovery::sanitize(&mut event.payload); }
         // A tab that is a terminal has no agent to recover.
         let terminal = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).map(TabEntry::is_terminal)).unwrap_or(false);
         if rt.status == TabStatus::Idle && !rt.turn_open && !rt.stopping && !terminal {

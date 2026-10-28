@@ -8,6 +8,12 @@
   organizations, with exact-name confirmation and guidance for remaining resources.
   Refresh membership and clear a deleted default selection without choosing a replacement.
 
+### Chat
+
+- Recognize completed Codex context compaction and preserve scoped compaction
+  history and status across conversation changes. The live compaction producer
+  remains inactive. (#644)
+
 ### Issue work status
 
 - Refresh shared issue work when the account service changes its supported

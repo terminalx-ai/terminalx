@@ -235,8 +235,8 @@ export function Chat({
               />
             );
           })}
-          {transcript.compacting && progressing && (
-            <div className="mb-3 px-1.5 text-[13px] text-shimmer">Compacting context</div>
+          {transcript.compacting && (
+            <div className="mb-3 px-1.5 text-[13px] text-shimmer">Compacting context…</div>
           )}
           {transcript.retry && progressing && (
             <div className="mb-3 px-1.5 text-[13px] text-warning">

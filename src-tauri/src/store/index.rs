@@ -11,8 +11,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-#[path = "transaction.rs"]
-mod transaction;
+use super::transaction;
 
 const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 

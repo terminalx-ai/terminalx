@@ -283,10 +283,16 @@ function ReaderMessage({
  */
 function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "compaction" }>; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useState(false);
+  // The existing Chat indicator owns animation; do not add a second spinner.
+  if (item.lifecycle?.state === "item_started") return null;
+  const count = (value: number) => value < 1000 ? String(value) : `${Math.round(value / 1000)}k`;
+  const status = item.lifecycle?.state === "stopped"
+    ? `Compaction stopped: turn ${item.lifecycle.stoppedBy === "interrupted" ? "interrupted" : "failed"}`
+    : item.lifecycle?.state === "unknown" ? (item.uncertain ? "Compaction status unknown: could not save status" : "Compaction status unknown") : "Context compacted";
   const label = (
     <>
-      Context compacted{item.preTokens ? ` from ${Math.round(item.preTokens / 1000)}k` : ""}
-      {item.postTokens ? ` to ${Math.round(item.postTokens / 1000)}k tokens` : ""}
+      {status}{item.preTokens != null ? ` from ${count(item.preTokens)}` : ""}
+      {item.postTokens != null ? ` to ${count(item.postTokens)} tokens` : ""}
     </>
   );
   if (!item.summary) {
