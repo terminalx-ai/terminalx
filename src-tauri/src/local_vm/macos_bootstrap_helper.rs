@@ -555,16 +555,8 @@ pub(super) fn validate_owner_receipt(
     if bytes.len() > 64 * 1024 {
         bail!("Helper receipt exceeds bound")
     }
+    validate_manifest_content(manifest)?;
     let expected: Manifest = serde_json::from_value(manifest.clone())?;
-    expected.binding.validate()?;
-    macos_account_name(&expected.account_name, &expected.account_home)?;
-    validate_os(&expected.os_version, &expected.os_build)?;
-    if expected.version != 1 {
-        bail!("Unsupported helper manifest")
-    }
-    for hash in [&expected.helper_sha256, &expected.runtime_sha256] {
-        super::transport::validate_runtime_sha(hash)?;
-    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct AccountReceipt {
@@ -668,3 +660,18 @@ pub(super) fn owner_test_receipts(
 #[cfg(test)]
 #[path = "macos_bootstrap_helper_tests.rs"]
 mod tests;
+
+/// Content validation only; it cannot authenticate a mount or create a channel.
+pub(super) fn validate_manifest_content(manifest: &Value) -> Result<()> {
+    let expected: Manifest = serde_json::from_value(manifest.clone())?;
+    expected.binding.validate()?;
+    macos_account_name(&expected.account_name, &expected.account_home)?;
+    validate_os(&expected.os_version, &expected.os_build)?;
+    if expected.version != 1 {
+        bail!("Unsupported helper manifest")
+    }
+    for hash in [&expected.helper_sha256, &expected.runtime_sha256] {
+        super::transport::validate_runtime_sha(hash)?;
+    }
+    Ok(())
+}

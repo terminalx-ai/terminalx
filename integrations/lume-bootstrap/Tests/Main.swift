@@ -10,6 +10,21 @@ import Darwin
         }
     }
     static func execute() throws {
+        if CommandLine.arguments.count == 15, CommandLine.arguments[1] == "run" {
+            let a = CommandLine.arguments
+            try txRequire(a[3] == "--display" && a[4] == "none" && a[5] == "--vnc" && a[6] == "disabled"
+                && a[7] == "--storage" && a[9] == "--shared-dir" && a[11] == "--shared-dir" && a[13] == "--terminalx-bootstrap-fd")
+            let cwd = FileManager.default.currentDirectoryPath
+            let control = try txObject(Data(contentsOf: URL(fileURLWithPath: cwd + "/fixture-control.json")), keys: ["requests", "fault"])
+            try txRequire(a[10] == cwd + "/input:ro" && a[12] == cwd + "/receipt:rw")
+            try txRequire(Set(ProcessInfo.processInfo.environment.keys).isSubset(of: ["PATH", "HOME", "TMPDIR", "LC_ALL", "__CF_USER_TEXT_ENCODING"]))
+            let observed = try txJSON(["argv": Array(a.dropFirst()), "environment": ProcessInfo.processInfo.environment])
+            try observed.write(to: URL(fileURLWithPath: cwd + "/fixture-exec.json"), options: .withoutOverwriting)
+            guard let fd = Int32(a[14]), let count = control["requests"] as? Int else { throw TXBootstrapError.refused }
+            if try txString(control, "fault") == "beforeReceive" { return }
+            try serve(fd, count, afterReceive: try txString(control, "fault") == "afterReceive")
+            return
+        }
         if CommandLine.arguments.count == 3, CommandLine.arguments[2] == "wire-backpressure",
            let fd = Int32(CommandLine.arguments[1]) {
             try TXWire.configure(fd, inherited: true)
@@ -21,7 +36,11 @@ import Darwin
         guard CommandLine.arguments.count == 3,
               let fd = Int32(CommandLine.arguments[1]), let requests = Int(CommandLine.arguments[2]),
               requests > 0 && requests < 100 else { throw TXBootstrapError.refused }
+        try serve(fd, requests, afterReceive: false)
+    }
+    static func serve(_ fd: Int32, _ requests: Int, afterReceive: Bool) throws {
         let launch = try TerminalXBootstrapLaunch.receive(fd)
+        if afterReceive { return }
         try launch.validateVM(configPath: launch.binding.paths["config"]!.path,
             diskPath: launch.binding.paths["disk"]!.path, nvramPath: launch.binding.paths["nvram"]!.path,
             loadedConfig: launch.pins["config"]!.bytes(limit: 64 * 1024))

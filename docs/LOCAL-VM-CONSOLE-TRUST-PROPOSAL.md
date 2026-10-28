@@ -192,12 +192,17 @@ Every receipt explicitly reports `ready:false` and `trustAccepted:false`. A loca
 serving readiness. The restricted-Lume candidate now inspects the owning VM's
 actual runtime shares and serves receipts through authenticated private IPC;
 the Rust client validates and journals them in a separate candidate admission
-ledger. It does not promote production account/SSH trust. Approved launcher/profile
-integration, the helper's authenticated guest-side channel acquisition, signed
+ledger. Its provisioning-bound host launcher now retains the original private
+reference, dispatch fence, owned-child outcome and authenticated reconnect.
+It does not promote production account/SSH trust. Approved artifact/catalog
+acquisition, the helper's authenticated guest-side channel acquisition, signed
 helper packaging, and seamless guest launch remain missing. Fixtures do not prove
 live owner/share behavior, macOS26 provisioning or SSH acceptance. No profile or
 dependency was installed to run these tests. VNC is disabled in this candidate
 because its private server's listener binding remains unverified.
+The [offline input audit](../integrations/lume-bootstrap/OFFLINE-BUILD.md) records
+the exact missing source/dependency revisions; focused fixture/typecheck results
+do not constitute a full upstream candidate build.
 
 ## Human steps and background behavior
 

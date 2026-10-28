@@ -127,6 +127,9 @@ fn execute_using(
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("Original provisioning actor is owned")
     }
+    if action == "run" && dir.join("restricted-owner-intent.json").try_exists()? {
+        bail!("Original restricted bootstrap launch exists; legacy run cannot replace it")
+    }
     let storage = root.join("macos-vms").join(key);
     let name = format!("terminalx-{key}");
     let expected = json!({"requestId":key,"storage":storage,"name":name,"restoreSha256":restore.sha256,"restoreBytes":restore.bytes,"macosMajor":26,"lumeVersion":super::bootstrap::LUME.version,"lumeSha256":super::bootstrap::LUME.executable_sha256,"cpu":4,"memory":"8GB","disk":"160GB"});
@@ -248,6 +251,9 @@ fn execute_using(
     Ok(record)
 }
 pub(super) fn request(method: &str, params: &Value) -> Result<Value> {
+    if method == "environment.runPersonalizedProvision" {
+        return super::macos_owner_channel::launch::request(params);
+    }
     // Source route is wired, but missing manifest and account/trust evidence
     // prevent any production tool/path discovery or process creation today.
     super::macos_transport::require_available()?;
@@ -269,6 +275,49 @@ pub(super) fn request(method: &str, params: &Value) -> Result<Value> {
         action,
         || Ok(()),
     )
+}
+
+/// Source admission for the restricted owner. It reuses the completed original
+/// restore and retained VM pin, never a caller-selected VM or executable.
+pub(super) fn created_for_bootstrap(root: &Path, key: &str) -> Result<Value> {
+    let dir = directory(root, key)?;
+    let record: Value = serde_json::from_slice(&macos_keys::private_read(
+        &dir.join("record.json"),
+        128 * 1024,
+    )?)?;
+    let intent = &record["intent"];
+    let input_digest = journal::digest(&serde_json::to_vec(intent)?);
+    if record["status"] != "created"
+        || record["ready"] != false
+        || record["inputDigest"] != input_digest
+        || intent["requestId"] != key
+        || intent["storage"] != json!(root.join("macos-vms").join(key))
+        || intent["name"] != format!("terminalx-{key}")
+        || intent["macosMajor"] != 26
+        || intent["lumeVersion"] != super::bootstrap::LUME.version
+        || intent["lumeSha256"] != super::bootstrap::LUME.executable_sha256
+        || intent["cpu"] != 4
+        || intent["memory"] != "8GB"
+        || intent["disk"] != "160GB"
+        || intent["restoreBytes"]
+            .as_u64()
+            .is_none_or(|bytes| bytes == 0)
+        || record["createReceipt"]
+            != json!({"kind":"originalChildSuccess","inputDigest":input_digest,"ready":false})
+        || record.get("runReceipt").is_some()
+    {
+        bail!("Original completed restore is required; no legacy or unknown run may be replaced")
+    }
+    let target: super::macos_personalization::Target =
+        serde_json::from_value(record["target"].clone())?;
+    if target.environment_id != record["environmentId"]
+        || target.generation != record["generation"]
+        || target.restore_sha256 != intent["restoreSha256"]
+    {
+        bail!("Original restore target changed")
+    }
+    macos_endpoint::verify_retained_pin(root, key, &target)?;
+    Ok(record)
 }
 
 #[cfg(test)]
@@ -354,6 +403,31 @@ if (root/'lose').exists():sys.exit(72)
             &json!({"idempotencyKey":key})
         )
         .is_err());
+    }
+    #[test]
+    fn restricted_owner_intent_fences_legacy_run_even_when_partial() {
+        let (root, restore, lume) = fixture();
+        let key = journal::new_id();
+        execute_using(root.path(), &key, &restore, &lume, "create", || Ok(())).unwrap();
+        created_for_bootstrap(&root.path().canonicalize().unwrap(), &key).unwrap();
+        let original = directory(root.path(), &key).unwrap();
+        std::fs::write(
+            original.join("restricted-owner-intent.json"),
+            b"partial original launch",
+        )
+        .unwrap();
+        assert!(
+            execute_using(root.path(), &key, &restore, &lume, "run", || panic!(
+                "legacy replacement"
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("cannot replace")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("calls")).unwrap(),
+            "create\n"
+        );
     }
     #[test]
     fn lost_command_or_replaced_vm_never_recreate_or_rebind() {

@@ -410,6 +410,14 @@ impl Reference {
         json!({"binding":STANDARD.encode(&self.raw),"capability":STANDARD.encode(&self.secret)})
     }
     fn accept_launch(&self, stream: &mut UnixStream, child_pid: u32) -> Result<()> {
+        self.accept_launch_using(stream, child_pid, || Ok(()))
+    }
+    fn accept_launch_using(
+        &self,
+        stream: &mut UnixStream,
+        child_pid: u32,
+        before_publish: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         // The inherited socketpair peer credential is the launching process;
         // child identity comes from its retained spawn handle plus the MAC.
         let envelope: Envelope = serde_json::from_slice(&read(stream)?)?;
@@ -429,7 +437,38 @@ impl Reference {
             bail!("Original launch handshake differs")
         }
         self.socket(&handshake)?;
+        before_publish()?;
         self.root.publish("owner-handshake.json", &bytes)
+    }
+    fn recover_launch(&self, original_child_pid: u32) -> Result<()> {
+        if self.root.exists("owner-handshake.json")? {
+            self.observe("observe", &journal::new_id())?;
+            return Ok(());
+        }
+        let started: Value = fs::json(&self.root, "owner-started.json", 32 * 1024)?;
+        let digest = journal::digest(&self.raw);
+        if started
+            != json!({"bindingDigest":digest,"epoch":self.binding.owner_epoch,"ownerPid":original_child_pid})
+        {
+            bail!("Original owner start history differs")
+        }
+        let meta =
+            std::fs::symlink_metadata(self.binding.paths["operation"].path.join("owner.sock"))?;
+        let handshake = Handshake {
+            binding_digest: digest,
+            epoch: self.binding.owner_epoch.clone(),
+            socket_device: meta.dev(),
+            socket_inode: meta.ino(),
+            owner_pid: original_child_pid,
+            console_available: false,
+        };
+        // Metadata only locates the original peer. A fresh mutual challenge on
+        // this exact socket must succeed before the recovered pin is retained.
+        self.observe_using(&handshake, "observe", &journal::new_id())?;
+        self.root.publish(
+            "owner-handshake.json",
+            &canonical(&serde_json::to_value(handshake)?)?,
+        )
     }
     fn socket(&self, h: &Handshake) -> Result<PathBuf> {
         self.check(&self.binding.paths["operation"].path)?;
@@ -455,7 +494,15 @@ impl Reference {
         }
         journal::validate_id(request_id)?;
         let handshake: Handshake = fs::json(&self.root, "owner-handshake.json", 32 * 1024)?;
-        let mut stream = UnixStream::connect(self.socket(&handshake)?)
+        self.observe_using(&handshake, action, request_id)
+    }
+    fn observe_using(
+        &self,
+        handshake: &Handshake,
+        action: &str,
+        request_id: &str,
+    ) -> Result<AuthenticatedReceipt> {
+        let mut stream = UnixStream::connect(self.socket(handshake)?)
             .context("Connect original private owner socket")?;
         configure(&stream, handshake.owner_pid).context("Verify original native socket peer")?;
         let mut nonce = [0; 32];
@@ -481,7 +528,7 @@ impl Reference {
             challenge.server_nonce.as_str(),
         ];
         verify(&self.secret, "owner", &parts, &challenge.mac)?;
-        self.socket(&handshake)?;
+        self.socket(handshake)?;
         send(
             &mut stream,
             &json!({"mac":tag(&self.secret,"host",&parts)?}),
@@ -507,7 +554,7 @@ impl Reference {
         {
             bail!("Authenticated owner returned a changed request or receipt")
         }
-        self.socket(&handshake)?;
+        self.socket(handshake)?;
         Ok(AuthenticatedReceipt { bytes: receipt })
     }
     fn admit(&self, action: &str) -> Result<Value> {
@@ -580,6 +627,9 @@ impl Reference {
 struct AuthenticatedReceipt {
     bytes: Vec<u8>,
 }
+
+#[path = "macos_owner_launch.rs"]
+pub(super) mod launch;
 
 #[cfg(test)]
 #[path = "macos_owner_channel_tests.rs"]

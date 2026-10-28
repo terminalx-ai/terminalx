@@ -53,13 +53,13 @@ and [sharing configuration](https://github.com/trycua/cua/blob/3350f504014c85416
 
 ## Original launch and reconnect contract
 
-The eventual approved host launcher must first retain one original private
+The candidate host launcher retains one original private
 operation, exact artifact and VM/config/disk/NVRAM/share pins, parent
 session/tab/conversation, bootstrap/generation/epoch/nonce, helper manifest digest
 and a private 32-byte control capability. The reference is not a provider or SSH
 credential and never enters guest shares, logs, argv or the environment. This
-candidate supplies the receiver/client behavior; production launcher/catalog
-acquisition is still unavailable. Tests provide synthetic capability bytes in
+candidate supplies receiver, client and launch lifecycle behavior; production
+catalog/acquisition is still unavailable. Tests provide synthetic capability bytes in
 disposable directories, not a production credential generator.
 
 The owner receives the canonical binding and capability through the inherited
@@ -97,6 +97,47 @@ only refuse a connection; they never release a VM, task, desktop or unknown owne
 The only operations are `observe`, `accountReceipt` and `keyReceipt`. Receipt
 names are fixed inside the original writable share. No request can choose a
 filename, host endpoint, VM, share, account, input action or termination target.
+
+## Original host launch lifecycle
+
+`src-tauri/src/local_vm/macos_owner_launch.rs` is a child module of the existing
+channel implementation and is wired into `environment.runPersonalizedProvision`.
+Production selection refuses before reading a tool/reference path because the
+restricted artifact catalog is unavailable. Neither UI parameters nor a local
+file can supply an approved executable/signature or bypass this gate.
+
+The actual source executor requires the completed original restore record and
+retained endpoint/VM pin, plus the original personalization account plan. It
+shares the original provisioning lock and retains an immutable launch intent in
+that ledger. An ordinary legacy run refuses once that restricted launch intent
+exists. Fixed private `bo/<bootstrap-id>` state holds the original reference and
+two guest shares; the Unix socket path must fit the native bound, with no alternate
+endpoint. Artifact selection binds the exact source commit, candidate patch,
+executable digest and inode, and uses only the catalog-derived artifact path.
+
+Before the only subprocess effect, it writes the original binding, expected
+helper manifest, private control capability and preparation receipt, then a
+durable spawn-attempt fence. The child receives a fixed argument list (`run`,
+original VM/storage, display none, VNC disabled, the two exact shares and inherited
+descriptor number), an empty-then-allowlisted environment and private empty HOME
+and TMPDIR. Stdio is not inherited. Capability bytes never enter argv, environment,
+shares or logs. Tests verify the actual child's observed argv/environment.
+
+The child-handle identity is retained before capability delivery. A lost startup
+announcement can reconnect only to that original child, with the original
+operation/start history, native peer identity and a new mutual challenge. Socket
+metadata merely locates the peer; it cannot authenticate the owner. Missing or
+partial preparation, an uncertain spawn before the child receipt, changed
+artifacts/account/parent/VM, or a dead owner remain fenced. No retry regenerates a
+capability, spawns a second owner, clears a lock, signals a PID or promotes trust.
+An owned-child waiter records exit through the retained original directory
+descriptor; exit is historical evidence, never replacement authorization.
+
+The retained `owner-helper-plan.json` is an internal expected-input seam, not a
+guest proof. Its production writer remains unavailable because authenticated
+guest-side mount acquisition and seamless helper delivery remain missing. Fixtures
+supply synthetic plans. Their validation and candidate receipts cannot construct
+the helper's production `Channel` or grant account/SSH trust.
 
 ## Host receipt admission
 
@@ -152,9 +193,13 @@ No installed Lume, VM/container, account/key/SSH, provider, owner or viewer was
 operated. Earlier prepared runtime/Dev artifacts remain unchanged.
 
 Remaining gates are full upstream candidate build/signature review, production
-launcher/reference integration, authenticated guest helper acquisition and seamless
+artifact/catalog acquisition, authenticated guest helper preparation and seamless
 background delivery/launch, genuine macOS26 restore provenance, and coordinated
 live acceptance. Console stays unavailable until an actual supported background
 console has a verified bind/ownership/input contract. Manual helper launch remains
 acceptance scaffolding only. Linux/macOS choice and separate Attach desktop tools /
 Run task in VM remain the working defaults. Acceptance and PR readiness stay false.
+
+See [the offline build input audit and reproducible plan](OFFLINE-BUILD.md). The
+retained partial source and standard caches do not contain the full exact source
+and 18 locked dependency revisions, so no full build or resolver was attempted.
