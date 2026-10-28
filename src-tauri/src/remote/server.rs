@@ -1055,7 +1055,12 @@ impl WorkspaceRpc {
                 .unwrap_or_else(|| Err(RpcError::new("method_not_found", format!("{git} is not a workspace method")))),
             "session.list" => self.session_list(peer),
             "session.get" => self.session_get(peer, params),
-            "session.create" => self.session_create(params),
+            "session.create" => {
+                if params.get("repository").is_some_and(|target| !target.is_null()) && !peer.granted("session-repository/1") {
+                    return Err(RpcError::new("capability_not_granted", "Repository session routing was not negotiated."));
+                }
+                self.session_create(params)
+            },
             "session.close" => self.session_close(params),
             "session.send" => self.session_send(peer, params),
             "session.interrupt" => self.session_interrupt(peer, params),
@@ -2276,8 +2281,7 @@ impl WorkspaceRpc {
     /// Every session of this workspace, whoever asks.
     fn workspace_sessions(&self) -> Result<Vec<SessionEntry>, RpcError> {
         crate::store::message_activity::backfill(self.sink.clone());
-        let root = self.root.to_string_lossy();
-        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| session.project_path == root).collect())
+        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect())
     }
 
     /// Sharing is workspace-wide (PRO-30): a person it is shared with sees
@@ -2342,6 +2346,8 @@ impl WorkspaceRpc {
             pipeline_settings: Option<crate::store::projects::IssuePipelineSettings>,
             #[serde(default)]
             worktree_name: Option<String>,
+            #[serde(default)]
+            repository: Option<super::session_target::RepositoryTarget>,
         }
         let mut p: Params = parse(params)?;
         // A blank mode is no mode: the tab takes the default launch mode.
@@ -2351,14 +2357,15 @@ impl WorkspaceRpc {
         if let Some(issue) = &p.issue {
             check_issue(issue)?;
         }
-        let root = self.root.to_string_lossy().into_owned();
+        let project = super::session_target::resolve(&self.root, p.repository.as_ref())?;
+        let root = project.to_string_lossy().into_owned();
         if let Some(settings) = p.pipeline_settings.take() {
             let patch = crate::store::projects::ProjectPatch { issue_pipeline: Some(settings), ..Default::default() };
             if let Err(error) = crate::store::projects::update(&root, patch) {
                 log::warn!("store the issue pipeline settings: {error:#}");
             }
         }
-        if p.use_worktree {
+        if p.use_worktree && p.repository.is_none() {
             // A blank project made before its folder was set up with Git: set it up now, so a worktree can be cut.
             if let Err(error) = crate::cloud_agents::launch::init_blank_repository(&self.root, "main") {
                 log::warn!("prepare the blank project folder: {error:#}");
@@ -2488,15 +2495,13 @@ impl WorkspaceRpc {
     /// One of this workspace's pipelines, by its id.
     fn own_pipeline(&self, params: &Value) -> Result<crate::issue_pipeline::Pipeline, RpcError> {
         let id = required_str(params, "pipeline")?;
-        let root = self.root.to_string_lossy();
-        crate::issue_pipeline::store::get(id).ok().filter(|pipeline| pipeline.project_path == root).ok_or_else(|| RpcError::not_found(format!("issue pipeline {id} not found")))
+        crate::issue_pipeline::store::get(id).ok().filter(|pipeline| super::session_target::owns_project(&self.root, &pipeline.project_path)).ok_or_else(|| RpcError::not_found(format!("issue pipeline {id} not found")))
     }
 
     /// `pipeline/1`: this workspace's pipelines, newest first, as many as fit
     /// [`PIPELINE_LIST_BYTES`]; `truncated` when older ones were left out.
     fn pipeline_list(&self) -> Result<Value, RpcError> {
-        let root = self.root.to_string_lossy();
-        let mut pipelines: Vec<_> = crate::issue_pipeline::store::list().map_err(RpcError::internal)?.into_iter().filter(|pipeline| pipeline.project_path == root).collect();
+        let mut pipelines: Vec<_> = crate::issue_pipeline::store::list().map_err(RpcError::internal)?.into_iter().filter(|pipeline| super::session_target::owns_project(&self.root, &pipeline.project_path)).collect();
         pipelines.sort_by(|a, b| b.created.cmp(&a.created));
         let (mut listed, mut bytes) = (Vec::new(), 0);
         for pipeline in &pipelines {
@@ -2515,9 +2520,8 @@ impl WorkspaceRpc {
     fn pipeline_reviewers(&self, params: &Value) -> Result<Value, RpcError> {
         let after = params.get("after").and_then(Value::as_str).unwrap_or("");
         let reviewers = crate::issue_pipeline::store::reviewer_sessions().map_err(RpcError::internal)?;
-        let root = self.root.to_string_lossy();
         let mut ids: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter()
-            .filter(|session| session.project_path == root && session.id.as_str() > after && reviewers.contains(&session.id))
+            .filter(|session| super::session_target::owns_project(&self.root, &session.project_path) && session.id.as_str() > after && reviewers.contains(&session.id))
             .map(|session| session.id).collect();
         ids.sort();
         let more = ids.len() > 500;
@@ -2939,7 +2943,7 @@ impl WorkspaceRpc {
             .map_err(RpcError::internal)?
             .into_iter()
             .find(|session| Some(session.id.as_str()) == params.get("sessionId").and_then(Value::as_str))
-            .filter(|session| session.project_path == self.root.to_string_lossy())
+            .filter(|session| super::session_target::owns_project(&self.root, &session.project_path))
             .ok_or_else(|| RpcError::not_found("no such session"))?;
         let only = params.get("tabId").and_then(Value::as_str);
         let closing: Vec<String> = session.tabs.iter().filter(|tab| only.is_none_or(|id| id == tab.id)).map(|tab| tab.id.clone()).collect();
