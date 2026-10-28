@@ -172,7 +172,9 @@ has no entries until native evidence is available. Staging never executes the
 artifact. An opaque verified artifact carries its provenance into a retained
 request bound to the full container ID, environment and generation. A changed
 key/input is refused, staged bytes are reverified, and existing enrollment/history
-blocks fresh installation.
+blocks fresh installation. An interrupted host-only staging write can finish
+using the same sealed artifact and unchanged retained intent; this recovery never
+executes the binary or retries a delivered installation.
 
 The executor seam records intent and reserves the exact container before delivery.
 Unknown delivery is retained across reopen and is never replayed; desktop exit
@@ -219,6 +221,11 @@ restarted, no host provider credentials are copied, and neither permissions nor
 application attestation are weakened.
 [MCP lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle),
 [MCP tools](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
+The exact Driver 0.28.0 tag documents this legacy initialization contract;
+its release includes the MCP implementation. This verifies source compatibility,
+not the unperformed installed adapter acceptance.
+[Tagged Driver contract](https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.28.0/libs/cua-driver/docs/mcp-protocol-and-skills.md),
+[Driver 0.28.0 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.28.0).
 
 Host and guest retain keyed intent before input delivery and retain the returned
 receipt. Repeated input with the same ID returns its known receipt; changed input

@@ -163,7 +163,14 @@ pub fn prepare(
         if previous["inputDigest"] != digest {
             bail!("Install request already names a different artifact or target");
         }
-        return Ok(previous);
+        if previous["intent"] != intent {
+            bail!("Retained installation intent changed");
+        }
+        // No executor can run from staging. A matching sealed artifact may
+        // finish a host-only interrupted write; delivered requests never replay.
+        if previous["status"] != "staging" {
+            return Ok(previous);
+        }
     }
     journal::private_directory(&dir)?;
     let prepared = json!({"intent":intent,"inputDigest":digest,"status":"staging","ready":false});
@@ -316,6 +323,35 @@ mod tests {
         let journal = Journal::open(dir.path()).unwrap();
         let prepared = prepare(dir.path(), "request", &binding, &artifact).unwrap();
         assert_eq!(prepared["status"], "prepared");
+        let staging = directory(dir.path(), "request").unwrap();
+        let mut interrupted = prepared.clone();
+        interrupted["status"] = json!("staging");
+        journal::atomic_private_write(
+            &staging.join("receipt.json"),
+            &serde_json::to_vec(&interrupted).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(staging.join("runtime.elf"), b"partial host-only copy").unwrap();
+        let resumed = prepare(dir.path(), "request", &binding, &artifact).unwrap();
+        assert_eq!(resumed, prepared);
+        assert_eq!(
+            journal::digest(&std::fs::read(staging.join("runtime.elf")).unwrap()),
+            artifact.profile.sha256
+        );
+        // A matching digest field cannot authorize a modified retained intent.
+        let mut corrupt = interrupted;
+        corrupt["intent"]["binding"]["generation"] = json!(journal::new_id());
+        journal::atomic_private_write(
+            &staging.join("receipt.json"),
+            &serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        assert!(prepare(dir.path(), "request", &binding, &artifact).is_err());
+        journal::atomic_private_write(
+            &staging.join("receipt.json"),
+            &serde_json::to_vec(&prepared).unwrap(),
+        )
+        .unwrap();
         let mut replaced = binding.clone();
         replaced.generation = journal::new_id();
         assert!(prepare(dir.path(), "request", &replaced, &artifact).is_err());
