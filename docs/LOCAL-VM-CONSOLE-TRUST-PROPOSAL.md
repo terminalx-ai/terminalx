@@ -7,6 +7,10 @@ receipt**. No VM, account, credential, installed profile or production artifact
 was changed. Linux/macOS choice and the separate **Attach desktop tools** and
 **Run task in VM** actions remain the working defaults.
 
+The follow-on source slice implements the bounded helper filesystem engine and
+disposable native tests described below. It does not adopt this dependency
+proposal or supply the missing authenticated owner/share channel.
+
 ## Recommended choice
 
 Keep Lume's ordinary macOS26 restore path and the existing noVNC **1.7.0** client.
@@ -131,18 +135,60 @@ host-code directory. Never execute its contents.
 | Stage | Effect and evidence |
 | --- | --- |
 | Human setup | Person completes normal macOS26 Setup Assistant in the embedded console, including account/password and any required security decisions. Initial implementation has no unverified automated screen transitions. Preserve SIP and normal lock/security behavior. |
-| Local helper launch | After an explicit human bootstrap authorization, launch the signed helper in that guest GUI account from the read-only share. Initially a human launch is a coordinated acceptance step; no invented auto-launch/keyboard sequence. Gatekeeper or removable-volume prompts remain human-only. A later verified background launch path may automate this non-consent step. |
+| Local helper launch | After an explicit human bootstrap authorization, launch the signed helper in that guest GUI account from the read-only share. An initial human launch is acceptance scaffolding only, not a final mandatory manual installation flow. Seamless onboarding still requires a verified background delivery/launch path for this non-consent step. Gatekeeper or removable-volume prompts remain human-only; no auto-launch or keyboard sequence is presumed verified. |
 | Account/trust observation | Helper derives its real/effective UID/GID, OS account name/home and home device/inode, OS version/build, plus the existing SSH Ed25519 **public** host key. No password/private host key is read or exported. Human enables Remote Login for only this account first. Missing host public key is a wait state, never permission to generate system keys or toggle services. |
 | Receipt transport | Helper writes a bounded receipt for the original nonce, target/config/restore/epoch and helper digest through the dedicated receipt share. Host accepts it only while the authenticated VM owner attests the original share mapping and lease. A file appearing on disk without that live original-owner proof is not sufficient. Original account and trust receipts feed the existing personalization ledger. |
 | Per-guest client key | Only after that account/trust binding exists, invoke the already implemented original key producer. Its private key remains in the host's private per-guest reference. Publish **only its public key** and the bound installation intent into the input share. This avoids the producer's existing trust precondition becoming circular. |
 | Public-key installation | Helper consumes the immutable manifest, checks the original account/home/key digest, persists intent, then creates the owned `.ssh`/`authorized_keys` entry without replacing unrelated keys. Use `.ssh` mode0700, file mode0600 and the line `restrict ssh-ed25519 <public> terminalx-bootstrap:<id>`. SSH supplies neither forwarding nor a PTY; task PTYs remain inside the authenticated runtime. Preserve original unrelated lines and retain before/after digests. Interrupted writes reconcile the original intent, never regenerate or append duplicates. Unknown/conflicting files fence recovery. |
 | Final trust confirmation | Receipt binds installed authorized-key digest and unchanged host public key to the original operation. First SSH uses strict pinned host-key authentication, isolated config and the new key only, then verifies the same account/home/target. A mismatch returns to a held state; never accept a new key, password or another OS. Existing runtime/Driver/Codex delivery can now proceed. |
 
-The helper's observable receipt, public-key write and terminal outcome need native
-filesystem fixture tests; they do not yet exist. A digest string supplied by UI,
-OCR output or a fake fixture is not a production trust constructor. The new
-internal constructor must consume the authenticated owner/share proof directly.
+The helper's local observation, public-key write and recovery are now implemented
+in `src-tauri/src/local_vm/macos_bootstrap_helper.rs`, with descriptor-relative
+storage in `macos_helper_fs.rs`. Native filesystem tests construct only synthetic
+channel/account/key observations in disposable directories. A digest string
+supplied by UI, OCR output or a fixture is not a production trust constructor.
+The future internal constructor must consume the authenticated owner/share proof
+directly and retain a live lease check before every effect and receipt acceptance.
 OpenSSH documents the [authorized_keys format and restrictions](https://man.openbsd.org/sshd.8#AUTHORIZED_KEYS_FILE_FORMAT).
+
+## Implemented helper boundary and remaining integration
+
+The internal helper entrypoint refuses before opening any OS account, public
+host-key or authorized-keys path: authenticated channel acquisition is unavailable.
+There is no CLI/RPC route or request-deserializable channel constructor. Existing
+production and legacy transports are unchanged. The native engine performs the
+following work only when an internal channel capability is present (currently
+constructed solely by disposable tests):
+
+* Read strict, size-bounded manifests tied to the original bootstrap, VM/config
+  fingerprint, generation, restore/runtime/helper digests, parent identity, nonce,
+  owner epoch and two distinct host/mounted share identities.
+* Observe the account name/UID/GID/home and exact macOS26 version/build; validate
+  the original home and the helper's bytes. Read only the existing Ed25519 public
+  host-key file; absence is a refusal, with no generation or service action.
+* Retain immutable original observation and key intents under one private home
+  ledger and stable exclusive lock. Use no-follow descriptor-relative file access,
+  reject aliases and changed device/inode/ownership/mode, and check the same open
+  file before and after bounded reads or writes.
+* Persist the original key intent before creating `.ssh` or its file; persist
+  original file identity/bytes and expected result before appending one restricted
+  public-key line. Preserve unrelated bytes, existing file identity and history.
+  New directories/files use modes0700/0600; unsafe existing entries are refused,
+  never chmodded, truncated, renamed or replaced.
+* After interruption, inspect the original file under the retained intent. Only
+  the exact expected full bytes on that same file permit a local completion
+  receipt. Partial writes, changed/missing records, changed input or conflicting
+  identities remain fenced. No retry appends a second key. Partial publications
+  remain intact; a missing immutable receipt can be republished from verified
+  original evidence without repeating the key effect.
+
+Every receipt explicitly reports `ready:false` and `trustAccepted:false`. A local
+`publicKeyInstalled` observation describes file bytes, not authentication or
+serving readiness. The broker's authentic owner/share proof, read-only mount
+enforcement and live lease, receipt admission into the host trust ledger, signed
+helper packaging, and seamless guest launch remain unimplemented. Filesystem
+fixtures do not establish those properties, real macOS26 provisioning or live
+SSH acceptance. No profile or dependency was installed to run these tests.
 
 ## Human steps and background behavior
 

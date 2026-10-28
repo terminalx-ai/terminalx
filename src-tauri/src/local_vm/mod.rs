@@ -29,3 +29,5 @@ mod macos_endpoint;
 pub(crate) mod macos_delivery;
 pub(crate) mod macos_provision;
 mod macos_tools;
+#[allow(dead_code)] // No broker/CLI route until authenticated owner/share acquisition exists.
+mod macos_bootstrap_helper;
