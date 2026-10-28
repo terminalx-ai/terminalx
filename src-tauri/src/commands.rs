@@ -103,6 +103,19 @@ pub async fn organization_select(
 
 // ------------------------------------------------------ organization members
 
+#[tauri::command]
+pub async fn organization_delete(
+    app: AppHandle,
+    organization_id: String,
+    context_revision: String,
+    confirmation_name: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::account::RolesRefresh, crate::account::organization_delete::DeleteError> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.delete_organization(&app, &organization_id, &context_revision, &confirmation_name))
+        .await.map_err(|_| crate::account::organization_delete::DeleteError::local("organization_delete_outcome_unknown"))?
+}
+
 type MembersResult = Result<crate::organization_members::OrganizationRoster, crate::organization_members::OrganizationMembersError>;
 
 async fn members_call(
@@ -2839,7 +2852,7 @@ pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> 
         let answer = cloud_control_question(
             app,
             "Let agents in local sessions control cloud workspaces?".to_string(),
-            "Any agent running in a local session will be able to list your organizations' cloud workspaces, read their conversations and send messages to running ones. Starting, stopping or creating a workspace will still ask you each time.".to_string(),
+            "Agents in local sessions will be able to list your organizations' cloud workspaces, read conversations, send messages, launch sessions, and resume or create workspaces within your permissions. This authorizes billed compute without another confirmation. Stopping a workspace will still ask you each time.".to_string(),
             "Turn on".to_string(),
         )
         .await;

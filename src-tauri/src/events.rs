@@ -38,6 +38,45 @@ pub struct SubagentRef {
     pub label: Option<String>,
 }
 
+/// Durable operation scope; a connection generation is not an operation id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionScope {
+    pub session_id: String,
+    pub tab_id: String,
+    pub conversation_id: Option<String>,
+    pub provider: String,
+    pub thread_id: String,
+    pub subagent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompactionEvidence {
+    pub scope: CompactionScope,
+    #[serde(flatten)]
+    pub observation: CompactionObservation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum CompactionObservation {
+    ConnectionOpened { generation: u64 },
+    ContinuityLost { generation: u64, reason: CompactionLoss },
+    ItemStarted { generation: u64, turn_id: String, item_id: String },
+    ItemCompleted { generation: u64, turn_id: String, item_id: String },
+    CompletionReconciled { turn_id: String, item_id: String },
+    TurnError { generation: u64, turn_id: String, will_retry: bool },
+    TurnEnded { generation: u64, turn_id: String, outcome: CompactionTurnEnd },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionLoss { Disconnected, Exited, Restarted }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTurnEnd { Completed, Failed, Interrupted }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockRef {
@@ -395,6 +434,14 @@ pub enum Payload {
     ModelRequestStarted,
     UsageUpdate(Usage),
     ContextCompactionStarted,
+    /// Additive lifecycle channel. No current provider emits confirmed starts.
+    ContextCompactionLifecycle {
+        evidence: CompactionEvidence,
+        #[serde(default)]
+        confirmed_start: bool,
+        /// False is live/read-time append uncertainty, never a saved success.
+        persisted: bool,
+    },
     ContextCompacted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_tokens: Option<u64>,
@@ -453,7 +500,8 @@ impl Payload {
     /// Previews and running counters are superseded by their committed event,
     /// so they are emitted but never written to the log.
     pub fn is_persisted(&self) -> bool {
-        !matches!(self, Payload::Delta(_) | Payload::UsageUpdate(_) | Payload::ModelRequestStarted | Payload::ProviderSettings { .. })
+        !matches!(self, Payload::Delta(_) | Payload::UsageUpdate(_) | Payload::ModelRequestStarted | Payload::ProviderSettings { .. }
+            | Payload::ContextCompactionLifecycle { persisted: false, .. })
     }
 
     pub fn is_turn_boundary(&self) -> bool {

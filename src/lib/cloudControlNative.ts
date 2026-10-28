@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 /**
  * What the app keeps in native code for the cloud commands of the CLI
  * (PRO-40), so that neither the window nor an agent that can click and type
- * decides it: the person's switch, and the question shown before anything
- * that spends, wakes or stops.
+ * decides it: the person's switch authorizing routine compute, and the
+ * question shown before a disruptive stop.
  *
  * - The switch is a file in the app's home. The control socket reads it
  *   itself and refuses `cloud.*` before the window hears of the command;

@@ -103,6 +103,30 @@ function applyStatus(status: AccountStatus) {
   scheduleRefresh(status);
 }
 
+/** Apply the server-confirmed removal through the same membership cleanup as role refresh.
+ * Never select a replacement organization or apply a late result to another account. */
+export async function deleteOrganization(confirmation: { organizationId: string; contextRevision: string; confirmationName: string }): Promise<void> {
+  const before = state.status;
+  if (before.state !== "signed-in" || before.context?.revision !== confirmation.contextRevision || !before.context.account) {
+    throw { code: "account_context_changed" };
+  }
+  const result = await api.organizationDelete(confirmation.organizationId, confirmation.contextRevision, confirmation.confirmationName);
+  if (state.status.state !== "signed-in" || state.status.context?.account !== before.context.account ||
+      result.status.context?.account !== before.context.account) throw { code: "account_context_changed_after_send" };
+  // Native status events may already have applied the removal or a later selection.
+  // Read today's snapshot rather than overwrite them with an earlier command result.
+  const observed = state.status;
+  let latest = observed === before ? result.status : observed;
+  try { latest = await api.accountStatus(); } catch { /* Committed deletion is still a success. */ }
+  if (state.status.context?.account !== before.context.account) throw { code: "account_context_changed_after_send" };
+  if (state.status === observed && latest.context?.account === before.context.account) {
+    applyStatus(result.fresh ? latest : {
+      ...latest,
+      lastError: latest.lastError ?? "Organization deleted. The organization list and capabilities could not be refreshed; refresh the account before starting more cloud work.",
+    });
+  }
+}
+
 /** Close one organization's cloud connections and drop what they cached in memory. */
 function dropCloudOrg(orgId: string) {
   closeCloudConnectionsIn(orgId);

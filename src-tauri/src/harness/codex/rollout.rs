@@ -237,6 +237,10 @@ fn decode_event(p: &Value, out: &mut Vec<Payload>) {
 fn decode_item(item: &Value, out: &mut Vec<Payload>) {
     let id = item["id"].as_str().unwrap_or_default().to_string();
     match item["type"].as_str().unwrap_or("") {
+        // Codex 0.153.4 persists this completed item in paginated rollouts;
+        // only legacy rollouts persist `context_compacted` (#644). The item
+        // confirms completion, carries no token counts and is not a turn.
+        "ContextCompaction" => out.push(Payload::ContextCompacted { pre_tokens: None, post_tokens: None }),
         "UserMessage" => {
             let text = text_of(&item["content"]);
             if !text.is_empty() {
@@ -704,6 +708,34 @@ mod tests {
         let text = format!("{:?}", s.push(FIXTURE.as_bytes()));
         assert!(!text.contains("tools.exec_command"));
         assert!(!text.contains("environment_context"));
+    }
+
+    #[test]
+    fn compaction_completion_in_either_rollout_format_is_not_a_turn() {
+        // Synthetic records from the rust-v0.153.4 protocol and rollout
+        // persistence policy, not a captured provider run. These formats
+        // are alternatives: paginated keeps ItemCompleted, legacy keeps
+        // ContextCompacted.
+        for line in [
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"ContextCompaction","id":"compact-1"}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"context_compacted"}}"#,
+        ] {
+            let mut out = Vec::new();
+            assert!(decode_marked(line, &none(), &mut out).is_none());
+            assert!(matches!(out.as_slice(), [Payload::ContextCompacted { pre_tokens: None, post_tokens: None }]));
+        }
+    }
+
+    #[test]
+    fn compaction_input_or_start_does_not_claim_completion() {
+        let mut out = Vec::new();
+        for line in [
+            r#"{"type":"event_msg","payload":{"type":"item_started","item":{"type":"ContextCompaction","id":"compact-1"}}}"#,
+            r#"{"type":"response_item","payload":{"type":"compaction","encrypted_content":"opaque"}}"#,
+        ] {
+            assert!(decode_marked(line, &none(), &mut out).is_none());
+        }
+        assert!(out.is_empty());
     }
 
     #[test]

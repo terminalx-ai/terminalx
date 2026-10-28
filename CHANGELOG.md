@@ -2,6 +2,61 @@
 
 ## Unreleased
 
+### Organizations
+
+- Let organization owners delete non-personal organizations, including test
+  organizations, with exact-name confirmation and guidance for remaining resources.
+  Refresh membership and clear a deleted default selection without choosing a replacement.
+
+### Chat
+
+- Recognize completed Codex context compaction and preserve scoped compaction
+  history and status across conversation changes. The live compaction producer
+  remains inactive. (#644)
+
+### Issue work status
+
+- Refresh shared issue work when the account service changes its supported
+  capabilities, and republish actual linked sessions after support returns.
+  Explain when the account service has not reported support; shared activity
+  still requires a supported backend. (#642)
+
+### Cloud workspaces
+
+- Treat enabled cloud control as consent for routine cloud workspace starts,
+  resumes and session launches without repeated native confirmations. Preserve
+  destructive confirmations and security checks. (#658)
+- Route new sessions to the selected, verified repository checkout and keep child
+  checkout sessions visible. Require the runtime's `session-repository/1`
+  capability; refuse unavailable or mismatched checkouts instead of using the
+  blank workspace root. (#656)
+
+## 0.2.21
+
+### Sessions and workspace
+
+- Create sessions from a compact dialog with a combined agent menu, branch picker
+  and searchable GitHub or Linear issues. Keep unsent prompts when the dialog
+  closes, reuse an open branch or check out another branch in a new worktree,
+  and name new worktrees from the prompt or issue. (#651)
+- Add a Linux desktop in the Computer panel using Docker or Podman, with live
+  viewing, manual control and agent computer tools. The container has no host
+  mounts, its viewer listens on loopback, and Stop and Reset check ownership. (#651)
+- Add a resizable terminal dock, per-turn changed files, branch renaming and
+  clearer loading and signed-out states. Fix transcript-only task notifications
+  leaving a conversation stuck on Working. (#651)
+
+### Updates
+
+- Check for updates shortly after launch and every four hours in release builds.
+  Show an Update button and a dismissible notice with Update and relaunch. (#651)
+
+### Permissions
+
+- Preserve the session directory and supplied approval reason through live events
+  and transcript replay. Prefer an explicit tool working directory, and explain
+  when Ask every time caused the permission request. (#636)
+
 ### Terminal
 
 - Cancel pending atlas warm-up when its final terminal owner is disposed, while

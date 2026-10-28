@@ -347,6 +347,8 @@ export const api = {
     invoke<OrganizationSummary & { selected?: boolean }>("organization_create", { name, idempotencyKey }),
   organizationSelect: (organizationId: string, contextRevision: string) =>
     invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
+  organizationDelete: (organizationId: string, contextRevision: string, confirmationName: string) =>
+    invoke<{ status: AccountStatus; fresh: boolean }>("organization_delete", { organizationId, contextRevision, confirmationName }),
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
@@ -721,6 +723,8 @@ export interface AccountStatus {
   memberWorkspaces?: boolean;
   /** The server takes `wake: false` on an agent command and refuses a stopped workspace instead of starting it (`cloud.workspaces.agent-command-wake.v1`, PRO-89). */
   agentCommandWake?: boolean;
+  /** True only when the account service reports account.work-claims.v1. */
+  workClaims?: boolean;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */

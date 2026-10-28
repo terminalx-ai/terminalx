@@ -122,11 +122,15 @@ try {
       });
       await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify({ cloud: true, localProjects: 2, dashboardCount: count })};\n${stub}`);
       await page.goto(server.url);
+      // Check the bridge contract directly: do not depend on the 15s background
+      // timer firing before this layout finishes to catch a bogus updater handle.
+      assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, `${context}: fixture reports no app update`);
       // The sidebar's destination is "Dashboard, <counts>" since the chat-first sidebar (#484); it was "Agent Dashboard".
       await page.getByRole("button", { name: /^Dashboard/ }).click();
       await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
       await page.getByText(`${count * 6} total`, { exact: true }).waitFor();
       if (count) await page.getByText("Check the synthetic layout", { exact: true }).first().waitFor();
+      assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, "layout fixture reports no available update");
       await page.evaluate(async ({ textScale }) => {
         await document.fonts.ready;
         if (textScale) {
@@ -210,6 +214,7 @@ try {
         const stopped = await page.evaluate(() => window.__PW_DASHBOARD_ACTIONS__);
         assert.deepEqual(stopped.map((action) => action.tabId), ["Local-working-0-claude", "Local-working-0-codex"], `${context}: Stop acts on the selected session's tabs`);
       }
+      assert.equal(await page.getByTestId("update-notice").count(), 0, `${context}: no unrelated update notice`);
       console.log(`ok   agent dashboard: ${context} — content, scrolling, controls and keyboard`);
       await page.close();
     }
