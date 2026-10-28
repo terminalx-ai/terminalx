@@ -33,6 +33,7 @@ pub(super) const STEP_IDS: &[&str] = &[
 pub fn initial(env: &Environment, harness: &str, key: &str) -> Result<Value> {
     validate_harness(harness)?;
     validate_key(key)?;
+    if env.transport.container().is_some() { return super::linux_setup::initial(env, harness, key); }
     Ok(
         json!({"protocol":PROTOCOL,"environmentId":env.id,"generation":env.generation,
         "harness":harness,"idempotencyKey":key,"status":"queued","lastCheckedAt":null,
@@ -95,6 +96,7 @@ pub fn queue(journal: &Journal, params: Value) -> Result<Value> {
     validate_harness(&request.harness)?;
     validate_key(&request.idempotency_key)?;
     let current = env(journal, &params)?;
+    let _admission = journal.container_admission(&current)?;
     // Keep typed identity fields part of the immutable request, even though
     // the environment lookup has already checked them.
     if current.id != request.environment_id || current.generation != request.generation {
@@ -157,7 +159,7 @@ pub fn set_step(
     })
 }
 
-fn check_binding(env: &Environment, harness: &str, value: &Value) -> Result<()> {
+pub(super) fn check_binding(env: &Environment, harness: &str, value: &Value) -> Result<()> {
     if value["protocol"] != 1
         || value["environmentId"] != env.id
         || value["generation"] != env.generation
@@ -238,6 +240,7 @@ fn record_readiness(
     readiness: &Value,
 ) -> Result<()> {
     check_binding(target, harness, readiness)?;
+    if target.transport.container().is_some() { return super::linux_setup::record(journal, target, readiness); }
     journal.transaction(|state| {
         let env=state.environments.get_mut(&target.id).filter(|e|e.generation==target.generation && e.deleted_at.is_none()).context("Setup timeline changed")?;
         if super::creation::blocked(env) { super::creation::require_supported()?; }
@@ -331,6 +334,10 @@ fn action_using(
     if current.id != request.environment_id || current.generation != request.generation {
         bail!("Setup action binding changed");
     }
+    if current.transport.container().is_some() && !request.action.starts_with("provider.codex") {
+        bail!("Linux shell task setup supports only guest-owned Codex account actions");
+    }
+    let _admission = journal.container_admission(&current)?;
     let digest = journal::digest(&serde_json::to_vec(&params)?);
     let prior=journal.transaction(|state| {
         let unfinished=state.tasks.values().any(|t|t.target.environment_id==current.id && !t.status.terminal());
@@ -484,6 +491,18 @@ pub fn auth(journal: &Journal, params: Value) -> Result<Value> {
 /// Called only by the admitted owner controller. Installer steps are recorded
 /// before effects; the supervisor's startup reconciliation never requeues them.
 pub fn advance(journal: &Journal, target: &Environment) -> Result<()> {
+    if target.transport.container().is_some() {
+        // An attachment is an independent workflow, not a failed setup effect.
+        let Ok(_admission) = journal.container_admission(target) else { return Ok(()); };
+        refresh_actions(journal, target)?;
+        let state = journal.read()?;
+        if state.tasks.values().any(|task|task.target.environment_id==target.id && !task.status.terminal()) { return Ok(()); }
+        let current = state.environments.get(&target.id).cloned().context("Linux setup environment missing")?;
+        let Some(report) = current.setup.as_ref() else { return Ok(()); };
+        if report["lastCheckedAt"].as_str().and_then(|at|chrono::DateTime::parse_from_rfc3339(at).ok())
+            .is_some_and(|at|chrono::Utc::now().signed_duration_since(at).num_seconds()<5) { return Ok(()); }
+        return inspect(journal, json!({"environmentId":target.id,"generation":target.generation,"harness":"codex"})).map(|_| ());
+    }
     if super::creation::hold_queued(journal, target)? {
         return Ok(());
     }
@@ -711,6 +730,7 @@ pub fn busy(env: &Environment) -> bool {
 }
 
 pub fn ready(env: &Environment, report: &Value) -> bool {
+    if env.transport.container().is_some() { return super::linux_setup::ready(env, report); }
     if super::creation::blocked(env) {
         return false;
     }

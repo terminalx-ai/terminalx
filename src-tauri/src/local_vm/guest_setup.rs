@@ -99,6 +99,7 @@ mod tests {
             records: Default::default(),
             canceled_targets: Default::default(),
             manual_lease: None,
+            attachments: Default::default(),
             provisioning_baseline: None,
             setup_operations: BTreeMap::from([(
                 params.idempotency_key.clone(),
@@ -977,12 +978,12 @@ struct Paths {
 }
 impl Paths {
     fn guest(base: &Path) -> Result<Self> {
-        super::super::desktop::check_identity()?;
+        super::check_setup_identity(base)?;
         let home = base
             .parent()
             .context("Pinned guest home missing")?
             .to_path_buf();
-        if home != Path::new("/Users/lume") {
+        if Some(home.as_path()) != Path::new(super::INSTALL).parent() {
             bail!("Pinned guest home required");
         }
         let codex = super::readiness::codex_program(&home);

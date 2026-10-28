@@ -134,6 +134,13 @@ pub fn request(manager: &crate::session::SessionManager, method: &str, params: s
     use serde_json::to_value;
     match method {
         "computer.inventory" => to_value(inventory()?).map_err(Into::into),
+        "computer.attachment" | "computer.reconcileAttachment" => {
+            let target: Target = serde_json::from_value(params["target"].clone())?;
+            let root = crate::local_vm::host::root()?;
+            if method == "computer.attachment" { return crate::local_vm::admission::inspect(&root, &target); }
+            crate::local_vm::admission::reconcile(&root, &target,
+                params["markerDigest"].as_str().context("Exact inspected receipt is required")?, params["confirm"] == true)
+        }
         "computer.viewer" => {
             let target: Target = serde_json::from_value(params["target"].clone())?;
             to_value(crate::container_vm::selected_status(&target)?).map_err(Into::into)

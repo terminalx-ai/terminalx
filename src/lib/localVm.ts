@@ -5,6 +5,8 @@ import type { LocalVmStatus } from "@/lib/api";
 import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 
 interface Requests {
+  "computer.attachment": { params: { target: ComputerTarget }; result: AttachmentReport };
+  "computer.reconcileAttachment": { params: { target: ComputerTarget; markerDigest: string; confirm: true }; result: AttachmentReport };
   "computer.inventory": { params: Record<string, never>; result: ComputerInventory };
   "computer.selection": { params: ComputerContext; result: ComputerSelection };
   "computer.select": { params: ComputerContext & { target: ComputerTarget | null }; result: ComputerSelection };
@@ -37,6 +39,14 @@ interface Requests {
   "task.permission": { params: { target: LocalVmTaskTarget; requestId: string; optionId: string; idempotencyKey: string }; result: LocalVmJson };
   "task.artifact": { params: { target: LocalVmTaskTarget; artifactId: string }; result: LocalVmArtifactContent };
   "task.applyPatch": { params: { target: LocalVmTaskTarget; artifactId: string; destinationRoot: string; confirm: true }; result: LocalVmPatchResult };
+}
+
+export interface AttachmentReport {
+  target: ComputerTarget;
+  status: "unreserved" | "fenced" | "releaseAvailable" | "released";
+  markerDigest?: string;
+  detail?: string;
+  priorOutcome?: "unknown";
 }
 
 export function submissionUnavailable(description: LocalVmDescription | null, settings: Pick<LocalVmTask["input"], "harness" | "model" | "effort" | "permissionMode">, mode: "desktop" | "shellFiles" = "desktop"): string | null {

@@ -167,6 +167,10 @@ pub struct Journal {
 }
 
 impl Journal {
+    pub(super) fn container_admission(&self, env: &Environment) -> Result<Option<super::admission::Guard>> {
+        env.transport.container().map(|target| super::admission::Guard::acquire(&self.dir, &target)).transpose()
+    }
+
     pub fn open(dir: &Path) -> Result<Self> {
         private_directory(dir)?;
         Ok(Self {

@@ -206,6 +206,37 @@ pub fn selected_runtime(target: &Target) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Read only, including stopped containers. Absence or a reused name is never
+/// an exit receipt for an earlier exact target.
+pub(crate) fn exit_evidence(target: &Target) -> Result<serde_json::Value> {
+    target.require(Capability::AttachedDesktop)?;
+    let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
+    let path = crate::binpath::resolve(runtime.name()).context("Selected container runtime is unavailable")?;
+    let output = run(&path, &["inspect", "--format", "{{json .}}", id], Duration::from_secs(3))?;
+    parse_exit_evidence(target, &serde_json::from_str(&output)?)
+}
+
+pub(crate) fn parse_exit_evidence(target: &Target, value: &serde_json::Value) -> Result<serde_json::Value> {
+    target.require(Capability::AttachedDesktop)?;
+    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    if value["Id"].as_str() != Some(id) || value["Config"]["Labels"][LABEL] != "1" {
+        bail!("Exact owned container identity was not confirmed; ownership remains fenced");
+    }
+    if !matches!(value["HostConfig"]["PidMode"].as_str(), Some("" | "private")) {
+        bail!("Private container PID namespace was not confirmed; ownership remains fenced");
+    }
+    let state = &value["State"];
+    if state["Status"] != "exited" || state["Running"] != false || state["Pid"] != 0
+        || state["Paused"] != false || state["Restarting"] != false || state["Dead"] != false {
+        bail!("No supported container exit proof; ownership remains fenced");
+    }
+    let started = chrono::DateTime::parse_from_rfc3339(state["StartedAt"].as_str().context("Missing container start receipt")?)?;
+    let finished = chrono::DateTime::parse_from_rfc3339(state["FinishedAt"].as_str().context("Missing container exit receipt")?)?;
+    if started.timestamp() <= 0 || finished < started { bail!("Invalid container exit interval"); }
+    Ok(serde_json::json!({"target":target,"status":"exited","running":false,"pid":0,
+        "pidMode":value["HostConfig"]["PidMode"],"startedAt":state["StartedAt"],"finishedAt":state["FinishedAt"]}))
+}
+
 pub fn selected_status(target: &Target) -> Result<VmStatus> {
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
@@ -522,6 +553,25 @@ pub fn run_stdio_cli() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_proof_requires_exact_owned_container_and_complete_stopped_state() {
+        for runtime in [Runtime::Docker, Runtime::Podman] {
+            let target = Target::LinuxContainer { runtime, id: "a".repeat(64) };
+            let valid = serde_json::json!({"Id":"a".repeat(64),"Config":{"Labels":{"ai.terminalx.computer":"1"}},"HostConfig":{"PidMode":"private"},
+                "State":{"Status":"exited","Running":false,"Pid":0,"Paused":false,"Restarting":false,"Dead":false,
+                    "StartedAt":"2026-10-28T01:00:00Z","FinishedAt":"2026-10-28T01:00:01Z"}});
+            assert!(parse_exit_evidence(&target,&valid).is_ok());
+            for (path, bad) in [("/Id",serde_json::json!("b".repeat(64))), ("/Config/Labels/ai.terminalx.computer",serde_json::json!("0")),
+                ("/HostConfig/PidMode",serde_json::json!("host")),("/HostConfig/PidMode",serde_json::Value::Null),
+                ("/State/Status",serde_json::json!("running")),("/State/Running",serde_json::json!(true)),("/State/Pid",serde_json::json!(2)),
+                ("/State/Paused",serde_json::json!(true)),("/State/Restarting",serde_json::json!(true)),("/State/Dead",serde_json::json!(true)),
+                ("/State/FinishedAt",serde_json::json!("2026-10-28T00:00:00Z")),("/State/StartedAt",serde_json::Value::Null)] {
+                let mut value = valid.clone(); *value.pointer_mut(path).unwrap()=bad;
+                assert!(parse_exit_evidence(&target,&value).is_err(),"{path}");
+            }
+        }
+    }
 
     #[test]
     fn only_a_loopback_binding_is_the_viewer() {

@@ -40,10 +40,30 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+fn check_setup_identity(base: &Path) -> Result<()> {
+    if cfg!(target_os = "linux") {
+        if base != Path::new(INSTALL) || !Guest::installed_for_root(&base.join("runtime"))? {
+            bail!("Linux setup requires the installed dedicated guest identity");
+        }
+        Ok(())
+    } else {
+        super::desktop::check_identity()
+    }
+}
+
+fn check_setup_action(linux: bool, action: setup::Action) -> Result<()> {
+    if linux && !matches!(action, setup::Action::LoginStart | setup::Action::LoginCancel | setup::Action::AccountVerify) {
+        bail!("Linux shell task setup supports only guest-owned Codex account actions");
+    }
+    Ok(())
+}
+
 #[path = "guest_readiness.rs"]
 pub(super) mod readiness;
 #[path = "guest_setup.rs"]
 mod setup;
+#[path = "guest_attachment.rs"]
+mod attachment;
 
 use super::journal::{
     atomic_private_write, digest, now, private_directory, validate_id, validate_relative, Artifact,
@@ -184,6 +204,8 @@ struct State {
     provisioning_baseline: Option<ProvisioningBaseline>,
     #[serde(default)]
     setup_operations: BTreeMap<String, setup::Operation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    attachments: BTreeMap<String, attachment::Lease>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -315,6 +337,7 @@ impl Guest {
                 manual_lease: None,
                 provisioning_baseline: None,
                 setup_operations: BTreeMap::new(),
+                attachments: BTreeMap::new(),
             }
         };
         if state.identity != identity {
@@ -415,6 +438,10 @@ impl Guest {
             "environment.disposition" => self.disposition(),
             "environment.provisionEvidence" => self.provision_evidence(),
             "desktop.state" => Ok(desktop_state(&self.state.lock().unwrap())),
+            "desktop.attachmentAcquire" => self.attachment_acquire(&request.params),
+            "desktop.attachmentRead" => self.attachment_read(&request.params),
+            "desktop.attachmentCall" => self.attachment_call(&request.params),
+            "desktop.attachmentRelease" => self.attachment_release(&request.params),
             "desktop.takeover" => self.takeover(&request.params),
             "desktop.release" => self.release_desktop(&request.params),
             "task.start" => self.start(&request.params),
@@ -488,6 +515,7 @@ impl Guest {
         launch: impl FnOnce(&setup::Actor, setup::Params, &Path, bool) -> Result<()>,
     ) -> Result<Value> {
         let params: setup::Params = serde_json::from_value(params.clone())?;
+        check_setup_action(cfg!(target_os = "linux"), params.action)?;
         let mut state = self.state.lock().unwrap();
         params.validate(&state.identity)?;
         if let Some(op) = state.setup_operations.get(&params.idempotency_key) {
@@ -506,7 +534,7 @@ impl Guest {
         if serde_json::to_value(&retained)? != serde_json::to_value(&*state)? {
             bail!("Retained guest state changed; no setup effect started");
         }
-        if state.manual_lease.is_some()
+        if attachment::held(&state) || state.manual_lease.is_some()
             || state.records.values().any(|r| !r.task.status.terminal())
             || !self.manager.terminals().owned_groups().is_empty()
         {
@@ -639,7 +667,7 @@ impl Guest {
         ];
         if cfg!(target_os = "linux") {
             capabilities.retain(|capability| !matches!(*capability,
-                "environment.setupReadiness" | "environment.setupAction" | "environment.setupAuth" | "desktop.takeover" | "desktop.release"));
+                "desktop.takeover" | "desktop.release"));
         }
         if available {
             capabilities.push(if cfg!(target_os = "linux") { "task.submitShell" } else { "task.submit" });
@@ -757,6 +785,7 @@ impl Guest {
         if setup::holds_admission(&state, self.boot_identity.as_deref())
             || self.setup_actor.busy()
             || state.manual_lease.is_some()
+            || attachment::held(&state)
             || state
                 .records
                 .values()
@@ -1088,7 +1117,7 @@ impl Guest {
             .unwrap_or(0);
         let mut state = self.state.lock().unwrap();
         page(&bound(&state, &target)?.task, after)?;
-        if setup::holds_admission(&state, self.boot_identity.as_deref()) || self.setup_actor.busy()
+        if attachment::held(&state) || setup::holds_admission(&state, self.boot_identity.as_deref()) || self.setup_actor.busy()
         {
             bail!("Guest setup helper owns admission; manual takeover is refused");
         }
@@ -1677,8 +1706,8 @@ impl Guest {
             json!({"evidenceVersion":1,"complete":true,"environmentId":state.identity.environment_id,"generation":state.identity.generation,"tasks":tasks,
             "currentBootIdentity":unused["currentBootIdentity"],"manualControl":state.manual_lease.is_some(),
             "activeOwnedGroups":self.manager.terminals().owned_groups().len()
-                + usize::from(self.setup_actor.busy() || setup::holds_admission(&state,self.boot_identity.as_deref())),"unusedRuntimeProof":unused,
-            "setupOperations":state.setup_operations,
+                + usize::from(attachment::held(&state) || self.setup_actor.busy() || setup::holds_admission(&state,self.boot_identity.as_deref())),"unusedRuntimeProof":unused,
+            "setupOperations":state.setup_operations,"attachments":state.attachments,
             "retainedData":unused["retainedData"],
             "canceledTargets":state.canceled_targets,
             "historyRetained":true,"deletionAvailable":false}),
@@ -1710,8 +1739,8 @@ impl Guest {
             "generation":state.identity.generation,"currentBootIdentity":current_boot,
             "initializedTimeline":state.provisioning_baseline,"manualControl":state.manual_lease.is_some(),
             "activeOwnedGroups":self.manager.terminals().owned_groups().len()
-                + usize::from(self.setup_actor.busy() || setup::holds_admission(state,Some(&current_boot))),
-            "setupOperations":state.setup_operations,
+                + usize::from(attachment::held(state) || self.setup_actor.busy() || setup::holds_admission(state,Some(&current_boot))),
+            "setupOperations":state.setup_operations,"attachments":state.attachments,
             "tasks":state.records.values().map(|r|json!({"target":r.task.target,
                 "lastEventSeq":r.task.last_event_seq,"status":r.task.status,
                 "workerSessionId":r.task.worker_session_id,"workerTabId":r.task.worker_tab_id,
@@ -1719,7 +1748,7 @@ impl Guest {
             "canceledTargets":state.canceled_targets,"historyDigest":digest(&serde_json::to_vec(&expected)?),
             "retainedData":inventory,
             "noExecutionSinceInitialization":state.provisioning_baseline.as_ref().is_some_and(|b|b.no_execution)
-                && state.records.is_empty() && state.canceled_targets.is_empty() && state.setup_operations.is_empty()
+                && state.records.is_empty() && state.canceled_targets.is_empty() && state.setup_operations.is_empty() && state.attachments.is_empty()
         }))
     }
 }
@@ -1837,7 +1866,7 @@ fn target(params: &Value) -> Result<TaskTarget> {
 
 fn desktop_state(state: &State) -> Value {
     json!({"environmentId":state.identity.environment_id,"generation":state.identity.generation,
-        "manualControl":state.manual_lease.is_some(),
+        "manualControl":state.manual_lease.is_some(),"attachedDesktop":attachment::held(state),
         "ready":state.manual_lease.as_ref().is_none_or(|lease| lease.ready),
         "target":state.manual_lease.as_ref().map(|lease| &lease.target)})
 }
@@ -1853,6 +1882,7 @@ fn takeover_response(state: &State, target: &TaskTarget, after: u64) -> Result<V
 }
 
 fn require_queue_control(state: &State) -> Result<()> {
+    if attachment::held(state) { bail!("An attached desktop workflow owns this guest; task execution remains reserved"); }
     if setup::holds_admission(state, boot_identity().as_deref()) {
         bail!("Guest setup helper exit is unconfirmed; task input remains reserved");
     }
@@ -2637,6 +2667,80 @@ mod tests {
         );
         let guest = Guest::open(base, manager, sink).unwrap();
         (home, guest, task)
+    }
+
+    #[test]
+    fn attached_guest_calls_are_exclusive_durable_and_never_replayed_after_unknown_exit() {
+        let (_home, guest, task) = setup();
+        let identity=guest.state.lock().unwrap().identity.clone();
+        let binding=json!({"environmentId":identity.environment_id,
+            "generation":identity.generation,"leaseId":new_id(),"sessionId":new_id(),"tabId":new_id(),"conversation":"parent"});
+        let lease=guest.attachment_acquire(&binding).unwrap();
+        assert_eq!(guest.attachment_acquire(&binding).unwrap(),lease);
+        assert!(require_queue_control(&guest.state.lock().unwrap()).is_err());
+        assert!(guest.setup_action_using(&json!({"environmentId":identity.environment_id,"generation":identity.generation,
+            "action":"provider.codexDeviceLogin.start","idempotencyKey":"blocked-login","confirm":true}),|_,_,_,_|panic!("setup during attachment")).is_err());
+        seed(&guest, record(task.clone()));
+        assert!(guest.takeover(&json!({"target":task.target,"confirm":true})).is_err());
+        let mut terminal=record(task);terminal.task.status=TaskStatus::Canceled;seed(&guest,terminal);
+        let mut other=binding.clone();other["leaseId"]=json!(new_id());
+        assert!(guest.attachment_acquire(&other).is_err());
+        let mut call=binding.clone();call["idempotencyKey"]=json!("input-one");call["tool"]=json!("type_text");call["arguments"]=json!({"text":"fixture only"});
+        let receipt=guest.attachment_call_using(&call,|_,_|Ok(json!({"ok":true}))).unwrap();
+        assert_eq!(receipt["status"],"complete");
+        assert_eq!(guest.attachment_call_using(&call,|_,_|panic!("replayed input")).unwrap(),receipt);
+        let mut changed=call.clone();changed["arguments"]=json!({"text":"different"});
+        assert!(guest.attachment_call_using(&changed,|_,_|panic!("changed input")).is_err());
+        call["idempotencyKey"]=json!("input-lost");
+        let unknown=guest.attachment_call_using(&call,|_,_|bail!("lost driver exit")).unwrap();
+        assert_eq!(unknown["status"],"outcomeUnknown");
+        let mut release=binding.clone();release["confirm"]=json!(true);
+        assert!(guest.attachment_release(&release).is_err());
+        let base=guest.base.clone();let manager=guest.manager.clone();let sink=guest.sink.clone();drop(guest);
+        let reopened=Guest::open(base,manager,sink).unwrap();
+        assert!(require_queue_control(&reopened.state.lock().unwrap()).is_err());
+        assert_eq!(reopened.attachment_call_using(&call,|_,_|panic!("replay after owner restart")).unwrap(),unknown);
+        call["idempotencyKey"]=json!("later-input");
+        assert!(reopened.attachment_call_using(&call,|_,_|panic!("input while fenced")).is_err());
+        assert!(reopened.attachment_release(&release).is_err());
+        assert_eq!(reopened.attachment_read(&binding).unwrap()["calls"].as_object().unwrap().len(),2);
+        let mut stale=binding.clone();stale["generation"]=json!(new_id());
+        assert!(reopened.attachment_read(&stale).is_err());
+        // Disposable retained-state fixture simulates a prior kernel boot.
+        // The public release request cannot supply or override this evidence.
+        let mut earlier=serde_json::to_value(durable(&reopened)).unwrap();
+        earlier["attachments"][binding["leaseId"].as_str().unwrap()]["bootIdentity"]=json!(new_id());
+        let base=reopened.base.clone();let manager=reopened.manager.clone();let sink=reopened.sink.clone();drop(reopened);
+        atomic_private_write(&base.join("runtime").join(STATE),&serde_json::to_vec(&earlier).unwrap()).unwrap();
+        let later=Guest::open(base,manager,sink).unwrap();
+        let released=later.attachment_release(&release).unwrap();
+        assert_eq!(released["releaseProof"]["kind"],"laterKernelBoot");
+        assert_eq!(released["releaseProof"]["priorActionOutcomeUnknown"],true);
+        assert_eq!(released["calls"]["input-lost"]["status"],"outcomeUnknown");
+    }
+
+    #[test]
+    fn idle_attached_guest_release_retains_history_and_rejects_delayed_input() {
+        let (_home, guest, _task)=setup();
+        let identity=guest.state.lock().unwrap().identity.clone();
+        let binding=json!({"environmentId":identity.environment_id,"generation":identity.generation,
+            "leaseId":new_id(),"sessionId":new_id(),"tabId":new_id(),"conversation":null});
+        guest.attachment_acquire(&binding).unwrap();
+        assert!(guest.attachment_release(&binding).is_err());
+        let mut release=binding.clone();release["confirm"]=json!(true);
+        let receipt=guest.attachment_release(&release).unwrap();
+        assert_eq!(receipt["releaseProof"]["kind"],"allCallsReceipted");
+        require_queue_control(&guest.state.lock().unwrap()).unwrap();
+        assert_eq!(guest.attachment_acquire(&binding).unwrap(),receipt);
+        let mut call=binding;call["idempotencyKey"]=json!("delayed");call["tool"]=json!("click");call["arguments"]=json!({});
+        assert!(guest.attachment_call_using(&call,|_,_|panic!("released lease accepted input")).is_err());
+        assert_eq!(durable(&guest).attachments.len(),1);
+        for action in [setup::Action::DriverStart,setup::Action::DriverPermissions,setup::Action::DesktopVerify] {
+            assert!(check_setup_action(true,action).is_err());
+        }
+        for action in [setup::Action::LoginStart,setup::Action::LoginCancel,setup::Action::AccountVerify] {
+            check_setup_action(true,action).unwrap();
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { errorMessage } from "@/lib/api";
 import { localVmRequest } from "@/lib/localVm";
 import { computerKey, type ComputerContext, type ComputerSelection as Selection, type ComputerTarget } from "@/types/computer";
 import { EnvironmentPicker, useComputerInventory } from "./EnvironmentPicker";
+import { LinuxComputerSetup } from "./LinuxComputerSetup";
 
 export function ComputerSelection({ context, active, children }: {
   context: ComputerContext; active: boolean; children: (target: ComputerTarget | null) => ReactNode;
@@ -14,6 +15,7 @@ export function ComputerSelection({ context, active, children }: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [setupTarget, setSetupTarget] = useState<string | null>(null);
   useEffect(() => {
     let current = true;
     void localVmRequest("computer.selection", context).then((value) => {
@@ -38,7 +40,9 @@ export function ComputerSelection({ context, active, children }: {
         <Button size="xs" disabled={busy || !entry?.capabilities.includes("attachedDesktop") || entry.state !== "running"} onClick={() => void attach(target)}>Attach desktop tools to this tab</Button>
         <Button size="xs" variant="outline" disabled={busy || (!selection?.target && !error)} onClick={() => void attach(null)}>Clear attachment</Button>
         <Button size="xs" variant="ghost" disabled={busy} onClick={() => void refresh()}>Refresh environments</Button>
+        {target && target.kind !== "macosGuest" ? <Button size="xs" variant="outline" onClick={() => setSetupTarget(setupTarget === computerKey(target) ? null : computerKey(target))}>Linux setup and ownership</Button> : null}
       </div>
+      {target && target.kind !== "macosGuest" && setupTarget === computerKey(target) ? <LinuxComputerSetup key={computerKey(target)} target={target} /> : null}
       {target?.kind === "macosGuest" ? <p>Use Local VM tasks in the conversation to check this macOS guest and submit a selected task. Attached macOS desktop tools are not available on this route.</p> : null}
       {error || inventoryError ? <p role="alert" className="text-destructive">{error || inventoryError}</p> : null}
       {inventory?.notices.map((notice) => <p key={notice} className="text-muted-foreground">{notice}</p>)}

@@ -324,7 +324,9 @@ impl<'a> Readiness<'a> {
             .map(|record| &record.task.target)
             .collect();
         let manual_control = state.manual_lease.is_some();
-        let action_admission = if manual_control {
+        let action_admission = if super::attachment::held(state) {
+            Check::new("blocked", "attached_desktop_lease_held", None)
+        } else if manual_control {
             Check::new(
                 "blocked",
                 "manual_desktop_lease_held",
@@ -364,8 +366,14 @@ impl<'a> Readiness<'a> {
 }
 
 pub(super) fn observe(base: &Path, harness: Harness) -> Result<Observed> {
-    super::super::desktop::check_identity()?;
+    super::check_setup_identity(base)?;
     let home = base.parent().context("Guest home missing")?;
+    if cfg!(target_os = "linux") {
+        return Ok(Observed {
+            desktop: Desktop::unavailable("unsupported", "linux_shell_tasks_do_not_require_desktop", None),
+            provider: inspect_provider(home, harness),
+        });
+    }
     let (desktop, provider) = std::thread::scope(|scope| {
         let desktop = scope.spawn(inspect_desktop);
         let provider = inspect_provider(home, harness);
@@ -992,6 +1000,7 @@ mod tests {
             records: Default::default(),
             canceled_targets: Default::default(),
             manual_lease: None,
+            attachments: Default::default(),
             provisioning_baseline: None,
             setup_operations: std::collections::BTreeMap::from([("first".into(), op.clone())]),
         };
@@ -1060,6 +1069,7 @@ mod tests {
             protocol: 1,
         };
         let state = State {
+            attachments: Default::default(),
             identity: identity.clone(),
             records: Default::default(),
             canceled_targets: Default::default(),

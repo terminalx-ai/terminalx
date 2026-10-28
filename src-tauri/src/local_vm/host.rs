@@ -67,7 +67,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
     if !journal.read()?.enabled {
         bail!("Enable Local Cua in Settings → Environments first");
     }
-    if method.starts_with("environment.") {
+    if method.starts_with("environment.") && !matches!(method, "environment.setup" | "environment.setupReadiness" | "environment.setupAction" | "environment.setupAuth") {
         if let Some(id) = params.get("environmentId").and_then(Value::as_str) {
             if let Some(env) = journal.read()?.environments.get(id) {
                 // macOS provisioner/lifecycle commands must never interpret a

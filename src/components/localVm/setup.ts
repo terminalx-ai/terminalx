@@ -1,3 +1,4 @@
+import { computerKey, environmentComputer } from "@/types/computer";
 import type { LocalVmCreateRequest, LocalVmEnvironment, LocalVmSetupAction, LocalVmSetupActionRequest, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupReport, LocalVmSetupRequest } from "@/types/localVm";
 
 export const SETUP_ACTIONS: readonly LocalVmSetupAction[] = ["driver.start", "driver.requestPermissions", "provider.codexDeviceLogin.start", "provider.codexDeviceLogin.cancel", "provider.codexAccount.verify", "desktop.verify"];
@@ -52,6 +53,7 @@ export function setupActions(report: LocalVmSetupReport): LocalVmSetupAction[] {
   const candidates = [...new Set(report.steps.filter((step) => step.state !== "complete").map((step) => step.actionCode).filter((action): action is LocalVmSetupAction => SETUP_ACTIONS.some((candidate) => candidate === action)))];
   return candidates.filter((action) => {
     if (report.creationCapability?.available === false && action !== "provider.codexDeviceLogin.cancel") return false;
+    if (report.taskMode === "shellFiles" && (!action.startsWith("provider.codex") || report.steps.find((step) => step.id === "runtime")?.state !== "complete")) return false;
     if (pending && action !== "provider.codexDeviceLogin.cancel") return false;
     if (action === "driver.requestPermissions" && readiness.accessibility.state === "granted" && readiness.screenRecording.state === "granted") return false;
     if (action.startsWith("provider.") && report.harness !== "codex") return false;
@@ -96,6 +98,7 @@ export function boundSetupReport(environment: LocalVmEnvironment, retainedReceip
   const report = environment.setup;
   if (environment.deletedAt && !retainedReceipt || !report || report.protocol !== 1 || report.environmentId !== environment.id || report.generation !== environment.generation ||
     !["codex", "claude"].includes(report.harness) || !["queued", "working", "needsAttention", "ready", "outcomeUnknown", "failed"].includes(report.status) || !Array.isArray(report.steps)) return null;
+  if (environment.transport?.kind === "linuxContainer" && (report.taskMode !== "shellFiles" || !report.computer || computerKey(report.computer) !== computerKey(environmentComputer(environment)))) return null;
   if (report.readiness && !boundReadiness(report.readiness, environment, report.harness)) return null;
   return report;
 }

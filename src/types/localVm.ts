@@ -138,6 +138,8 @@ export interface LocalVmSetupReadiness {
 }
 
 export interface LocalVmSetupReport {
+  taskMode?: "shellFiles";
+  computer?: import("./computer").ComputerTarget;
   protocol: 1;
   environmentId: string;
   generation: string;

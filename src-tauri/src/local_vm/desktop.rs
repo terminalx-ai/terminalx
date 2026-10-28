@@ -143,7 +143,7 @@ fn check_request(target: &TaskTarget, value: &Value) -> Result<()> {
     check_capability_request(value)
 }
 
-fn check_capability_request(value: &Value) -> Result<()> {
+pub(super) fn check_capability_request(value: &Value) -> Result<()> {
     match value
         .get("method")
         .and_then(Value::as_str)

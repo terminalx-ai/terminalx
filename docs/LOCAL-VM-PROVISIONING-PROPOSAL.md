@@ -132,3 +132,66 @@ This is not complete Linux onboarding or demonstrated parity. Remaining work:
 5. Implement the macOS attached-desktop lease/proxy using guest ownership and
    manual-control rules; never graft direct Cua tools onto an active guest task.
 6. Keep live activation, disruptive acceptance, PR and merge readiness held.
+
+
+## Linux native artifact gate and proposed build preparation
+
+The current lockfile selects `openssl 0.10.81` and `openssl-sys 0.9.117`.
+The macOS cross-check stopped in openssl-sys before compiling our Linux code:
+there is no Linux OpenSSL sysroot. A successful macOS check does not establish
+Linux-native compilation or runtime behavior. No packages or build containers
+were installed or started for this continuation.
+
+Reuse the existing release matrix's `ubuntu-22.04` x64 and
+`ubuntu-22.04-arm` arm64 builders for a **nonpublishing** validation job from the
+exact reviewed commit. The proposed prerequisites are a native C toolchain,
+`pkg-config`, and Linux OpenSSL headers/libraries (`libssl-dev` on these runners).
+Record the runner image, compiler/Rust versions, package versions, lockfile digest,
+ELF machine, required glibc version, shared-library dependencies and binary SHA256.
+Do not point a Linux build at the host's Homebrew OpenSSL. Cross-building instead
+would require a matching compiler/sysroot and target-prefixed
+`X86_64_UNKNOWN_LINUX_GNU_OPENSSL_DIR` or
+`AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_DIR`; setting an environment variable without
+those libraries is not a build fix. These are the crate's supported build inputs.
+[Exact crate build documentation](https://docs.rs/openssl/0.10.81/openssl/).
+
+This is a dependency/build proposal, not an installed-profile change or a request
+to run the publishing release workflow. No new package or image version is pinned
+by this proposal. A reproducible builder/package manifest and both native build
+receipts must precede a trusted Linux profile entry. That entry must bind the
+source commit, target architecture, runtime protocol and SHA256. The installer
+must verify the ELF architecture and full artifact digest before executing it,
+then verify the nonroot cua account, private installation and immutable
+container/environment/generation through the authenticated guest RPC. Existing
+histories and unknown ownership outcomes must block replacement. This installer
+and trusted artifact catalog remain implementation work; the UI does not offer a
+fake successful install or ask the user for an arbitrary runtime binary path.
+
+## Ownership reconciliation and macOS attachment source boundary
+
+Linux attachment reconciliation acquires the same admission lock as task/setup
+routing, inspects the exact full container ID, and requires the TerminalX label,
+`Status=exited`, `Running=false`, `Pid=0`, all pause/restart/dead flags false, and a
+valid started/finished interval. A private PID namespace is required; missing,
+host or shared PID mode is refused. Missing/replaced/ambiguous or still-running
+containers stay fenced. Confirmation repeats the fresh inspection; UI-supplied
+state is never proof. The original marker and exit evidence are archived before
+release, while the earlier action outcome remains unknown. Nothing stops a
+container, changes input, or retries an MCP operation.
+[Docker exec lifetime](https://docs.docker.com/reference/cli/docker/container/exec/),
+[Docker inspect](https://docs.docker.com/reference/cli/docker/container/inspect/),
+[Podman inspect state fields](https://docs.podman.io/en/latest/markdown/podman-container-inspect.1.html).
+The private-namespace exit rule follows Linux's termination of the namespace's
+remaining processes when its PID 1 exits.
+[Linux PID namespace lifetime](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
+
+The new macOS guest attachment boundary retains exact environment/generation and
+parent session/tab/conversation leases. Tool input is restricted to the existing
+Driver capability allowlist; each keyed call is journaled before delivery and
+its receipt is retained. An unknown call blocks new input and same-boot release;
+reopening the owner returns the original receipt without replay. Explicit release
+requires either all call receipts or a different current kernel boot, retaining
+any unknown earlier outcome. Tasks, manual takeover, setup actions and provisioning
+evidence account for this lease. This source seam is not advertised as an attached
+macOS capability yet: the host MCP adapter, exact-target selection admission,
+discovery catalog and end-to-end UI/recovery fixtures still need integration.
