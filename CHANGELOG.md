@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Issue work status
+
+- Refresh shared issue work when the account service changes its supported
+  capabilities, and republish actual linked sessions after support returns.
+  Explain when the account service has not reported support; shared activity
+  still requires a supported backend. (#642)
+
 ### Cloud workspaces
 
 - Route new sessions to the selected, verified repository checkout and keep child
