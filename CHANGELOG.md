@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Cloud workspaces
+
+- Route new sessions to the selected, verified repository checkout and keep child
+  checkout sessions visible. Require the runtime's `session-repository/1`
+  capability; refuse unavailable or mismatched checkouts instead of using the
+  blank workspace root. (#656)
+
 ### Terminal
 
 - Cancel pending atlas warm-up when its final terminal owner is disposed, while
