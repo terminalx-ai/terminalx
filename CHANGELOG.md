@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Mobile
+
+- Switch to Sessions when tapping a connected machine on iPhone, preserving its
+  active connection and session list. (#653)
+
 ### Organizations
 
 - Let organization owners delete non-personal organizations, including test
