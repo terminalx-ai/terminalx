@@ -19,6 +19,7 @@ import {
 import { creatableProviders, machine0Offered } from "@/lib/hiddenProviders";
 import type { RuntimeIssuePipeline, RuntimeIssueRef, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
+import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
 import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
@@ -75,7 +76,7 @@ export interface CloudIssueOutcome {
   note: string | null;
 }
 
-export type CloudStartPlan = { kind: "reuse" | "wake"; node: CloudWorkspaceNode } | { kind: "create" };
+export type CloudStartPlan = { kind: "reuse" | "wake"; node: CloudWorkspaceNode; repository: { identity: string; directory: string | null } | null } | { kind: "create" };
 
 function usable(node: CloudWorkspaceNode): boolean {
   const { item } = node;
@@ -106,13 +107,17 @@ function manages(node: CloudWorkspaceNode): boolean {
  */
 export function planCloudStart(project: CloudProject): CloudStartPlan {
   const candidates = project.workspaces.filter((node) => usable(node) && manages(node));
+  const target = (kind: "reuse" | "wake", node: CloudWorkspaceNode): CloudStartPlan => {
+    const advertised = project.selected ? node.item.workspace.repositories?.find((repository) => repository.fullName != null && normalizeRepositoryIdentity(repository.identity) === project.identity) : undefined;
+    return { kind, node, repository: project.blank ? null : { identity: project.identity, directory: advertised?.targetDirectory ?? null } };
+  };
   const running = candidates.find((node) => node.item.workspace.state === "ready" && !isChanging(node.item));
-  if (running) return { kind: "reuse", node: running };
+  if (running) return target("reuse", running);
   // Starting or resuming: waiting on it costs nothing more than it already does.
   const coming = candidates.find((node) => node.item.workspace.state === "provisioning" || (node.item.workspace.state === "ready" && isChanging(node.item)) || (node.item.workspace.state === "suspended" && isOpen(node.item.latestOperation)));
-  if (coming) return { kind: "wake", node: coming };
+  if (coming) return target("wake", coming);
   const stopped = candidates.find((node) => node.item.workspace.state === "suspended");
-  if (stopped) return { kind: "wake", node: stopped };
+  if (stopped) return target("wake", stopped);
   return { kind: "create" };
 }
 
@@ -122,6 +127,19 @@ export function titleOf(prompt: string): string {
 }
 
 const WAKE_WITHIN_MS = 5 * 60 * 1000;
+
+// SaaS standard root and the older persisted-runtime layout. This is only a
+// pre-wake compatibility filter: the runtime must enforce its own configured root.
+const SESSION_CHECKOUT_ROOTS = ["/var/lib/terminalx/workspace", "/srv/terminalx/state/workspace"];
+
+function checkCheckoutLayout(directory: string): void {
+  const parts = directory.split("/").filter((part) => part !== "" && part !== ".");
+  if (parts.includes("..")) throw new Error("cloud_repository_checkout_unavailable");
+  if (!directory.startsWith("/")) return;
+  const normalized = "/" + parts.join("/");
+  if (!SESSION_CHECKOUT_ROOTS.some((root) => normalized === root || normalized.startsWith(root + "/")))
+    throw new Error("cloud_repository_checkout_scope_unsupported: Environment checkout paths outside the standard workspace scope are not supported for new sessions.");
+}
 
 function worktreeRefused(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error ?? "");
@@ -145,6 +163,8 @@ export async function startInWorkspace(
    */
   options: { select?: boolean; wakeIfStopped?: boolean | (() => Promise<boolean>); onIssue?: (outcome: CloudIssueOutcome) => void } = {},
 ): Promise<string> {
+  if (plan.repository && !plan.repository.directory) throw new Error("cloud_repository_checkout_unavailable");
+  if (plan.repository?.directory) checkCheckoutLayout(plan.repository.directory);
   bootCloudSessions();
   const { orgId, id: workspaceId } = plan.node.item.workspace;
   const target = { orgId, workspaceId };
@@ -164,6 +184,7 @@ export async function startInWorkspace(
       client = await waitCloudConnected(lease, WAKE_WITHIN_MS);
     }
     const scope = { organizationId: orgId, workspaceId };
+    if (plan.repository && !client.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
     // An issue goes only to a runtime that knows what to do with one: an older one would start a plain session silently.
     const issue = request.issue && client.hasCapability("pipeline/1") ? request.issue : null;
     const params = {
@@ -174,6 +195,7 @@ export async function startInWorkspace(
       title: request.title || titleOf(request.prompt) || undefined,
       prompt: request.prompt.trim() ? request.prompt : undefined,
       useWorktree: request.useWorktree,
+      ...(plan.repository ? { repository: { identity: plan.repository.identity, directory: plan.repository.directory! } } : {}),
       ...(request.pipeline?.resolveConflicts ? { pipeline: true, pipelineOptions: { ...request.pipeline, autoMerge: false }, pipelineSettings: request.pipelineSettings as unknown as Record<string, unknown> } : {}),
       ...(issue
         ? { issue: issue.ref, issueBody: issue.body, worktreeName: issue.worktreeName, pipeline: issue.pipeline, pipelineSettings: issue.settings as unknown as Record<string, unknown>,
@@ -185,7 +207,7 @@ export async function startInWorkspace(
       created = await newCloudAgentTab(scope, client, params);
     } catch (error) {
       // A workspace whose folder has no Git repository cannot cut a worktree; the session works in the folder.
-      if (!request.useWorktree || !worktreeRefused(error)) throw error;
+      if (plan.repository || !request.useWorktree || !worktreeRefused(error)) throw error;
       created = await newCloudAgentTab(scope, client, { ...params, useWorktree: false });
     }
     const tabId = created.tabId;
