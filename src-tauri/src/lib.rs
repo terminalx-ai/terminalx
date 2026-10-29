@@ -80,6 +80,7 @@ mod floating;
 #[cfg(feature = "desktop")]
 mod media;
 mod media_types;
+mod branch_overview;
 mod git;
 mod github;
 mod pr_associations;
@@ -529,6 +530,7 @@ pub fn run() {
             commands::list_skills,
             commands::skill_detail,
             commands::work_status,
+            commands::branch_overview,
             commands::list_branches,
             commands::worktree_disposition,
             commands::sessions_sharing_worktree,

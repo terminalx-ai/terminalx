@@ -642,6 +642,7 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
+  branchOverview: (cwd: string) => invoke<BranchOverview>("branch_overview", { cwd }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
   // directory from the two ids and only reports it back (`root`).
@@ -1890,6 +1891,35 @@ export interface PrCheck {
   name: string;
   state: string;
   url?: string | null;
+}
+
+export interface BranchContributor {
+  name: string;
+  email: string;
+  commits: number;
+  /** Their newest commit's author date. */
+  last: string;
+}
+
+/** A checkout's branch against the branch it merges into, read from refs already here. */
+export interface BranchOverview {
+  branch: string | null;
+  /** `origin/main`, else the local default branch; null outside a repository or without one. */
+  base: string | null;
+  onBase: boolean;
+  forkPoint: CommitInfo | null;
+  /** Commits only on the branch, and on the base since the fork. */
+  ahead: number;
+  behind: number;
+  commits: CommitInfo[];
+  baseCommits: CommitInfo[];
+  contributors: BranchContributor[];
+  baseContributors: BranchContributor[];
+  upstream: string | null;
+  unpushed: number;
+  unpulled: number;
+  dirty: boolean;
+  merge: { state: "clean" | "conflicts" | "merged" | "unknown"; conflicted: string[] };
 }
 
 export interface PullRequest {

@@ -9,6 +9,7 @@ vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), keycaps: () => [], useShor
 vi.mock("@/lib/dialogs", () => ({ openSettle: vi.fn(), openWorkspaceDelete: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => null }));
+vi.mock("@/components/changes/BranchPanel", () => ({ BranchPanel: ({ active }: { active: boolean }) => (active ? <p>Branch overview</p> : null) }));
 vi.mock("@/components/files/FileTree", () => ({ FileTree: () => null }));
 
 const { RightPanel } = await import("./RightPanel");
@@ -36,8 +37,19 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); });
 
+/** The panel opens on Branch; these are about Changes. */
+const openChanges = () => fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+
+it("opens on the Branch tab", () => {
+  render(<RightPanel cwd={cwd} branch="fix/test" />);
+  expect(screen.getByText("Branch overview")).toBeTruthy();
+  openChanges();
+  expect(screen.queryByText("Branch overview")).toBeNull();
+});
+
 it("shows workspace work after a status-only turn and opens Repo for committing", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" events={events} />);
+  openChanges();
 
   expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
   expect(screen.getByText(/Against main/)).toBeTruthy();
@@ -60,12 +72,14 @@ it("shows workspace work after a status-only turn and opens Repo for committing"
 
 it("offers workspace changes before there is a turn snapshot", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" />);
+  openChanges();
   expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
   expect(await screen.findByRole("button", { name: /untracked.json/ })).toBeTruthy();
 });
 
 it("uses live-turn wording while an agent is running", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" events={events.slice(0, 1)} live />);
+  openChanges();
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
   expect(await screen.findByText("This turn · 2 files")).toBeTruthy();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("changes_between", { cwd, base: "snapshot", head: "live-snapshot" }));
@@ -73,6 +87,7 @@ it("uses live-turn wording while an agent is running", async () => {
 
 it("keeps the working-tree view scoped to the workspace", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" workingTree />);
+  openChanges();
   expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
   expect(screen.getByRole("button", { name: /untracked.json/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Commit and history in Repo" })).toBeTruthy();
