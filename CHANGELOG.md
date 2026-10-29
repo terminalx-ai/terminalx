@@ -16,8 +16,10 @@
 ### Chat
 
 - Recognize completed Codex context compaction and preserve scoped compaction
-  history and status across conversation changes. The live compaction producer
-  remains inactive. (#644)
+  history and status across conversation changes. Add a default-off experimental
+  owned-stdio connection for explicitly created new Codex sessions, with confirmed
+  compaction start/completion events and retained interruption status. Existing
+  PTY sessions keep their current behavior. (#644)
 
 ### Issue work status
 

@@ -189,7 +189,7 @@ pub struct Claimed {
 /// The tab a claimed launch starts. A launch that names no mode (or a blank
 /// one) starts in the default launch mode, bypass, like any other session.
 pub(crate) fn new_tab(claim: &Claim) -> crate::session_ops::NewTab {
-    crate::session_ops::NewTab {
+    crate::session_ops::NewTab { transport: Default::default(),
         harness: claim.agent.clone(),
         model: claim.model.clone().unwrap_or_default(),
         effort: claim.effort.clone(),

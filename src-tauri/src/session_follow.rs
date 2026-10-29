@@ -357,7 +357,7 @@ impl SessionManager {
             title: renamed.then(|| title.clone()),
             permission_mode: MODE_SET_IN_TERMINAL.into(),
             follow: index::Follow { pane: Some(pane.to_string()), terminal_title: Some(title), title_pinned: renamed, adopted: true, ..Default::default() },
-            ..crate::session_ops::new_tab_entry(&crate::session_ops::NewTab { harness: agent.harness.to_string(), model: String::new(), effort: None, permission_mode: None })
+            ..crate::session_ops::new_tab_entry(&crate::session_ops::NewTab { transport: Default::default(), harness: agent.harness.to_string(), model: String::new(), effort: None, permission_mode: None })
         };
         let made = tab.clone();
         // The session's active tab is left alone: a window on another tab
@@ -399,7 +399,7 @@ impl SessionManager {
             // itself is its business.
             Engine::Cli(p) if p.by_hand.is_none() && self.terminals.is_running(&p.pane_id) => return Ok(()),
             // A headless tab's hand-off terminal.
-            Engine::Acp(_) | Engine::OpenCode(_) => return Ok(()),
+            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) => return Ok(()),
             Engine::Cli(_) => self.became_terminal(&mut rt, Gone::Replaced),
             Engine::None => {}
         }
@@ -962,6 +962,7 @@ impl SessionManager {
     /// Make sure a tab that is a terminal has a shell in its pane, and say
     /// which pane that is.
     pub(super) fn shell_for(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         // One at a time for a tab, under its lock: the exit that makes a tab
         // a terminal and the window that then opens it both come here, and
         // two shells started at once for one pane would each end the other.
@@ -1016,6 +1017,7 @@ impl SessionManager {
     /// A prompt was sent to a tab that is a terminal: start the tab's agent
     /// again on its conversation, in the place of the idle shell.
     pub(super) fn wake(&self, rt: &mut TabRuntime, tab: &TabEntry) -> Result<()> {
+        anyhow::ensure!(!super::codex_stdio::selected(tab), "Experimental Codex sessions cannot switch to a PTY owner");
         self.shell_is_idle(tab)?;
         self.set_front(rt, Front::Agent);
         self.announce_tab(rt);

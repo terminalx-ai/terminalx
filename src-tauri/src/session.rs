@@ -25,6 +25,8 @@ use anyhow::{anyhow, bail, Context, Result};
 #[path = "session_compaction.rs"]
 #[allow(dead_code)] // Admission is intentionally not connected to a producer yet.
 mod compaction;
+#[path = "session_codex_stdio.rs"]
+mod codex_stdio;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -480,6 +482,7 @@ pub struct CliTab {
 #[allow(clippy::large_enum_variant)]
 pub enum Engine {
     Cli(CliTab),
+    CodexStdio(codex::stdio::Stdio),
     Acp(acp::Acp),
     OpenCode(opencode::OpenCode),
     None,
@@ -495,6 +498,9 @@ pub struct TabRuntime {
     /// First text chunk per block, retained until its committed event is saved.
     message_times: HashMap<String, String>,
     compaction: compaction::Admission,
+    stdio_compaction: Option<compaction::Token>,
+    stdio_starting: bool,
+    stdio_writer: Option<std::sync::mpsc::SyncSender<codex::stdio::Outbound>>,
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
@@ -1048,7 +1054,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(),
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None,
                 turn_started_at: None,
                 turn_by_command: false,
                 last_activity: Instant::now(),
@@ -1408,7 +1414,7 @@ impl SessionManager {
                     }
                     agent_panes.insert(cli.pane_id.clone());
                 }
-                Engine::Acp(_) | Engine::OpenCode(_) => roots.extend(tab.child_pid),
+                Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) => roots.extend(tab.child_pid),
                 Engine::None => {}
             }
         }
@@ -1704,6 +1710,11 @@ impl SessionManager {
         }
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
+        if codex_stdio::selected(&tab) {
+            anyhow::ensure!(receipt.is_none(), "Experimental Codex does not support continuation delivery");
+            return self.send_codex_stdio(&mut rt, &rt_arc, &entry, prompt, refs, wire_images);
+        }
+
         if receipt.is_some() && (pty_first(&tab.harness).is_none() || rt.turn_open || !rt.pending.is_empty()) {
             bail!("Continuation delivery requires an idle Claude Code or Codex destination.");
         }
@@ -1781,7 +1792,7 @@ impl SessionManager {
                 };
                 self.apply_actions(&mut rt, actions);
             }
-            Engine::Cli(_) | Engine::None => bail!("no engine"),
+            Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => bail!("no engine"),
         }
         rt.open_turn();
         rt.turn_started_at = Some(Instant::now());
@@ -1906,7 +1917,7 @@ impl SessionManager {
         let busy = rt.turn_open || !rt.pending.is_empty() || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting);
         let running = match &rt.engine {
             Engine::Cli(p) => self.terminals.is_running(&p.pane_id),
-            Engine::Acp(_) | Engine::OpenCode(_) => rt.child.is_some() && rt.turn_open,
+            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) => rt.child.is_some() && rt.turn_open,
             Engine::None => false,
         };
         if !busy || !running {
@@ -1938,6 +1949,11 @@ impl SessionManager {
                 self.apply_actions(&mut rt, actions);
                 sent
             }
+            Engine::CodexStdio(engine) => {
+                let actions = engine.interrupt()?;
+                self.apply_codex_actions(&mut rt, actions)?;
+                true
+            }
             Engine::None => false,
         };
         if sent {
@@ -1960,6 +1976,10 @@ impl SessionManager {
                 Engine::Cli(p) => drop(p.decisions.remove(request_id)),
                 Engine::Acp(a) => actions.extend(a.answer(request_id, "raccoon:cancel").unwrap_or_default()),
                 Engine::OpenCode(o) => actions.extend(o.answer(request_id, "reject").unwrap_or_default()),
+                Engine::CodexStdio(engine) => {
+                    let writes = engine.cancel_asks();
+                    if let Err(error) = self.apply_codex_actions(rt, writes) { log::warn!("Cancel Codex approvals: {error:#}"); }
+                }
                 Engine::None => {}
             }
         }
@@ -2014,6 +2034,9 @@ impl SessionManager {
         self.mobile.invalidate_tab(session_id, tab_id);
         let key = key_of(session_id, tab_id);
         let rt_arc = self.runtime(session_id, tab_id)?;
+        if matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(_)) {
+            return self.stop_codex_stdio(&rt_arc);
+        }
         if matches!(&rt_arc.lock().unwrap().engine, Engine::Cli(p) if p.by_hand.is_some()) {
             return self.stop_by_hand(&rt_arc);
         }
@@ -2221,6 +2244,11 @@ impl SessionManager {
                 self.apply_actions(&mut rt, actions);
                 (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
             }
+            Engine::CodexStdio(engine) => {
+                let actions = engine.answer(request_id, option_id)?;
+                self.apply_codex_actions(&mut rt, actions)?;
+                (option_id == "allow", if option_id == "allow" { "Allowed".into() } else { "Denied".into() })
+            }
             Engine::None => bail!("no engine"),
         };
         rt.pending.remove(request_id);
@@ -2253,6 +2281,7 @@ impl SessionManager {
     /// moves when the provider is running it (`harness::settings`): at once
     /// when nothing is running, on the provider's word when something is.
     pub fn set_model(&self, session_id: &str, tab_id: &str, model: &str) -> Result<()> {
+        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if HarnessId::parse(&rt.harness).settings().model == Apply::Restart {
@@ -2537,6 +2566,7 @@ impl SessionManager {
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(mode) {
             bail!("Stop sharing this session before switching to {}.", settings::mode_label(mode));
         }
+        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if let Some(refusal) = Self::by_hand_refusal(&rt, "the permission mode") {
@@ -2580,6 +2610,7 @@ impl SessionManager {
     /// headless peers have no effort setting at all, and say so rather than
     /// take a value that would change nothing.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
+        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if HarnessId::parse(&rt.harness).settings().effort == Apply::Unsupported && effort.is_some_and(|e| !e.is_empty()) {
@@ -2733,7 +2764,7 @@ impl SessionManager {
         if tab.is_terminal() || (tab.by_hand() && !following) {
             return self.shell_for(session_id, tab_id);
         }
-        if pty_first(&tab.harness).is_none() {
+        if codex_stdio::selected(&tab) || pty_first(&tab.harness).is_none() {
             return Ok(());
         }
         let mut rt = rt_arc.lock().unwrap();
@@ -2800,6 +2831,7 @@ impl SessionManager {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
+        anyhow::ensure!(!codex_stdio::selected(tab), "Experimental stdio sessions cannot launch a PTY owner");
         let Some(kind) = pty_first(&tab.harness) else { return Ok(false) };
         let pane = tab.pane_id();
         if let Engine::Cli(p) = &rt.engine {
@@ -4381,6 +4413,7 @@ impl SessionManager {
     /// terminal view is a view flag, not a hand-off. Only the hidden
     /// harnesses reach this, which is why it outlives them being offered.
     pub fn handoff(&self, session_id: &str, tab_id: &str) -> Result<HandoffInfo> {
+        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
@@ -4413,7 +4446,7 @@ impl SessionManager {
         let actions = match &mut rt.engine {
             Engine::Acp(a) => a.handle(line),
             Engine::OpenCode(o) => o.handle(line),
-            Engine::Cli(_) | Engine::None => return,
+            Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => return,
         };
         self.stall_disproved(&mut rt);
         self.apply_actions(&mut rt, actions);
@@ -4555,7 +4588,7 @@ impl SessionManager {
                     Engine::OpenCode(o) => o.prompt(q.text.clone(), q.images.clone()),
                     // A PTY tab never queues here: the CLI holds typed input
                     // itself, so the message went in when it was written.
-                    Engine::Cli(_) | Engine::None => Vec::new(),
+                    Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => Vec::new(),
                 };
                 let sent = !actions.is_empty();
                 self.apply_actions(rt, actions);

@@ -69,6 +69,8 @@ pub(crate) fn notify_sessions_deleted(sink: &dyn EventSink, removed: &[SessionEn
 pub struct NewTab {
     pub harness: String,
     #[serde(default)]
+    pub transport: index::AgentTransport,
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
@@ -107,9 +109,18 @@ pub struct NewSession {
 }
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
+    if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
     if !req.use_worktree && requested_worktree && !req.on_main {
         return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
+    }
+    Ok(())
+}
+
+fn validate_transport(tab: &NewTab) -> Result<()> {
+    if tab.transport == index::AgentTransport::ExperimentalCodexStdio {
+        if tab.harness != "codex" { return Err("Experimental stdio is available only for new Codex sessions.".into()); }
+        crate::harness::codex::stdio::Stdio::validate_mode(&index::permission_mode_or_default(tab.permission_mode.as_deref())).map_err(err)?;
     }
     Ok(())
 }
@@ -151,6 +162,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
     TabEntry {
         id: uuid::Uuid::now_v7().to_string(),
         harness: t.harness.clone(),
+        transport: t.transport,
         title: None,
         model: t.model.clone(),
         effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None,
@@ -310,6 +322,7 @@ pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat
 }
 
 pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry> {
+    if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let id = uuid::Uuid::now_v7().to_string();
     let scratch = store::quick::create(&id).map_err(err)?;
     let created = (|| {
@@ -1010,6 +1023,7 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
 
 /// Add an agent tab to a session and make it the active one.
 pub(crate) fn add_tab_entry(session_id: &str, tab: &NewTab) -> Result<TabEntry> {
+    validate_transport(tab)?;
     let t = new_tab_entry(tab);
     let out = t.clone();
     index::update_session(session_id, |s| {
@@ -1145,7 +1159,7 @@ mod tests {
             issue: None,
             automation: None,
             cwd: None,
-            tab: Some(NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            tab: Some(NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
         })
         .unwrap()
     }
@@ -1511,7 +1525,7 @@ mod tests {
         create_quick_chat_entry(NewQuickChat {
             title: None,
             cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
-            tab: Some(NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            tab: Some(NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
         })
         .unwrap()
     }
@@ -1526,7 +1540,7 @@ mod tests {
         assert!(projects::list().unwrap().0.is_empty());
         let sink = sink();
         let mut events = sink.subscribe();
-        let first = create_quick_chat_blocking(&sink, NewQuickChat { title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
+        let first = create_quick_chat_blocking(&sink, NewQuickChat { title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
         assert_eq!(&*events.try_recv().unwrap().event, "session_created");
 
         assert_eq!(first.kind, SessionKind::Quick);
@@ -1960,7 +1974,7 @@ mod tests {
             let claude = claude_transcript(&session, CONVERSATION);
             let codex_session = session_in(dir.path(), &session.cwd, "Codex companion");
             let codex_id = "22222222-2222-4222-8222-222222222222";
-            let codex_tab = add_tab_entry(&codex_session.id, &NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }).unwrap();
+            let codex_tab = add_tab_entry(&codex_session.id, &NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }).unwrap();
             index::update_tab(&codex_session.id, &codex_tab.id, |tab| {
                 tab.provider_session_id = Some(codex_id.into());
                 Ok(())

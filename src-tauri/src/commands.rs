@@ -3524,7 +3524,7 @@ mod command_tests {
     }
     #[test]
     fn new_tabs_use_the_default_permission_mode_when_unspecified() {
-        let tab = new_tab_entry(&NewTab {
+        let tab = new_tab_entry(&NewTab { transport: Default::default(),
             harness: "claude".into(),
             model: String::new(),
             effort: None,
@@ -3537,9 +3537,9 @@ mod command_tests {
         );
 
         // Blank is unset too; a named mode is the reader's and is kept.
-        let blank = new_tab_entry(&NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some(String::new()) });
+        let blank = new_tab_entry(&NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some(String::new()) });
         assert_eq!(blank.permission_mode, "bypassPermissions");
-        let chosen = new_tab_entry(&NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some("manual".into()) });
+        let chosen = new_tab_entry(&NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some("manual".into()) });
         assert_eq!(chosen.permission_mode, "manual");
     }
 
@@ -3658,7 +3658,7 @@ mod command_tests {
             issue: None,
             automation: None,
             cwd: None,
-            tab: Some(NewTab {
+            tab: Some(NewTab { transport: Default::default(),
                 harness: "codex".into(),
                 model: String::new(),
                 effort: None,
@@ -3724,7 +3724,7 @@ mod command_tests {
             issue: None,
             automation: None,
             cwd: None,
-            tab: Some(NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }),
+            tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }),
         })
         .unwrap();
         let attached = crate::store::projects::add(project.to_str().unwrap()).unwrap();
@@ -3774,7 +3774,7 @@ mod command_tests {
             issue: None,
             automation: None,
             cwd: Some(worktree.to_string_lossy().into_owned()),
-            tab: Some(NewTab {
+            tab: Some(NewTab { transport: Default::default(),
                 harness: "codex".into(),
                 model: "gpt-5".into(),
                 effort: None,

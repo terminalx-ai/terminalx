@@ -62,9 +62,28 @@ describe("disabled compaction lifecycle evidence reducer (#644)", () => {
   });
 
   it("does not call a turn-scoped error a compaction failure", () => {
-    const state = fold(opened, start, { ...retry, willRetry: false }, end);
+    const state = fold(opened, start, { ...retry, willRetry: false });
     expect(operation(state)).toMatchObject({ state: "unknown", unknownReason: "turn_error", retrying: false });
     expect(operation(state).stoppedBy).toBeUndefined();
+    expect(operation(reduceCompactionLifecycle(state, evidence({ ...end, outcome: "completed" }))))
+      .toMatchObject({ state: "unknown", unknownReason: "turn_error" });
+  });
+
+  it("settles a nonretrying error only after the same continuous turn stops", () => {
+    const error = { ...retry, willRetry: false };
+    for (const outcome of ["failed", "interrupted"] as const) {
+      const stopped = fold(opened, start, error, { ...end, outcome });
+      expect(operation(stopped)).toMatchObject({ state: "stopped", stoppedBy: outcome, retrying: false });
+      expect(operation(stopped).unknownReason).toBeUndefined();
+      expect(operation(fold(opened, start, error, { ...end, outcome }, complete)))
+        .toMatchObject({ state: "completed", stoppedBy: outcome });
+      for (const terminal of [{ ...end, outcome, turnId: "other" }, { ...end, outcome, generation: 2 }]) {
+        expect(operation(fold(opened, start, error, terminal)))
+          .toMatchObject({ state: "unknown", unknownReason: "turn_error" });
+      }
+      expect(operation(fold(opened, start, error, loss, { ...end, outcome })).state).toBe("unknown");
+      expect(operation(fold(opened, start, error, { ...opened, generation: 2 }, { ...end, outcome })).state).toBe("unknown");
+    }
   });
 
   it("never lets a later turn outcome overwrite positive completion", () => {

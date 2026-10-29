@@ -688,6 +688,8 @@ impl ControlService {
             #[serde(default)]
             cwd: Option<String>,
             agent: String,
+            #[serde(default)]
+            experimental_codex_stdio: bool,
             /// Required, unless the session starts from an issue.
             #[serde(default)]
             prompt: String,
@@ -767,7 +769,10 @@ impl ControlService {
                 )));
             }
         }
-        let first_tab = NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
+        if p.experimental_codex_stdio && (p.agent != "codex" || p.issue.is_some()) {
+            return Err(ControlError::invalid("Experimental stdio requires a new Codex session without an issue pipeline."));
+        }
+        let first_tab = NewTab { transport: if p.experimental_codex_stdio { index::AgentTransport::ExperimentalCodexStdio } else { index::AgentTransport::Pty }, harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
         let mut issue = None;
         let entry = match p.project.as_deref() {
             None => {

@@ -655,6 +655,19 @@ describe("scoped compaction projection (#644)", () => {
     expect(operations(rows([...events, lost]))[0]).toMatchObject({ uncertain: true, lifecycle: { state: "unknown" } });
   });
 
+  it("replays the observed nonretrying error then failed terminal as stopped compaction", () => {
+    const events = [opened(), started(),
+      lifecycle({ type: "turn_error", generation: 1, turnId: "turn", willRetry: false }),
+      lifecycle({ type: "turn_ended", generation: 1, turnId: "turn", outcome: "failed" }),
+    ];
+    const replay = rows(events);
+    expect(replay.compacting).toBe(false);
+    expect(operations(replay)).toHaveLength(1);
+    expect(operations(replay)[0].lifecycle).toMatchObject({ state: "stopped", stoppedBy: "failed" });
+    expect(replay.turns).toHaveLength(1);
+    expect(replay.turns[0].prompt).toBeUndefined();
+  });
+
   it("deduplicates completion without start and rejects stale starts and other scopes", () => {
     const completion = completed();
     const done = rows([opened(), completion, completion, started()]);
