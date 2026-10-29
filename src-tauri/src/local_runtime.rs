@@ -451,11 +451,39 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ownership_is_exclusive_and_survives_lock_path_reuse() {
+        // A concurrent test can fork while this process holds the flock. Even
+        // with CLOEXEC, that child retains the shared open file until exec or
+        // exit, so dropping our descriptor need not immediately release it.
+        // Run the same exclusivity/reacquisition oracle without unrelated forks.
+        const CHILD: &str = "TERMINALX_TEST_RUNTIME_OWNER_CHILD";
+        if std::env::var_os(CHILD) != Some("1".into()) {
+            let dir = tempfile::tempdir().unwrap();
+            let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "local_runtime::tests::ownership_is_exclusive_and_survives_lock_path_reuse", "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+                .spawn().unwrap();
+            let until = Instant::now() + Duration::from_secs(20);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+                    result => {
+                        let _ = child.kill();
+                        child.wait().expect("reap ownership test child");
+                        panic!("ownership test child did not complete: {result:?}");
+                    }
+                }
+            };
+            assert!(status.success(), "{}", std::fs::read_to_string(dir.path().join("child.log")).unwrap());
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let owner = Owner::acquire(home.path()).unwrap();
         assert!(Owner::acquire(home.path()).is_err());
         drop(owner);
-        assert!(Owner::acquire(home.path()).is_ok());
+        let _next_owner = Owner::acquire(home.path()).expect("reacquire the released ownership lock");
     }
 
     #[cfg(unix)]
