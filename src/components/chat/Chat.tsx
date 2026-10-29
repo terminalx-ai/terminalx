@@ -8,6 +8,8 @@ import { TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
 import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
 import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
+import { usePrefs } from "@/lib/prefs";
+import { PromptMap } from "./PromptMap";
 
 const NEAR_BOTTOM_PX = 40;
 const FIRST_MOUNT = 12;
@@ -196,64 +198,97 @@ export function Chat({
     pinToBottom();
   }, [lastPromptSeq, follow, pinToBottom]);
 
+  // A prompt's mark was clicked: its turn's top under the top of the view.
+  // A turn still waiting to be backfilled is mounted first, then gone to.
+  const pendingJump = useRef<string | null>(null);
+  const goToTurn = useCallback(
+    (key: string) => {
+      const el = scroller.current;
+      const node = el?.querySelector<HTMLElement>(`[data-turn="${CSS.escape(key)}"]`);
+      if (!el || !node) return false;
+      follow(false);
+      el.scrollTo({ top: el.scrollTop + node.getBoundingClientRect().top - el.getBoundingClientRect().top - 12, behavior: "smooth" });
+      return true;
+    },
+    [follow],
+  );
+  const jumpTo = useCallback(
+    (key: string) => {
+      if (goToTurn(key)) return;
+      const index = turns.findIndex((t) => t.key === key);
+      if (index < 0) return;
+      pendingJump.current = key;
+      setOldestMounted((o) => Math.min(o, index));
+    },
+    [goToTurn, turns],
+  );
+  useLayoutEffect(() => {
+    const key = pendingJump.current;
+    if (key && goToTurn(key)) pendingJump.current = null;
+  }, [oldestMounted, goToTurn]);
+  const { promptMap } = usePrefs();
+
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
-        <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
-          {oldestMounted > 0 && (
-            <div className="mb-4 text-center text-xs text-faint">Loading earlier turns…</div>
-          )}
-          {!turns.length && !live && loading && (
-            // Loading is a label alone; the scene is for a conversation that really is empty.
-            <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
-              <Loader2 className="size-3 animate-spin" aria-hidden />
-              Loading the conversation…
-            </p>
-          )}
-          {!turns.length && !live && !loading && (
-            <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
-              <RaccoonScene />
-              <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
-            </div>
-          )}
-          {turns.slice(oldestMounted).map((t, i, arr) => {
-            const isLast = i === arr.length - 1;
-            return (
-              <TurnBlock
-                key={t.key}
-                turn={t}
-                cwd={cwd}
-                sessionId={sessionId}
-                stream={isLast && live ? stream : []}
-                working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
-                streamingTool={isLast && live ? streamingTool : undefined}
-                // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
-                onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
-              />
-            );
-          })}
-          {transcript.compacting && (
-            <div className="mb-3 px-1.5 text-[13px] text-shimmer">Compacting context…</div>
-          )}
-          {transcript.retry && progressing && (
-            <div className="mb-3 px-1.5 text-[13px] text-warning">
-              Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
-              {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
-            </div>
-          )}
-          {transcript.pendingAsks.map((ask) => (
-            <div key={ask.requestId} className="mb-3">
-              {ask.kind === "permission" ? (
-                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
-              ) : (
-                <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
-              )}
-            </div>
-          ))}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
+          <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
+            {oldestMounted > 0 && (
+              <div className="mb-4 text-center text-xs text-faint">Loading earlier turns…</div>
+            )}
+            {!turns.length && !live && loading && (
+              // Loading is a label alone; the scene is for a conversation that really is empty.
+              <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
+                <Loader2 className="size-3 animate-spin" aria-hidden />
+                Loading the conversation…
+              </p>
+            )}
+            {!turns.length && !live && !loading && (
+              <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
+                <RaccoonScene />
+                <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
+              </div>
+            )}
+            {turns.slice(oldestMounted).map((t, i, arr) => {
+              const isLast = i === arr.length - 1;
+              return (
+                <TurnBlock
+                  key={t.key}
+                  turn={t}
+                  cwd={cwd}
+                  sessionId={sessionId}
+                  stream={isLast && live ? stream : []}
+                  working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
+                  streamingTool={isLast && live ? streamingTool : undefined}
+                  // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
+                  onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
+                />
+              );
+            })}
+            {transcript.compacting && (
+              <div className="mb-3 px-1.5 text-[13px] text-shimmer">Compacting context…</div>
+            )}
+            {transcript.retry && progressing && (
+              <div className="mb-3 px-1.5 text-[13px] text-warning">
+                Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
+                {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
+              </div>
+            )}
+            {transcript.pendingAsks.map((ask) => (
+              <div key={ask.requestId} className="mb-3">
+                {ask.kind === "permission" ? (
+                  <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
+                ) : (
+                  <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
+                )}
+              </div>
+            ))}
+          </div>
         </div>
+        {promptMap && <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} />}
       </div>
       <div className="relative shrink-0">
         {/* Above the composer, never behind it: the composer is see-through. */}
