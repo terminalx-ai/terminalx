@@ -110,6 +110,10 @@ proposal; it is not accomplished by enabling this listener. A person-launched
 helper may support coordinated acceptance experiments, but is not the required
 seamless final onboarding and is not implemented as a product fallback here.
 
+The proposed chain is specified in [signed first-boot helper delivery](LOCAL-VM-HELPER-DELIVERY.md):
+a privileged offline seed of a root-only per-VM enrollment key and LaunchDaemon
+before first boot, then a MAC proof on this listener. It is a design, not source.
+
 ## Evidence scope
 
 Native Swift/Python and Rust/Swift fixtures use inherited Unix socketpairs,
