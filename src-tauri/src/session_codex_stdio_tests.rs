@@ -16,7 +16,7 @@ pub(super) fn observed_full_pipe() {
 
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control"] {
+    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -90,6 +90,44 @@ fn child_fixture() {
     } else { Outbound::connection("large input".repeat(65536)) };
     let launch = engine.launch.clone();
     rt.engine = Engine::CodexStdio(engine);
+    if case == "private-diagnostics" {
+        let path = rt.diagnostics_path();
+        let seq = rt.seq;
+        drop(rt);
+        let sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) };
+        sink.stderr_line("é".repeat(3000));
+        sink.stderr_line("must not exceed startup budget".into());
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["detail"]["text"].as_str().unwrap().len(), 4096);
+        assert_eq!(lines[0]["detail"]["truncated"], true);
+        let retained = std::fs::read(&path).unwrap();
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
+            engine.ready = true;
+        }
+        let ready_sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) };
+        ready_sink.stderr_line("model-work stderr is not captured".into());
+        assert_eq!(std::fs::read(&path).unwrap(), retained);
+        let mut rt = rt_arc.lock().unwrap();
+        assert_eq!(rt.seq, seq);
+        assert!(rt.recovery.is_none());
+        let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
+        engine.ready = false;
+        rt.child_pid = Some(42);
+        drop(rt);
+        let stale = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: Arc::new(()), startup_stderr_bytes: Mutex::new(0) };
+        stale.stderr_line("wrong launch".into());
+        stale.exited(42, Some(7));
+        assert_eq!(std::fs::read(&path).unwrap(), retained);
+        sink.exited(42, Some(7));
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["detail"], json!({"stage":"exit", "code":7, "stop_requested":false}));
+        assert_eq!(rt_arc.lock().unwrap().seq, seq);
+        return;
+    }
     if case == "stale-control" {
         let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
         engine.handle(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}}"#).unwrap();
@@ -100,7 +138,7 @@ fn child_fixture() {
         assert!(matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(e) if !e.blocked));
         return;
     }
-    let sink = Arc::new(GateSink { sink: StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone() },
+    let sink = Arc::new(GateSink { sink: StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) },
         entered, release: Mutex::new(gate), settled });
     // A complete buffered frame is held at the callback boundary. The process
     // exits naturally, so even a failed assertion leaves no long-lived child.

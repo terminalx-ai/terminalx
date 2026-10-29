@@ -105,6 +105,16 @@ pub fn diagnose(path: &std::path::Path, payload: &Payload) {
     }
 }
 
+/// Private transport evidence, never a chat event or a lifecycle signal.
+pub(crate) fn diagnose_codex_stdio(path: &std::path::Path, detail: serde_json::Value) {
+    let line = serde_json::json!({
+        "type": "codex_stdio_diagnostic",
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "detail": detail,
+    });
+    append_diagnostic(path, &line.to_string());
+}
+
 /// One stage of a composer prompt's way into a PTY-first CLI: `ready`,
 /// `body_written`, `submit_written`, then `accepted` or `unconfirmed`.
 ///

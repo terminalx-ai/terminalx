@@ -120,7 +120,7 @@ impl SessionManager {
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
         ];
-        let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone() });
+        let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) });
         let args = vec!["app-server".into(), "--listen".into(), "stdio://".into()];
         let child = self.host.spawn(&key_of(session, tab), SpawnSpec { program: &program, args: &args, cwd: Path::new(cwd), env: &env }, sink)?;
         let cancelled = {
@@ -306,7 +306,7 @@ fn ensure_local(prompt: &PromptText) -> Result<()> {
     Ok(())
 }
 
-struct StdioSink { manager: SessionManager, rt: Arc<Mutex<TabRuntime>>, launch: Arc<()> }
+struct StdioSink { manager: SessionManager, rt: Arc<Mutex<TabRuntime>>, launch: Arc<()>, startup_stderr_bytes: Mutex<usize> }
 impl StdioSink {
     fn current(&self, rt: &TabRuntime) -> bool { same_launch(rt, &self.launch) }
 }
@@ -319,7 +319,22 @@ impl Sink for StdioSink {
         let result = actions.and_then(|actions| self.manager.apply_codex_actions(&mut rt, actions));
         if let Err(error) = result { self.manager.codex_stdio_failed(&mut rt, &error); }
     }
-    fn stderr_line(&self, _line: String) { /* Protocol stderr is not lifecycle evidence. */ }
+    fn stderr_line(&self, line: String) {
+        let rt = self.rt.lock().unwrap();
+        if !self.current(&rt) || !matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.ready) { return; }
+        // Retain at most 4 KiB of startup stderr per launch, in the tab's
+        // existing private diagnostics only. Once the thread is ready, model
+        // work has begun and stderr is not captured. It never drives status.
+        let mut used = self.startup_stderr_bytes.lock().unwrap();
+        let remaining = 4096usize.saturating_sub(*used);
+        if remaining == 0 { return; }
+        let mut end = line.len().min(remaining);
+        while !line.is_char_boundary(end) { end -= 1; }
+        *used += end.max(1);
+        recovery::diagnose_codex_stdio(&rt.diagnostics_path(), serde_json::json!({
+            "stage": "startup_stderr", "text": &line[..end], "truncated": end < line.len(),
+        }));
+    }
     fn stdout_closed(&self, _end: crate::harness::host::ReaderEnd) {
         let mut rt = self.rt.lock().unwrap();
         if !self.current(&rt) { return; }
@@ -330,9 +345,12 @@ impl Sink for StdioSink {
             self.manager.codex_stdio_failed(&mut rt, &anyhow!("Codex output connection closed"));
         }
     }
-    fn exited(&self, pid: u32, _code: Option<i32>) {
+    fn exited(&self, pid: u32, code: Option<i32>) {
         let mut rt = self.rt.lock().unwrap();
         if !self.current(&rt) || rt.child_pid != Some(pid) { return; }
+        recovery::diagnose_codex_stdio(&rt.diagnostics_path(), serde_json::json!({
+            "stage": "exit", "code": code, "stop_requested": rt.stopping,
+        }));
         if let Engine::CodexStdio(engine) = &mut rt.engine { engine.exited = true; }
         rt.stdio_writer = None;
         self.manager.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
