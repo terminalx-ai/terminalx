@@ -128,7 +128,12 @@ export function reduceCompactionLifecycle(state: CompactionLifecycle, evidence: 
 
   const operations = { ...state.operations };
   for (const [key, operation] of Object.entries(operations)) {
-    if (operation.turnId !== evidence.turnId || operation.generation !== evidence.generation || operation.state !== "item_started") continue;
+    if (operation.turnId !== evidence.turnId || operation.generation !== evidence.generation) continue;
+    // An error alone cannot settle an item, but the owning turn's later
+    // failed/interrupted terminal event confirms that its work stopped.
+    const errorThenStopped = operation.state === "unknown" && operation.unknownReason === "turn_error"
+      && evidence.type === "turn_ended" && evidence.outcome !== "completed";
+    if (operation.state !== "item_started" && !errorThenStopped) continue;
     if (evidence.type === "turn_error") {
       // Errors identify a turn, not an item. Even a nonretrying error alone
       // cannot assert that this compaction failed.
@@ -138,7 +143,7 @@ export function reduceCompactionLifecycle(state: CompactionLifecycle, evidence: 
     } else {
       operations[key] = evidence.outcome === "completed"
         ? { ...operation, state: "unknown", unknownReason: "completion_missing", retrying: false }
-        : { ...operation, state: "stopped", stoppedBy: evidence.outcome, retrying: false };
+        : { ...operation, state: "stopped", stoppedBy: evidence.outcome, unknownReason: undefined, retrying: false };
     }
   }
   const endedTurns = evidence.type === "turn_ended" && !state.endedTurns.includes(evidence.turnId)
