@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::hooks::ControlEndpoint;
-use crate::session::{PendingPermission, SessionManager};
+use crate::recovery::RecoveryKind;
+use crate::session::{PendingPermission, SessionManager, WaitView};
 use crate::session_ops::{NewSession, NewTab};
 use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
@@ -916,22 +917,17 @@ impl ControlService {
             if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
                 return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
             }
-            let status = self.manager.status_of(&target.session.id, &target.tab.id);
-            let running = self.manager.is_running(&target.session.id, &target.tab.id);
-            let reason = match status {
-                TabStatus::Waiting => Some("permission"),
-                TabStatus::Completed => Some("stop"),
-                TabStatus::Idle if !running => Some("stopped"),
-                _ => None,
-            };
-            if let Some(reason) = reason {
-                return Ok(
-                    json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": reason, "status": status}),
-                );
+            let view = self.manager.wait_view(&target.session.id, &target.tab.id);
+            if let Some(end) = wait_end(&view) {
+                let mut result = json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": end.reason(), "status": view.status});
+                if let WaitEnd::Recovery(kind) = end {
+                    result["recovery"] = json!(kind);
+                }
+                return Ok(result);
             }
             if Instant::now() >= deadline {
                 return Ok(
-                    json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": "timeout", "status": status}),
+                    json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": "timeout", "status": view.status}),
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -1413,6 +1409,52 @@ fn target_from_session(session: SessionEntry) -> Result<Target, ControlError> {
     Ok(Target { session, tab })
 }
 
+/// Why `wait` returns before its timeout (#668).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitEnd {
+    /// A request someone can answer: `permissions list` shows it.
+    Permission,
+    /// The agent stopped on an error and waits for someone to deal with it.
+    Recovery(RecoveryKind),
+    /// The turn ended.
+    Stop,
+    /// Nothing is running.
+    Stopped,
+}
+
+impl WaitEnd {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Permission => "permission",
+            Self::Recovery(_) => "recovery",
+            Self::Stop => "stop",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// The same rules as a cloud tab's wait (`settledReason` in cloudControl.ts),
+/// on what the local runtime holds. A tab waiting on neither a request nor an
+/// error is waiting on a prompt only the agent's own terminal shows: nobody
+/// can answer it through `permissions`, so it ends nothing.
+fn wait_end(view: &WaitView) -> Option<WaitEnd> {
+    if view.asks {
+        return Some(WaitEnd::Permission);
+    }
+    if view.status == TabStatus::Waiting {
+        return view.recovery.map(WaitEnd::Recovery);
+    }
+    // A prompt behind the turn starts as soon as the turn ends.
+    if view.queued && view.running {
+        return None;
+    }
+    match view.status {
+        TabStatus::Completed => Some(WaitEnd::Stop),
+        TabStatus::Idle if !view.running => Some(WaitEnd::Stopped),
+        _ => None,
+    }
+}
+
 fn resolve_permission(
     pending: &[PendingPermission],
     selector: &str,
@@ -1789,6 +1831,60 @@ mod tests {
         assert_eq!(resolve_pipeline("0199dddd-4", None).unwrap().id, "0199dddd-4");
         assert_eq!(resolve_pipeline("0199dddd-4", Some(&project("/repo"))).unwrap_err().code, "not_found");
         assert_eq!(resolve_pipeline("eng-42", None).unwrap().id, "0199bbbb-2");
+    }
+
+    #[test]
+    fn wait_says_permission_only_for_a_request_someone_can_answer() {
+        let view = |status, asks, recovery, queued, running| WaitView { status, asks, recovery, queued, running };
+        let failed = Some(RecoveryKind::Failed);
+        for (seen, expected) in [
+            // A request held for an answer, whatever else the tab is doing.
+            (view(TabStatus::Waiting, true, None, false, true), Some(WaitEnd::Permission)),
+            (view(TabStatus::Waiting, true, failed, true, true), Some(WaitEnd::Permission)),
+            // An agent that stopped on an error is not a permission (#668).
+            (view(TabStatus::Waiting, false, failed, false, false), Some(WaitEnd::Recovery(RecoveryKind::Failed))),
+            (view(TabStatus::Waiting, false, Some(RecoveryKind::SignedOut), false, true), Some(WaitEnd::Recovery(RecoveryKind::SignedOut))),
+            // A prompt behind the error goes nowhere until it is dealt with.
+            (view(TabStatus::Waiting, false, failed, true, true), Some(WaitEnd::Recovery(RecoveryKind::Failed))),
+            // Waiting on the agent's own terminal prompt: nothing here to answer.
+            (view(TabStatus::Waiting, false, None, false, true), None),
+            (view(TabStatus::InProgress, false, None, false, true), None),
+            (view(TabStatus::Completed, false, None, false, true), Some(WaitEnd::Stop)),
+            // The prompt sent behind the turn that just ended has not started yet.
+            (view(TabStatus::Completed, false, None, true, true), None),
+            // With no agent left to take it, it never will.
+            (view(TabStatus::Completed, false, None, true, false), Some(WaitEnd::Stop)),
+            (view(TabStatus::Idle, false, None, false, false), Some(WaitEnd::Stopped)),
+            (view(TabStatus::Idle, false, None, false, true), None),
+        ] {
+            assert_eq!(wait_end(&seen), expected, "{seen:?}");
+        }
+        assert_eq!(
+            [WaitEnd::Permission, WaitEnd::Recovery(RecoveryKind::Failed), WaitEnd::Stop, WaitEnd::Stopped].map(WaitEnd::reason),
+            ["permission", "recovery", "stop", "stopped"]
+        );
+    }
+
+    #[test]
+    fn wait_names_the_error_a_tab_whose_agent_failed_to_start_stopped_on() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let tab = session.tabs[0].id.clone();
+        // The launch's log: its prompt, then the failure the agent stopped on.
+        let log = crate::store::log_path(&session.id, &tab).unwrap();
+        for (seq, payload) in [(1, json!({"type": "user_message", "text": "fix the login"})), (2, json!({"type": "recovery", "kind": "failed"}))] {
+            let event = json!({"id": format!("e{seq}"), "sessionId": session.id, "tabId": tab, "harness": "codex", "seq": seq, "ts": index::now(), "payload": payload});
+            crate::store::append_line(&log, &event.to_string()).unwrap();
+        }
+        let (service, _sink) = headless_service();
+        service.manager.load_events(&session.id, &tab).unwrap();
+        assert!(service.manager.pending_permissions().is_empty());
+        let waited = service.execute("wait", json!({"target": session.id, "timeoutSeconds": 1}), "w1").unwrap();
+        assert_eq!(waited, json!({"sessionId": session.id, "tabId": tab, "reason": "recovery", "recovery": "failed", "status": "waiting"}));
     }
 
     #[test]

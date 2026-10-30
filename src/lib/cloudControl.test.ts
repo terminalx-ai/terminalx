@@ -59,14 +59,17 @@ vi.mock("@/lib/cloudConnections", async (importOriginal) => {
   return {
     ...original,
     wakeCloudConnection: vi.fn(async () => ({ release: vi.fn() })),
-    retainCloudConnection: vi.fn(async () => {
+    retainCloudConnection: vi.fn(async (at?: { orgId: string; workspaceId: string }) => {
       const client = {
         get connection() {
           return { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage", you: mocks.runtime.you };
         },
         listAgentTabs: mocks.runtime.listAgentTabs,
       };
-      return { release: vi.fn(), client, current: () => ({ client }), state: () => client.connection, ended: () => false };
+      // The connection closes with its lease: what it listed is last known from then on, as `cloudSessions` marks it.
+      const { markCloudAgentsOffline } = await import("@/lib/cloudAgents");
+      const release = vi.fn(() => at && markCloudAgentsOffline({ organizationId: at.orgId, workspaceId: at.workspaceId }));
+      return { release, client, current: () => ({ client }), state: () => client.connection, ended: () => false };
     }),
     connectedCloudClient: vi.fn(() => null),
   };
@@ -90,6 +93,7 @@ const {
   LOOKUP_WITHIN_MS,
   SEND_LOOKUP_WITHIN_MS,
   WAIT_CHUNK_SECONDS,
+  settledReason,
 } = await import("./cloudControl");
 // The lifecycle refusal is the app's own sentence, whatever it currently says (PRO-73 rewords it).
 const { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON } = await import("@/lib/cloudCollab");
@@ -97,7 +101,8 @@ const catalog = await import("@/lib/cloudCatalog");
 const connections = await import("@/lib/cloudConnections");
 const newSession = await import("@/lib/cloudNewSession");
 const sessions = await import("@/lib/sessions");
-const { resetCloudAgents } = await import("@/lib/cloudAgents");
+const { applyLiveTabs, resetCloudAgents } = await import("@/lib/cloudAgents");
+const { mergeTabEvents } = await import("@/lib/agentEvents");
 const { resetCloudSessions } = await import("@/lib/cloudSessions");
 const { resetCloudDashboard } = await import("@/lib/cloudDashboard");
 const { resetCollab } = await import("@/lib/cloudCollab");
@@ -462,16 +467,143 @@ describe("wait", () => {
     expect(reads).toBeGreaterThanOrEqual(6);
   });
 
-  it("says a tab waits for a permission", async () => {
-    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: tabInfo("s1", "waiting") };
+  /** An event of the s1 tab's transcript. */
+  const said = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "s1-tab", seq, ts: seq, payload });
+  const ask = { requestId: "r1", toolName: "Bash", input: { command: "rm -rf build" }, options: ["allow", "deny"] };
+
+  it("says a tab waits for a permission only when there is one to answer", async () => {
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), pendingPermissions: [ask] } };
     resetCloudAgents();
     expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toMatchObject({ reason: "permission", status: "waiting" });
+
+    // Waiting with nothing to answer and no error behind it (#668): what it waits on is not shown here.
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: tabInfo("s1", "waiting") };
+    resetCloudAgents();
+    const { now, sleep } = fakeSleep();
+    expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 5 }, sleep, now)).toMatchObject({ reason: "timeout", status: "waiting" });
+  });
+
+  it("says a tab whose agent failed to start stopped on an error, and which one", async () => {
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), lastSeq: 3 }, events: [...events, said(3, { type: "recovery", kind: "failed" })] };
+    resetCloudAgents();
+    expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toEqual({
+      session: `cloud:${ORG}:ws-1:s1`,
+      tabId: "s1-tab",
+      reason: "recovery",
+      recovery: "failed",
+      status: "waiting",
+    });
+  });
+
+  it("reads why a connected tab waits from its checkpoint when its transcript is behind its status", async () => {
+    // Connected: the runtime's list says waiting, at an event this desktop has not been streamed.
+    vi.mocked(connections.connectedCloudClient).mockReturnValue({ connection: { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage" } } as never);
+    const scope = { organizationId: ORG, workspaceId: "ws-1" };
+    await handleCloudControl("read", { target: `cloud:${ORG}:ws-1:s1` });
+    applyLiveTabs(scope, [{ ...tabInfo("s1", "waiting"), lastSeq: 3 } as never]);
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_checkpoint") return base(command, args);
+      const projection = { v: 1, sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status: "waiting", process: "exited", truncated: false, followUps: [], updatedAt: 5 };
+      return { epoch: 1, version: 1, projection: { ...projection, events: [...events, said(3, { type: "recovery", kind: "usage_limit" })] } };
+    });
+    try {
+      const { now, sleep } = fakeSleep();
+      expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 30 }, sleep, now)).toMatchObject({ reason: "recovery", recovery: "usage_limit", status: "waiting" });
+    } finally {
+      vi.mocked(connections.connectedCloudClient).mockReturnValue(null);
+    }
+  });
+
+  it.each([
+    ["whose agent failed to start", "waiting", said(3, { type: "recovery", kind: "failed" })],
+    ["whose last turn has ended", "completed", said(3, { type: "turn_completed", status: "ok" })],
+  ])("waits right after a send to a tab %s for the new turn, and says when that ends", async (_, before, last) => {
+    const target = `cloud:${ORG}:ws-1:s1`;
+    const scope = { organizationId: ORG, workspaceId: "ws-1" };
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", before), lastSeq: 3 }, events: [...events, last] };
+    resetCloudAgents();
+    // The mailbox's receipts: none until the runtime has taken the message.
+    let taken = false;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_outbox_sync") return base(command, args);
+      return taken ? enqueued.map((_, index) => ({ clientCommandId: `cmd-${index + 1}`, tabId: "s1-tab", kind: "send", state: "applied", receipt: { queued: false }, createdAt: 1, updatedAt: 2 })) : [];
+    });
+    vi.useFakeTimers();
+    try {
+      await handleCloudControl("send", { target, text: "try again" });
+      // What the runtime does while the wait pauses, a step per pause.
+      const steps = [
+        // It takes the message. The receipt comes in; nothing newer of the tab has yet.
+        () => void (taken = true),
+        // Its new turn, and the status it reports with it.
+        () => {
+          mergeTabEvents("s1", "s1-tab", [said(4, { type: "user_message", text: "try again" }), said(5, { type: "recovery", kind: null })] as never);
+          applyLiveTabs(scope, [{ ...tabInfo("s1", "in_progress"), lastSeq: 5 } as never]);
+        },
+        () => {
+          mergeTabEvents("s1", "s1-tab", [said(6, { type: "assistant_message", text: "it starts now" }), said(7, { type: "turn_completed", status: "ok" })] as never);
+          applyLiveTabs(scope, [{ ...tabInfo("s1", "completed"), lastSeq: 7 } as never]);
+        },
+      ];
+      const sleep = async (ms: number) => {
+        steps.shift()?.();
+        await vi.advanceTimersByTimeAsync(ms);
+      };
+      expect(await waitForCloudTab({ target, timeoutSeconds: 30 }, sleep, () => Date.now())).toMatchObject({ reason: "stop", status: "completed" });
+      expect(steps).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("is refused to someone the workspace is not shared with", async () => {
     await list(OTHER, [item("ws-b", OTHER, { authority: "participate", you: { role: "none", canApprove: false, canManageShares: false } })]);
     expect(await refusal("wait", { target: `cloud:${OTHER}:ws-b:sb`, timeoutSeconds: 1 })).toMatchObject({ code: "forbidden" });
     expect(connections.retainCloudConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("why a wait ends (#668)", () => {
+  const info = (status: string, fields: Record<string, unknown> = {}) => ({ status, pendingPermissions: [], followUps: [], ...fields }) as never;
+  const said = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "s1-tab", seq, ts: seq, payload }) as never;
+  const ask = { requestId: "r1", toolName: "Bash", input: {}, options: ["allow", "deny"] };
+  const followUp = { clientCommandId: "cmd-9", text: "then the docs" };
+  const prompt = said(1, { type: "user_message", text: "fix the login" });
+  const failed = [prompt, said(2, { type: "recovery", kind: "failed" })];
+  const asked = said(2, { type: "questions_asked", requestId: "q1", toolUseId: "", questions: [] });
+
+  it("says permission only for what someone can answer", () => {
+    expect(settledReason(info("waiting", { pendingPermissions: [ask] }), [prompt], false)).toEqual({ reason: "permission" });
+    // A question the transcript shows open, before the runtime's list does.
+    expect(settledReason(info("in_progress"), [prompt, asked], false)).toEqual({ reason: "permission" });
+    // Answered, or gone with its turn: open no longer.
+    expect(settledReason(info("in_progress"), [prompt, asked, said(3, { type: "permission_decided", requestId: "q1", allowed: true, label: "Answered" })], false)).toBeNull();
+    expect(settledReason(info("completed"), [prompt, asked, said(3, { type: "turn_completed", status: "ok" })], false)).toEqual({ reason: "stop" });
+    // Nothing to answer and no error: not a permission, whatever the status says.
+    expect(settledReason(info("waiting"), [prompt], false)).toBeNull();
+    // A message on its way waits behind the request; the request is still someone's to answer.
+    expect(settledReason(info("waiting", { pendingPermissions: [ask] }), failed, true)).toEqual({ reason: "permission" });
+  });
+
+  it("names the error a waiting tab stopped on, unless a message to it is on its way", () => {
+    expect(settledReason(info("waiting"), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting"), [prompt, said(2, { type: "recovery", kind: "signed_out" })], false)).toEqual({ reason: "recovery", recovery: "signed_out" });
+    expect(settledReason(info("waiting"), failed, true)).toBeNull();
+    // A new prompt took the error away: a status that still says waiting is from before it.
+    expect(settledReason(info("waiting"), [...failed, said(3, { type: "user_message", text: "try again" }), said(4, { type: "recovery", kind: null })], false)).toBeNull();
+    // A follow-up held by the runtime goes nowhere until the error is dealt with.
+    expect(settledReason(info("waiting", { followUps: [followUp] }), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+  });
+
+  it("ends on a finished turn or a stopped tab only when nothing is queued behind it", () => {
+    expect(settledReason(info("completed"), [prompt], false)).toEqual({ reason: "stop" });
+    expect(settledReason(info("idle"), [prompt], false)).toEqual({ reason: "stopped" });
+    expect(settledReason(info("in_progress"), [prompt], false)).toBeNull();
+    expect(settledReason(info("completed"), [prompt], true)).toBeNull();
+    expect(settledReason(info("completed", { followUps: [followUp] }), [prompt], false)).toBeNull();
+    expect(settledReason(info("idle", { followUps: [followUp] }), [prompt], false)).toBeNull();
   });
 });
 

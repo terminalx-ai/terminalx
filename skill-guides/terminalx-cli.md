@@ -184,8 +184,24 @@ terminalx wait <session-or-tab> [--timeout <seconds>] --json
 
 `send` types into the live agent TUI through the composer path. `read` returns normalized,
 persisted transcript events; `--since` is exclusive and `--tail` is applied after it. `wait`
-returns when the turn completes, the agent asks for permission, the tab stops, or the timeout
-expires. Its result names the reason and includes the current tab status.
+returns when the turn completes, the agent asks for a decision, the agent stops on an error, the
+tab stops, or the timeout expires. Its result names the `reason` and includes the current tab
+`status`:
+
+- `permission`: the agent asks for a decision someone can give. `permissions list` shows it.
+- `recovery`: the agent stopped on an error and waits for someone to deal with it. Nothing is
+  in `permissions list`. `recovery` names the error: `failed`, `signed_out`, `usage_limit`,
+  `capacity`, `timeout`, `disconnected`, `delivery_unconfirmed` or `permission_expired`.
+  Read the transcript before sending again, and tell the person when only they can fix it
+  (for example, signing the agent in again).
+- `stop`: the turn ended.
+- `stopped`: nothing is running.
+- `timeout`: none of these before the timeout. A `status` of `waiting` with this reason means
+  the agent waits on a prompt that only its own terminal shows.
+
+A `wait` right after a `send` waits for the agent to take that message, so a turn that ended or
+failed before it is not reported. A message the agent holds behind an error it has stopped on
+still reports that `recovery`.
 
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
@@ -458,8 +474,10 @@ session has no tab there, or its first prompt failed to start one (the message s
   itself, so `--auto-merge` is refused, and the merge is the person's, from the issue page.
   The response carries `pipeline`, or `null` with the reason in `pipelineNote`.
 
-`wait` returns `reason`: `permission` (the agent asks for a decision), `stop` (the turn ended),
-`stopped` (nothing is running) or `timeout`. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
+`wait` returns `reason`: `permission` (the agent asks for a decision), `recovery` (the agent
+stopped on an error; `recovery` names it, as for a local tab), `stop` (the turn ended), `stopped`
+(nothing is running) or `timeout`. As for a local tab, a `wait` right after a `send` does not
+report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
 ### This guide

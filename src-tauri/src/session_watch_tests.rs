@@ -2190,3 +2190,36 @@ fn compaction_reconciliation_preserves_old_provider_after_conversation_switch() 
     let expected: serde_json::Value = serde_json::from_str(include_str!("../../src/lib/fixtures/compaction-provider-switch.json")).unwrap();
     assert_eq!(serde_json::to_value(normalized).unwrap(), expected);
 }
+
+/// What `terminalx wait` reads of a tab (#668). A request raised by the CLI's
+/// hook is one `permissions list` shows; an error the agent stopped on leaves
+/// the tab waiting too, with nothing in that list and the error to name.
+#[test]
+fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let manager = rig.manager.clone();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: json!({"cwd": "/workspace/app", "tool_name": "Bash", "tool_input": {"cmd": "rm -rf build"}}),
+    };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    let asked = rig.manager.wait_view(SESSION, TAB);
+    assert_eq!((asked.status, asked.asks, asked.recovery), (TabStatus::Waiting, true, None));
+    assert_eq!(rig.manager.pending_permissions().iter().map(|p| p.request_id.as_str()).collect::<Vec<_>>(), [request.as_str()]);
+    // Answered as `permissions allow` answers it.
+    rig.manager.respond_permission(SESSION, TAB, &request, "allow").unwrap();
+    worker.join().unwrap();
+    assert!(!rig.manager.wait_view(SESSION, TAB).asks);
+
+    // The agent stops on an error: the tab waits, with nothing to answer.
+    rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::Error { message: "unexpected failure".into(), fatal: true }, None);
+    let failed = rig.manager.wait_view(SESSION, TAB);
+    assert_eq!((failed.status, failed.asks, failed.recovery), (TabStatus::Waiting, false, Some(RecoveryKind::Failed)));
+    assert!(rig.manager.pending_permissions().is_empty());
+}
