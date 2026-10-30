@@ -199,6 +199,77 @@ impl Ready {
     pub fn settled(&self) -> bool {
         self.at.lock().unwrap().is_some_and(|at| at.elapsed() >= READY_SETTLE)
     }
+
+    /// Whether the CLI has said it is up at all.
+    pub fn arrived(&self) -> bool {
+        self.at.lock().unwrap().is_some()
+    }
+}
+
+// ------------------------------------------------------------ its last words
+
+/// How many of the last lines a CLI printed are kept as why it went.
+const LAST_WORDS_LINES: usize = 3;
+/// And how much of them, so a CLI that printed a wall does not fill the chat.
+const LAST_WORDS_CHARS: usize = 300;
+/// How far back to look: an exit message is the last thing printed.
+const LAST_WORDS_TAIL_BYTES: usize = 64 * 1024;
+
+/// The last lines a CLI printed, as plain text: what it said as it exited
+/// when it went before it ever got going (#663), such as Claude Code's "No
+/// conversation found with session ID". Terminal controls are dropped, and a
+/// cursor moved right or to a column stands for the spaces a TUI draws that
+/// way. `None` when it printed nothing to read.
+pub fn last_words(output: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(&output[output.len().saturating_sub(LAST_WORDS_TAIL_BYTES)..]);
+    let mut lines = vec![String::new()];
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let line = lines.last_mut().expect("there is always a line");
+        match c {
+            '\n' | '\r' => lines.push(String::new()),
+            '\t' => line.push(' '),
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    // Parameters and intermediates, then the final byte that
+                    // says what the sequence does.
+                    let done = chars.by_ref().find(|c| ('@'..='~').contains(c));
+                    match done {
+                        Some('C' | 'G') => line.push(' '),
+                        // To another row: what follows is another line.
+                        Some('A' | 'B' | 'E' | 'F' | 'H' | 'f') => lines.push(String::new()),
+                        _ => {}
+                    }
+                }
+                Some(']' | 'P' | '_' | '^') => {
+                    // A string, ended by BEL or ST (ESC \).
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                // A character set chosen: one more character names it.
+                Some('(' | ')' | '*' | '+' | '-' | '.' | '/') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            c if c.is_control() => {}
+            c => line.push(c),
+        }
+    }
+    let lines: Vec<String> = lines.iter().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|line| !line.is_empty()).collect();
+    let said = lines[lines.len().saturating_sub(LAST_WORDS_LINES)..].join(" ");
+    if said.is_empty() {
+        return None;
+    }
+    if said.chars().count() <= LAST_WORDS_CHARS {
+        return Some(said);
+    }
+    // The end is where the reason is; what is cut is the start.
+    let kept: String = said.chars().skip(said.chars().count() - LAST_WORDS_CHARS).collect();
+    Some(format!("…{}", kept.trim_start()))
 }
 
 // ------------------------------------------------------------------ the tail
@@ -898,6 +969,31 @@ mod tests {
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"second\n").unwrap();
         assert!(matches!(&tail.drain()[0], Payload::Status { text } if text == "second"));
+    }
+
+    /// What Claude Code 2.1.314 printed, byte for byte, when it was resumed on
+    /// a conversation it never wrote (#663), then exited.
+    const NO_CONVERSATION: &[u8] = b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[38;2;255;107;128mNo conversation found with session ID: 0d5e7c1a-1111-4222-8333-944455556666\x1b[39m\r\r\n\x1b[?25h\x1b(B\x0f\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[>4m\x1b[?1004l\x1b[?2031l\x1b[?2004l\x1b[<u\x1b[?25h\x1b7\x1b[r\x1b8\x1b]0;\x07\x1b[?25h";
+
+    #[test]
+    fn a_cli_s_last_words_are_what_it_printed_less_the_terminal_s_controls() {
+        assert_eq!(last_words(NO_CONVERSATION).as_deref(), Some("No conversation found with session ID: 0d5e7c1a-1111-4222-8333-944455556666"));
+        // A TUI that draws its spaces as cursor moves still reads as words.
+        assert_eq!(last_words(b"\x1b[2GQuick\x1b[8Gsafety\x1b[15Gcheck:").as_deref(), Some("Quick safety check:"));
+        // A login shell's chatter before the CLI is not its last words.
+        let shell_first = [b"Last login: Thu Oct 29\r\n".as_slice(), b"zsh: warning\r\n", b"Error: unknown option '--frob'\r\n", b"Usage: claude [options]\r\n", b"Run claude --help for help\r\n"].concat();
+        assert_eq!(last_words(&shell_first).as_deref(), Some("Error: unknown option '--frob' Usage: claude [options] Run claude --help for help"));
+        // Nothing but controls is nothing said.
+        assert_eq!(last_words(b"\x1b[?25h\x1b]0;title\x07\r\n\r\n"), None);
+        assert_eq!(last_words(b""), None);
+    }
+
+    #[test]
+    fn a_long_last_word_keeps_its_end_where_the_reason_is() {
+        let long = format!("{} the reason", "x".repeat(LAST_WORDS_CHARS * 2));
+        let said = last_words(long.as_bytes()).unwrap();
+        assert!(said.starts_with('…') && said.ends_with("the reason"), "{said}");
+        assert_eq!(said.chars().count(), LAST_WORDS_CHARS + 1);
     }
 
     #[test]

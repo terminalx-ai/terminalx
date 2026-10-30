@@ -15,6 +15,13 @@
 
 ### Chat
 
+- Restart Claude Code tabs whose conversation the CLI never wrote (opened and
+  never prompted, or a first prompt that never reached it) under the same id
+  instead of resuming a conversation that does not exist, which exited at once.
+  Send a Continue in New Session handoff again, ahead of the next prompt, when
+  the CLI never took it. Offer any other prompt the agent never received with
+  **Resend last prompt**, images included. Say why a CLI that exits as it
+  starts went, from what it printed. (#663)
 - Recognize completed Codex context compaction and preserve scoped compaction
   history and status across conversation changes. Add a default-off experimental
   owned-stdio connection for explicitly created new Codex sessions, with confirmed

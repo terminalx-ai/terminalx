@@ -165,6 +165,10 @@ impl Sessions {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
     }
 
+    pub fn resend_unsent(&self, session: &str, tab: &str) -> Result<SendOutcome> {
+        self.tab("resendUnsent", session, tab, json!({}))
+    }
+
     pub fn prepare_continuation(&self, session: &str, tab: &str) -> Result<crate::continuation::Context> {
         self.tab("prepareContinuation", session, tab, json!({}))
     }

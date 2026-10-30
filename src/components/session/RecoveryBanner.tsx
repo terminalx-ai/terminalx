@@ -21,7 +21,7 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSignIn }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSignIn, onResend }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -44,6 +44,8 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   onContinue: () => void;
   /** Signed out: sign the agent in again, where it can be (its terminal, or a shell running its login). */
   onSignIn?: () => void;
+  /** Unsent: send the last prompt the agent never received again, as it was sent. */
+  onResend?: () => void;
 }) {
   const now = useCountdownNow([kind === "usage_limit" ? limit?.resetsAt ?? null : null]);
   if (!kind && !waiting) return null;
@@ -66,7 +68,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   return <section aria-label="Session recovery" role="status" className={placement === "composer"
     ? "mx-auto mb-2 max-h-[50vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 overflow-auto rounded-xl border border-warning/30 bg-warning/10 p-3 text-xs"
     : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
-    <p className="font-medium">{asks.length ? "Waiting for input" : kind === "usage_limit" ? "Usage limit reached" : kind === "signed_out" ? "Signed out" : kind ? "Needs attention" : "Waiting for input"}</p>
+    <p className="font-medium">{asks.length ? "Waiting for input" : kind === "usage_limit" ? "Usage limit reached" : kind === "signed_out" ? "Signed out" : kind === "unsent" ? "Prompt not received" : kind ? "Needs attention" : "Waiting for input"}</p>
     <p className="mt-1">{kind ? RECOVERY_MESSAGES[kind] : asks.length ? "Review the pending request to continue." : "Check the terminal for a pending decision, or stop the session."}</p>
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
@@ -74,8 +76,10 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
       {kind === "signed_out" && onSignIn && !asks.length && <Button size="sm" disabled={busy} onClick={onSignIn}>Sign in</Button>}
+      {/* The agent never had the prompt, so there is no turn to retry: the prompt itself is what goes again. */}
+      {kind === "unsent" && onResend && !asks.length && <Button size="sm" disabled={busy} onClick={onResend}>Resend last prompt</Button>}
       {/* Signed out, a retry only fails again until the agent is signed in: it comes second, for after. */}
-      {kind && kind !== "usage_limit" && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && !asks.length && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{kind === "signed_out" ? "Retry" : "Retry safely"}</Button>}
+      {kind && kind !== "usage_limit" && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && kind !== "unsent" && !asks.length && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{kind === "signed_out" ? "Retry" : "Retry safely"}</Button>}
       {offerModels && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
         <option value="" disabled>Choose another model</option>
         {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}

@@ -343,6 +343,21 @@ export function TabView({
     finally { recoveryLock.current = false; setRecovering(false); }
   };
 
+  // The agent never received the last prompt (#663): it goes again as it was sent, images and all.
+  const resend = async () => {
+    if (recoveryLock.current || !backend.resendUnsent) return;
+    recoveryLock.current = true;
+    setRecovering(true);
+    try {
+      const out = await backend.resendUnsent(tab.id);
+      setStopped(false);
+      for (const ev of out.events) applyEvent(ev);
+      if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
+      setError(null);
+    } catch (e) { setError(safeError(e)); }
+    finally { recoveryLock.current = false; setRecovering(false); }
+  };
+
   // Editors, dialogs and pickers own Escape before the agent does, and with nothing running the key is nobody's.
   const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane");
   // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
@@ -439,7 +454,7 @@ export function TabView({
   const banner = (placement: "top" | "composer") => (
     <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
-        onRetry={retry} onStop={stop} onSignIn={signInAgent} onContinue={() => {
+        onRetry={retry} onStop={stop} onSignIn={signInAgent} onResend={backend.resendUnsent && !gate?.blocked ? resend : undefined} onContinue={() => {
           if (recoveryLock.current) return;
           recoveryLock.current = true;
           setRecovering(true);

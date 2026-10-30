@@ -53,6 +53,27 @@ The rest of the command line is `--model`, `--effort`, `--permission-mode`
 (`--dangerously-skip-permissions` for bypass, the default launch mode),
 `--name` (so the tab is recognisable in the CLI's own picker) and `--settings`.
 
+The CLI writes the transcript only once it takes a prompt, so an id is not a
+conversation (#663). A tab opened and never prompted, or one whose first
+prompt never reached the CLI, holds an id with no file, and `--resume` of it
+exits at once ("No conversation found with session ID", probed on 2.1.314).
+So a tab resumes only a transcript that exists. Without one it starts again
+with `--session-id <same id>`, and a fork is made from its parent again while
+the parent's file exists. What starting afresh cost is read from the tab's own
+log (`session_unsent.rs`): nothing when nothing was said; the prompts the CLI
+never took when its agent never answered; the conversation, said as "no longer
+on this machine", when it answered and the file has gone since. A prompt that
+carried another conversation's context in (`TabEntry.continuation`) is sent
+again at once, ahead of whatever prompt relaunched the tab: prompts reach a
+pane in the order they were sent (`PaneWriter`). Any other prompt the CLI
+never took is offered back with the recovery banner's **Resend last prompt**,
+which sends it as it was sent, images included.
+
+A CLI that exits before it said it was up, within 15 s of being started, is
+named with its last printed lines ("Claude Code exited: No conversation found
+…"), read from what that program printed and not from what the pane held
+before it. A CLI the reader quits after it was up is only said to have exited.
+
 The pane's environment carries `RACCOON_TAB_ID`, `RACCOON_SESSION_ID`,
 `RACCOON_HOOK_SOCKET` and `RACCOON_HOOK_TOKEN`, all of which the CLI passes on
 to every hook it runs. It also carries `TERMINALX_NEXT_SOCKET` and
@@ -649,7 +670,9 @@ the reader's copy is left exactly as it was. Resuming a copied rollout was
 verified against the installed CLI — the conversation replays in full, so the
 sqlite thread history is not needed. If the id cannot be found in either home
 the tab says so in the chat and starts a new conversation, because
-`codex resume <unknown>` fails the launch outright.
+`codex resume <unknown>` fails the launch outright. That, and a tab whose
+first prompt Codex never took (it has no id until one does), go through the
+same reading of the tab's log as a Claude tab with no transcript.
 
 ### The rollout is the conversation
 

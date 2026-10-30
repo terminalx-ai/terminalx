@@ -45,6 +45,9 @@ struct Pane {
     /// only sign that the program has finished drawing and is listening.
     last_output: Arc<Mutex<Option<Instant>>>,
     scrollback: Arc<Mutex<VecDeque<u8>>>,
+    /// How much of the scrollback this pane's own program printed. The rest
+    /// came before it: what the pane's last program left (`respawn`).
+    printed: Arc<AtomicU64>,
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
@@ -347,7 +350,18 @@ fn wait_for_view(slot: &TapSlot, exited: &AtomicBool) {
 }
 
 fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
+    push_scrollback(&mut scrollback.lock().unwrap(), bytes);
+}
+
+/// Output of the pane's own program, counted under the scrollback's lock so
+/// that `program_output` never sees the one without the other.
+fn append_own_output(scrollback: &Mutex<VecDeque<u8>>, printed: &AtomicU64, bytes: &[u8]) {
     let mut scrollback = scrollback.lock().unwrap();
+    push_scrollback(&mut scrollback, bytes);
+    printed.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+}
+
+fn push_scrollback(scrollback: &mut VecDeque<u8>, bytes: &[u8]) {
     if bytes.len() >= SCROLLBACK_BYTES {
         scrollback.clear();
         scrollback.extend(bytes[bytes.len() - SCROLLBACK_BYTES..].iter().copied());
@@ -459,6 +473,7 @@ impl Terminals {
         let last_output = Arc::new(Mutex::new(None));
         let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
         append_scrollback(&scrollback, &printed);
+        let own = Arc::new(AtomicU64::new(0));
         let tap = self.tap_slot(id);
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
@@ -470,6 +485,7 @@ impl Terminals {
             let alive = alive.clone();
             let last_output = last_output.clone();
             let scrollback = scrollback.clone();
+            let own = own.clone();
             let emitted = self.emitted.clone();
             let tap = tap.clone();
             let exited = exited.clone();
@@ -498,7 +514,7 @@ impl Terminals {
                         // bytes exactly once: in the scrollback it is handed,
                         // or from its tap.
                         let mut views = tap.0.lock().unwrap();
-                        append_scrollback(&scrollback, acc);
+                        append_own_output(&scrollback, &own, acc);
                         views.0.retain_mut(|view| {
                             let received = (view.tap)(acc);
                             if received {
@@ -573,7 +589,7 @@ impl Terminals {
             })?;
         }
         let writer = Arc::new(Mutex::new(writer));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, explicit_command, alive, group, last_output, scrollback, cwd: cwd.to_string(), created: crate::store::index::now() });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, explicit_command, alive, group, last_output, scrollback, printed: own, cwd: cwd.to_string(), created: crate::store::index::now() });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -771,6 +787,17 @@ impl Terminals {
             Some(scrollback) => Some(scrollback.lock().unwrap().iter().copied().collect()),
             None => self.retained.lock().unwrap().get(id).map(|history| history.data.clone()),
         }
+    }
+
+    /// What the pane's own program printed, as far as the scrollback still
+    /// holds it: not what an earlier program in the same pane left there.
+    /// Still there once the program has exited, until the pane is replaced.
+    pub fn program_output(&self, id: &str) -> Option<Vec<u8>> {
+        let (scrollback, printed) = self.panes.lock().unwrap().get(id).map(|pane| (pane.scrollback.clone(), pane.printed.clone()))?;
+        let scrollback = scrollback.lock().unwrap();
+        // Counted under this lock (`append_own_output`), so the two agree.
+        let own = usize::try_from(printed.load(Ordering::Relaxed)).unwrap_or(usize::MAX).min(scrollback.len());
+        Some(scrollback.iter().skip(scrollback.len() - own).copied().collect())
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
@@ -1608,6 +1635,43 @@ mod tests {
         assert!(all.find("last-words").unwrap() < all.find("shell-prompt").unwrap(), "{all:?}");
         assert!(terminals.is_running("pane"));
         assert!(terminals.opened("pane").unwrap().1 >= created);
+        terminals.kill_all();
+    }
+
+    /// Why an agent's CLI exited is in what it printed, not in what the pane
+    /// held before it (#663).
+    #[test]
+    fn what_a_program_printed_is_told_apart_from_what_it_was_handed() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        let (watching, watched) = collector();
+        terminals.attach("main", "pane", "watching", watching);
+        pane(&terminals, &sink, &dir, "pane", "sh -c 'printf earlier-program'");
+        read_until(&watched, "earlier-program");
+        let gone = |terminals: &Terminals| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while terminals.is_running("pane") {
+                assert!(Instant::now() < deadline, "the program never exited");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        gone(&terminals);
+        // The login shell the pane runs it from may say something first.
+        let said = |terminals: &Terminals| String::from_utf8(terminals.program_output("pane").unwrap()).unwrap();
+        assert!(said(&terminals).ends_with("earlier-program"), "{:?}", said(&terminals));
+
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'printf its-own-words; exit 1'"), env: &[] };
+        terminals.respawn(sink.clone(), "pane", spec).unwrap();
+        read_until(&watched, "its-own-words");
+        gone(&terminals);
+        // The scrollback has both; the program said only its own, and it is
+        // still there to be read once the program has gone.
+        let all = String::from_utf8(terminals.read_output("pane").unwrap()).unwrap();
+        assert!(all.contains("earlier-program") && all.contains("its-own-words"), "{all:?}");
+        let own = said(&terminals);
+        assert!(own.ends_with("its-own-words") && !own.contains("earlier-program"), "{own:?}");
+        assert!(terminals.program_output("no-such-pane").is_none());
         terminals.kill_all();
     }
 

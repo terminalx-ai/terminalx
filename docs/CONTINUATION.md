@@ -83,6 +83,14 @@ ownership across pipeline preparation, startup, archiving and launch retries,
 including edits that return to identical text.
 Users can inspect the chat/terminal before retrying an uncertain delivery.
 
+The tab records which prompt was its continuation (`TabEntry.continuation`,
+the prompt's `seq`). The prepared prompt is the destination's whole brief, so
+if the CLI never took it (a submit lost on the way in, an app or machine
+restart before delivery), the tab's next launch finds no conversation file and
+sends that prompt again by itself, ahead of any prompt that relaunched the
+tab. The chat keeps the one message where it was sent, and a status line says
+the context is being sent again (#663, `docs/PTY-FIRST.md`).
+
 ## Verification
 
 - `pnpm check` covers selection, availability, cancellation, resetting the
