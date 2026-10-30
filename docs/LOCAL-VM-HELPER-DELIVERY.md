@@ -70,9 +70,12 @@ So an unprivileged seed would leave a LaunchDaemon that launchd refuses. Its
 commonly the first account Setup Assistant creates. Exclusivity needs a
 privileged host write followed by an ownership-enabled readback.
 
-## Decision required: the privileged host step
+## Decision: the privileged host step
 
-TerminalX ships no privileged host component today. Choose one:
+TerminalX ships no privileged host component today. On 2026-10-30 the user
+selected **Option A** as the architectural target. Its validation is planned in
+[the helper validation plan](LOCAL-VM-HELPER-VALIDATION-PLAN.md); nothing in it
+has run. The options considered were:
 
 | Option | Mechanism | Cost |
 | --- | --- | --- |
@@ -189,7 +192,9 @@ intact, or anything resembling hardware attestation.
 
 ## Facts the first coordinated acceptance must establish
 
-Each is unverified here and blocks Option A:
+Each is unverified here and blocks Option A. The
+[validation plan](LOCAL-VM-HELPER-VALIDATION-PLAN.md) assigns each one a run,
+evidence and pass/fail criteria (G1–G6 there):
 
 1. A restored macOS26 Data volume can be attached and mounted on the host before
    first boot, unencrypted. Upstream's `tahoe` preset implies this; it is
