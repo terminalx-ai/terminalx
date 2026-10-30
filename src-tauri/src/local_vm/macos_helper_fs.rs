@@ -162,10 +162,25 @@ impl Directory {
         self.check_file(value, &file, private)?;
         Ok(bytes)
     }
+    /// Exclusive, and atomic for readers: the bytes are written and synced
+    /// under a unique temporary name, then linked to `value` (which fails if it
+    /// exists) and the temporary name is removed. A concurrent reader sees no
+    /// file or the complete one, never a prefix.
     pub fn write_new(&self, value: &str, bytes: &[u8]) -> Result<()> {
-        let mut file = self.open_file(value, true, true, true)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        let target = name(value)?;
+        let temporary = format!(".{value}.{}.partial", uuid::Uuid::new_v4());
+        let staged = name(&temporary)?;
+        let mut file = self.open_file(&temporary, true, true, true)?;
+        let linked = file.write_all(bytes).and_then(|_| file.sync_all()).and_then(|_| {
+            // SAFETY: both names are single components under this directory descriptor.
+            let code = unsafe {
+                libc::linkat(self.file.as_raw_fd(), staged.as_ptr(), self.file.as_raw_fd(), target.as_ptr(), 0)
+            };
+            if code == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+        });
+        // SAFETY: removes only the temporary name this call created.
+        unsafe { libc::unlinkat(self.file.as_raw_fd(), staged.as_ptr(), 0) };
+        linked?;
         self.check_file(value, &file, true)?;
         self.file.sync_all()?;
         Ok(())
