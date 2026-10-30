@@ -697,21 +697,22 @@ const WAIT_CHECKPOINT_MS = 5_000;
  */
 export const WAIT_CHUNK_SECONDS = 30;
 
-/** Why a wait ends: someone can answer the agent, it stopped on an error, its turn ended, or nothing runs. */
-export type WaitSettled = { reason: "permission" } | { reason: "recovery"; recovery: RecoveryKind } | { reason: "stop" } | { reason: "stopped" };
+/**
+ * Why a wait ends: someone can answer the agent, it stopped on an error, it
+ * asks in its own terminal, its turn ended, or nothing runs.
+ */
+export type WaitSettled = { reason: "permission" } | { reason: "recovery"; recovery: RecoveryKind } | { reason: "terminal" } | { reason: "stop" } | { reason: "stopped" };
 
-/** A question the agent asked in this turn that is not answered, withdrawn or lapsed yet. */
-function questionOpen(events: AgentEvent[]): boolean {
-  const open = new Set<string>();
-  for (const event of events) {
-    if (event.subagent) continue;
-    const p = event.payload;
-    if (p.type === "questions_asked") open.add(p.requestId);
-    else if (p.type === "permission_decided") open.delete(p.requestId);
-    // A question does not outlive its turn.
-    else if (p.type === "turn_completed" || (p.type === "user_message" && !p.queued)) open.clear();
-  }
-  return open.size > 0;
+/** The newest committed event of a transcript, as `lastSeq` finds its seq. */
+function lastCommitted(events: AgentEvent[]): AgentEvent | undefined {
+  for (let i = events.length - 1; i >= 0; i--) if (events[i].payload.type !== "delta") return events[i];
+  return undefined;
+}
+
+/** A prompt typed in, an error taken back, or a request decided: the turn has moved on from any wait before it. */
+function movesOn(event: AgentEvent | undefined): boolean {
+  const p = event?.payload;
+  return (p?.type === "user_message" && !p.queued) || (p?.type === "recovery" && !p.kind) || p?.type === "permission_decided";
 }
 
 /**
@@ -719,23 +720,28 @@ function questionOpen(events: AgentEvent[]): boolean {
  * is on its way.
  *
  * - "permission" only for what someone can answer: a request the runtime
- *   holds, or a question the transcript shows open.
- * - A tab left waiting by an error is "recovery", with its kind: what the
- *   window calls "Needs attention".
- * - Waiting on nothing this desktop can see ends nothing: it is a status from
- *   before the transcript moved on, or a prompt only the agent's own terminal
- *   shows.
+ *   holds. It holds an agent's questions as it holds its permission requests.
+ * - A waiting tab is judged only on a transcript that has reached its status:
+ *   one behind may tell of an earlier stop. An error the agent stopped on is
+ *   "recovery", with its kind (the window's "Needs attention"); no error and
+ *   nothing to answer is a prompt only the agent's own terminal shows.
+ * - A status the transcript has moved past (a tab that streams here hears of
+ *   an event before the status that follows it) ends nothing.
  */
-export function settledReason(info: Pick<AgentTabInfo, "status" | "pendingPermissions" | "followUps">, events: AgentEvent[], onItsWay: boolean): WaitSettled | null {
-  if (info.pendingPermissions.length > 0 || questionOpen(events)) return { reason: "permission" };
+export function settledReason(info: Pick<AgentTabInfo, "status" | "pendingPermissions" | "followUps" | "lastSeq">, events: AgentEvent[], onItsWay: boolean): WaitSettled | null {
+  if (info.pendingPermissions.length > 0) return { reason: "permission" };
   // A message still on its way is work to wait for: what the tab says now is from before it.
   if (onItsWay) return null;
+  const last = lastCommitted(events);
+  const seen = last?.seq ?? 0;
   if (info.status === "waiting") {
+    if (seen < info.lastSeq) return null;
     const recovery = recoveryFromEvents(events);
-    return recovery ? { reason: "recovery", recovery } : null;
+    if (recovery) return { reason: "recovery", recovery };
+    return seen === info.lastSeq && !movesOn(last) ? { reason: "terminal" } : null;
   }
-  // A follow-up the runtime holds starts as soon as the turn ends.
-  if (info.followUps.length > 0) return null;
+  // A follow-up the runtime holds starts as soon as the turn ends, and a prompt after the status starts a turn of its own.
+  if (info.followUps.length > 0 || (last?.payload.type === "user_message" && !last.payload.queued)) return null;
   if (info.status === "completed") return { reason: "stop" };
   if (info.status === "idle") return { reason: "stopped" };
   return null;

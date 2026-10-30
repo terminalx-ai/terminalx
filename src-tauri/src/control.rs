@@ -1416,6 +1416,9 @@ enum WaitEnd {
     Permission,
     /// The agent stopped on an error and waits for someone to deal with it.
     Recovery(RecoveryKind),
+    /// The agent asks in its own terminal, which `permissions list` does not
+    /// show: its own permission prompt, or a CLI started by hand.
+    Terminal,
     /// The turn ended.
     Stop,
     /// Nothing is running.
@@ -1427,6 +1430,7 @@ impl WaitEnd {
         match self {
             Self::Permission => "permission",
             Self::Recovery(_) => "recovery",
+            Self::Terminal => "terminal",
             Self::Stop => "stop",
             Self::Stopped => "stopped",
         }
@@ -1434,15 +1438,15 @@ impl WaitEnd {
 }
 
 /// The same rules as a cloud tab's wait (`settledReason` in cloudControl.ts),
-/// on what the local runtime holds. A tab waiting on neither a request nor an
-/// error is waiting on a prompt only the agent's own terminal shows: nobody
-/// can answer it through `permissions`, so it ends nothing.
+/// on what the local runtime holds. Its status is never behind its
+/// transcript, so a tab waiting on neither a request nor an error is waiting
+/// on its own terminal.
 fn wait_end(view: &WaitView) -> Option<WaitEnd> {
     if view.asks {
         return Some(WaitEnd::Permission);
     }
     if view.status == TabStatus::Waiting {
-        return view.recovery.map(WaitEnd::Recovery);
+        return Some(view.recovery.map_or(WaitEnd::Terminal, WaitEnd::Recovery));
     }
     // A prompt behind the turn starts as soon as the turn ends.
     if view.queued && view.running {
@@ -1846,8 +1850,9 @@ mod tests {
             (view(TabStatus::Waiting, false, Some(RecoveryKind::SignedOut), false, true), Some(WaitEnd::Recovery(RecoveryKind::SignedOut))),
             // A prompt behind the error goes nowhere until it is dealt with.
             (view(TabStatus::Waiting, false, failed, true, true), Some(WaitEnd::Recovery(RecoveryKind::Failed))),
-            // Waiting on the agent's own terminal prompt: nothing here to answer.
-            (view(TabStatus::Waiting, false, None, false, true), None),
+            // Waiting on the agent's own terminal prompt: said, without a request to look for.
+            (view(TabStatus::Waiting, false, None, false, true), Some(WaitEnd::Terminal)),
+            (view(TabStatus::Waiting, false, None, true, true), Some(WaitEnd::Terminal)),
             (view(TabStatus::InProgress, false, None, false, true), None),
             (view(TabStatus::Completed, false, None, false, true), Some(WaitEnd::Stop)),
             // The prompt sent behind the turn that just ended has not started yet.
@@ -1860,8 +1865,8 @@ mod tests {
             assert_eq!(wait_end(&seen), expected, "{seen:?}");
         }
         assert_eq!(
-            [WaitEnd::Permission, WaitEnd::Recovery(RecoveryKind::Failed), WaitEnd::Stop, WaitEnd::Stopped].map(WaitEnd::reason),
-            ["permission", "recovery", "stop", "stopped"]
+            [WaitEnd::Permission, WaitEnd::Recovery(RecoveryKind::Failed), WaitEnd::Terminal, WaitEnd::Stop, WaitEnd::Stopped].map(WaitEnd::reason),
+            ["permission", "recovery", "terminal", "stop", "stopped"]
         );
     }
 

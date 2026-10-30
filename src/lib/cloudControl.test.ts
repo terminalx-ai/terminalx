@@ -476,11 +476,29 @@ describe("wait", () => {
     resetCloudAgents();
     expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toMatchObject({ reason: "permission", status: "waiting" });
 
-    // Waiting with nothing to answer and no error behind it (#668): what it waits on is not shown here.
+    // Waiting with nothing to answer and no error behind it (#668): the agent asks in its own terminal.
     cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: tabInfo("s1", "waiting") };
     resetCloudAgents();
+    expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toEqual({ session: `cloud:${ORG}:ws-1:s1`, tabId: "s1-tab", reason: "terminal", status: "waiting" });
+  });
+
+  it("waits for a transcript behind a waiting tab's status before saying why it waits", async () => {
+    // The status is from after the failure this desktop holds: the agent tried again and stopped once more.
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), lastSeq: 5 }, events: [...events, said(3, { type: "recovery", kind: "failed" })] };
+    resetCloudAgents();
+    let checkpoints = 0;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_checkpoint") return base(command, args);
+      // Its upload is behind at first, then catches up.
+      if (++checkpoints < 3) return null;
+      const projection = { v: 1, sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status: "waiting", process: "exited", truncated: false, followUps: [], updatedAt: 5 };
+      const later = [said(4, { type: "user_message", text: "try again" }), said(5, { type: "recovery", kind: "signed_out" })];
+      return { epoch: 1, version: 1, projection: { ...projection, events: [...events, said(3, { type: "recovery", kind: "failed" }), ...later] } };
+    });
     const { now, sleep } = fakeSleep();
-    expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 5 }, sleep, now)).toMatchObject({ reason: "timeout", status: "waiting" });
+    expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 30 }, sleep, now)).toMatchObject({ reason: "recovery", recovery: "signed_out" });
+    expect(checkpoints).toBe(3);
   });
 
   it("says a tab whose agent failed to start stopped on an error, and which one", async () => {
@@ -566,44 +584,59 @@ describe("wait", () => {
 });
 
 describe("why a wait ends (#668)", () => {
-  const info = (status: string, fields: Record<string, unknown> = {}) => ({ status, pendingPermissions: [], followUps: [], ...fields }) as never;
+  /** The runtime's word on the tab, reported when its transcript reached `lastSeq`. */
+  const info = (status: string, lastSeq: number, fields: Record<string, unknown> = {}) => ({ status, lastSeq, pendingPermissions: [], followUps: [], ...fields }) as never;
   const said = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "s1-tab", seq, ts: seq, payload }) as never;
   const ask = { requestId: "r1", toolName: "Bash", input: {}, options: ["allow", "deny"] };
   const followUp = { clientCommandId: "cmd-9", text: "then the docs" };
   const prompt = said(1, { type: "user_message", text: "fix the login" });
+  const replied = [prompt, said(2, { type: "assistant_message", text: "Looking at it." })];
   const failed = [prompt, said(2, { type: "recovery", kind: "failed" })];
-  const asked = said(2, { type: "questions_asked", requestId: "q1", toolUseId: "", questions: [] });
+  const retried = [...failed, said(3, { type: "user_message", text: "try again" }), said(4, { type: "recovery", kind: null })];
 
-  it("says permission only for what someone can answer", () => {
-    expect(settledReason(info("waiting", { pendingPermissions: [ask] }), [prompt], false)).toEqual({ reason: "permission" });
-    // A question the transcript shows open, before the runtime's list does.
-    expect(settledReason(info("in_progress"), [prompt, asked], false)).toEqual({ reason: "permission" });
-    // Answered, or gone with its turn: open no longer.
-    expect(settledReason(info("in_progress"), [prompt, asked, said(3, { type: "permission_decided", requestId: "q1", allowed: true, label: "Answered" })], false)).toBeNull();
-    expect(settledReason(info("completed"), [prompt, asked, said(3, { type: "turn_completed", status: "ok" })], false)).toEqual({ reason: "stop" });
-    // Nothing to answer and no error: not a permission, whatever the status says.
-    expect(settledReason(info("waiting"), [prompt], false)).toBeNull();
+  it("says permission only for a request the runtime holds", () => {
+    expect(settledReason(info("waiting", 2, { pendingPermissions: [ask] }), replied, false)).toEqual({ reason: "permission" });
     // A message on its way waits behind the request; the request is still someone's to answer.
-    expect(settledReason(info("waiting", { pendingPermissions: [ask] }), failed, true)).toEqual({ reason: "permission" });
+    expect(settledReason(info("waiting", 2, { pendingPermissions: [ask] }), failed, true)).toEqual({ reason: "permission" });
+    // A question this desktop's copy shows open, answered elsewhere since: the runtime holds no request.
+    const asked = [...replied, said(3, { type: "questions_asked", requestId: "q1", toolUseId: "", questions: [] })];
+    expect(settledReason(info("in_progress", 5), asked, false)).toBeNull();
+    expect(settledReason(info("completed", 5), asked, false)).toEqual({ reason: "stop" });
   });
 
-  it("names the error a waiting tab stopped on, unless a message to it is on its way", () => {
-    expect(settledReason(info("waiting"), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
-    expect(settledReason(info("waiting"), [prompt, said(2, { type: "recovery", kind: "signed_out" })], false)).toEqual({ reason: "recovery", recovery: "signed_out" });
-    expect(settledReason(info("waiting"), failed, true)).toBeNull();
-    // A new prompt took the error away: a status that still says waiting is from before it.
-    expect(settledReason(info("waiting"), [...failed, said(3, { type: "user_message", text: "try again" }), said(4, { type: "recovery", kind: null })], false)).toBeNull();
+  it("names the error a waiting tab stopped on, from a transcript that has reached its status", () => {
+    expect(settledReason(info("waiting", 2), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting", 2), [prompt, said(2, { type: "recovery", kind: "signed_out" })], false)).toEqual({ reason: "recovery", recovery: "signed_out" });
     // A follow-up held by the runtime goes nowhere until the error is dealt with.
-    expect(settledReason(info("waiting", { followUps: [followUp] }), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting", 2, { followUps: [followUp] }), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting", 2), failed, true)).toBeNull();
+    // The status is from later than the transcript held here: what stopped the agent then is not known yet.
+    expect(settledReason(info("waiting", 6), retried, false)).toBeNull();
+    expect(settledReason(info("waiting", 6), failed, false)).toBeNull();
   });
 
-  it("ends on a finished turn or a stopped tab only when nothing is queued behind it", () => {
-    expect(settledReason(info("completed"), [prompt], false)).toEqual({ reason: "stop" });
-    expect(settledReason(info("idle"), [prompt], false)).toEqual({ reason: "stopped" });
-    expect(settledReason(info("in_progress"), [prompt], false)).toBeNull();
-    expect(settledReason(info("completed"), [prompt], true)).toBeNull();
-    expect(settledReason(info("completed", { followUps: [followUp] }), [prompt], false)).toBeNull();
-    expect(settledReason(info("idle", { followUps: [followUp] }), [prompt], false)).toBeNull();
+  it("says the agent asks in its own terminal when it waits with nothing to answer and no error", () => {
+    expect(settledReason(info("waiting", 2), replied, false)).toEqual({ reason: "terminal" });
+    // Before anything was said: a CLI asking on its first screen.
+    expect(settledReason(info("waiting", 0), [], false)).toEqual({ reason: "terminal" });
+    // Not on a transcript behind the status, nor ahead of it.
+    expect(settledReason(info("waiting", 3), replied, false)).toBeNull();
+    expect(settledReason(info("waiting", 2), retried, false)).toBeNull();
+    // A tab that streams here hears of the event before the status that follows it: a prompt taken,
+    // an error taken back or a request decided leaves a status that still says waiting from before.
+    expect(settledReason(info("waiting", 4), retried, false)).toBeNull();
+    expect(settledReason(info("waiting", 3), [...replied, said(3, { type: "permission_decided", requestId: "r1", allowed: true, label: "Allow" })], false)).toBeNull();
+  });
+
+  it("ends on a finished turn or a stopped tab only when nothing is queued or started behind it", () => {
+    expect(settledReason(info("completed", 2), replied, false)).toEqual({ reason: "stop" });
+    expect(settledReason(info("idle", 2), replied, false)).toEqual({ reason: "stopped" });
+    expect(settledReason(info("in_progress", 2), replied, false)).toBeNull();
+    expect(settledReason(info("completed", 2), replied, true)).toBeNull();
+    expect(settledReason(info("completed", 2, { followUps: [followUp] }), replied, false)).toBeNull();
+    expect(settledReason(info("idle", 2, { followUps: [followUp] }), replied, false)).toBeNull();
+    // The transcript's newest event is a prompt the status has not caught up with.
+    expect(settledReason(info("completed", 3), [...replied, said(3, { type: "user_message", text: "and the docs" })], false)).toBeNull();
   });
 });
 

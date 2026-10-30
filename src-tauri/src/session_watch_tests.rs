@@ -2192,8 +2192,9 @@ fn compaction_reconciliation_preserves_old_provider_after_conversation_switch() 
 }
 
 /// What `terminalx wait` reads of a tab (#668). A request raised by the CLI's
-/// hook is one `permissions list` shows; an error the agent stopped on leaves
-/// the tab waiting too, with nothing in that list and the error to name.
+/// hook is one `permissions list` shows. The CLI asking in its own screen, and
+/// an error the agent stopped on, leave the tab waiting too, with nothing in
+/// that list: the first with no error to name, the second with one.
 #[test]
 fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
@@ -2216,6 +2217,11 @@ fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     rig.manager.respond_permission(SESSION, TAB, &request, "allow").unwrap();
     worker.join().unwrap();
     assert!(!rig.manager.wait_view(SESSION, TAB).asks);
+
+    // The CLI asks in its own screen: the tab waits, on nothing this app holds.
+    rig.hook("Notification", json!({"notification_type": "permission_prompt", "message": "Codex needs your permission"}));
+    let terminal = rig.manager.wait_view(SESSION, TAB);
+    assert_eq!((terminal.status, terminal.asks, terminal.recovery), (TabStatus::Waiting, false, None));
 
     // The agent stops on an error: the tab waits, with nothing to answer.
     rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::Error { message: "unexpected failure".into(), fatal: true }, None);
