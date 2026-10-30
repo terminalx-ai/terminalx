@@ -606,4 +606,38 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn an_account_confirmation_counts_only_when_tagged_under_the_session() {
+        use std::os::unix::fs::MetadataExt;
+        let key = session_key(&KEY, &"1".repeat(64), &"2".repeat(64), &"3".repeat(64)).unwrap();
+        let user = std::env::var("USER").unwrap();
+        let home = format!("/Users/{user}");
+        let meta = std::fs::metadata(&home).unwrap();
+        // SAFETY: no preconditions.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let body = json!({"accountConfirmation": {"confirmed": true, "confirmationSha256": "c".repeat(64), "gid": gid,
+            "home": home, "homeDevice": meta.dev(), "homeInode": meta.ino(), "name": user, "uid": uid}});
+        for (signing_key, ok) in [(key, true), ([0x55; 32], false)] {
+            let (mut helper, mut owner) = UnixStream::pair().unwrap();
+            let frame = json!({"body": body, "seq": 0, "tag": tag(&signing_key, "frame", &[OWNER, "0", &sha256(&canonical(&body))])});
+            write_frame(
+                &mut owner,
+                &canonical(&frame),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            let mut session = Session {
+                key,
+                sent: 0,
+                received: 0,
+                deadline: Duration::from_secs(1),
+            };
+            let confirmed = session.receive_confirmation(&mut helper);
+            assert_eq!(confirmed.is_ok(), ok, "{confirmed:?}");
+            if ok {
+                assert_eq!(confirmed.unwrap().uid, uid);
+            }
+        }
+    }
 }

@@ -3,6 +3,7 @@
 //! Nothing here authenticates a helper, approves an account or marks Ready.
 #![cfg(target_os = "macos")]
 
+pub mod account;
 pub mod disk;
 pub mod enroll;
 pub mod fsx;
