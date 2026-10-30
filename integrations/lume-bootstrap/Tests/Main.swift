@@ -32,6 +32,27 @@ import Darwin
             }
             return
         }
+        // <control-fd> guest-enroll <guest-fd>...: the real version-3 service, as
+        // the VZ listener drives it, over each inherited stream in order.
+        if CommandLine.arguments.count >= 4, CommandLine.arguments[2] == "guest-enroll",
+           let control = Int32(CommandLine.arguments[1]) {
+            let launch = try TerminalXBootstrapLaunch.receive(control)
+            let operation = launch.binding.paths["operation"]!.path
+            let view = TXOwnedVM.fixture {
+                let data = try txObject(Data(contentsOf: URL(fileURLWithPath: operation + "/fixture-view.json")), keys: ["running", "shares"])
+                try txRequire(data["running"] as? Bool == true)
+            }
+            let service = try TXEnrollmentService(launch: launch)
+            for argument in CommandLine.arguments.dropFirst(3) {
+                guard let fd = Int32(argument) else { throw TXBootstrapError.refused }
+                if let attempt = service.admit() { service.run(fd: fd, attempt: attempt, view: view) }
+                close(fd)
+            }
+            let state = service.gate.state
+            print(String(decoding: try txJSON(["claimed": state.claimed, "refusals": state.refusals, "fenced": state.fenced,
+                "sessionRetained": service.session != nil]), as: UTF8.self))
+            return
+        }
         if CommandLine.arguments.count == 15, CommandLine.arguments[1] == "run" {
             let a = CommandLine.arguments
             try txRequire(a[3] == "--display" && a[4] == "none" && a[5] == "--vnc" && a[6] == "disabled"

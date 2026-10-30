@@ -43,9 +43,12 @@ enum TXEnrollment {
          "ready": false, "trustAccepted": false]
     }
     /// One attempt on a connected stream. `journal` durably records the
-    /// challenge before it is sent; if it throws, nothing is sent.
+    /// challenge before it is sent; `commit` durably records a verified proof
+    /// before the helper is told it was accepted. If either throws, the helper
+    /// receives nothing further.
     static func accept(fd: Int32, key: SymmetricKey, binding: TXEnrollmentBinding,
-                       journal: (Data) throws -> Void) throws -> TXEnrollmentSession {
+                       journal: (Data) throws -> Void,
+                       commit: (TXEnrollmentSession) throws -> Void = { _ in }) throws -> TXEnrollmentSession {
         try TXWire.configureStream(fd)
         let hello = try txObject(TXWire.read(fd), keys: ["bootstrapId", "clientNonce", "seedId", "version"])
         try txRequire(hello["version"] as? Int == 2 && txString(hello, "bootstrapId") == binding.bootstrapId
@@ -67,6 +70,7 @@ enum TXEnrollment {
         try txRequire(txEqualTag(expected, try txString(proof, "proof")))
         let session = TXEnrollmentSession(key: try sessionKey(key, clientNonce: clientNonce, serverNonce: serverNonce,
             challengeSha256: challengeSha256), challengeSha256: challengeSha256, claims: claims)
+        try commit(session)
         try session.send(fd, acceptance(challengeSha256))
         return session
     }
@@ -124,5 +128,73 @@ final class TXEnrollmentGate: @unchecked Sendable {
     var state: (claimed: Bool, refusals: Int, fenced: Bool) {
         lock.lock(); defer { lock.unlock() }
         return (claimedState, refusalCount, !claimedState && refusalCount >= limit)
+    }
+}
+
+/// The restricted owner's version-3 enrollment for one launch. The key comes
+/// only from the private operation directory (`enrollment.key`, owner-only),
+/// never from the binding, argv, a share or a frame. Every admitted attempt
+/// journals its challenge; a verified proof writes the one enrollment receipt
+/// before the helper is accepted. The receipt holds digests and states, never
+/// the key, and never claims account authentication, trust or readiness.
+final class TXEnrollmentService: @unchecked Sendable {
+    static let refusalLimit = 8
+    static let attemptNames = Swift.Set((0...refusalLimit).map { "enrollment-attempt-\($0).json" })
+    let gate = TXEnrollmentGate(limit: refusalLimit)
+    private let launch: TerminalXBootstrapLaunch
+    private let key: SymmetricKey
+    private let binding: TXEnrollmentBinding
+    private let lock = NSLock()
+    private var attempts = 0
+    private var retained: TXEnrollmentSession?
+
+    init(launch: TerminalXBootstrapLaunch) throws {
+        try txRequire(launch.binding.version == 3)
+        guard let seedId = launch.binding.seedId, let receipt = launch.binding.seedReceiptSha256 else {
+            throw TXBootstrapError.refused
+        }
+        let stored = try launch.pins["operation"]!.receipt("enrollment.key")
+        guard let text = String(data: stored, encoding: .utf8) else { throw TXBootstrapError.refused }
+        key = SymmetricKey(data: try txHex(text))
+        binding = TXEnrollmentBinding(bootstrapId: launch.binding.bootstrapId, seedId: seedId,
+            bindingDigest: launch.bindingDigest, ownerEpoch: launch.binding.ownerEpoch, seedReceiptSha256: receipt)
+        self.launch = launch
+    }
+    /// The attempt number for an admitted connection, or nil once claimed,
+    /// fenced or while another attempt is in flight.
+    func admit() -> Int? {
+        guard gate.begin() else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        attempts += 1
+        return attempts - 1
+    }
+    /// The verified session, retained for the authenticated relay that consumes it.
+    var session: TXEnrollmentSession? {
+        lock.lock(); defer { lock.unlock() }
+        return retained
+    }
+    func run(fd: Int32, attempt: Int, view: TXOwnedVM) {
+        let operation = launch.pins["operation"]!
+        var committed = false
+        do {
+            try launch.check(); try view.check()
+            let session = try TXEnrollment.accept(fd: fd, key: key, binding: binding, journal: {
+                try operation.writeNew("enrollment-attempt-\(attempt).json", $0)
+            }, commit: { session in
+                try self.launch.check(); try view.check()
+                try operation.writeNew("enrollment.json", txJSON(["version": 2, "bindingDigest": self.binding.bindingDigest,
+                    "ownerEpoch": self.binding.ownerEpoch, "bootstrapId": self.binding.bootstrapId, "seedId": self.binding.seedId,
+                    "seedReceiptSha256": self.binding.seedReceiptSha256, "attempt": attempt,
+                    "challengeSha256": session.challengeSha256, "claimsSha256": txDigest(try txJSON(session.claims)),
+                    "helperAuthenticated": true, "accountAuthenticated": false, "trustAccepted": false, "ready": false]))
+                committed = true
+            })
+            lock.lock(); retained = session; lock.unlock()
+            gate.finish(authenticated: true)
+        } catch {
+            // A durable receipt claims even if the acceptance reply was lost: the
+            // enrollment is never repeated or replaced, and its session is gone.
+            gate.finish(authenticated: committed)
+        }
     }
 }

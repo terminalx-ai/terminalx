@@ -15,6 +15,8 @@ import unittest
 import uuid
 
 BINARY = Path(sys.argv.pop(1)).resolve()
+# Optional: the real Rust guest helper fixture for version-3 listener tests.
+HELPER = Path(sys.argv.pop(1)).resolve() if len(sys.argv) > 1 and not sys.argv[1].startswith('-') else None
 def wire(v): return json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 def digest(v): return hashlib.sha256(v).hexdigest()
 def uid(): return str(uuid.uuid4())
@@ -280,5 +282,123 @@ class GuestTests(unittest.TestCase):
         self.assertEqual((f.op/'guest-observation-intent.json').read_bytes(),challenge)
         result=json.loads((f.op/'guest-observation.json').read_bytes())
         self.assertFalse(result['helperAuthenticated']);self.assertFalse(result['ready'])
+
+ENROLL = 'terminalx-vm-enrollment-v2'
+def etag(key, domain, parts):
+    message = b''.join(struct.pack('!I', len(v.encode())) + v.encode() for v in [ENROLL, domain] + parts)
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+def send_raw(s, data): s.sendall(struct.pack('!I', len(data)) + data)
+
+@unittest.skipIf(HELPER is None, 'needs the Rust enroll-fixture helper')
+class EnrollmentListenerTests(unittest.TestCase):
+    """The real version-3 TXEnrollmentService after a genuine launch hand-off."""
+    def binding(self, f, key=True):
+        b = f.binding; b['version'] = 3; b['seedId'] = os.urandom(16).hex(); b['seedReceiptSha256'] = digest(b'seed receipt')
+        self.key = os.urandom(32)
+        if key: private(f.op/'enrollment.key', self.key.hex().encode())
+        private(f.op/'owner-intent.json', wire(b)); f.bd = digest(wire(b))
+        return b
+    def launch(self, f, b, count):
+        a, c = socket.socketpair(); pairs = [socket.socketpair() for _ in range(count)]
+        ends = [p[1] for p in pairs]
+        f.process = subprocess.Popen([str(BINARY), str(c.fileno()), 'guest-enroll', *[str(e.fileno()) for e in ends]],
+            pass_fds=[c.fileno(), *[e.fileno() for e in ends]], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        c.close()
+        for e in ends: e.close()
+        send(a, {'binding': b64(wire(b)), 'capability': b64(f.secret)}); self.addCleanup(a.close)
+        return [p[0] for p in pairs]
+    def rust(self, f, b, s, key=None):
+        seed = f.root/f'seed-{uid()}.json'
+        private(seed, wire({'bootstrapId': b['bootstrapId'], 'key': b64(key or self.key), 'seedId': b['seedId'], 'version': 1}))
+        result = subprocess.run([str(HELPER), str(s.fileno()), str(seed), 'enroll-only'], pass_fds=[s.fileno()], capture_output=True, timeout=30)
+        s.close(); self.outputs += [result.stdout, result.stderr]
+        return json.loads(result.stdout)
+    def done(self, f):
+        out, err = f.process.communicate(timeout=60); self.outputs += [out, err]
+        self.assertEqual(f.process.returncode, 0, err.decode())
+        return json.loads(out)
+    def secret_free(self, f):
+        forms = [self.key.hex().encode(), b64(self.key).encode(), f.secret.hex().encode(), b64(f.secret).encode()]
+        files = [p.read_bytes() for p in f.op.rglob('*') if p.is_file() and p.name != 'enrollment.key']
+        return not any(x in t for x in forms for t in self.outputs + files)
+    def setUp(self): self.outputs = []
+    def test_listener_enrolls_the_real_rust_helper_and_records_only_helper_authentication(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        (s,) = self.launch(f, b, 1)
+        rust = self.rust(f, b, s)
+        state = self.done(f)
+        self.assertTrue(rust['authenticated'])
+        self.assertEqual(state, {'claimed': True, 'refusals': 0, 'fenced': False, 'sessionRetained': True})
+        receipt = json.loads((f.op/'enrollment.json').read_bytes())
+        self.assertEqual(receipt['challengeSha256'], rust['challengeSha256'])
+        self.assertEqual(receipt['challengeSha256'], digest((f.op/'enrollment-attempt-0.json').read_bytes()))
+        self.assertEqual({k: receipt[k] for k in ['bindingDigest', 'bootstrapId', 'seedId', 'seedReceiptSha256', 'ownerEpoch']},
+            {'bindingDigest': f.bd, 'bootstrapId': b['bootstrapId'], 'seedId': b['seedId'], 'seedReceiptSha256': b['seedReceiptSha256'], 'ownerEpoch': b['ownerEpoch']})
+        self.assertTrue(receipt['helperAuthenticated'])
+        for k in ['accountAuthenticated', 'trustAccepted', 'ready']: self.assertFalse(receipt[k])
+        self.assertTrue(self.secret_free(f))
+    def test_failed_attempts_are_bounded_journaled_and_never_claim(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        sockets = self.launch(f, b, 3)
+        self.assertFalse(self.rust(f, b, sockets[0], key=os.urandom(32))['authenticated'])
+        send(sockets[1], {'bootstrapId': b['bootstrapId'], 'clientNonce': 'a'*64, 'seedId': os.urandom(16).hex(), 'version': 2})
+        with self.assertRaises((EOFError, ConnectionResetError)): read(sockets[1])
+        sockets[1].close()
+        self.assertTrue(self.rust(f, b, sockets[2])['authenticated'])
+        self.assertEqual(self.done(f), {'claimed': True, 'refusals': 2, 'fenced': False, 'sessionRetained': True})
+        self.assertTrue((f.op/'enrollment-attempt-0.json').exists())
+        self.assertFalse((f.op/'enrollment-attempt-1.json').exists(), 'a refused hello gets no challenge')
+        self.assertEqual(json.loads((f.op/'enrollment.json').read_bytes())['attempt'], 2)
+    def test_spent_budget_fences_and_a_claim_admits_nothing_more(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        sockets = self.launch(f, b, 9)
+        for s in sockets[:8]: s.close()
+        self.assertFalse(self.rust(f, b, sockets[8])['authenticated'])
+        self.assertEqual(self.done(f), {'claimed': False, 'refusals': 8, 'fenced': True, 'sessionRetained': False})
+        self.assertFalse((f.op/'enrollment.json').exists())
+        g = Fixture(); self.addCleanup(g.finish); b = self.binding(g)
+        sockets = self.launch(g, b, 2)
+        self.assertTrue(self.rust(g, b, sockets[0])['authenticated'])
+        self.assertFalse(self.rust(g, b, sockets[1])['authenticated'])
+        self.assertEqual(self.done(g)['claimed'], True)
+    def test_a_lost_acceptance_reply_still_claims_once(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        sockets = self.launch(f, b, 2)
+        s = sockets[0]; hello = {'bootstrapId': b['bootstrapId'], 'clientNonce': os.urandom(32).hex(), 'seedId': b['seedId'], 'version': 2}
+        send(s, hello)
+        n = struct.unpack('!I', s.recv(4, socket.MSG_WAITALL))[0]; challenge = s.recv(n, socket.MSG_WAITALL)
+        claims = {'euid': 0}; sha = digest(challenge)
+        send(s, {'challengeSha256': sha, 'claims': claims, 'proof': etag(self.key, 'enrollment', [sha, digest(wire(claims))])})
+        s.close()  # never reads the acceptance
+        self.assertFalse(self.rust(f, b, sockets[1])['authenticated'])
+        state = self.done(f)
+        self.assertTrue(state['claimed'])
+        self.assertEqual(json.loads((f.op/'enrollment.json').read_bytes())['attempt'], 0)
+    def test_version_3_needs_its_private_key_and_exact_seed_binding(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f, key=False)
+        (s,) = self.launch(f, b, 1); s.close()
+        f.process.communicate(timeout=30); self.assertNotEqual(f.process.returncode, 0, 'no key, no listener')
+        for change in [{'seedReceiptSha256': None}, {'seedId': 'short'}, {'version': 2}]:
+            g = Fixture(); self.addCleanup(g.finish); b = self.binding(g)
+            for k, v in change.items():
+                if v is None: del b[k]
+                else: b[k] = v
+            private(g.op/'owner-intent.json', wire(b))
+            (s,) = self.launch(g, b, 1); s.close()
+            g.process.communicate(timeout=30); self.assertNotEqual(g.process.returncode, 0, change)
+    def test_owner_channel_serves_only_the_enrollment_receipt_for_version_3(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        receipt = wire({'helperAuthenticated': True, 'accountAuthenticated': False, 'trustAccepted': False, 'ready': False})
+        private(f.op/'enrollment.json', receipt)
+        f.start(n=3, binding=b)
+        payload, served = f.call('enrollment')
+        self.assertEqual((served, payload['action']), (receipt, 'enrollment'))
+        for action in ['guestObservation', 'accountReceipt']:
+            with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): f.call(action)
+    def test_version_2_owner_never_serves_an_enrollment_receipt(self):
+        f = Fixture(); self.addCleanup(f.finish); b = f.binding; b['version'] = 2
+        private(f.op/'enrollment.json', wire({'helperAuthenticated': True}))
+        f.start(n=2, binding=b)
+        with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): f.call('enrollment')
 
 if __name__=='__main__':unittest.main()

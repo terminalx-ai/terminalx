@@ -175,8 +175,29 @@ reference playing a hostile peer on each side:
 - promoted or mistagged acceptance;
 - out-of-sequence, tampered and reflected session frames.
 
-The owner listener is not yet switched to version 2. Its key delivery and
-binding fields belong to slices 3-4.
+**Listener (2026-10-31).** A version-3 owner binding adds exactly `seedId` and
+`seedReceiptSha256`; versions 1 and 2 keep their exact forms and behavior. For
+version 3:
+
+- The restricted owner reads the key only from `enrollment.key` in its private
+  operation directory (owner-only, single link). The key is never in the
+  binding, argv, a share or a frame.
+- The VZ listener runs `TXEnrollmentService` for each admitted connection. Each
+  admitted attempt journals `enrollment-attempt-N.json`.
+- A verified proof writes `enrollment.json` before the acceptance frame is
+  sent. That file holds digests, ids and `helperAuthenticated: true`, with
+  account authentication, trust and readiness false.
+- A durable receipt claims even if the reply is lost, so enrollment is never
+  repeated.
+- The owner channel serves only the `enrollment` action for version 3, and
+  never serves it for version 2.
+
+`protocol_test.py` runs the real service after a genuine launch hand-off with
+the real Rust helper. It covers refusals, the budget fence, the claim, a lost
+reply, a missing key and a malformed seed binding.
+
+The host still writes version-2 bindings. Writing version 3 needs the seed
+journal (slice 4, `macos_seed.rs`) and key delivery from the private reference.
 
 ## Account confirmation and effects
 

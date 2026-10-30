@@ -10,9 +10,13 @@ fn main() {
     use terminalx_vm_bootstrap::enroll;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [fd, seed_path] = args.as_slice() else {
-        eprintln!("usage: enroll-fixture <fd> <seed-file>");
-        std::process::exit(64);
+    let (fd, seed_path, enroll_only) = match args.as_slice() {
+        [fd, seed] => (fd, seed, false),
+        [fd, seed, mode] if mode == "enroll-only" => (fd, seed, true),
+        _ => {
+            eprintln!("usage: enroll-fixture <fd> <seed-file> [enroll-only]");
+            std::process::exit(64);
+        }
     };
     let result = (|| -> std::io::Result<serde_json::Value> {
         let fd: i32 = fd
@@ -31,6 +35,9 @@ fn main() {
         let claims = json!({"euid": unsafe { libc::geteuid() }, "fixture": true});
         let (mut session, challenge) =
             enroll::enroll(&mut stream, &seed, &claims, Duration::from_secs(3))?;
+        if enroll_only {
+            return Ok(json!({"authenticated": true, "challengeSha256": challenge}));
+        }
         session.send(&mut stream, json!({"hello": "rust helper"}))?;
         let echo = session.receive(&mut stream)?;
         Ok(json!({"authenticated": true, "challengeSha256": challenge, "echo": echo}))

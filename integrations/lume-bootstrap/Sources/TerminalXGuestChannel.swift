@@ -79,8 +79,12 @@ final class TXGuestListener: NSObject, VZVirtioSocketListenerDelegate, @unchecke
     private let listener = VZVirtioSocketListener()
     private let lock = NSLock()
     private var claimed = false
-    private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, device: VZVirtioSocketDevice) {
+    // Version 3: seeded-key enrollment with a bounded refusal budget instead of
+    // the version-2 single observation claim.
+    private let enrollment: TXEnrollmentService?
+    private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, device: VZVirtioSocketDevice) throws {
         self.launch = launch; self.view = view; self.device = device
+        enrollment = launch.binding.version == 3 ? try TXEnrollmentService(launch: launch) : nil
         super.init()
         listener.delegate = self
     }
@@ -91,7 +95,7 @@ final class TXGuestListener: NSObject, VZVirtioSocketListenerDelegate, @unchecke
         return try handle.queue.sync {
             try txRequire(handle.machine.state == .running && handle.machine.socketDevices.count == 1)
             guard let device = handle.machine.socketDevices.first as? VZVirtioSocketDevice else { throw TXBootstrapError.refused }
-            let result = TXGuestListener(launch: launch, view: view, device: device)
+            let result = try TXGuestListener(launch: launch, view: view, device: device)
             device.setSocketListener(result.listener, forPort: TXGuestProtocol.port)
             return result
         }
@@ -99,7 +103,17 @@ final class TXGuestListener: NSObject, VZVirtioSocketListenerDelegate, @unchecke
     func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection, from socketDevice: VZVirtioSocketDevice) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard listener === self.listener, socketDevice === device,
-              connection.destinationPort == TXGuestProtocol.port, !claimed else { return false }
+              connection.destinationPort == TXGuestProtocol.port else { return false }
+        if let enrollment {
+            guard let attempt = enrollment.admit() else { return false }
+            let retained = TXGuestConnection(connection)
+            DispatchQueue(label: "terminalx.bootstrap.guest-enrollment").async { [view, retained] in
+                defer { retained.connection.close() }
+                enrollment.run(fd: retained.connection.fileDescriptor, attempt: attempt, view: view)
+            }
+            return true
+        }
+        guard !claimed else { return false }
         claimed = true
         let retained = TXGuestConnection(connection)
         DispatchQueue(label: "terminalx.bootstrap.guest-observation").async { [self, retained] in

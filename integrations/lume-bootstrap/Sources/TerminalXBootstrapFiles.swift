@@ -67,7 +67,8 @@ final class TXPinnedPath: @unchecked Sendable {
         return bytes
     }
     func receipt(_ name: String) throws -> Data {
-        try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json"].contains(name))
+        try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json",
+            "enrollment.key", "enrollment.json"].contains(name))
         try check()
         let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         try txRequire(child >= 0)
@@ -83,7 +84,8 @@ final class TXPinnedPath: @unchecked Sendable {
     }
     func arm(_ bytes: Data) throws { try writeNew("owner-started.json", bytes) }
     func writeNew(_ name: String, _ bytes: Data) throws {
-        try txRequire(directory && ["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json"].contains(name) && bytes.count <= 64 * 1024)
+        try txRequire(directory && (["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json",
+            "enrollment.json"].contains(name) || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
         try check()
         let file = try TXDescriptor(openat(fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
         let written = bytes.withUnsafeBytes { Darwin.write(file.raw, $0.baseAddress, $0.count) }
@@ -113,15 +115,21 @@ struct TXBinding: Codable {
     let outputShareId: String
     let configSha256: String
     let paths: [String: TXPathPin]
+    // Version 3 only: the offline seed this VM was enrolled from.
+    let seedId: String?
+    let seedReceiptSha256: String?
     static let roles: Swift.Set<String> = ["operation", "storage", "vm", "config", "disk", "nvram", "input", "output"]
     static let keys: Swift.Set<String> = ["version", "macosMajor", "bootstrapId", "ownerEpoch", "nonce", "environmentId", "generation", "vmFingerprint", "restoreSha256", "runtimeSha256", "helperManifestSha256", "executableSha256", "parentSession", "parentTab", "parentConversation", "inputShareId", "outputShareId", "configSha256", "paths"]
+    static let enrollmentKeys = keys.union(["seedId", "seedReceiptSha256"])
     static func decode(_ bytes: Data) throws -> Self {
-        let object = try txObject(bytes, keys: keys)
+        // Version 3 adds exactly the seed binding; versions 1 and 2 keep their exact form.
+        let object = try (try? txObject(bytes, keys: enrollmentKeys)) ?? txObject(bytes, keys: keys)
         guard let paths = object["paths"] as? [String: [String: Any]] else { throw TXBootstrapError.refused }
         try txRequire(Swift.Set(paths.keys) == roles)
         for pin in paths.values { try txRequire(Swift.Set(pin.keys) == ["path", "device", "inode"]) }
         let binding = try JSONDecoder().decode(Self.self, from: bytes)
-        try txRequire([1, 2].contains(binding.version) && binding.macosMajor == 26 && !binding.parentConversation.isEmpty && binding.parentConversation.utf8.count <= 256
+        let enrolled = binding.seedId != nil
+        try txRequire((enrolled ? binding.version == 3 : [1, 2].contains(binding.version)) && binding.macosMajor == 26 && !binding.parentConversation.isEmpty && binding.parentConversation.utf8.count <= 256
             && binding.parentConversation.utf8.allSatisfy { $0 >= 32 && $0 < 127 })
         for id in [binding.bootstrapId, binding.ownerEpoch, binding.environmentId, binding.generation,
                    binding.parentSession, binding.parentTab, binding.inputShareId, binding.outputShareId] {
@@ -131,6 +139,10 @@ struct TXBinding: Codable {
                      binding.helperManifestSha256, binding.executableSha256, binding.configSha256] { _ = try txHex(hash) }
         try txRequire(binding.inputShareId != binding.outputShareId
             && Swift.Set(binding.paths.values.map { "\($0.device):\($0.inode)" }).count == roles.count)
+        if enrolled {
+            _ = try txHex(binding.seedId!, bytes: 16)
+            _ = try txHex(binding.seedReceiptSha256 ?? "")
+        }
         let vm = binding.paths["vm"]!.path
         try txRequire(URL(fileURLWithPath: vm).deletingLastPathComponent().path == binding.paths["storage"]!.path)
         for (role, name) in [("config", "config.json"), ("disk", "disk.img"), ("nvram", "nvram.bin")] {

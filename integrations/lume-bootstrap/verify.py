@@ -34,13 +34,14 @@ def main():
         run('swiftc','-swift-version','6','-warnings-as-errors','-typecheck',*map(str,sources),str(HERE/'Tests/TypecheckStubs.swift'),env=env)
         binary=root/'protocol-fixture'
         run('swiftc','-swift-version','6','-warnings-as-errors','-D','TERMINALX_BOOTSTRAP_FIXTURES',*map(str,sources),str(HERE/'Tests/Main.swift'),'-o',str(binary),env=env)
-        run('python3',str(HERE/'Tests/protocol_test.py'),str(binary),env=env)
         # The real Rust guest helper against this Swift owner, plus an independent
         # reference that also plays hostile peers. Offline, locked crate inputs only.
         helper_target=root/'vm-bootstrap-target'
         run('cargo','build','--offline','--locked','--example','enroll-fixture','--manifest-path',
             str(HERE.parents[1]/'native/vm-bootstrap/Cargo.toml'),'--target-dir',str(helper_target))
-        run('python3',str(HERE/'Tests/enrollment_test.py'),str(binary),str(helper_target/'debug/examples/enroll-fixture'),env=env)
-    print(json.dumps({'patchAppliesToPinnedSource':True,'patchedSwiftParsed':True,'ownerAndAppleAdapterTypechecked':True,'nativeProtocolFixtures':'passed','enrollmentV2CrossLanguage':'passed','fullUpstreamBuildVerified':False,'profileInstalled':False,'consoleEnabled':False,'liveAcceptanceVerified':False}))
+        helper=helper_target/'debug/examples/enroll-fixture'
+        run('python3',str(HERE/'Tests/protocol_test.py'),str(binary),str(helper),env=env)
+        run('python3',str(HERE/'Tests/enrollment_test.py'),str(binary),str(helper),env=env)
+    print(json.dumps({'patchAppliesToPinnedSource':True,'patchedSwiftParsed':True,'ownerAndAppleAdapterTypechecked':True,'nativeProtocolFixtures':'passed','enrollmentV2CrossLanguage':'passed','enrollmentListenerV3':'passed','fullUpstreamBuildVerified':False,'profileInstalled':False,'consoleEnabled':False,'liveAcceptanceVerified':False}))
 
 if __name__=='__main__':main()

@@ -180,7 +180,7 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         let requestId = try txString(request, "requestId")
         let clientNonce = try txString(request, "clientNonce")
         _ = try txHex(clientNonce)
-        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation"].contains(action)
+        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment"].contains(action)
             && txString(request, "bindingDigest") == launch.bindingDigest)
         let nonce = txNonce()
         let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
@@ -191,8 +191,11 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         try check()
         let receipt: Data
         if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
+        // Version 3 has no share trust path; only the enrollment receipt is served.
+        try txRequire((launch.binding.version == 3) == (action == "enrollment") || action == "observe")
         switch action {
         case "guestObservation": receipt = try launch.pins["operation"]!.receipt("guest-observation.json")
+        case "enrollment": receipt = try launch.pins["operation"]!.receipt("enrollment.json")
         case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
         case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
         default: receipt = Data()
@@ -255,7 +258,7 @@ extension TerminalXBootstrapOwner {
             }
         }
         let owner = try start(launch: launch, view: view, configLease: configLease)
-        if launch.binding.version == 2 {
+        if launch.binding.version >= 2 {
             let guestView = TXOwnedVM { [weak owner] in
                 guard let owner else { throw TXBootstrapError.refused }
                 try owner.check()

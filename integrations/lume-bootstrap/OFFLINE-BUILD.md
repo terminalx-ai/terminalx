@@ -29,7 +29,9 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   rebuild produced arm64 `lume`, 22,007,592 bytes, SHA-256
   `91e404fad57bd506d2545d509295941253030e8dbf51ed84c898d3504eca042e`, again
   with only the linker's ad hoc signature and with no compiler errors or
-  warnings in TerminalX sources.
+  warnings in TerminalX sources. With the version-3 listener (patch
+  `ba8d9424…`) the latest clean rebuild is 22,032,184 bytes, SHA-256
+  `996cdc9381935c802efc9f86af2e8927e71c82e0be8c1e82b7d1f93fb53fbe09`.
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those
