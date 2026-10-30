@@ -2,7 +2,7 @@ import { fs, invoke } from "@/lib/api";
 import { assertLocal } from "@/types/target";
 import type { ComputerContext, ComputerInventory, ComputerSelection, ComputerTarget } from "@/types/computer";
 import type { LocalVmStatus } from "@/lib/api";
-import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
+import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 
 export interface LinuxInstallRecord {
   activation?: { id: string; status: "outcomeUnknown" | "owned" | "stopped"; ready: false; detail?: string };
@@ -55,6 +55,8 @@ interface Requests {
   "environment.awake": { params: { environmentId: string; enabled: boolean }; result: LocalVmJson };
   "environment.desktop": { params: { environmentId: string; target?: LocalVmTaskTarget }; result: LocalVmJson };
   "environment.releaseDesktop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
+  "environment.guestAccountConfirmations": { params: { parentSession: string; parentTab: string; parentConversation: string }; result: { bootstraps: LocalVmGuestAccountStatus[] } };
+  "environment.confirmGuestAccount": { params: { idempotencyKey: string; confirm: true; observationSha256: string; account: LocalVmGuestAccount; parentSession: string; parentTab: string; parentConversation: string }; result: LocalVmJson };
   "task.submit": { params: LocalVmSubmission; result: LocalVmTask };
   "task.cancel": { params: { target: LocalVmTaskTarget }; result: LocalVmJson };
   "task.followup": { params: { target: LocalVmTaskTarget; text: string; idempotencyKey: string }; result: LocalVmJson };

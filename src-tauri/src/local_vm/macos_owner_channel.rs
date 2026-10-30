@@ -88,12 +88,59 @@ fn operation(params: &Value) -> Result<Reference> {
 /// Read-only: the accounts the enrolled helper reported, for the person to
 /// choose from, and any answer to an earlier confirmation.
 pub(super) fn guest_accounts(params: &Value) -> Result<Value> {
-    let reference = operation(params)?;
+    account_status(&operation(params)?)
+}
+/// Read-only: this conversation's version-3 bootstraps and where each account
+/// confirmation stands. Only bootstraps whose original parent is exactly this
+/// session, tab and conversation are listed; nothing is chosen or relayed.
+pub(super) fn guest_account_confirmations(params: &Value) -> Result<Value> {
+    confirmations_in(&super::host::root()?.join("bo"), params)
+}
+fn confirmations_in(root: &Path, params: &Value) -> Result<Value> {
+    let text = |name: &str| params[name].as_str().context("Original parent session, tab and conversation required");
+    let (session, tab, conversation) = (text("parentSession")?, text("parentTab")?, text("parentConversation")?);
+    let mut bootstraps = Vec::new();
+    if root.try_exists()? {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if journal::validate_id(&key).is_err() {
+                continue;
+            }
+            let Ok(reference) = Reference::reopen(&entry.path()) else { continue };
+            let b = &reference.binding;
+            if b.version != 3 || b.parent_session != session || b.parent_tab != tab || b.parent_conversation != conversation {
+                continue;
+            }
+            let mut status = account_status(&reference).unwrap_or_else(|error| {
+                json!({"observationSha256": null, "accounts": [], "detail": format!("{error:#}"), "accountAuthenticated": false,
+                    "trustAccepted": false, "ready": false})
+            });
+            status["idempotencyKey"] = json!(key);
+            bootstraps.push(status);
+        }
+    }
+    bootstraps.sort_by(|a, b| a["idempotencyKey"].as_str().cmp(&b["idempotencyKey"].as_str()));
+    Ok(json!({"bootstraps": bootstraps}))
+}
+fn account_status(reference: &Reference) -> Result<Value> {
     let (bytes, observation) = reference.account_observation()?;
     let answer = reference.account_answer().ok();
     let authenticated = answer.as_ref().is_some_and(|a| a["accountAuthenticated"] == true);
+    // The per-guest key producer is not routed yet, so no grant is made from
+    // here; an existing grant's result is reported exactly as the helper gave it.
+    let key = match reference.key_result() {
+        Ok(result) => result,
+        Err(_) if reference.root.exists("key-grant.json")? => json!({"stage": "grantPending"}),
+        Err(_) if authenticated => json!({"stage": "awaitingKeyProducer"}),
+        Err(_) => Value::Null,
+    };
+    let chosen = match reference.root.exists("account-confirmation.json")? {
+        true => serde_json::from_slice::<Value>(&reference.root.read("account-confirmation.json", 32 * 1024, true)?)?["account"].clone(),
+        false => Value::Null,
+    };
     Ok(json!({"observationSha256": journal::digest(&bytes), "accounts": observation["accounts"], "helperAuthenticated": true,
-        "accountAuthenticated": authenticated, "answer": answer, "trustAccepted": false, "ready": false}))
+        "accountAuthenticated": authenticated, "chosen": chosen, "answer": answer, "key": key, "trustAccepted": false, "ready": false}))
 }
 /// The person's explicit confirmation of one reported account.
 pub(super) fn confirm_guest_account(params: &Value) -> Result<Value> {
@@ -562,6 +609,7 @@ impl Reference {
             "stop",
             "accountObservation",
             "accountAnswer",
+            "keyAnswer",
         ]
         .contains(&action)
         {
@@ -754,6 +802,9 @@ impl Reference {
     /// The helper's answer to the relayed confirmation. Only an exact
     /// acknowledgement authenticates that one account; trust and readiness stay false.
     fn account_answer(&self) -> Result<Value> {
+        Ok(self.account_answer_bytes()?.1)
+    }
+    fn account_answer_bytes(&self) -> Result<(Vec<u8>, Value)> {
         if self.binding.version != 3 {
             bail!("Account confirmation requires a version-3 owner binding")
         }
@@ -769,7 +820,61 @@ impl Reference {
         {
             bail!("Owner account answer changed or promoted trust")
         }
-        Ok(answer)
+        Ok((receipt.bytes, answer))
+    }
+    /// The SSH public key grant for the account the helper confirmed: recorded
+    /// once, exclusively, then relayed. Bound to that confirmation, the exact
+    /// answer, the account and the original parent. A retry re-presents the same
+    /// grant; a different key or reference is refused for good.
+    fn grant_key(&self, key_reference: &str, public_key: &str) -> Result<Value> {
+        let (answer_bytes, answer) = self.account_answer_bytes()?;
+        if answer["outcome"] != "confirmed" || answer["accountAuthenticated"] != true {
+            bail!("The person's account choice was not acknowledged by the helper; no key is granted")
+        }
+        journal::validate_id(key_reference)?;
+        super::macos_personalization::public_key(public_key)?;
+        let confirmation = self.root.read("account-confirmation.json", 32 * 1024, true)?;
+        let account = json!({"name": answer["account"]["name"], "uid": answer["account"]["uid"]});
+        let grant = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&self.raw),
+            "ownerEpoch": self.binding.owner_epoch, "confirmationSha256": journal::digest(&confirmation),
+            "answerSha256": journal::digest(&answer_bytes), "account": account, "keyReference": key_reference,
+            "publicKey": public_key, "parentSession": self.binding.parent_session, "parentTab": self.binding.parent_tab,
+            "parentConversation": self.binding.parent_conversation}))?;
+        if !self.root.exists("key-grant.json")? {
+            self.root.write_new("key-grant.json", &grant)?;
+        }
+        let recorded = self.root.read("key-grant.json", 32 * 1024, true)?;
+        let retained: Value = serde_json::from_slice(&recorded)?;
+        if retained["keyReference"] != key_reference || retained["publicKey"] != public_key || retained["account"] != account {
+            bail!("A different key was already granted for this VM; it is never replaced or regenerated")
+        }
+        let handshake: Handshake = fs::json(&self.root, "owner-handshake.json", 32 * 1024)?;
+        let receipt = self.observe_using(&handshake, "grantKey", &journal::new_id(), Some(&recorded))?;
+        let relay: Value = serde_json::from_slice(&receipt.bytes)?;
+        if relay != json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+            "grantSha256": journal::digest(&recorded), "keyReference": key_reference, "publicKey": public_key,
+            "account": account, "relayed": true, "installed": false, "trustAccepted": false, "ready": false})
+        {
+            bail!("Owner key grant record changed or claimed an install")
+        }
+        Ok(relay)
+    }
+    /// The helper's install result for the recorded grant. Only its own
+    /// `publicKeyInstalled` counts; unknown and refused never become success.
+    fn key_result(&self) -> Result<Value> {
+        let recorded = self.root.read("key-grant.json", 32 * 1024, true)?;
+        let retained: Value = serde_json::from_slice(&recorded)?;
+        let receipt = self.observe("keyAnswer", &journal::new_id())?;
+        let result: Value = serde_json::from_slice(&receipt.bytes)?;
+        let stage = result["stage"].as_str().unwrap_or_default();
+        if !["publicKeyInstalled", "outcomeUnknown", "refused"].contains(&stage)
+            || result != json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+                "grantSha256": journal::digest(&recorded), "keyReference": retained["keyReference"], "stage": stage,
+                "installed": stage == "publicKeyInstalled", "trustAccepted": false, "ready": false})
+        {
+            bail!("Owner key install result changed or claimed trust")
+        }
+        Ok(result)
     }
     fn guest_observation(&self) -> Result<Value> {
         if self.binding.version != 2 {

@@ -101,4 +101,69 @@ enum TXAccountRelay {
         try launch.pins["operation"]!.writeNew("account-confirmation-answer.json", record)
         return record
     }
+
+    static let grantKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "confirmationSha256", "answerSha256",
+        "account", "keyReference", "publicKey", "parentSession", "parentTab", "parentConversation"]
+
+    /// Validates the host's key grant against the confirmed account and journals
+    /// it once. Only after the helper confirmed that account; only one ed25519
+    /// public key with its original reference. The same grant returns the same
+    /// record (a lost reply); a changed key, reference or account is refused for good.
+    static func recordGrant(_ grant: Data, launch: TerminalXBootstrapLaunch) throws -> Data {
+        let operation = launch.pins["operation"]!
+        let g = try txObject(grant, keys: grantKeys)
+        try txRequire(g["version"] as? Int == 1 && txString(g, "bindingDigest") == launch.bindingDigest
+            && txString(g, "ownerEpoch") == launch.binding.ownerEpoch)
+        let relay = try txObject(operation.receipt("account-confirmation-relay.json"), keys: relayKeys)
+        let answerBytes = try operation.receipt("account-confirmation-answer.json")
+        guard let answer = try JSONSerialization.jsonObject(with: answerBytes) as? [String: Any],
+              answer["outcome"] as? String == "confirmed", answer["accountAuthenticated"] as? Bool == true,
+              let account = relay["account"] as? [String: Any], let granted = g["account"] as? [String: Any] else {
+            throw TXBootstrapError.refused
+        }
+        try txRequire(txString(g, "confirmationSha256") == txString(relay, "confirmationSha256")
+            && txString(g, "answerSha256") == txDigest(answerBytes)
+            && Swift.Set(granted.keys) == ["name", "uid"] && granted["name"] as? String == account["name"] as? String
+            && granted["uid"] as? Int == account["uid"] as? Int)
+        for id in [try txString(g, "keyReference"), try txString(g, "parentSession"), try txString(g, "parentTab")] {
+            try txRequire(UUID(uuidString: id) != nil)
+        }
+        let parts = try txString(g, "publicKey").split(separator: " ", omittingEmptySubsequences: false)
+        try txRequire(parts.count == 2 && parts[0] == "ssh-ed25519" && !parts[1].isEmpty && parts[1].utf8.count <= 128
+            && parts[1].utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || [43, 47, 61].contains($0) })
+        let digest = txDigest(grant)
+        if let existing = try? operation.receipt("key-grant-relay.json") {
+            try txRequire(txString(txObject(existing, keys: grantRelayKeys), "grantSha256") == digest)
+            return existing
+        }
+        let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
+            "grantSha256": digest, "keyReference": try txString(g, "keyReference"), "publicKey": try txString(g, "publicKey"),
+            "account": granted, "relayed": true, "installed": false, "trustAccepted": false, "ready": false])
+        try operation.writeNew("key-grant-relay.json", record)
+        return record
+    }
+    static let grantRelayKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "grantSha256", "keyReference",
+        "publicKey", "account", "relayed", "installed", "trustAccepted", "ready"]
+
+    /// The session frame for a journaled grant, in the helper's key grant form.
+    static func grantFrame(_ relay: Data) throws -> [String: Any] {
+        let r = try txObject(relay, keys: grantRelayKeys)
+        return ["keyGrant": ["keyReference": try txString(r, "keyReference"), "publicKey": try txString(r, "publicKey")]]
+    }
+
+    /// Journals the helper's install result. Only the helper's own
+    /// `publicKeyInstalled` for this reference counts as installed; an unknown
+    /// outcome or refusal is recorded as such and never becomes success.
+    static func keyResult(_ body: [String: Any], relay: Data, launch: TerminalXBootstrapLaunch) throws -> Data {
+        let r = try txObject(relay, keys: grantRelayKeys)
+        guard body.count == 1, let result = body["keyResult"] as? [String: Any],
+              Swift.Set(result.keys) == ["keyReference", "stage"], let stage = result["stage"] as? String,
+              ["publicKeyInstalled", "outcomeUnknown", "refused"].contains(stage) else { throw TXBootstrapError.refused }
+        try txRequire(txString(result, "keyReference") == txString(r, "keyReference"))
+        let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
+            "grantSha256": try txString(r, "grantSha256"), "keyReference": try txString(r, "keyReference"), "stage": stage,
+            "installed": stage == "publicKeyInstalled", "trustAccepted": false, "ready": false])
+        try launch.pins["operation"]!.writeNew("key-install-result.json", record)
+        return record
+    }
 }

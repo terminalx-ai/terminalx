@@ -45,9 +45,22 @@ fn main() {
             session.report_accounts(&mut stream, &accounts)?;
             let account =
                 session.await_confirmation(&mut stream, &accounts, Duration::from_secs(30))?;
+            // The real forking installer. Unprivileged, it refuses before any
+            // fork or write, and that refusal is what gets reported.
+            let state =
+                std::env::temp_dir().join(format!("tx-helper-state-{}", std::process::id()));
+            let mut installer = terminalx_vm_bootstrap::child::Forking { state };
+            let stage = terminalx_vm_bootstrap::child::grant_and_report(
+                &mut session,
+                &mut stream,
+                &account,
+                &seed.bootstrap_id,
+                Duration::from_secs(30),
+                &mut installer,
+            )?;
             return Ok(
                 json!({"authenticated": true, "challengeSha256": challenge, "confirmed": account.name,
-                "confirmationSha256": account.confirmation_sha256}),
+                "confirmationSha256": account.confirmation_sha256, "keyStage": stage}),
             );
         }
         session.send(&mut stream, json!({"hello": "rust helper"}))?;

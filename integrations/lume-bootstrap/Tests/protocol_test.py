@@ -455,7 +455,7 @@ class EnrollmentListenerTests(unittest.TestCase):
     def owner_with_guest(self, f, b, wait=8):
         raw = wire(b); private(f.op/'owner-intent.json', raw); f.bd = digest(raw)
         a, c = socket.socketpair(); a.settimeout(5); g, h = socket.socketpair()
-        f.process = subprocess.Popen([str(BINARY), str(c.fileno()), '16', 'guest', str(h.fileno()), str(wait)],
+        f.process = subprocess.Popen([str(BINARY), str(c.fileno()), '32', 'guest', str(h.fileno()), str(wait)],
             pass_fds=[c.fileno(), h.fileno()], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         c.close(); h.close()
         send(a, {'binding': b64(raw), 'capability': b64(f.secret)}); read(a); a.close()
@@ -512,12 +512,36 @@ class EnrollmentListenerTests(unittest.TestCase):
         self.assertEqual(self.host(f, 'confirmAccount', chosen), relay, 'a lost-reply retry gets the same record')
         with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)):
             self.host(f, 'confirmAccount', confirmation())
-        out, err = helper.communicate(timeout=30)
-        result = json.loads(out)
-        self.assertEqual((result['confirmed'], result['confirmationSha256']), (mine['name'], digest(chosen)), err.decode())
-        answer = json.loads(self.poll(f, 'accountAnswer'))
+        answer_bytes = self.poll(f, 'accountAnswer')
+        answer = json.loads(answer_bytes)
         self.assertEqual((answer['outcome'], answer['accountAuthenticated'], answer['trustAccepted'], answer['ready']),
                          ('confirmed', True, False, False))
+        public = 'ssh-ed25519 ' + b64(struct.pack('!I', 11) + b'ssh-ed25519' + struct.pack('!I', 32) + bytes([7]) * 32)
+        reference = uid()
+        def grant(**change):
+            value = {'version': 1, 'bindingDigest': f.bd, 'ownerEpoch': b['ownerEpoch'], 'confirmationSha256': digest(chosen),
+                     'answerSha256': digest(answer_bytes), 'account': {'name': mine['name'], 'uid': mine['uid']},
+                     'keyReference': reference, 'publicKey': public, 'parentSession': uid(), 'parentTab': uid(),
+                     'parentConversation': 'original'}
+            value.update(change); return wire(value)
+        for bad in [grant(account={'name': mine['name'], 'uid': mine['uid'] + 1}), grant(answerSha256='0' * 64),
+                    grant(confirmationSha256='0' * 64), grant(publicKey='ssh-rsa AAAA'), grant(keyReference='x')]:
+            with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, 'grantKey', bad)
+        self.assertFalse((f.op/'key-grant-relay.json').exists(), 'no refused grant is journaled')
+        chosen_grant = grant()
+        granted = json.loads(self.host(f, 'grantKey', chosen_grant))
+        self.assertEqual((granted['relayed'], granted['installed'], granted['grantSha256'], granted['publicKey']),
+                         (True, False, digest(chosen_grant), public))
+        self.assertEqual(json.loads(self.host(f, 'grantKey', chosen_grant)), granted, 'a lost-reply retry gets the same record')
+        with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)):
+            self.host(f, 'grantKey', grant(keyReference=uid()))
+        out, err = helper.communicate(timeout=60)
+        result = json.loads(out)
+        self.assertEqual((result['confirmed'], result['confirmationSha256']), (mine['name'], digest(chosen)), err.decode())
+        self.assertEqual(result['keyStage'], 'refused', 'an unprivileged helper refuses before any fork or write')
+        installed = json.loads(self.poll(f, 'keyAnswer'))
+        self.assertEqual((installed['stage'], installed['installed'], installed['trustAccepted'], installed['ready'],
+                          installed['grantSha256']), ('refused', False, False, False, digest(chosen_grant)))
         self.assertEqual(json.loads((f.op/'account-confirmation-relay.json').read_bytes())['confirmationSha256'], digest(chosen))
         texts = [p.read_bytes() for p in f.op.rglob('*') if p.is_file() and p.name != 'enrollment.key'] + [out, err]
         self.assertFalse(any(self.key.hex().encode() in t or b64(self.key).encode() in t for t in texts))

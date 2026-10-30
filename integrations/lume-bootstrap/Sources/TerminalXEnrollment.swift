@@ -222,6 +222,17 @@ final class TXEnrollmentService: @unchecked Sendable {
         }
         try launch.check(); try view.check()
         try session.send(fd, TXAccountRelay.frame(relay!))
-        _ = try TXAccountRelay.answer(try session.receive(fd), relay: relay!, launch: launch)
+        let answer = try TXAccountRelay.answer(try session.receive(fd), relay: relay!, launch: launch)
+        // A key is granted only for an account the helper confirmed.
+        guard (try JSONSerialization.jsonObject(with: answer) as? [String: Any])?["outcome"] as? String == "confirmed" else { return }
+        var grant = try? operation.receipt("key-grant-relay.json")
+        while grant == nil {
+            try txRequire(DispatchTime.now() < deadline)
+            _ = relayed.wait(timeout: .now() + 1)
+            grant = try? operation.receipt("key-grant-relay.json")
+        }
+        try launch.check(); try view.check()
+        try session.send(fd, TXAccountRelay.grantFrame(grant!))
+        _ = try TXAccountRelay.keyResult(try session.receive(fd), relay: grant!, launch: launch)
     }
 }

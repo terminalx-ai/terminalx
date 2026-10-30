@@ -277,3 +277,29 @@ export interface LocalVmTakeoverResult {
   manualControl: boolean;
   task: LocalVmTask;
 }
+
+/** A personal account the enrolled guest helper reported; an observation only. */
+export interface LocalVmGuestAccount {
+  name: string;
+  uid: number;
+  gid: number;
+  home: string;
+  homeDevice: number;
+  homeInode: number;
+}
+
+export type LocalVmGuestKeyStage = "publicKeyInstalled" | "outcomeUnknown" | "refused" | "grantPending" | "awaitingKeyProducer";
+
+/** Where one bootstrap's account confirmation stands, as the host verified it. */
+export interface LocalVmGuestAccountStatus {
+  idempotencyKey: string;
+  observationSha256: string | null;
+  accounts: LocalVmGuestAccount[];
+  detail?: string;
+  chosen?: LocalVmGuestAccount | null;
+  answer?: { outcome: "confirmed" | "refused"; accountAuthenticated: boolean; account: LocalVmGuestAccount } | null;
+  key?: { stage: LocalVmGuestKeyStage; installed?: boolean } | null;
+  accountAuthenticated: boolean;
+  trustAccepted: false;
+  ready: false;
+}

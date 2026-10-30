@@ -248,7 +248,45 @@ The confirmation request's payload digest joins all three owner-channel MACs.
 - Interruptions reconcile without replaying creation or appending twice, and a
   changed file is reported as an unknown outcome.
 
-Still to come: the host-to-owner relay of the key grant over the session.
+**Key grant (2026-10-31).** Granting needs the helper's confirmed answer. The
+host records `key-grant.json` exclusively. It binds the key reference and the
+SSH public key (never a private key) to:
+
+- the confirmation digest and the exact answer bytes;
+- the account's name and uid;
+- the original parent session, tab and conversation.
+
+A retry re-presents the same grant, and a different key or reference is
+refused for good.
+
+The owner checks the grant against its relay and answer journals and journals
+`key-grant-relay.json` once. It sends `{keyGrant: {keyReference, publicKey}}` over
+the session and journals the helper's `{keyResult: {keyReference, stage}}` as
+`key-install-result.json`. Only `publicKeyInstalled` counts as installed;
+`outcomeUnknown` and `refused` never become success.
+
+The helper's `child::Forking` installer works as follows:
+
+- The root parent never opens an account file. A forked child drops permanently
+  to the account, opens the confirmed home and an account-private journal, and
+  installs. A failed or unreadable child result reports `refused` or
+  `outcomeUnknown`.
+- Without root it refuses before any fork or write. That refusal is what the
+  host, owner and helper fixture records end to end.
+
+The per-guest key producer is still not routed, so no production RPC grants a
+key, and none accepts a caller-supplied public key. `environment.guestAccounts`
+reports `awaitingKeyProducer` in that state.
+
+**On-screen confirmation.** Each conversation's Local VM section lists only the
+bootstraps whose original parent is that session, tab and conversation
+(`environment.guestAccountConfirmations`). It shows the exact reported accounts
+and requires a selection plus an explicit consent checkbox before
+`environment.confirmGuestAccount`.
+
+It drops a selection when the list changes and explains stale-list refusals
+and safe retries. It shows a pending choice as immutable, and states that
+confirmation is not trust or SSH readiness. Nothing is confirmed on load.
 
 **Record publication.** The owner's `writeNew` and the host's `write_new` now
 write under a unique hidden name and rename with `RENAME_EXCL`. Readers see no

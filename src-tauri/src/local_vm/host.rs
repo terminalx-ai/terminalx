@@ -167,6 +167,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         }
         // The person's choice of one guest-reported account; never inferred.
         "environment.guestAccounts" => super::macos_owner_channel::guest_accounts(&params),
+        "environment.guestAccountConfirmations" => super::macos_owner_channel::guest_account_confirmations(&params),
         "environment.confirmGuestAccount" => {
             confirm(&params)?;super::macos_owner_channel::confirm_guest_account(&params)
         }

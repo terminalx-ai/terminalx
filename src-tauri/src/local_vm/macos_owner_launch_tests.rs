@@ -614,3 +614,67 @@ fn native_only_the_persons_confirmation_from_the_original_parent_is_relayed_once
     private(&f.op().join("account-confirmation-answer.json"), &canonical(&forged).unwrap());
     assert!(reference.account_answer().is_err());
 }
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_key_grant_follows_only_an_acknowledged_confirmation_and_never_becomes_success_by_itself() {
+    use base64::Engine;
+    let f = Fixture::new();
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let digest = journal::digest(&reference.raw);
+    let account = json!({"gid": 20, "home": "/Users/personal", "homeDevice": 1, "homeInode": 601, "name": "personal", "uid": 501});
+    let observation = canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "challengeSha256": "c".repeat(64), "accounts": [account], "helperAuthenticated": true,
+        "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
+    private(&f.op().join("account-observation.json"), &observation);
+    let key = |fill: u8| {
+        let mut bytes = 11_u32.to_be_bytes().to_vec();
+        bytes.extend(b"ssh-ed25519");
+        bytes.extend(32_u32.to_be_bytes());
+        bytes.extend([fill; 32]);
+        format!("ssh-ed25519 {}", base64::engine::general_purpose::STANDARD.encode(bytes))
+    };
+    let key_reference = journal::new_id();
+    reference.confirm_account(&super::super::AccountConfirmation {
+        confirm: true, observation_sha256: journal::digest(&observation), account: account.clone(),
+        parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
+        parent_conversation: reference.binding.parent_conversation.clone(),
+    }).unwrap();
+    assert!(reference.grant_key(&key_reference, &key(7)).is_err(), "no grant before the helper acknowledged the account");
+    assert!(!f.op().join("key-grant.json").exists());
+    let recorded = std::fs::read(f.op().join("account-confirmation.json")).unwrap();
+    let answer = json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "confirmationSha256": journal::digest(&recorded), "account": account, "outcome": "confirmed",
+        "accountAuthenticated": true, "trustAccepted": false, "ready": false});
+    private(&f.op().join("account-confirmation-answer.json"), &canonical(&answer).unwrap());
+    let relay = reference.grant_key(&key_reference, &key(7)).unwrap();
+    assert_eq!((relay["relayed"].as_bool(), relay["installed"].as_bool()), (Some(true), Some(false)));
+    assert_eq!(relay["account"], json!({"name": "personal", "uid": 501}));
+    let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
+    assert!(!String::from_utf8_lossy(&grant).contains("PRIVATE"), "only the public key is granted");
+    assert_eq!(reference.grant_key(&key_reference, &key(7)).unwrap(), relay, "a retry relays the same grant");
+    assert!(reference.grant_key(&key_reference, &key(8)).is_err(), "never a different key");
+    assert!(reference.grant_key(&journal::new_id(), &key(7)).is_err(), "never a different reference");
+    assert_eq!(std::fs::read(f.op().join("key-grant.json")).unwrap(), grant);
+    assert!(reference.key_result().is_err(), "no result before the helper reports");
+    let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
+        "parentConversation": reference.binding.parent_conversation});
+    let listed = super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap();
+    assert_eq!(listed["bootstraps"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["bootstraps"][0]["idempotencyKey"], f.key.as_str());
+    assert_eq!(listed["bootstraps"][0]["chosen"], account);
+    assert_eq!(listed["bootstraps"][0]["key"]["stage"], "grantPending");
+    let mut elsewhere = parents.clone();
+    elsewhere["parentTab"] = json!(journal::new_id());
+    assert_eq!(super::super::confirmations_in(&f.root.join("bo"), &elsewhere).unwrap()["bootstraps"], json!([]), "another tab sees nothing");
+    let result = |stage: &str, installed: bool| json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "grantSha256": journal::digest(&grant), "keyReference": key_reference, "stage": stage, "installed": installed,
+        "trustAccepted": false, "ready": false});
+    private(&f.op().join("key-install-result.json"), &canonical(&result("refused", false)).unwrap());
+    assert_eq!(reference.key_result().unwrap()["installed"], false);
+    std::fs::remove_file(f.op().join("key-install-result.json")).unwrap();
+    private(&f.op().join("key-install-result.json"), &canonical(&result("outcomeUnknown", true)).unwrap());
+    assert!(reference.key_result().is_err(), "an unknown outcome never reads as installed");
+}

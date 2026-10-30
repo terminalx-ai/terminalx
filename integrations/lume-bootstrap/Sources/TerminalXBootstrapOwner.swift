@@ -189,12 +189,12 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
             requestPayload = Data(base64Encoded: try txString(request, "payload"))
             try txRequire(requestPayload.map { !$0.isEmpty && $0.count <= 16 * 1024 } ?? false)
         }
-        try txRequire((requestPayload != nil) == (action == "confirmAccount"))
+        try txRequire((requestPayload != nil) == ["confirmAccount", "grantKey"].contains(action))
         let requestId = try txString(request, "requestId")
         let clientNonce = try txString(request, "clientNonce")
         _ = try txHex(clientNonce)
         try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop",
-            "accountObservation", "confirmAccount", "accountAnswer"].contains(action)
+            "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer"].contains(action)
             && txString(request, "bindingDigest") == launch.bindingDigest)
         let nonce = txNonce()
         let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
@@ -209,7 +209,7 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
         // Version 3 has no share trust path: only enrollment and an owner-mediated
         // stop are served, and neither is served for earlier versions.
-        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer"]
+        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer"]
         try txRequire(launch.binding.version == 3
             ? (["observe"] + enrolledOnly).contains(action) : !enrolledOnly.contains(action))
         switch action {
@@ -222,6 +222,11 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
             state.lock(); let wake = onRelay; state.unlock()
             wake?()
         case "accountAnswer": receipt = try launch.pins["operation"]!.receipt("account-confirmation-answer.json")
+        case "grantKey":
+            receipt = try TXAccountRelay.recordGrant(requestPayload!, launch: launch)
+            state.lock(); let wake = onRelay; state.unlock()
+            wake?()
+        case "keyAnswer": receipt = try launch.pins["operation"]!.receipt("key-install-result.json")
         case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
         case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
         default: receipt = Data()
