@@ -143,12 +143,12 @@ Guards that keep it that way:
 | --- | --- | --- | --- | --- |
 | P1 | One Apple macOS 26 IPSW: URL on `updates.cdn-apple.com` or `appldnld.apple.com`, build, SHA-256, bytes | Runs 1, 2 | **Absent.** The catalog compiled into source is `{"version":1,"images":[]}`. Image download is held. | The person approves selecting and downloading one image. Its URL, build, SHA-256, size and selection source are recorded. For Run 2 the same record becomes a reviewed catalog entry, which is a separate source change. |
 | P2 | Pinned Lume 0.6.1 | Run 1 | **Present.** `~/.local/share/lume/lume.app` executable SHA-256 `a369d637…fc904` matches `bootstrap.rs:63`; signed `com.trycua.lume`, team `YCK386LBJ7` | Re-verify the digest at preflight. No reinstall or update. |
-| P3 | Validation probe `terminalx-vm-validation-probe` ([spec](#validation-probe-and-seed-items)) | Runs 1, 2 | **Absent.** No source exists. | Write it as reviewed source, build arm64, and sign with TerminalX's Developer ID Application identity and hardened runtime. Record digest, cdhash, team ID and signing time. Signing is held. The repo pins no TerminalX team: build scripts read `APPLE_SIGNING_IDENTITY`, and the only pinned team (`YCK386LBJ7`) is Cua's. An ad hoc signature still exercises G1–G4, but cannot establish G6's attribution. |
-| P4 | Validation LaunchDaemon plist | Runs 1, 2 | **Absent.** Specified below. | Generate it, check it with `plutil -lint`, review it and record its digest. |
-| P5 | Seed and readback run sheet | Runs 1, 2 | **Absent.** | Once P1–P4 exist, write an exact run sheet with their real digests and paths, and review it before any approval. Nothing in this document is that run sheet. |
-| P6 | Restricted owner executable | Run 2 | **Absent.** Full build blocked by 18 locked dependency revisions; `Artifact::production()` refuses | Supply sources, build per the offline build plan, review, sign with the virtualization entitlement, and decide catalog adoption for a validation profile. All of this is held. |
+| P3 | Validation probe `terminalx-vm-validation-probe` ([spec](#validation-probe-and-seed-items)) | Runs 1, 2 | **Built, not Developer ID signed.** Source is `native/vm-bootstrap` (commit `6aa26b4a`). The arm64 probe `283ec5a8…` has only the linker's ad hoc signature and no team ([run sheet](LOCAL-VM-HELPER-RUN-SHEET.md)). | Sign with TerminalX's Developer ID Application identity and hardened runtime. Record digest, cdhash, team ID and signing time, then regenerate the run sheet. Signing is held. The repo pins no TerminalX team: build scripts read `APPLE_SIGNING_IDENTITY`, and the only pinned team (`YCK386LBJ7`) is Cua's. An ad hoc signature still exercises G1–G4, but cannot establish G6's attribution. |
+| P4 | Validation LaunchDaemon plist | Runs 1, 2 | **Present.** `native/vm-bootstrap/com.terminalx.next.vm-validation-probe.plist` (`2d1e0636…`). A test checks it with `plutil` against the probe's label and program path. | Review. |
+| P5 | Seed and readback run sheet | Runs 1, 2 | **Written, not executed.** The [Run 1 run sheet](LOCAL-VM-HELPER-RUN-SHEET.md) uses the real artifact digests and marks the Developer ID and restore-image fields absent. | Review it before any approval. Regenerate it after signing and once P1 exists. |
+| P6 | Restricted owner executable | Run 2 | **Built offline, not signed or adopted.** On 2026-10-30, all 18 locked revisions and the exact source were fetched into an isolated folder. The network-denied build produced arm64 `lume` `057152a5…`, with only the linker's ad hoc signature and no entitlements ([offline build](../integrations/lume-bootstrap/OFFLINE-BUILD.md)). `Artifact::production()` still refuses. | Review, sign with the virtualization entitlement, and decide catalog adoption for a validation profile. All of this is held. |
 | P7 | TerminalX validation build | Run 2 | **Absent.** | A reviewed source slice that acquires only the P6 artifact, under a validation profile and the dedicated `TERMINALX_HOME`; creates through the existing path using the P1 entry; and supports an owner-mediated stop. Without that stop, Run 2 is not runnable. |
-| P8 | Probe vsock client mode | Run 2 | **Absent.** Part of P3. | Version-1 hello only, as described in the probe spec below. |
+| P8 | Probe vsock client mode | Run 2 | **Implemented** in `wire.rs`. Fixture-tested over socketpairs against the owner's exact framing; never run against the real listener. | Run 2 itself. |
 | P9 | Person and console | Run 1 | Not arranged | The person is available for the `sudo` steps, Setup Assistant and Login Items. The console exception is approved. |
 | P10 | Capacity | Runs 1, 2 | 128.9 GiB free; 0 VM processes | Re-checked at preflight against the bounds above. |
 
@@ -160,8 +160,17 @@ names, so a leftover can never be mistaken for the production helper.
 | Path on the guest Data volume | Owner / mode | Content |
 | --- | --- | --- |
 | `/Library/LaunchDaemons/com.terminalx.next.vm-validation-probe.plist` | `root:wheel 0644` | `Label` `com.terminalx.next.vm-validation-probe`, absolute `Program`, `RunAtLoad` true, `KeepAlive {SuccessfulExit: false}`. The same key set as the design's plist; no arguments, environment or `UserName`. |
-| `/Library/Application Support/TerminalX/VMValidation/terminalx-vm-validation-probe` (parents `root:wheel 0755`) | `root:wheel 0755` | P3, with no extended attributes |
+| `/Library/Application Support/TerminalX/VMValidation/terminalx-vm-validation-probe` (parents `root:wheel 0755`) | `root:wheel 0755` | P3. No quarantine attribute; only `com.apple.provenance` is accepted (see below). |
 | `/private/var/db/com.terminalx.next.vm-validation/enrollment.json` (directory `root:wheel 0700`) | `root:wheel 0600` | `{version: 1, purpose: "validation", seedId, key}`, with 32 random bytes. Nothing reads it. |
+
+**Finding (2026-10-30, disposable fixture).** Files created by a
+provenance-tracked process carry `com.apple.provenance`, and that process
+cannot remove it: `xattr -d` reports success but the attribute remains. A
+seeder run from Terminal under `sudo` is therefore expected to leave it on all
+three items. The seeder records attribute names and refuses any other name,
+quarantine in particular. Readback requires the recorded set. Whether launchd
+loads a daemon whose plist and executable carry this attribute is observed
+under G2.
 
 Each time it is launched, the probe:
 
@@ -177,8 +186,13 @@ Each time it is launched, the probe:
 - Every 10 seconds within its 15-minute window, opens an `AF_VSOCK` stream and
   makes a nonblocking connect to `VMADDR_CID_HOST` port 49871, recording the
   `errno` of each attempt. In Run 2, after a successful connect, it sends
-  `{"version":1,"clientNonce":…}`, reads one offer frame of at most 64 KiB,
-  records the frame's SHA-256 and its `version` and `ownerEpoch`, then closes.
+  `{"version":1,"clientNonce":…}`, reads one offer frame of at most 256 KiB
+  (the owner's TXWire bound), and records:
+  - the frame's size and SHA-256;
+  - the decoded challenge's SHA-256, `version` and `ownerEpoch`;
+  - whether the challenge echoes this hello's client nonce.
+
+  It then closes.
   It sends no share echo, claims or account data.
 - Exits 0 when the window ends, so `KeepAlive` does not restart it. It writes
   nowhere else, opens no other socket and never reads the key.
@@ -383,8 +397,9 @@ they exist.
 - Pass G3: a probe line with `.AppleSetupDone` absent and `/dev/console` owned
   by root records a successful connect to CID 2 port 49871.
 - Pass G5: the owner's private attempt journal shows one accepted connection on
-  the configured device and listener at port 49871. The digest of the offer it
-  sent equals the probe's recorded digest.
+  the configured device and listener at port 49871. The SHA-256 of the challenge the
+  owner journaled (`guest-observation-intent.json`) equals the probe's recorded
+  `challengeSha256`.
 - Fail: the connect fails while the listener is present (G3), or the
   connection never reaches the delegate or is refused (G5). Stop and report the
   `errno` values and the owner journal.

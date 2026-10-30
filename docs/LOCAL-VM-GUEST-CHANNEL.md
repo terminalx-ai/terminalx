@@ -123,8 +123,9 @@ and no-replay behavior. The VZ adapter is typechecked; no VZ object or live gues
 is instantiated. Production catalog/acquisition, signed helper delivery, actual
 mount acquisition and live acceptance remain unavailable/unverified.
 
-The full exact-source / 18-locked-dependency offline build blocker is unchanged;
-this continuation neither repeated cache preflight nor resolved dependencies.
-See [the retained offline build plan](../integrations/lume-bootstrap/OFFLINE-BUILD.md).
+The full exact-source build with all 18 locked dependencies now compiles offline
+(2026-10-30). That build exposed a real `Set` name clash, which is now fixed. The
+executable is unsigned and unadopted, and nothing here was run against it. See
+[the offline build record](../integrations/lume-bootstrap/OFFLINE-BUILD.md).
 macOS26, separate Attach desktop tools / Run task in VM, human-only safeguards,
 and acceptance/PR holds remain unchanged.

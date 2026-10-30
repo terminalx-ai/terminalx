@@ -39,7 +39,7 @@ stage 8 reuses `macos_bootstrap_helper.rs` unchanged in substance.
 | Path on the guest Data volume | Owner / mode | Content |
 | --- | --- | --- |
 | `/Library/LaunchDaemons/com.terminalx.next.vm-bootstrap.plist` | `root:wheel 0644` | `Label`, absolute `Program`, `RunAtLoad`, `KeepAlive {SuccessfulExit: false}`. No arguments, environment, `UserName` or secrets. |
-| `/Library/Application Support/TerminalX/VMBootstrap/terminalx-vm-bootstrap` (parents `root:wheel 0755`) | `root:wheel 0755` | Catalog-pinned, Developer ID signed arm64 helper. No extended attributes, so no quarantine. |
+| `/Library/Application Support/TerminalX/VMBootstrap/terminalx-vm-bootstrap` (parents `root:wheel 0755`) | `root:wheel 0755` | Catalog-pinned, Developer ID signed arm64 helper. No quarantine attribute. `com.apple.provenance`, which a provenance-tracked writer cannot remove, is recorded and compared on readback. |
 | `/private/var/db/com.terminalx.next.vm-bootstrap/enrollment.json` (directory `root:wheel 0700`) | `root:wheel 0600` | `{version, bootstrapId, targetDigest, seedId, key}`: 32 bytes from the host CSPRNG, base64. |
 
 The seed **never** creates or edits accounts, `.AppleSetupDone`, autologin,
@@ -110,7 +110,7 @@ only worth its review cost if those facts hold.
    device anywhere is a refusal: a root writer must never follow
    guest-controlled links onto the host.
 5. Read back after unmount and a fresh ownership-enabled mount: owner, mode,
-   size and SHA256 of each item. Detach, then journal the seed receipt.
+   size, SHA256 and extended attribute names of each item. Detach, then journal the seed receipt.
 6. Journal `created → seedOutcomeUnknown → seeded`. `run` for this profile
    requires `seeded`. An unknown outcome is resolved only by readback. Exact
    expected items complete the seed; partial or foreign content fences the
@@ -214,7 +214,10 @@ evidence and pass/fail criteria (G1–G6 there):
 
 1. Seeder core with descriptor-relative writes and readback, tested against
    disposable APFS images. Non-root fixtures cover layout, no-follow and
-   pristine checks; root ownership needs the acceptance run.
+   pristine checks; root ownership needs the acceptance run. Implemented in
+   `native/vm-bootstrap` (`seed.rs`, `disk.rs`) and fixture-tested on
+   disposable APFS images. The Run 1 tool `terminalx-vm-seed` uses it. Root
+   ownership and slice 4's journal states remain.
 2. Version-2 enrollment in the Swift owner and the Rust helper, with
    cross-language socketpair fixtures for proof, refusal budget, replay and
    tampered frames.
