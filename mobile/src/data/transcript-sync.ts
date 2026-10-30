@@ -17,9 +17,10 @@ const haltAfter = (code: number) => code === MESSAGE_TOO_LARGE ? 1 : LOSSES_BEFO
  * Kept outside any one watcher: every reconnect starts a new one, and this
  * count is what stops a page that breaks the connection from being asked for
  * again on each reconnect (#670). Another path (Wi-Fi instead of Relay) starts
- * a fresh count.
+ * a fresh count, and so does clearing the host's transcript caches (unpair,
+ * sign-out), which moves its cache epoch on.
  */
-const losses = new Map<string, { request: string; path: TransportPath | null; count: number; code: number }>();
+const losses = new Map<string, { epoch: number; request: string; path: TransportPath | null; count: number; code: number }>();
 const lossKey = (host: string, session: string, tab: string) => JSON.stringify([host, session, tab]);
 
 /** The same read was in flight each time the connection dropped: it is not sent again over this path until someone asks. */
@@ -69,6 +70,7 @@ export function watchTranscript(
   const read = async <T>(request: string, send: () => Promise<T>): Promise<T> => {
     const key = lossKey(host, session, tab);
     const path = api.transport();
+    if (losses.get(key)?.epoch !== epoch) losses.delete(key);
     const loss = losses.get(key);
     if (loss && loss.request === request && loss.path === path && loss.count >= haltAfter(loss.code)) throw new TranscriptHaltedError(path, loss.code);
     try {
@@ -79,7 +81,7 @@ export function watchTranscript(
       if (cause instanceof RelayOuterError) {
         const previous = losses.get(key);
         const count = previous && previous.request === request && previous.path === path ? previous.count + 1 : 1;
-        losses.set(key, { request, path, count, code: cause.code });
+        losses.set(key, { epoch, request, path, count, code: cause.code });
         if (count >= haltAfter(cause.code)) throw new TranscriptHaltedError(path, cause.code);
       } else if (!connectionProblem(cause)) {
         // The Mac answered, if with a refusal: the read did not take the connection down.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canRetry, closeDetail, connectionProblem, problemText } from "./connection-errors";
+import { canRetry, closeDetail, connectionProblem, mayHaveArrived, problemText } from "./connection-errors";
 import { RelayOuterError } from "./relay-client";
 
 describe("transport failures in plain words (#670)", () => {
@@ -31,6 +31,11 @@ describe("transport failures in plain words (#670)", () => {
   it("offers a retry unless the pairing itself was refused", () => {
     expect(canRetry("pairing-invalid")).toBe(false);
     for (const problem of ["mac-offline", "dropped", "reconnecting", "network", "too-large", "no-answer"] as const) expect(canRetry(problem)).toBe(true);
+  });
+
+  it("takes only an unanswered request to have most likely reached the Mac", () => {
+    expect(mayHaveArrived("no-answer")).toBe(true);
+    for (const problem of ["pairing-invalid", "mac-offline", "dropped", "reconnecting", "network", "too-large"] as const) expect(mayHaveArrived(problem)).toBe(false);
   });
 
   it("logs the code with what the close said", () => {

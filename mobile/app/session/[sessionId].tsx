@@ -12,7 +12,7 @@ import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/h
 import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
 import type { ConnectionStage } from "@mobile/transport/connection";
-import { canRetry, connectionProblem, problemText } from "@mobile/transport/connection-errors";
+import { canRetry, connectionProblem, mayHaveArrived, problemText } from "@mobile/transport/connection-errors";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 import { conversationKey } from "@mobile/data/conversations";
@@ -226,8 +226,11 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
       if (!problem) return showError(error instanceof Error ? error.message : "The host could not send this message.");
       // The connection failed, not the Mac: say so in plain words, and offer
       // the same draft again for when it is back (#670). The code is logged.
-      setSendFeedback({ kind: "error", message: `Not sent: ${problemText(problem)}. Your message is still in the box.`, resend: canRetry(problem) });
       app.connection.reportError("Session message failed", error);
+      // A Mac that never answered most likely has it: sending it again could
+      // give the agent the same prompt twice (#675).
+      if (mayHaveArrived(problem)) return setSendFeedback({ kind: "error", message: `Not confirmed: ${problemText(problem)}, so the message may have reached the agent. Check the conversation before sending it again.` });
+      setSendFeedback({ kind: "error", message: `Not sent: ${problemText(problem)}. Your message is still in the box.`, resend: canRetry(problem) });
     } finally {
       setSending(false);
     }

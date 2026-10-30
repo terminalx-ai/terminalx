@@ -49,6 +49,15 @@ export function canRetry(problem: ConnectionProblem): boolean {
   return problem !== "pairing-invalid";
 }
 
+/**
+ * Whether a request that failed here most likely reached the Mac anyway: the
+ * connection stayed up and the Mac never answered. Safe to repeat for a read,
+ * not for a send, which the Mac does not de-duplicate (#675).
+ */
+export function mayHaveArrived(problem: ConnectionProblem): boolean {
+  return problem === "no-answer";
+}
+
 /** For the connection log: the code, and what the close said when there was a close. */
 export function closeDetail(error: RelayOuterError): string {
   if (error.wasClean === undefined) return error.message;

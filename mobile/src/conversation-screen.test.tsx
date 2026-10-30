@@ -306,6 +306,18 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(() => button("Send again")).toThrow();
   });
 
+  it("does not call a send the Mac never answered 'not sent', nor offer to send it again", async () => {
+    const timedOut = new Error("RPC timed out: session.send");
+    mocks.app.api.sendSession.mockRejectedValueOnce(timedOut);
+    await render(); await type("Run the migration"); await click("Send");
+    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the message may have reached the agent. Check the conversation before sending it again.");
+    expect(container.textContent).not.toContain("Not sent");
+    expect(container.textContent).not.toContain("RPC timed out");
+    expect(() => button("Send again")).toThrow();
+    expect(input().value).toBe("Run the migration");
+    expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", timedOut);
+  });
+
   it("does not offer Send again when the relay refuses the pairing, and keeps the Mac's own refusals as they are", async () => {
     mocks.app.api.sendSession
       .mockRejectedValueOnce(new RelayOuterError(4401, "", false))

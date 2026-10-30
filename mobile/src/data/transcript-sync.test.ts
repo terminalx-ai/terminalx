@@ -56,7 +56,8 @@ function host(initial = 20, supported = true) {
   return { request, subscribe, updates, error, start, restartApi: () => { api = new HostApi(connection); }, ready: () => ready(), live: (e: AgentEvent) => listener({ event: e }), append: (count: number) => { events.push(...Array.from({ length: count }, (_, i) => event(events.length + i + 1))); }, edit: () => { events[events.length - 1] = event(events.length, "reconciled"); }, fail: (offset: number) => { failOffset = offset; }, race: (callback: () => void) => { afterPage = callback; }, path: (next: "direct" | "relay") => { path = next; }, drop: (code: number | null) => { drop = code; } };
 }
 
-beforeEach(() => { storage.clear(); vi.useFakeTimers(); });
+// Clearing the caches also resets the drop counts kept across watchers.
+beforeEach(async () => { storage.clear(); await clearTranscriptCaches(); vi.useFakeTimers(); });
 afterEach(() => { stops.splice(0).forEach((stop) => stop()); vi.useRealTimers(); });
 
 describe("incremental transcript sync", () => {
@@ -277,6 +278,15 @@ describe("a read that keeps dropping the connection", () => {
     h.request.mockClear();
     await connection(h, "typed");
     expect(syncs(h)).toEqual([]);
+  });
+
+  it("starts the count afresh once the host's transcript caches are cleared", async () => {
+    const h = host(100); h.path("relay"); h.drop(1001);
+    await connection(h, "cleared"); await connection(h, "cleared");
+    await clearTranscriptCaches("cleared"); h.drop(null); h.request.mockClear();
+    await connection(h, "cleared");
+    expect(syncs(h)).toHaveLength(1);
+    expect((await readCache("cleared", "session", "tab")).cursor?.offset).toBe(100);
   });
 
   it("does not count a read that never went out", async () => {
