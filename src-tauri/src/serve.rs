@@ -52,6 +52,8 @@ Options:
                          (cloud workspaces get it from the bootstrap)
   --self-test            Start, run one shell in a PTY, then exit
   --idle-grace-seconds N Local runtime idle grace (1–3600; default 60)
+  --log-file <file>      Keep the log in <file>, with its stdout and stderr,
+                         moving it to <file>.1 when it reaches 8 MB
   -V, --version          Print the version
   -h, --help             Print this help
 
@@ -87,6 +89,7 @@ pub struct Options {
     pub runtime_kind: RuntimeKind,
     pub self_test: bool,
     pub relay_link: Option<PathBuf>,
+    pub log_file: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,7 +101,7 @@ enum Command {
 
 fn parse(args: &[String]) -> Result<Command> {
     let mut options =
-        Options { idle_grace_seconds: crate::local_runtime::IDLE_GRACE.as_secs(), project_root: None, data_dir: None, runtime_kind: RuntimeKind::Local, self_test: false, relay_link: None };
+        Options { idle_grace_seconds: crate::local_runtime::IDLE_GRACE.as_secs(), project_root: None, data_dir: None, runtime_kind: RuntimeKind::Local, self_test: false, relay_link: None, log_file: None };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -124,6 +127,7 @@ fn parse(args: &[String]) -> Result<Command> {
                 }
             }
             "--relay-link" => options.relay_link = Some(PathBuf::from(value(flag)?)),
+            "--log-file" => options.log_file = Some(PathBuf::from(value(flag)?)),
             "--self-test" if inline.is_none() => options.self_test = true,
             "--idle-grace-seconds" => {
                 options.idle_grace_seconds = value(flag)?.parse().context("idle grace must be seconds from 1 to 3600")?;
@@ -167,7 +171,15 @@ pub fn main() -> i32 {
             return 2;
         }
     };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    #[cfg(unix)]
+    if let Some(path) = &options.log_file {
+        match crate::local_runtime::log_file::Log::install(path) {
+            Ok(log) => { logger.target(env_logger::Target::Pipe(Box::new(log))); }
+            Err(error) => eprintln!("terminalx-serve: cannot keep its log in {}: {error}", path.display()),
+        }
+    }
+    logger.init();
     #[cfg(all(target_os = "macos", feature = "local-ui"))]
     let outcome = if options.runtime_kind == RuntimeKind::Local && !options.self_test
         && std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1") {
@@ -316,10 +328,11 @@ fn run(options: Options) -> Result<()> {
                     _ = tokio::time::sleep(Duration::from_millis(250)) => {
                         #[cfg(all(target_os = "macos", feature = "local-ui"))]
                         if crate::local_runtime::platform::shutdown_requested() { break; }
-                        if runtime.lifetime.is_some() {
+                        if let Some(lifetime) = &runtime.lifetime {
                             crate::local_sharing::owner::reap(&runtime.manager);
                             runtime.manager.mobile.drain(&runtime.manager);
                             runtime.manager.history_downloads.reap();
+                            lifetime.turned();
                         }
                         if runtime.lifetime.as_ref().is_some_and(|lifetime| lifetime.should_exit_checked(|| {
                             // An explicitly configured relay server is a
@@ -882,7 +895,7 @@ mod tests {
         let Some(root) = std::env::var_os("TERMINALX_TEST_SHARING_REPLY_OWNER") else { return };
         run(Options { idle_grace_seconds: 30, project_root: None,
             data_dir: Some(root.into()), runtime_kind: RuntimeKind::Local,
-            self_test: false, relay_link: None }).unwrap();
+            self_test: false, relay_link: None, log_file: None }).unwrap();
     }
 
     fn args(list: &[&str]) -> Vec<String> {
@@ -901,6 +914,7 @@ mod tests {
                 runtime_kind: RuntimeKind::CloudWorkspace,
                 self_test: false,
                 relay_link: None,
+                log_file: None,
             })
         );
     }
@@ -918,6 +932,13 @@ mod tests {
         assert!(parse(&args(&["--runtime-kind", "mars"])).is_err());
         assert!(parse(&args(&["--project-root"])).is_err());
         assert!(parse(&args(&["--no-pairing"])).is_err());
+        assert!(parse(&args(&["--log-file"])).is_err());
         assert_eq!(parse(&args(&["--help", "--bogus"])).unwrap(), Command::Help);
+    }
+
+    #[test]
+    fn a_desktop_launch_names_the_runtime_log() {
+        let Command::Serve(options) = parse(&args(&["--data-dir", "/home", "--log-file", "/logs/runtime.log"])).unwrap() else { panic!("expected serve") };
+        assert_eq!(options.log_file, Some("/logs/runtime.log".into()));
     }
 }

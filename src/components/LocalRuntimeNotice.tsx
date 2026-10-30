@@ -8,12 +8,17 @@ import { getSessionStore } from "@/lib/sessions";
 import { cloudDraftsReadyForRecovery } from "@/lib/cloudAgents";
 
 const reloadWindow = () => window.location.reload();
+/** How often a runtime that stopped answering is asked again: it may recover on its own. */
+export const UNRESPONSIVE_RECHECK = 10_000;
 
 /** Recover readers only: connection health never implies an agent stopped. */
 export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => void }) {
   const [state, setState] = useState<LocalRuntimeState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   const reconnect = useRef(() => {});
+  const restart = useRef((_epoch: string | null) => {});
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
 
@@ -66,6 +71,13 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
         if (cancelled || reloaded) return;
         if (requested !== revision) { pendingRetry ||= retry; return; }
         setState(found);
+        if (found.state !== "unresponsive") setFailure(null);
+        if (found.state === "unresponsive") {
+          // Reconnecting would reach the same wedged process; only a restart
+          // recovers, and that stops its agents, so it is the reader's call.
+          timer = setTimeout(() => void check(), UNRESPONSIVE_RECHECK);
+          return;
+        }
         if (found.state !== "unavailable") {
           if (reloadRequired && found.state === "connected") recovered();
           return;
@@ -104,6 +116,26 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
     }
     // Manual recovery grants one attempt, without replenishing the auto budget.
     reconnect.current = () => { void check(true); };
+    // Only the runtime this window found not responding: another window may
+    // already have replaced it.
+    restart.current = (epoch) => {
+      if (cancelled || reloaded) return;
+      revision++;
+      setRestarting(true);
+      setFailure(null);
+      void localRuntime.restart(epoch).then((found) => {
+        if (cancelled || reloaded) return;
+        // A fresh runtime has none of this page's views: rebuild them.
+        if (found.state === "connected") reloadRequired = true;
+        else setState(found);
+      }, (error: unknown) => {
+        if (!cancelled && !reloaded) setFailure(errorMessage(error));
+      }).finally(() => {
+        if (cancelled || reloaded) return;
+        setRestarting(false);
+        void check();
+      });
+    };
     const disconnected = () => {
       revision++;
       void check();
@@ -113,7 +145,7 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
       disconnected();
     };
     void (async () => {
-      for (const event of ["local_runtime_disconnected", "local_runtime_view_disconnected", "local_runtime_reattached"]) {
+      for (const event of ["local_runtime_disconnected", "local_runtime_view_disconnected", "local_runtime_health", "local_runtime_reattached"]) {
         const stop = await listen(event, event === "local_runtime_reattached" ? reattached : disconnected);
         if (cancelled) { stop(); return; }
         unlisten.push(stop);
@@ -127,9 +159,20 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
       clearTimeout(timer);
       unlisten.forEach((stop) => stop());
       reconnect.current = () => {};
+      restart.current = (_epoch) => {};
     };
   }, []);
 
+  if (state?.state === "unresponsive") return (
+    <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+      <div className="min-w-0 flex-1 text-xs">
+        <div className="font-medium">TerminalX runtime is not responding</div>
+        <p className="mt-1 text-muted-foreground">{state.message} Restarting it stops the agents and terminals it runs; each agent picks up its conversation again when its tab starts.</p>
+        {failure && <p role="alert" className="mt-1 text-destructive">{failure}</p>}
+      </div>
+      <Button variant="outline" size="sm" disabled={restarting} onClick={() => restart.current(state.epoch)}>{restarting ? "Restarting…" : "Restart runtime"}</Button>
+    </aside>
+  );
   if (state?.state !== "unavailable") return null;
   return (
     <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">

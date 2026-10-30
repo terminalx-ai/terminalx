@@ -4,11 +4,16 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 
 use super::{bridge::Bridge, client::{AttachmentIdentity, Client}, sessions::Sessions};
 use crate::{pty::Tap, sink::EventSink};
+
+/// How long the owner's loop may go without finishing a pass before a window
+/// says it is not responding. A pass normally takes a quarter of a second.
+const LOOP_STALL: Duration = Duration::from_secs(30);
 
 pub struct Desktop {
     client: Arc<Client>,
@@ -34,7 +39,7 @@ impl Desktop {
         // round trip before registering the replacement, so it cannot race a
         // still-valid old window lease. An already-expired lease is harmless;
         // owner loss is independently rejected by the pinned stream handshake.
-        let _: Result<serde_json::Value> = self.client.call("runtime.detach", serde_json::to_value(previous)?);
+        let _: Result<serde_json::Value> = self.client.quick("runtime.detach", serde_json::to_value(previous)?);
         // The caller must publish the new identity before exposing services.
         Self::connect(self.client.clone(), self.sink.clone())
     }
@@ -52,7 +57,7 @@ impl Desktop {
     /// The listener is private to this window. Only the owner publishes home discovery.
     fn register_window(&self, endpoint: crate::hooks::ControlEndpoint) -> Result<()> {
         let attachment = self.attachment()?;
-        let _: serde_json::Value = self.client.call("runtime.window.register", serde_json::json!({
+        let _: serde_json::Value = self.client.quick("runtime.window.register", serde_json::json!({
             "epoch":attachment.epoch,"lease":attachment.lease,"socket":endpoint.socket,"token":endpoint.token
         }))?;
         Ok(())
@@ -64,6 +69,19 @@ impl Desktop {
     }
 
     pub fn attachment(&self) -> Result<AttachmentIdentity> { self.events.attachment() }
+
+    /// The owner this desktop is pinned to, whether or not its events still flow.
+    pub fn epoch(&self) -> &str { self.client.epoch() }
+
+    /// Whether the owner answers, and its own loop still turns. A loop held
+    /// up behind a lock is a wedged owner even while `status` answers (#661).
+    pub fn probe(&self) -> Result<()> {
+        let status: serde_json::Value = self.client.quick("status", serde_json::json!({}))?;
+        if let Some(age) = status["localRuntime"]["loopAgeMs"].as_u64().map(Duration::from_millis).filter(|age| *age >= LOOP_STALL) {
+            anyhow::bail!("The TerminalX runtime answers, but its work loop has been stuck for {} seconds.", age.as_secs());
+        }
+        Ok(())
+    }
 
     /// PTY transport is shared by this window's panes, not by every session
     /// or every window. A healthy event publisher does not prove it is live.

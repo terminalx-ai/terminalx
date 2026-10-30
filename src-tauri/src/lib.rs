@@ -165,6 +165,8 @@ pub struct AppState {
     manager: std::sync::Mutex<Option<session::SessionManager>>,
     runtime: std::sync::Mutex<Option<Arc<local_runtime::desktop::Desktop>>>,
     runtime_error: std::sync::Mutex<String>,
+    /// Whether the attached runtime still answers (#661).
+    runtime_health: local_runtime::ui::Health,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
 }
 
@@ -235,6 +237,7 @@ pub fn run() {
         manager: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(None),
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
+        runtime_health: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
 
@@ -335,15 +338,18 @@ pub fn run() {
             browser.start_keepalive();
             floating::install(app.handle());
             if let Err(error) = local_runtime::ui::connect(app.handle()) {
-                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
                 log::error!("attach background runtime: {error:#}");
+                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
+                app.state::<AppState>().runtime_health.attach_failed(&error);
             }
+            local_runtime::ui::watch(app.handle());
             work_claims.start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
+            local_runtime::ui::local_runtime_restart,
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
