@@ -26,7 +26,12 @@ function set(patch: Partial<State>) {
   for (const listener of listeners) listener();
 }
 
+/** When each pipeline was last announced, so a list can tell what is newer than it. */
+const announcedAt = new Map<string, number>();
+let announcements = 0;
+
 export function upsertPipeline(pipeline: IssuePipeline) {
+  announcedAt.set(pipeline.id, ++announcements);
   const previous = state.pipelines.find((value) => value.id === pipeline.id);
   set({ pipelines: previous ? state.pipelines.map((value) => (value.id === pipeline.id ? pipeline : value)) : [...state.pipelines, pipeline] });
   // A pipeline first heard of at rest is not news; one that came to rest is.
@@ -37,16 +42,30 @@ let booted = false;
 export async function bootIssuePipelines() {
   if (booted) return;
   booted = true;
+  const since = announcements;
   try {
     await listen<IssuePipeline>("issue_pipeline", (event) => upsertPipeline(event.payload));
+    // Pipelines that moved while the live connection was down were not announced.
+    await listen("local_runtime_reattached", () => void listPipelines(announcements));
   } catch {
     /* outside a webview */
   }
+  await listPipelines(since);
+}
+
+/** List them all again. What was announced after `since` is newer than the list. */
+async function listPipelines(since: number) {
   try {
     const listed = await pipelinesApi.list();
-    // Anything announced while the list was on its way is newer than the list.
-    const heard = new Set(state.pipelines.map((value) => value.id));
-    set({ pipelines: [...listed.filter((value) => !heard.has(value.id)), ...state.pipelines], loaded: true });
+    const newer = (id: string) => (announcedAt.get(id) ?? 0) > since;
+    const before = state.pipelines;
+    const fresh = listed.filter((value) => !newer(value.id));
+    set({ pipelines: [...fresh, ...before.filter((value) => newer(value.id))], loaded: true });
+    // One that came to rest during a gap in the live connection is still news.
+    for (const pipeline of fresh) {
+      const previous = before.find((value) => value.id === pipeline.id);
+      if (previous && previous.state !== pipeline.state) notePipelineState(pipeline);
+    }
   } catch {
     set({ loaded: true });
   }

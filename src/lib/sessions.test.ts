@@ -396,3 +396,47 @@ it("subscribes before boot backfill and merges its newer time into a stale initi
   mocks.listeners.get("session_updated")!({ payload: { ...initial, title: "Synthetic rename" } });
   expect(sessions.getSessionStore().sessions[0]).toMatchObject({ title: "Synthetic rename", lastMessageAt: newer.lastMessageAt });
 });
+
+describe("a new live connection", () => {
+  const reads = ["list_projects", "list_sessions", "list_harnesses", "list_workspaces", "chats_dir"];
+
+  it("re-reads the sessions, projects and checkouts the gap hid, and sends nothing", async () => {
+    const renamed = { ...attached, title: "Renamed while disconnected" };
+    const added = { path: "/repos/other", name: "Other" };
+    mocks.invoke.mockClear();
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_projects") return { projects: [{ path: projectPath, name: "Raccoon" }, added], lastSelected: projectPath };
+      if (command === "list_sessions") return [renamed];
+      if (command === "list_harnesses") return [];
+      if (command === "list_workspaces") return [main];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    mocks.listeners.get("local_runtime_reattached")!({ payload: { generation: 2 } });
+    await vi.waitFor(() => expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main]));
+    const store = sessions.getSessionStore();
+    expect(store.sessions.map((session) => session.title)).toEqual(["Renamed while disconnected"]);
+    expect(store.projects.map((project) => project.path)).toEqual([projectPath, added.path]);
+    expect(mocks.invoke.mock.calls.every(([command]) => reads.includes(command))).toBe(true);
+  });
+
+  it("loads the index of a window that opened while the runtime was out of reach", async () => {
+    vi.resetModules();
+    mocks.listeners.clear();
+    const working = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, ...rest: unknown[]) => {
+      if (command === "list_sessions") throw new Error("local runtime event connection is closed");
+      return working(command, ...rest);
+    });
+    const fresh = await import("./sessions");
+    await expect(fresh.bootSessions()).rejects.toThrow("connection is closed");
+    expect(fresh.getSessionStore().loaded).toBe(false);
+    expect(mocks.listeners.has("session_deleted")).toBe(false);
+    mocks.invoke.mockImplementation(working);
+    mocks.listeners.get("local_runtime_reattached")!({ payload: { generation: 1 } });
+    await vi.waitFor(() => expect(fresh.getSessionStore().loaded).toBe(true));
+    expect(fresh.getSessionStore().sessions.map((session) => session.id)).toEqual([attached.id]);
+    // And it hears of later changes from then on.
+    mocks.listeners.get("session_deleted")!({ payload: attached.id });
+    expect(fresh.getSessionStore().sessions).toEqual([]);
+  });
+});

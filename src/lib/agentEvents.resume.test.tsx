@@ -9,7 +9,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api", () => ({ agent: { loadEvents: mocks.loadEvents }, api: { listSessions: mocks.listSessions } }));
 vi.mock("@/lib/sessions", () => ({ getSessions: () => ({ sessions: mocks.sessions }), patchTab: mocks.patchTab }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+const listeners = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+  listeners.set(name, handler);
+  return () => listeners.delete(name);
+}) }));
 
 const event = (id: string, seq: number): AgentEvent => ({
   id, seq, sessionId: "synthetic", tabId: "tab", harness: "synthetic", ts: "", subagent: undefined,
@@ -216,5 +220,20 @@ it("rejects a reconciliation response for a dropped and recreated log at the sam
   });
   expect(hook.result.current.compactionContinuityKnown).not.toBe(true);
   expect(hook.result.current.events.map(e => e.id)).toEqual(["replacement"]);
+  hook.unmount();
+});
+
+it("reads missed history and status again over a new live connection, as on resume, sending nothing", async () => {
+  const store = await import("./agentEvents");
+  mocks.sessions = [{ id: "synthetic", tabs: [{ id: "tab", status: "in_progress" }] }];
+  mocks.loadEvents.mockResolvedValueOnce([event("before", 1)]);
+  await store.loadTab("synthetic", "tab");
+  await store.subscribeAgentEvents();
+  const hook = renderHook(() => store.useTabLog("synthetic", "tab"));
+  mocks.listSessions.mockResolvedValue([{ id: "synthetic", tabs: [{ id: "tab", status: "completed" }] }]);
+  mocks.loadEvents.mockResolvedValueOnce([event("before", 1), event("during the gap", 2)]);
+  await act(async () => listeners.get("local_runtime_reattached")!({ payload: { generation: 2 } }));
+  await vi.waitFor(() => expect(hook.result.current.events.map((e) => e.id)).toEqual(["before", "during the gap"]));
+  expect(mocks.patchTab).toHaveBeenCalledWith("synthetic", "tab", { status: "completed" });
   hook.unmount();
 });

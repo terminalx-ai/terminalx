@@ -1738,9 +1738,17 @@ export interface KillResult {
   confirmation: string | null;
 }
 
+/**
+ * One window's live connection to the local runtime (`supervisor.rs`). A new
+ * `generation` is a new attachment; a new `view` is a new connection for this
+ * window's terminal output alone. Either way the window attaches again.
+ */
 export type LocalRuntimeState =
   | { state: "inProcess" }
-  | { state: "connected"; epoch: string; runningAgents: number; terminals: number }
+  | { state: "connected"; epoch: string; generation: number; view: number }
+  /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
+  | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
+  /** Retrying cannot help until something outside this window changes. */
   | { state: "unavailable"; message: string };
 
 export type QuitBehavior = "keepRunning" | "stopAll";

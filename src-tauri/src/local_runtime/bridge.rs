@@ -1,6 +1,7 @@
 //! One native window connection. PTY callbacks receive the same bytes and
 //! cumulative acknowledgements as an in-process tap. Dropping this connection
 //! releases views and its UI lease, never the processes that produced them.
+//! It pings the owner, so a hung owner is noticed as a lost connection.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -17,6 +18,8 @@ use crate::sink::EventSink;
 use super::client::Client;
 
 type Views = HashMap<String, (String, Tap)>;
+/// Told once when the connection ends by itself, never after `disconnect`.
+pub type Lost = Box<dyn FnOnce() + Send>;
 
 struct State {
     write: UnixStream,
@@ -50,20 +53,30 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn connect(client: &Client, sink: Arc<dyn EventSink>) -> Result<Self> {
-        Self::open(client, sink, true)
+    pub fn connect(client: &Client, sink: Arc<dyn EventSink>, lost: Option<Lost>) -> Result<Self> {
+        Self::open(client, sink, true, lost)
     }
 
     /// Additional windows need independent flow control, but must not publish
     /// another copy of the owner's app-wide events into the desktop event bus.
-    pub fn connect_views(client: &Client, sink: Arc<dyn EventSink>) -> Result<Self> {
-        Self::open(client, sink, false)
+    pub fn connect_views(client: &Client, sink: Arc<dyn EventSink>, lost: Option<Lost>) -> Result<Self> {
+        Self::open(client, sink, false, lost)
     }
 
-    fn open(client: &Client, sink: Arc<dyn EventSink>, publish_events: bool) -> Result<Self> {
+    fn open(client: &Client, sink: Arc<dyn EventSink>, publish_events: bool, lost: Option<Lost>) -> Result<Self> {
         let mut connection = client.stream()?;
         let attachment = connection.attachment().clone();
         let state = Arc::new(Mutex::new(State { write: connection.writer()?, views: HashMap::new(), connected: true, detached: false }));
+        // A failed ping closes the socket, which ends the reader below. Silence
+        // ends it too, at the stream's read deadline.
+        let pinger = Arc::downgrade(&state);
+        let interval = client.ping_interval();
+        std::thread::Builder::new().name("local-runtime-ping".into()).spawn(move || loop {
+            std::thread::sleep(interval);
+            let Some(state) = pinger.upgrade() else { return };
+            let mut state = state.lock().unwrap();
+            if !state.connected || state.send(json!({"method":"ping"})).is_err() { return; }
+        })?;
         let reader = state.clone();
         std::thread::Builder::new().name("local-runtime-events".into()).spawn(move || {
             let outcome: Result<()> = (|| {
@@ -107,6 +120,7 @@ impl Bridge {
                 // may still be running. A new bridge starts with new taps.
                 let event = if publish_events { "local_runtime_disconnected" } else { "local_runtime_view_disconnected" };
                 sink.emit(event, &json!({"reattachRequired":true}));
+                if let Some(lost) = lost { lost(); }
             }
         })?;
         Ok(Self { state, attachment })
