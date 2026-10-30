@@ -32,7 +32,7 @@ not exist yet are named as missing, never filled with stand-ins.
   attached-desktop path pins Cua's `cua-driver` 0.28.0. That pilot path is not
   the onboarding path validated here.
 
-## Two groups of facts
+## Three groups of checks
 
 **Guest facts G1–G6** are properties of macOS 26 and Virtualization. They do not
 depend on how the host obtains root. So a person-run `sudo` seed stands in for
@@ -60,6 +60,10 @@ notarization, approval, caller restriction, disable/revoke and update. It needs
 the daemon to exist (design source slice 5) and its own approval. It is defined
 [below](#host-acceptance-of-the-bundled-seed-daemon-h1h6) so that guest results
 are never read as host acceptance. No H procedure runs before G1–G6 pass.
+
+**Fresh-Mac packaging acceptance F0–F7** covers the finished end-user flow on
+a Mac with no developer tooling. It comes last, after G and H, and is defined
+[below](#fresh-mac-packaging-acceptance-f0f7).
 
 ## Why two runs, one target at a time
 
@@ -367,7 +371,14 @@ they exist.
 4. **Observe and stop.** The probe connects within its window, the owner
    journals the attempt and sends its offer, and the probe records it. Then an
    owner-mediated stop, followed by the offline readback from 1.5.
-5. **Teardown.** As in Run 1, plus deleting the dedicated `TERMINALX_HOME`.
+5. **Retain the journals, then tear down.** Before anything is deleted, copy
+   the dedicated `TERMINALX_HOME`'s non-secret records into the Run 2 evidence
+   directory, with a SHA-256 for each file. These include the provisioning
+   record, owner intent, host plan, prepared record, attempt journal and
+   receipts, plus the probe's `launches.jsonl`. Never copy secret material:
+   `control.capability`, any private key or `macos_keys.rs` key reference,
+   or the validation key. Verify the copies against their digests. Only then
+   delete the VM storage, as in Run 1, and the dedicated `TERMINALX_HOME`.
 
 - Pass G3: a probe line with `.AppleSetupDone` absent and `/dev/console` owned
   by root records a successful connect to CID 2 port 49871.
@@ -394,6 +405,81 @@ involves either retained VM.
 | H4 | Caller restriction and contract | Fixture tests on disposable APFS images, plus one live root check | The daemon's Mach-service `NSXPCListener` sets `setConnectionCodeSigningRequirement` to the TerminalX app's requirement, so non-matching peers are "automatically rejected before consulting the delegate." It accepts one request type. It enforces the seeder contract's refusals: a path under `~/.lume`, a record not in `created`, a booted or non-pristine volume, a symlink, a foreign device, or an image that is attached elsewhere. |
 | H5 | Disable and revoke | Status log and wait-state UI | Turning it off in Login Items yields `RequiresApproval` ("returned if the user revokes consent"). TerminalX shows a wait state and never re-enables it. A seed request while disabled fails with no write. `unregister` leaves no daemon. |
 | H6 | Update | Status log across an app update | The SDK says the service "must be re-registered or it may not launch" after a plist or executable change. The update path unregisters, re-registers and re-checks status, and a stale daemon refuses requests. |
+
+## Fresh-Mac packaging acceptance (F0–F7)
+
+**Plain answer.** In the intended finished flow, the person installs TerminalX
+the normal way and installs nothing else by hand. There is no Homebrew, Xcode
+or Command Line Tools, Lume, Cua, Spaces, separate helper or `PATH` change.
+TerminalX downloads and verifies everything else itself after showing sizes,
+and macOS asks for the helper approval in its own Settings UI. **That flow is
+not implemented or validated yet.** Today fresh macOS guest creation is refused
+before anything is downloaded
+([Local Cua tasks](LOCAL-CUA-TASKS.md#execution-and-retained-identity)), and
+the distribution artifacts listed below do not exist.
+
+### Build machine versus end user
+
+| Needed by | What | Notes |
+| --- | --- | --- |
+| TerminalX's build and release machine only | Xcode and the Swift toolchain, Rust, Node/pnpm, the 18 locked Swift dependency sources, a Developer ID identity and notarization credentials | These produce the signed artifacts. They are never a fresh-Mac prerequisite. |
+| End user | A supported Apple silicon Mac on macOS 26, network access, free memory and disk, and a person who can approve the helper in System Settings and complete the guest's Setup Assistant | TerminalX checks the host at admission: Apple silicon and macOS version, virtualization, free memory and disk, dependency versions and local VM concurrency ([dependency profile](LOCAL-CUA-TASKS.md#candidate-dependency-profile-and-distribution-boundary)). |
+
+### Finished target versus today
+
+| Artifact | Finished target | Today |
+| --- | --- | --- |
+| Pinned Lume 0.6.1 for restore | App-managed download into the private `tools/<sha>` cache. The archive (6,112,964 bytes), the executable SHA-256 and the publisher's Developer ID team are checked before use (`bootstrap.rs:54`–`:66`, `:177`). | **Exists** for the current profile |
+| Restricted Lume owner | Built by TerminalX from upstream `3350f504` plus `bootstrap.patch`, signed, delivered by TerminalX and pinned in its catalog | **Absent.** Not built; `Artifact::production()` refuses |
+| Bundled seed daemon | Inside `TerminalX.app`, notarized and registered through `SMAppService` (H1–H3) | **Absent.** Not implemented |
+| Guest helper `terminalx-vm-bootstrap` | Signed, catalog-pinned and seeded offline | **Absent.** Not implemented |
+| macOS 26 restore image | Downloaded by the app from Apple's CDN and checked against a catalog SHA-256 | **Absent.** The catalog is empty |
+| TerminalX release | One normal signed, notarized installer containing or fetching all of the above | **Absent.** No release includes them |
+| Distribution review | Complete | **Open.** It is a release gate. Lume is MIT-licensed, and this path uses no Cua image and no `cua-spacesd`. |
+
+The personalized path does not download the 24.2 GB Cua prebuilt image that
+the earlier pilot profile used.
+
+### Phases
+
+The fresh Mac must be a separate physical Mac that is newly set up or erased.
+It cannot be this development Mac, which has Xcode, a user-installed Lume on
+`~/.local/bin` and the retained VMs. It also cannot be a macOS VM: the
+installed SDK declares nested virtualization only in
+`VZGenericPlatformConfiguration.h`, not for Mac guests.
+
+The evaluator's audit commands are evidence, not steps in the flow. They use
+base-system tools only, such as `sw_vers`, `ls`, `stat`, `shasum`, `codesign`
+and `spctl`. They never run developer-tool stubs such as `git`, `clang` or
+`python3`, because on a Mac without the Command Line Tools those prompt to
+install them.
+
+| # | Phase | Actor | Evidence | Pass |
+| --- | --- | --- | --- | --- |
+| F0 | Host eligibility | Evaluator, read-only | `sw_vers`, `hw.model`, a listing showing absence and a digest of `/etc/paths` | The Mac is Apple silicon on macOS 26. None of these exist: `/opt/homebrew`, `/usr/local/bin/brew`, Xcode, the Command Line Tools, `lume`, `cua`, `~/.lume`, `~/.cua`, `~/.local/bin`, a TerminalX LaunchDaemon, or shell-profile `PATH` additions. |
+| F1 | Install | Person | Installer digest and the `spctl --assess` result | TerminalX installs through its normal signed, notarized installer. Gatekeeper accepts it without any override. |
+| F2 | Disclosure and downloads | Person confirms; the app downloads | Screenshots, and the owner journal showing intent before each effect | Before anything is downloaded, the app shows the restore image, runtime and helper byte counts, the VM resources (4 vCPU, 8 GB, 160 GB sparse), the expected disk use and the retained storage. The shown sizes equal the catalog pins. Each artifact passes its SHA-256 and signature checks before use. |
+| F3 | Download failure and interruption | Evaluator injects the faults; the person recovers | Journal entries, the UI state and the partial-file state | The faults are: network loss mid-download, quitting the app mid-download, too little disk at admission, and a corrupted file. In each case a partial or mismatched file is never used, and the error is shown in TerminalX. Recovery is an explicit action in TerminalX. Create is never replayed, and nothing silently retries an uncertain effect. |
+| F4 | Native helper consent | Person | `SMAppService` status log and System Settings screenshots | Approval happens only in macOS's own UI (H3). Declining leaves a TerminalX wait state, with no fallback to Terminal, `sudo` or an admin script. |
+| F5 | Guest Setup Assistant and guest permissions | Person, in the guest | Screenshots and owner journal receipts | The person completes Setup Assistant and grants any guest permission in the guest's own System Settings. No SIP, TCC or profile change is made, and there is no fixed account or autologin. |
+| F6 | Completion | Person confirms the account; automation does the rest | Account confirmation, enrollment and retirement receipts | The flow reaches the design's retirement receipt (stage 9) through TerminalX alone. |
+| F7 | Post-run audit | Evaluator, read-only | A diff of the F0 probes | Only `TerminalX.app`, its private data root and the approved seed daemon were added. There is still no Homebrew, Xcode or Command Line Tools, Lume or Cua on `PATH`, Spaces, or shell-profile change. |
+
+**Fail, explicitly:** the phase fails if any step requires the person to do
+any of the following:
+
+- open Terminal or run a shell command;
+- install Homebrew, Xcode, the Command Line Tools, Lume, Cua, Spaces or a
+  helper by hand;
+- edit `PATH`;
+- disable SIP or Gatekeeper;
+- approve an unsigned or unnotarized item.
+
+A Command Line Tools install prompt appearing at any point also fails it.
+
+All of these are future work: G1–G6, H1–H6, every artifact marked absent above,
+a signed and notarized release, the distribution review, a separate fresh Mac
+and its own future approval.
 
 ## Draft approval scope for a future coordinated run
 
@@ -436,7 +522,7 @@ Run 1 approval would not cover:
 
 Run 2 and H1–H6 each need a separate approval of the same shape, naming the
 validation build, the restricted artifact digest and the dedicated
-`TERMINALX_HOME`.
+`TERMINALX_HOME`. F0–F7 need their own approval, on a separate fresh Mac.
 
 ## Outcomes
 
@@ -452,6 +538,8 @@ validation build, the restricted artifact digest and the dedicated
   re-reviewed.
 - **G6 attribution fails.** The person-facing control story is incomplete and
   must be resolved before H3.
+- **Any F step needs a manual install or a shell command.** Packaging fails,
+  and the finished-flow answer above does not hold until that is fixed.
 
 In every outcome, `acceptanceReady` and `readyForPr` stay false. Passing the
 guest facts is evidence for a design, not product readiness.
@@ -474,6 +562,11 @@ Retained under `~/.raccoon/task-coordination/pro114-pro117/passes/20261030-helpe
   - macOS licence section 2B(iii) (`968f9721…dcb`).
 - `status-before.json`
   `f556ca5cf5d65be3491e6ecdaa4e54d763c3ea3f18a1a583ea0acaf346e3f6f3`.
+- `fresh-mac-addendum.txt`
+  `7b430f817421847080f5e696fbf804e598985cbfb075a2fa682950c00d082052`. It shows
+  that `VZGenericPlatformConfiguration.h` (`275c188f…d5`) is the only
+  Virtualization header that declares nested virtualization, and records the
+  Lume archive pin.
 
 No VM was listed, started, stopped or attached through Lume. No disk image,
 privileged tool, signing identity, download or account was used.
