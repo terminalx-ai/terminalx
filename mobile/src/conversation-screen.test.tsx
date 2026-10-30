@@ -87,7 +87,7 @@ beforeEach(() => {
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
-    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
+    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected", connectionAttempt: 0,
     sessions: [{ id: "worktree", title: "Create a new issue", project: "TerminalX", worktree: "issue-132", modified: "today", tabs: [
       { id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" },
     ] }],
@@ -543,11 +543,17 @@ describe("mobile conversation navigation", () => {
     await click("Retry loading transcript");
     expect(mocks.app.connection.retryNow).toHaveBeenCalledTimes(1);
     expect(mocks.app.api.tail).toHaveBeenCalledTimes(1);
-    mocks.app.connectionStage = "cant-connect";
+    // Four failed attempts still read as reconnecting; the fifth says the Mac isn't reachable.
+    mocks.app = { ...mocks.app, connectionStage: "cant-connect", connectionAttempt: 4 };
+    await render();
+    expect(container.textContent).toContain("Reconnecting to your Mac…");
+    expect(container.textContent).not.toContain("Your Mac isn't reachable");
+    mocks.app = { ...mocks.app, connectionAttempt: 5 };
     await render();
     expect(container.textContent).toContain("Your Mac isn't reachable");
+    expect(container.textContent).not.toContain("Reconnecting to your Mac…");
     expect(button("Retry loading transcript").disabled).toBe(false);
-    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 2 };
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionAttempt: 0, connectionEpoch: 2 };
     await render();
     expect(container.textContent).toContain("claude transcript");
     expect(container.textContent).not.toContain("Your Mac isn't reachable");

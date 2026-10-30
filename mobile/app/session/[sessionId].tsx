@@ -28,6 +28,8 @@ import { useConversationState } from "@mobile/state/conversation-state";
 const MOBILE_TERMINAL_ENABLED = false;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 8;
+/** Failed reconnect attempts before the transcript card stops saying "Reconnecting" and says the Mac isn't reachable. */
+const UNREACHABLE_AFTER_ATTEMPTS = 5;
 
 interface MobileAttachment extends AttachmentInput {
   id: string;
@@ -292,7 +294,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
     }
   };
 
-  const notice = transcriptNotice(app.connectionStage, epoch > 0, available, loadError, events.length > 0, loading);
+  const notice = transcriptNotice(app.connectionStage, app.connectionAttempt, epoch > 0, available, loadError, events.length > 0, loading);
   const retryTranscript = () => {
     // One more read, even of a page that halted after breaking the connection.
     retryHaltedTranscript(hostId, sessionId, tabId);
@@ -329,14 +331,14 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
  * Reconnecting keeps whatever this phone saved on screen, and Retry stays
  * available whenever it can help.
  */
-function transcriptNotice(stage: ConnectionStage, everConnected: boolean, available: boolean, loadError: { cause: unknown } | null, saved: boolean, loading: boolean): TranscriptNotice | null {
+function transcriptNotice(stage: ConnectionStage, attempt: number, everConnected: boolean, available: boolean, loadError: { cause: unknown } | null, saved: boolean, loading: boolean): TranscriptNotice | null {
   // The page above already says this conversation is gone from the Mac.
   if (!available) return null;
   // Reconnecting would only ask for the same read again.
   if (loadError?.cause instanceof TranscriptHaltedError) return { title: "Could not load transcript", detail: loadError.cause.message, retry: true };
   if (stage !== "connected") {
     const shown = saved ? "Showing the transcript saved on this phone." : "The transcript loads once the phone is connected.";
-    if (stage === "cant-connect" || stage === "unreachable") return { title: "Your Mac isn't reachable", detail: `Check that your Mac is awake and TerminalX is open; the phone keeps trying. ${shown}`, retry: true };
+    if (attempt >= UNREACHABLE_AFTER_ATTEMPTS) return { title: "Your Mac isn't reachable", detail: `Check that your Mac is awake and TerminalX is open; the phone keeps trying. ${shown}`, retry: true };
     return { title: everConnected ? "Reconnecting to your Mac…" : "Connecting to your Mac…", detail: shown, retry: true };
   }
   if (!loadError) return null;
