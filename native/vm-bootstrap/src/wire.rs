@@ -158,7 +158,7 @@ impl Exchange {
     }
 }
 
-fn canonical_object(
+pub(crate) fn canonical_object(
     bytes: &[u8],
     keys: &[&str],
 ) -> Result<serde_json::Map<String, Value>, &'static str> {

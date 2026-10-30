@@ -4,6 +4,7 @@
 #![cfg(target_os = "macos")]
 
 pub mod disk;
+pub mod enroll;
 pub mod fsx;
 pub mod probe;
 pub mod seed;

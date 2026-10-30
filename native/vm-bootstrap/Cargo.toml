@@ -21,6 +21,8 @@ path = "src/bin/seed.rs"
 # Exact versions already locked by src-tauri, so builds stay offline.
 [dependencies]
 base64 = "=0.22.1"
+hkdf = "=0.12.4"
+hmac = "=0.12.1"
 libc = "=0.2.189"
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"

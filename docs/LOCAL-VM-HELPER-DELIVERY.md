@@ -146,6 +146,38 @@ Shares are no longer the trust path. The read-only input share may still carry
 bulk artifacts, accepted only against digests sent over the authenticated
 session. The version-1 share-echo observation remains for retained histories.
 
+### Implemented wire form (2026-10-31)
+
+Source: `integrations/lume-bootstrap/Sources/TerminalXEnrollment.swift` (owner)
+and `native/vm-bootstrap/src/enroll.rs` (guest helper). All frames use the
+existing TXWire framing and canonical JSON.
+
+| Step | Frame | Checked |
+| --- | --- | --- |
+| Hello | `{bootstrapId, clientNonce, seedId, version: 2}` | Exact keys, canonical; both ids equal the binding. A refused hello gets no challenge and no journal entry. |
+| Challenge | `{bindingDigest, bootstrapId, clientNonce, ownerEpoch, seedId, seedReceiptSha256, serverNonce, version: 2}` | Journaled before it is sent. The helper sends no proof unless every field matches its seed and its own hello. |
+| Proof | `{challengeSha256, claims, proof}` | `proof = tag(K, "enrollment", [challengeSha256, sha256(claims)])` under the prefix `terminalx-vm-enrollment-v2`, distinct from `terminalx-lume-owner-v1`. Claims are a flat object of at most 16 values. |
+| Session | `{body, seq, tag}` | Key: HKDF-SHA256 with `K` as input, both nonces as salt and `"terminalx-vm-enrollment-v2 session " + challengeSha256` as info. Each direction counts `seq` from 0. Tag: `tag(session, "frame", [direction, seq, sha256(body)])`. |
+| Acceptance | owner frame 0 | Body `{accountAuthenticated: false, challengeSha256, helperAuthenticated: true, ready: false, trustAccepted: false}`; the helper refuses any other body. |
+
+`TXEnrollmentGate` admits one attempt at a time. A failed attempt spends one
+unit of a bounded refusal budget and never claims. The first valid proof
+claims, after which nothing more is admitted. A spent budget fences the gate
+for inspection. Cross-language fixtures (`Tests/enrollment_test.py`, run by
+`verify.py`) cover the following, with an independent standard-library
+reference playing a hostile peer on each side:
+
+- Rust helper ↔ Swift owner;
+- wrong keys, changed claims, replayed and redirected proofs;
+- hellos and challenges for another seed or binding;
+- non-canonical, oversized, closed and silent streams;
+- refusal budget and claim;
+- promoted or mistagged acceptance;
+- out-of-sequence, tampered and reflected session frames.
+
+The owner listener is not yet switched to version 2. Its key delivery and
+binding fields belong to slices 3-4.
+
 ## Account confirmation and effects
 
 - The helper waits for the person to finish Setup Assistant. It never drives
@@ -220,7 +252,8 @@ evidence and pass/fail criteria (G1–G6 there):
    ownership and slice 4's journal states remain.
 2. Version-2 enrollment in the Swift owner and the Rust helper, with
    cross-language socketpair fixtures for proof, refusal budget, replay and
-   tampered frames.
+   tampered frames. Implemented (wire form above); the listener
+   switch remains.
 3. An authenticated `Channel` constructor fed by the session, replacing
    `acquire_authenticated()`, plus the privilege-dropping account child.
 4. Seed journal states in `macos_provision.rs` and the `run` precondition.

@@ -24,6 +24,12 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   the linker's ad hoc signature, no team and no entitlements.
   - There are zero compiler warnings in `TerminalXBootstrap` and 36 in
     upstream files.
+- **Rebuild with version-2 enrollment (2026-10-31).** After
+  `TerminalXEnrollment.swift` was added (patch `f575a0c9…`), a clean offline
+  rebuild produced arm64 `lume`, 22,007,592 bytes, SHA-256
+  `91e404fad57bd506d2545d509295941253030e8dbf51ed84c898d3504eca042e`, again
+  with only the linker's ad hoc signature and with no compiler errors or
+  warnings in TerminalX sources.
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those

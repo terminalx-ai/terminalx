@@ -1,5 +1,6 @@
 // Disposable protocol process only. Never instantiates Virtualization or a VM.
 import Foundation
+import CryptoKit
 import Darwin
 
 @main struct FixtureMain {
@@ -52,6 +53,56 @@ import Darwin
             var size: Int32 = 1024
             try txRequire(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, socklen_t(MemoryLayout<Int32>.size)) == 0)
             try TXWire.write(fd, Data(repeating: 65, count: 256 * 1024))
+            return
+        }
+        // enroll-gate <0600 config path> <refusal limit> <fd>...: each inherited
+        // stream is one attempt through the same gate. The key is read from the
+        // private config file, never argv; output carries digests and states only.
+        if CommandLine.arguments.count >= 5, CommandLine.arguments[1] == "enroll-gate",
+           let limit = Int(CommandLine.arguments[3]) {
+            let path = CommandLine.arguments[2]
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            try txRequire((attributes[.posixPermissions] as? Int) == 0o600)
+            let config = try txObject(Data(contentsOf: URL(fileURLWithPath: path)), keys: ["key", "bootstrapId", "seedId",
+                "bindingDigest", "ownerEpoch", "seedReceiptSha256", "journal"])
+            let key = SymmetricKey(data: try txHex(txString(config, "key")))
+            let binding = TXEnrollmentBinding(bootstrapId: try txString(config, "bootstrapId"), seedId: try txString(config, "seedId"),
+                bindingDigest: try txString(config, "bindingDigest"), ownerEpoch: try txString(config, "ownerEpoch"),
+                seedReceiptSha256: try txString(config, "seedReceiptSha256"))
+            let journal = try txString(config, "journal")
+            let gate = TXEnrollmentGate(limit: limit)
+            for (index, argument) in CommandLine.arguments.dropFirst(4).enumerated() {
+                guard let fd = Int32(argument) else { throw TXBootstrapError.refused }
+                defer { close(fd) }
+                var result: [String: Any] = ["attempt": index]
+                if !gate.begin() {
+                    result["admitted"] = false
+                } else {
+                    result["admitted"] = true
+                    do {
+                        let session = try TXEnrollment.accept(fd: fd, key: key, binding: binding) {
+                            try $0.write(to: URL(fileURLWithPath: "\(journal)/challenge-\(index).json"), options: .withoutOverwriting)
+                        }
+                        gate.finish(authenticated: true)
+                        result["authenticated"] = true
+                        result["challengeSha256"] = session.challengeSha256
+                        result["claims"] = session.claims
+                        do {
+                            let body = try session.receive(fd)
+                            try session.send(fd, ["echo": body])
+                        } catch { result["sessionError"] = "\(error)" }
+                        result["sent"] = session.sent
+                        result["received"] = session.received
+                    } catch {
+                        gate.finish(authenticated: false)
+                        result["authenticated"] = false
+                        result["error"] = "\(error)"
+                    }
+                }
+                print(String(decoding: try txJSON(result), as: UTF8.self))
+            }
+            let state = gate.state
+            print(String(decoding: try txJSON(["claimed": state.claimed, "refusals": state.refusals, "fenced": state.fenced]), as: UTF8.self))
             return
         }
         guard CommandLine.arguments.count == 3,
