@@ -4,10 +4,11 @@ import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { hostDisplayName } from "../store/host-name";
-import { RelayClient, type RelayEvent } from "./relay-client";
+import { RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
 import { rotateCredentialIfNeeded } from "./credential-rotation";
+import type { PhoneNetwork } from "./network";
 
 export type ConnectionStage = "idle" | "connecting" | "connected" | "reconnecting" | "cant-connect" | "unreachable";
 export interface ConnectionLogEntry { id: string; at: number; level: "info" | "success" | "warning" | "error"; message: string; detail?: string }
@@ -20,6 +21,17 @@ export const RESUME_QUIET_MS = 1_000;
 export const RESUME_PROBE_MS = 1_500;
 /** A request made right after returning waits this long for the reconnect instead of failing at once. */
 export const RESUME_REQUEST_WAIT_MS = 5_000;
+/**
+ * Once every relay path has failed, a LAN path that has not opened a socket
+ * gets this much longer, not the rest of its 15 s handshake timeout: on mobile
+ * data a LAN address never answers, and the relay's refusal says why (#666).
+ */
+export const DIRECT_GRACE_MS = 3_000;
+/** A connection lost this soon after connecting waits before it reconnects, longer each time it happens again. */
+export const FLAP_WINDOW_MS = 5_000;
+export const FLAP_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
+/** Relay close codes a phone can be given, in words, where the number alone tells a person nothing. */
+const RELAY_REFUSALS: Partial<Record<number, string>> = { 4404: "the Mac is not connected to Relay" };
 
 /**
  * The connection to a paired Mac.
@@ -53,6 +65,11 @@ export class HostConnection {
   private connectedListeners = new Set<() => void>();
   private client: RelayClient | null = null;
   private generation = 0;
+  /** Why the last generation ended, for the attempt it cut short. */
+  private cancelReason = "";
+  private network: PhoneNetwork | undefined;
+  /** Connections in a row that were lost within FLAP_WINDOW_MS of connecting. */
+  private flaps = 0;
   private pendingClients = new Set<RelayClient>();
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private active: { host: StoredHost; credential: HostCredential } | null = null;
@@ -64,17 +81,18 @@ export class HostConnection {
   private streams = new Map<number, { method: string; params: unknown; deliver: (result: unknown) => void; detach?: () => void }>();
 
   start(host: StoredHost, credential: HostCredential): void {
-    this.stop();
+    this.stop("another connection started");
+    this.flaps = 0;
     this.active = { host, credential };
     const generation = this.generation;
     void this.connectLoop(generation);
   }
 
-  stop(): void {
+  stop(reason = "disconnected"): void {
     this.backgrounded = false;
     this.lostWhileAway = false;
     this.resumeDeadline = 0;
-    this.generation++;
+    this.cancel(reason);
     clearInterval(this.refreshTimer);
     for (const client of this.pendingClients) client.close();
     this.pendingClients.clear();
@@ -86,10 +104,10 @@ export class HostConnection {
     this.emitStage("idle", 0);
   }
 
-  restart(): void {
+  restart(reason = "restarted"): void {
     const active = this.active;
     if (!active) return;
-    this.generation++;
+    this.cancel(reason);
     clearInterval(this.refreshTimer);
     for (const client of this.pendingClients) client.close();
     this.pendingClients.clear();
@@ -107,7 +125,7 @@ export class HostConnection {
     this.refreshTimer = undefined;
     if (!this.client) {
       // It was already reconnecting: that stops too, and starts fresh on return.
-      this.generation++;
+      this.cancel("the app went to the background");
       for (const client of this.pendingClients) client.close();
       this.pendingClients.clear();
       this.lostWhileAway = true;
@@ -128,7 +146,7 @@ export class HostConnection {
     const lost = this.lostWhileAway || !client;
     this.lostWhileAway = false;
     if (lost) {
-      this.reconnectNow();
+      this.reconnectNow("the connection was lost in the background");
       return true;
     }
     const generation = this.generation;
@@ -143,10 +161,25 @@ export class HostConnection {
       },
       () => {
         if (generation !== this.generation || this.client !== client || this.backgrounded) return;
-        this.reconnectNow();
+        this.reconnectNow("the connection from before the background did not answer");
       },
     );
     return true;
+  }
+
+  /**
+   * The phone's network changed. A path chosen on the old one can be dead
+   * without a word (a LAN address after leaving the Wi-Fi), and a better one
+   * can now exist (LAN after joining it), so the paths are raced again at once.
+   * Like a return from the background, a reconnect that is quick shows nothing.
+   */
+  networkChanged(network: PhoneNetwork): void {
+    const previous = this.network;
+    this.network = network;
+    if (!previous || previous.key === network.key || !network.online || !this.active || this.backgrounded) return;
+    this.log("info", "Network changed", `${previous.label} → ${network.label}`);
+    if (this.shown === "connected") this.beginQuiet();
+    this.reconnectNow("the network changed");
   }
 
   /** Each time a connection is up and usable (the first, a reconnect, a return from the background): time to read what was missed. */
@@ -155,9 +188,15 @@ export class HostConnection {
     return () => this.connectedListeners.delete(listener);
   }
 
-  private reconnectNow(): void {
+  private reconnectNow(reason: string): void {
     this.resumeDeadline = Date.now() + RESUME_REQUEST_WAIT_MS;
-    this.restart();
+    this.restart(reason);
+  }
+
+  /** Ends the current generation: its loop and race stop at their next check, and say why. */
+  private cancel(reason: string): void {
+    this.generation++;
+    this.cancelReason = reason;
   }
 
   private beginQuiet(): void {
@@ -233,18 +272,22 @@ export class HostConnection {
     return () => this.logListeners.delete(listener);
   }
 
-  private async connectLoop(generation: number): Promise<void> {
+  private async connectLoop(generation: number, firstDelay = 0): Promise<void> {
     let attempt = 0;
     while (this.active && generation === this.generation) {
       this.emitStage(attempt === 0 ? "connecting" : attempt >= 12 ? "unreachable" : attempt >= 3 ? "cant-connect" : "reconnecting", attempt);
-      const delay = attempt === 0 ? 0 : attempt > 12 ? RECONNECT_TRICKLE_MS : RECONNECT_DELAYS_MS[Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1)]!;
+      const delay = attempt === 0 ? firstDelay : attempt > 12 ? RECONNECT_TRICKLE_MS : RECONNECT_DELAYS_MS[Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1)]!;
       if (delay) await wait(delay);
       if (!this.active || generation !== this.generation) return;
       try {
         await this.connectOnce(generation);
         return;
       } catch (error) {
-        if (generation !== this.generation) return;
+        if (generation !== this.generation) {
+          // An attempt cut short says so: otherwise it reads as one that never ended (#666).
+          this.log("info", "Connection attempt cancelled", this.cancelReason);
+          return;
+        }
         this.log("warning", "Connection attempt failed", safeError(error));
         attempt++;
       }
@@ -252,34 +295,56 @@ export class HostConnection {
   }
 
   private async connectOnce(generation: number): Promise<void> {
-    if (!this.active) return;
+    const cancelled = () => new Error("Connection attempt cancelled");
+    if (!this.active) throw cancelled();
     const { host: storedHost, credential } = this.active;
     const clientSecretKey = await loadOrCreateE2EESecretKey();
-    if (generation !== this.generation || !this.active) return;
+    if (generation !== this.generation || !this.active) throw cancelled();
     const clients = new Set<RelayClient>();
     let raceFinished = false;
+    // Each path's failure is logged as it happens, while the race it belongs to is still on.
+    const racing = () => !raceFinished && generation === this.generation;
+    const resumable = storedHost.relay && credential.current
+      ? [credential.current, ...(credential.grace && credential.grace.expiresAt > Date.now() ? [credential.grace] : [])]
+      : [];
+    let relayPending = resumable.length;
+    let relayRefused!: () => void;
+    // Never settles when there is no relay path: LAN-only pairings wait for their own timeouts.
+    const relayAllFailed = new Promise<void>((resolve) => { relayRefused = resolve; });
     const openDirect = async (endpoint: string): Promise<ConnectionCandidate> => {
       const client = new RelayClient({ transport: "direct", endpoint, deviceToken: credential.deviceToken, desktopPublicKeyB64: storedHost.publicKeyB64, clientSecretKey });
       clients.add(client);
       this.pendingClients.add(client);
-      this.log("info", "Opening encrypted direct connection", redactEndpoint(endpoint));
-      try { await client.connect(); } catch (error) {
+      let opened = false;
+      const unwatch = client.subscribeState((state) => { if (state === "handshaking" || state === "connected") opened = true; });
+      const connecting = client.connect();
+      const abandoned = relayAllFailed.then(() => wait(DIRECT_GRACE_MS)).then(() => {
+        if (!opened) throw new Error(`no answer ${DIRECT_GRACE_MS / 1_000} s after Relay failed`);
+        return connecting;
+      });
+      try { await Promise.race([connecting, abandoned]); } catch (error) {
         client.close();
-        throw new Error(`${redactEndpoint(endpoint)}: ${safeError(error)}`);
+        const reason = `${redactEndpoint(endpoint)}: ${safeError(error)}`;
+        if (racing()) this.log("info", "Direct path failed", reason);
+        throw new Error(reason);
+      } finally {
+        unwatch();
       }
       return { client, host: { ...storedHost, endpoint }, path: "direct" };
     };
     this.log("info", "Trying connection paths", [
       ...directEndpoints(storedHost).map(redactEndpoint),
-      ...(storedHost.relay && credential.current ? [redactEndpoint(storedHost.relay.cellUrl)] : []),
+      ...(resumable.length ? [redactEndpoint(storedHost.relay!.cellUrl)] : []),
     ].join(" · "));
     const attempts: Promise<ConnectionCandidate>[] = directEndpoints(storedHost).map(openDirect);
-    if (storedHost.relay && credential.current) {
-      const resumable = [credential.current, ...(credential.grace && credential.grace.expiresAt > Date.now() ? [credential.grace] : [])];
-      for (const resume of resumable) {
-        attempts.push((async () => {
-          const host = await resolveRelay({ ...storedHost, relay: storedHost.relay! }, resume.token).catch(() => storedHost);
-          if (raceFinished || generation !== this.generation) throw new Error("Connection attempt cancelled");
+    for (const resume of resumable) {
+      attempts.push((async (): Promise<ConnectionCandidate> => {
+        try {
+          const host = await resolveRelay({ ...storedHost, relay: storedHost.relay! }, resume.token).catch((error: unknown) => {
+            if (racing()) this.log("warning", "Relay director unavailable", `${safeError(error)} · trying the saved relay cell`);
+            return storedHost;
+          });
+          if (!racing()) throw cancelled();
           if (!host.relay) throw new Error("Relay endpoint unavailable");
           const client = new RelayClient({ relay: host.relay, credential: resume.token, credentialKind: "resume", credentialVersion: resume.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64, clientSecretKey });
           clients.add(client);
@@ -287,11 +352,16 @@ export class HostConnection {
           this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
           try { await client.connect(); } catch (error) {
             client.close();
-            throw new Error(`${redactEndpoint(host.relay.cellUrl)}: ${safeError(error)}`);
+            throw new Error(`${redactEndpoint(host.relay.cellUrl)}: ${relayError(error)}`);
           }
           return { client, host, path: "relay", resumeVersion: resume.version };
-        })());
-      }
+        } catch (error) {
+          // Shown on the connection card at once, while LAN paths are still pending.
+          if (racing()) this.log("warning", "Relay path failed", safeError(error));
+          if (--relayPending === 0) relayRefused();
+          throw error;
+        }
+      })());
     }
     let winner!: ConnectionCandidate;
     try { winner = await firstCandidate(attempts); } finally {
@@ -303,28 +373,34 @@ export class HostConnection {
     }
     if (generation !== this.generation || !this.active) {
       winner.client.close();
-      return;
+      throw cancelled();
     }
     const { client, host } = winner;
     this.client = client;
     client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
     let wasConnected = false;
+    let connectedAt = 0;
     client.subscribeState((state) => {
       if (generation !== this.generation) return;
       if (state === "connected") {
         wasConnected = true;
+        connectedAt = Date.now();
         this.emitStage("connected", 0);
         this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
       } else if (state === "disconnected" && wasConnected) {
         clearInterval(this.refreshTimer);
         this.client = null;
+        // A Mac that accepts and then drops every connection would otherwise be
+        // retried at once, in a loop that fills the log (#666).
+        this.flaps = Date.now() - connectedAt < FLAP_WINDOW_MS ? this.flaps + 1 : 0;
         if (this.backgrounded) {
           // Lost while away: noted, and taken up again on return. Nothing is tried, or shown, from the background.
           this.lostWhileAway = true;
           return;
         }
-        this.log("warning", "Connection lost", hostDisplayName(host));
-        void this.connectLoop(generation);
+        const delay = this.flaps ? FLAP_DELAYS_MS[Math.min(this.flaps, FLAP_DELAYS_MS.length) - 1]! : 0;
+        this.log("warning", "Connection lost", delay ? `${hostDisplayName(host)} · reconnecting in ${delay / 1_000} s` : hostDisplayName(host));
+        void this.connectLoop(generation, delay);
       }
     });
     const confirmation = client.getResumeConfirmation();
@@ -435,6 +511,10 @@ async function resolveRelay(host: StoredHost & { relay: NonNullable<StoredHost["
 }
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const relayError = (error: unknown) => {
+  const meaning = error instanceof RelayOuterError ? RELAY_REFUSALS[error.code] : undefined;
+  return meaning ? `${safeError(error)} (${meaning})` : safeError(error);
+};
 const safeError = (value: unknown) => {
   const message = value instanceof Error ? value.message : typeof value === "string" ? value : "Unknown connection error";
   return message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]");
