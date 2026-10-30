@@ -8,6 +8,7 @@ mod crypto;
 mod diagnostics;
 mod direct;
 mod guest;
+mod host_poll;
 mod mobile;
 use crate::local_runtime::mobile::model;
 mod registry;
@@ -679,96 +680,8 @@ impl PairingManager {
         self.emit();
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
-            manager.host_poll(epoch, context, relay, generation).await;
+            manager.host_poll(epoch, context.user_id, relay, generation).await;
         });
-    }
-
-    async fn host_poll(
-        self: Arc<Self>,
-        epoch: u64,
-        context: AccountContext,
-        relay: RelayLive,
-        generation: u64,
-    ) {
-        let host_id = relay.relay_host_id.clone();
-        let mut last_heartbeat = 0i64;
-        while self.is_epoch(epoch) && !self.is_stopped() {
-            let now = Utc::now().timestamp_millis();
-            let context_for_request = context.clone();
-            let host_for_request = host_id.clone();
-            let poll = tokio::task::spawn_blocking(move || -> Result<_> {
-                if now - last_heartbeat >= 30_000 {
-                    cloud::heartbeat(&context_for_request, &host_for_request, generation, "live")?;
-                }
-                let grants =
-                    cloud::pending_grants(&context_for_request, &host_for_request, generation)?;
-                let revocations = cloud::pending_revocations(
-                    &context_for_request,
-                    &host_for_request,
-                    generation,
-                )?;
-                Ok((grants, revocations))
-            })
-            .await;
-            match poll {
-                Ok(Ok((grants, revocations))) => {
-                    if now - last_heartbeat >= 30_000 {
-                        last_heartbeat = now;
-                        if let Some(host) = self.inner.lock().unwrap().host.as_mut() {
-                            host.last_seen_at = Some(Utc::now().to_rfc3339());
-                        }
-                    }
-                    for grant in grants {
-                        self.fulfill_grant(epoch, &context, &relay, generation, grant)
-                            .await;
-                    }
-                    for revocation in revocations {
-                        if revocation.user_id != context.user_id
-                            || revocation.host_id != host_id
-                            || revocation.binding_generation != generation
-                        {
-                            continue;
-                        }
-                        if let Ok(Some(device)) = self.registry.automatic_for_grant(
-                            &context.user_id, &revocation.client_installation_id, &revocation.grant_request_id,
-                        ) {
-                            if let Err(error) = self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device.id})) {
-                                // The failed fence disconnects the attachment before
-                                // the persisted credential is retired below.
-                                log::warn!("fence revoked mobile grant: {error:#}");
-                            }
-                        }
-                        if let Ok(Some(device)) = self.registry.revoke_automatic_grant(
-                            &context.user_id,
-                            &revocation.client_installation_id,
-                            &revocation.grant_request_id,
-                        ) {
-                            let _ = self.secrets.delete_device_token(&device.id);
-                            self.cancel_connections(&device.id);
-                            relay.revoke(device.id);
-                        }
-                        let context = context.clone();
-                        let host_id = host_id.clone();
-                        let revocation_id = revocation.revocation_id;
-                        let _ = tokio::task::spawn_blocking(move || {
-                            cloud::acknowledge_revocation(
-                                &context,
-                                &host_id,
-                                &revocation_id,
-                                generation,
-                            )
-                        })
-                        .await;
-                    }
-                    self.emit();
-                }
-                Ok(Err(error)) => {
-                    log::debug!("host binding poll failed: {error:#}");
-                }
-                Err(error) => log::warn!("host binding poll task failed: {error}"),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
     }
 
     async fn fulfill_grant(
