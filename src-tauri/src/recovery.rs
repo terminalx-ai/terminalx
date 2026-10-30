@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 /// `Tool` is no longer raised (#400): a failed tool is a row in the transcript,
 /// not a state of the session. It stays for the logs that recorded it and for
 /// the text a failed tool's result is replaced with.
-pub enum RecoveryKind { Capacity, UsageLimit, Tool, Timeout, DeliveryUnconfirmed, Disconnected, PermissionExpired, SignedOut, Failed }
+///
+/// `Unsent` is a launch finding the CLI never took the tab's last prompt
+/// (#663): the conversation starts without it, and the reader can send it
+/// again. It is never what an error classifies as.
+pub enum RecoveryKind { Capacity, UsageLimit, Tool, Timeout, DeliveryUnconfirmed, Unsent, Disconnected, PermissionExpired, SignedOut, Failed }
 
 impl RecoveryKind {
     pub fn classify(message: &str) -> Self {
@@ -36,6 +40,7 @@ impl RecoveryKind {
             Self::Tool => "A tool or command failed. Review its outcome before continuing.",
             Self::Timeout => "No progress was confirmed before the timeout. The process outcome is unknown.",
             Self::DeliveryUnconfirmed => "Prompt delivery could not be confirmed. Check the terminal: if your message is still in the agent's input, press Enter there to send it. To resend instead, stop the session, then press Up in the composer to recall your message.",
+            Self::Unsent => "The agent never received your last prompt, so its conversation starts without it. Resend it, or send something new.",
             Self::Disconnected => "The connection was lost. The process outcome is unknown.",
             Self::PermissionExpired => "The permission request expired. Check the terminal for a new request or stop the session.",
             Self::SignedOut => "The agent is signed out, or its sign-in expired. Sign in again, then retry.",

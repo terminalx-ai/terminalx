@@ -2361,6 +2361,15 @@ pub async fn send_message(
         .map_err(err)?
 }
 
+/// The recovery banner's "Resend last prompt": the prompt the tab's agent
+/// never received, sent again as it was (#663). Sending starts the CLI, so
+/// it does not run on the main thread.
+#[tauri::command]
+pub async fn resend_unsent(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<SendOutcome> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.resend_unsent(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
     state.sessions().map_err(err)?.interrupt(&session_id, &tab_id).map_err(err)

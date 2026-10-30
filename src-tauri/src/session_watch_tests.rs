@@ -188,6 +188,7 @@ impl Rig {
                 mode: "default".into(),
                 pane_id: pane.clone(),
                 generation: 0,
+                launched_at: now,
                 restart_when_idle: false,
                 settings_asked_at: None,
                 launched_for: None,

@@ -62,6 +62,24 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("TabView recovery lifecycle", () => {
+  it("sends a prompt the agent never received again, as it was sent, and leaves the draft alone (#663)", async () => {
+    const otherwise = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => command === "resend_unsent"
+      ? { queued: false, events: [event({ type: "user_message", text: "Fix the flaky test", queued: false })] }
+      : otherwise(command, args));
+    render(<Harness />);
+    emit({ type: "user_message", text: "Fix the flaky test", queued: false });
+    emit({ type: "recovery", kind: "unsent" });
+    expect(screen.getByText("Prompt not received")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Resend last prompt" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("resend_unsent", { sessionId: session.id, tabId: session.tabs[0].id }));
+    // The prompt went again: the notice is answered, and nothing the reader was typing is touched.
+    await waitFor(() => expect(screen.queryByLabelText("Session recovery")).toBeNull());
+    expect(mocks.invoke).not.toHaveBeenCalledWith("send_message", expect.anything());
+    expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
+  });
+
   it("shows one delivery notice with resend instructions and clears it when activity arrives", async () => {
     render(<Harness />);
     emit({ type: "user_message", text: "Implement my change", queued: false });
