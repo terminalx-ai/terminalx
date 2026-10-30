@@ -538,13 +538,60 @@ fn a_queued_prompt_the_cli_takes_is_never_flagged() {
     }
 }
 
+impl Rig {
+    /// Run `script` in the tab's pane, in place of the CLI, once it has
+    /// said `CLI-IS-UP`.
+    fn run_in_pane(&self, script: &str) {
+        let path = self._dir.path().join("cli.sh");
+        std::fs::write(&path, script).unwrap();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+        let command = format!("sh '{}'", path.display());
+        let spec = pty::PaneSpec { cwd: self._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(&command), env: &[] };
+        self.manager.terminals.spawn(sink, &self.pane, spec).unwrap();
+        self.pane_says(&["CLI-IS-UP"]);
+    }
+
+    /// Wait until the pane has printed one of `needles`, and say which.
+    fn pane_says(&self, needles: &[&str]) -> String {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let seen = String::from_utf8_lossy(&self.manager.terminals.read_output(&self.pane).unwrap_or_default()).into_owned();
+            if let Some(found) = needles.iter().find(|needle| seen.contains(**needle)) {
+                return found.to_string();
+            }
+            assert!(Instant::now() < deadline, "the pane never said any of {needles:?}: {seen:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Type the newest composer prompt into the pane as `send` would, its
+    /// CLI having said it is up.
+    fn type_composed(&self, text: &str) -> u64 {
+        let (ready, seq) = {
+            let rt = self.rt.lock().unwrap();
+            let Engine::Cli(cli) = &rt.engine else { unreachable!() };
+            (cli.ready.clone(), cli.awaiting_delivery.unwrap())
+        };
+        ready.mark();
+        self.manager.type_prompt(&self.rt, &self.pane, text.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None });
+        seq
+    }
+
+    /// Wait for the writer to let go of the pane: the typing is over.
+    fn typed(&self) {
+        let writer = self.manager.writers.lock().unwrap().get(&self.pane).unwrap().clone();
+        drop(writer.lock().unwrap());
+    }
+}
+
 /// The regression for delayed paste processing, against a real pane.
 ///
 /// The program in the pane stands in for a CLI that is busy when the prompt
 /// arrives: it does not look at its input for a second and a half, then
 /// reads whatever is there in one gulp. Like the TUIs this was written
 /// against, it takes a carriage return that arrives in the same read as the
-/// paste for part of the paste, and only one read on its own for Enter.
+/// paste for part of the paste, and only one read on its own for Enter; and
+/// it shows the paste it read before it reads anything more.
 ///
 /// A fixed pause between the two writes loses to that: both are waiting by
 /// the time the program reads, and the prompt is left in its input. The
@@ -556,58 +603,28 @@ fn a_queued_prompt_the_cli_takes_is_never_flagged() {
 fn an_enter_is_not_written_until_a_busy_cli_has_read_the_paste() {
     const PROMPT: &str = "synthetic prompt for a busy cli";
     let rig = Rig::of(CliKind::Claude, "");
-    let script = rig._dir.path().join("busy-cli.sh");
-    std::fs::write(
-        &script,
+    rig.run_in_pane(
         r#"stty raw -echo
 printf 'CLI-IS-UP'
 sleep 1.5
 first=$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')
 case "$first" in
   *'[201~\r'*) printf 'PROMPT-LEFT-IN-INPUT' ;;
-  *'[201~') dd bs=1 count=1 2>/dev/null | od -An -c | grep -q '\\r' && printf 'PROMPT-SUBMITTED' ;;
+  *'[201~') printf 'PASTE-SHOWN'; dd bs=1 count=1 2>/dev/null | od -An -c | grep -q '\\r' && printf 'PROMPT-SUBMITTED' ;;
   *) printf 'UNEXPECTED-INPUT' ;;
 esac
 sleep 600
 "#,
-    )
-    .unwrap();
-    let screen = |rig: &Rig| String::from_utf8_lossy(&rig.manager.terminals.read_output(&rig.pane).unwrap_or_default()).into_owned();
-    let wait_for = |rig: &Rig, needles: &[&str]| {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            let seen = screen(rig);
-            if let Some(found) = needles.iter().find(|needle| seen.contains(**needle)) {
-                return found.to_string();
-            }
-            assert!(Instant::now() < deadline, "the pane never said any of {needles:?}: {seen:?}");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    };
-
-    let sink = Arc::new(crate::sink::BroadcastSink::new(256));
-    let command = format!("sh '{}'", script.display());
-    let spec = pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(&command), env: &[] };
-    rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
-    wait_for(&rig, &["CLI-IS-UP"]);
-
+    );
     rig.compose(PROMPT, 0);
-    let (ready, seq) = {
-        let rt = rig.rt.lock().unwrap();
-        let Engine::Cli(cli) = &rt.engine else { unreachable!() };
-        (cli.ready.clone(), cli.awaiting_delivery.unwrap())
-    };
-    ready.mark();
-    rig.manager.type_prompt(&rig.rt, &rig.pane, PROMPT.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None });
-    assert_eq!(wait_for(&rig, &["PROMPT-SUBMITTED", "PROMPT-LEFT-IN-INPUT", "UNEXPECTED-INPUT"]), "PROMPT-SUBMITTED");
-
-    // The writer is done once it lets go of the pane.
-    let writer = rig.manager.writers.lock().unwrap().get(&rig.pane).unwrap().clone();
-    drop(writer.lock().unwrap());
+    rig.type_composed(PROMPT);
+    assert_eq!(rig.pane_says(&["PROMPT-SUBMITTED", "PROMPT-LEFT-IN-INPUT", "UNEXPECTED-INPUT"]), "PROMPT-SUBMITTED");
+    rig.typed();
     // Every stage is on record with its timing, and none of the prompt is.
     let (stages, file) = rig.delivery_stages();
     assert_eq!(stages, ["ready", "body_written", "submit_written"]);
     assert!(file.contains(r#""paste":"read""#), "{file}");
+    assert!(file.contains(r#""drawn":true"#), "{file}");
     assert!(!file.contains("synthetic") && !file.contains(rig._dir.path().to_str().unwrap()), "{file}");
 
     // An Enter the program read is still not a prompt the agent took. This
@@ -618,6 +635,182 @@ sleep 600
     rig.tick();
     assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed));
     assert_eq!(rig.told(), [format!("user: {PROMPT}")]);
+}
+
+/// The regression for #662, against a real pane: a CLI that has read the
+/// paste is not yet done with it. One that had been up for a second and a
+/// half was given a 6 KB handoff, read it, and lost the Enter that came a
+/// quarter of a second later; nothing it drew said so.
+///
+/// The program in the pane reads the paste and then takes a second over it,
+/// drawing nothing, before it looks for more. If the Enter is already there
+/// by then, it came before the CLI showed the paste. Like the CLIs, it then
+/// draws the paste, and only after that reads the Enter that sends it.
+#[cfg(unix)]
+#[test]
+fn an_enter_is_not_written_until_the_cli_has_drawn_the_paste_it_read() {
+    const PROMPT: &str = "synthetic prompt for a cli still taking it in";
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.run_in_pane(
+        r#"stty raw -echo
+printf 'CLI-IS-UP'
+got=''
+while :; do
+  got="$got$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')"
+  case "$got" in
+    *'[201~') break ;;
+    *'[201~'*) printf 'ENTER-WITH-PASTE'; sleep 600 ;;
+  esac
+done
+sleep 1
+stty min 0 time 0
+early=$(dd bs=1 count=1 2>/dev/null | od -An -c | tr -d ' \n')
+if [ -n "$early" ]; then printf 'ENTER-BEFORE-DRAW'; sleep 600; fi
+stty min 1 time 0
+printf 'PASTE-SHOWN'
+dd bs=1 count=1 2>/dev/null | od -An -c | grep -q '\\r' && printf 'PROMPT-SUBMITTED'
+sleep 600
+"#,
+    );
+    rig.compose(PROMPT, 0);
+    rig.type_composed(PROMPT);
+    assert_eq!(rig.pane_says(&["PROMPT-SUBMITTED", "ENTER-BEFORE-DRAW", "ENTER-WITH-PASTE"]), "PROMPT-SUBMITTED");
+    rig.typed();
+    let (stages, file) = rig.delivery_stages();
+    assert_eq!(stages, ["ready", "body_written", "submit_written"]);
+    assert!(file.contains(r#""paste":"read""#) && file.contains(r#""drawn":true"#), "{file}");
+}
+
+/// A continuation's Enter is written again until the CLI acknowledges it,
+/// as any prompt's is (#662). Only the deadline is not the tab's: whoever
+/// sent the continuation hears what became of it through its receipt.
+#[test]
+fn a_continuations_enter_is_nudged_but_the_tab_sets_it_no_deadline() {
+    for (receipted, deadline) in [(true, false), (false, true)] {
+        let rig = Rig::of(CliKind::Claude, "");
+        let _receipt = if receipted { Some(rig.compose_confirmed("continue work")) } else { rig.compose("continue work", 0); None };
+        let seq = rig.awaited();
+        SessionManager::submit_composer_prompt(&rig.rt, Some(seq), receipted.then_some(seq), true, || Ok(())).unwrap();
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &rt.engine else { unreachable!() };
+        assert_eq!((p.accept_by.is_some(), p.nudge_by.is_some(), p.nudges_left, p.entered_at.is_some()), (deadline, true, tui::NUDGES, true), "receipted: {receipted}");
+    }
+}
+
+impl Rig {
+    /// The prompt the tab is waiting for the CLI to acknowledge.
+    fn awaited(&self) -> u64 {
+        match &self.rt.lock().unwrap().engine {
+            Engine::Cli(p) => p.awaiting_delivery.expect("a prompt is awaited"),
+            _ => unreachable!("the rig's tab is a CLI"),
+        }
+    }
+
+    /// The Enter for the newest prompt went in at `at`; `nudges` more are
+    /// to come, the next one at `next`.
+    fn entered(&self, at: Instant, nudges: u32, next: Option<Instant>) {
+        if let Engine::Cli(p) = &mut self.rt.lock().unwrap().engine {
+            p.echoed.back_mut().unwrap().submitted = true;
+            p.entered_at = Some(at);
+            p.nudges_left = nudges;
+            p.nudge_by = next;
+        }
+    }
+}
+
+const QUICK: ReceiptWait = ReceiptWait {
+    after_enter: Duration::from_millis(300),
+    limit: Duration::from_secs(60),
+    poll: Duration::from_millis(10),
+};
+
+/// The wait for a handoff's receipt follows its delivery, not a clock
+/// started when it was sent (#662). It used to be 90 s from the send,
+/// whatever happened in them: a handoff one Enter short of delivered spun
+/// the dialog for the whole of it.
+#[test]
+fn a_continuations_receipt_is_waited_for_until_well_after_its_last_enter() {
+    let rig = Rig::of(CliKind::Claude, "");
+    let receipt = rig.compose_confirmed("continue work");
+    let seq = rig.awaited();
+    // Typed, its Enter written and no nudge left: the wait ends `after_enter`
+    // past that Enter, nowhere near the limit.
+    rig.entered(Instant::now(), 0, None);
+    let waited = Instant::now();
+    assert_eq!(rig.manager.await_receipt(&rig.rt, seq, &receipt, QUICK), Receipt::Unconfirmed);
+    assert!(waited.elapsed() < QUICK.limit / 2, "{:?}", waited.elapsed());
+
+    // What the receipt says ends the wait the moment it is said.
+    let (said, heard) = std::sync::mpsc::channel();
+    said.send(Ok(())).unwrap();
+    assert_eq!(rig.manager.await_receipt(&rig.rt, seq, &heard, ReceiptWait::DEFAULT), Receipt::Delivered);
+    let (said, heard) = std::sync::mpsc::channel();
+    said.send(Err("The new session did not become ready.".into())).unwrap();
+    assert_eq!(rig.manager.await_receipt(&rig.rt, seq, &heard, ReceiptWait::DEFAULT), Receipt::Failed("The new session did not become ready.".into()));
+    // Nothing left to send it is nothing to wait for.
+    let (said, heard) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
+    drop(said);
+    assert_eq!(rig.manager.await_receipt(&rig.rt, seq, &heard, ReceiptWait::DEFAULT), Receipt::Unconfirmed);
+}
+
+/// A handoff's nudges are its waiter's to write as they fall due, and the
+/// wait runs on from the last of them.
+#[cfg(unix)]
+#[test]
+fn a_continuations_waiter_writes_its_nudges_and_waits_on_from_the_last() {
+    let rig = Rig::of(CliKind::Claude, "").with_pane();
+    let receipt = rig.compose_confirmed("continue work");
+    let seq = rig.awaited();
+    let typed = Instant::now();
+    rig.entered(typed, 1, Some(typed));
+    assert_eq!(rig.manager.await_receipt(&rig.rt, seq, &receipt, QUICK), Receipt::Unconfirmed);
+    let (stages, file) = rig.delivery_stages();
+    assert_eq!(stages, ["nudged"], "{file}");
+    assert!(file.contains(r#""written":true"#) && file.contains(r#""by":"app""#), "{file}");
+    let rt = rig.rt.lock().unwrap();
+    let Engine::Cli(p) = &rt.engine else { unreachable!() };
+    assert!(p.entered_at.is_some_and(|nudged| nudged > typed), "the wait ran on from the nudge");
+    assert_eq!((p.nudges_left, p.nudge_by), (0, None));
+}
+
+/// What the pane shows when nothing was heard for a handoff, read off a
+/// pane that drew what Claude Code 2.1.314 draws for a paste in its input.
+#[cfg(unix)]
+#[test]
+fn a_handoff_nobody_confirmed_is_seen_in_the_input_and_said_to_be_there() {
+    for (drawn, in_input) in [(&include_bytes!("harness/claude/fixtures/pasted_composer.bin")[..], true), (&b"> continue the work"[..], false)] {
+        let rig = Rig::of(CliKind::Claude, "");
+        let output = rig._dir.path().join("drawn.bin");
+        std::fs::write(&output, drawn).unwrap();
+        rig.run_in_pane(&format!("printf 'CLI-IS-UP'; cat '{}'; printf 'DRAWN'; cat >/dev/null", output.display()));
+        rig.pane_says(&["DRAWN"]);
+        let _receipt = rig.compose_confirmed("continue work");
+        let seq = rig.awaited();
+        let seen = rig.manager.unconfirmed_continuation(&rig.rt, seq);
+        assert_eq!(seen, Some(Unconfirmed { agent: "Claude Code", unread: 0, in_input }));
+        let (stages, file) = rig.delivery_stages();
+        assert_eq!(stages, ["unconfirmed"]);
+        assert!(file.contains(&format!(r#""in_input":{in_input}"#)), "{file}");
+    }
+}
+
+/// A handoff in the input is no failure: the dialog is told it is there.
+/// A CLI not reading its input never got it, and anything else cannot be
+/// told apart from a failure.
+#[test]
+fn a_handoff_nobody_confirmed_is_answered_by_what_its_pane_shows() {
+    let outcome = || SendOutcome { queued: false, events: Vec::new(), in_input: false };
+    let seen = |unread, in_input| Some(Unconfirmed { agent: "Claude Code", unread, in_input });
+    assert!(answer_unconfirmed(seen(0, true), outcome()).unwrap().in_input);
+    let stopped = answer_unconfirmed(seen(1, true), outcome()).unwrap_err().to_string();
+    assert!(stopped.contains("Claude Code has stopped reading its input"), "{stopped}");
+    for unknown in [seen(0, false), None] {
+        let error = answer_unconfirmed(unknown, outcome()).unwrap_err().to_string();
+        assert!(error.contains("could not be confirmed") && error.contains("prepared prompt is retained"), "{error}");
+    }
+    // A plain send never says it.
+    assert!(!serde_json::to_string(&outcome()).unwrap().contains("inInput"));
+    assert!(serde_json::to_string(&SendOutcome { in_input: true, ..outcome() }).unwrap().contains(r#""inInput":true"#));
 }
 
 impl Rig {

@@ -248,6 +248,8 @@ impl Rig {
             mode: "default".into(),
             pane_id: pane.clone(),
             nudge_by: None,
+            nudges_left: 0,
+            entered_at: None,
             held: Vec::new(),
             resend_after_abort: None,
             codex_interrupt_hooks_owed: 0,
