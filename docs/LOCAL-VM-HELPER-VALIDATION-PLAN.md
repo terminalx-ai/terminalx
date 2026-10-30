@@ -147,7 +147,7 @@ Guards that keep it that way:
 | P4 | Validation LaunchDaemon plist | Runs 1, 2 | **Present.** `native/vm-bootstrap/com.terminalx.next.vm-validation-probe.plist` (`2d1e0636…`). A test checks it with `plutil` against the probe's label and program path. | Review. |
 | P5 | Seed and readback run sheet | Runs 1, 2 | **Written, not executed.** The [Run 1 run sheet](LOCAL-VM-HELPER-RUN-SHEET.md) uses the real artifact digests and marks the Developer ID and restore-image fields absent. | Review it before any approval. Regenerate it after signing and once P1 exists. |
 | P6 | Restricted owner executable | Run 2 | **Built offline, not signed or adopted.** On 2026-10-30, all 18 locked revisions and the exact source were fetched into an isolated folder. The network-denied build produced arm64 `lume`, most recently `15b95b0c…` (2026-10-31, with the version-3 listener and owner-mediated stop), with only the linker's ad hoc signature and no entitlements ([offline build](../integrations/lume-bootstrap/OFFLINE-BUILD.md)). `Artifact::production()` still refuses. | Review, sign with the virtualization entitlement, and decide catalog adoption for a validation profile. All of this is held. |
-| P7 | TerminalX validation build | Run 2 | **Partly built.** The owner-mediated stop exists for version-3 owners: a MAC'd `stop` request is journaled once, answered, then the VM is asked to stop, and exit evidence is only the host's child-wait record (native tests with the compiled owner). The seeded version-3 launch and enrollment receipt exist too. Still absent: acquiring the P6 artifact and the P1 restore entry under a validation profile and dedicated `TERMINALX_HOME`. | A reviewed source slice that acquires only the P6 artifact, under a validation profile and the dedicated `TERMINALX_HOME`; creates through the existing path using the P1 entry; and supports an owner-mediated stop. Without that stop, Run 2 is not runnable. |
+| P7 | TerminalX validation build | Run 2 | **Partly built.** The owner-mediated stop exists for version-3 owners: a MAC'd `stop` request is journaled once, answered, then the VM is asked to stop, and exit evidence is only the host's child-wait record (native tests with the compiled owner). The seeded version-3 launch and enrollment receipt exist too. The cargo feature `vm-validation` (never in a release) reads the P6 pin and the P1 entry only from owner-only files under a dedicated, non-default `TERMINALX_HOME`; see Run 2 below. Release builds still refuse both. | A reviewed source slice that acquires only the P6 artifact, under a validation profile and the dedicated `TERMINALX_HOME`; creates through the existing path using the P1 entry; and supports an owner-mediated stop. Without that stop, Run 2 is not runnable. |
 | P8 | Probe vsock client mode | Run 2 | **Implemented** in `wire.rs`. Fixture-tested over socketpairs against the owner's exact framing; never run against the real listener. | Run 2 itself. |
 | P9 | Person and console | Run 1 | Not arranged | The person is available for the `sudo` steps, Setup Assistant and Login Items. The console exception is approved. |
 | P10 | Capacity | Runs 1, 2 | 128.9 GiB free; 0 VM processes | Re-checked at preflight against the bounds above. |
@@ -376,6 +376,19 @@ they exist.
 1. **Create.** The validation build, with the dedicated `TERMINALX_HOME`,
    creates the target through the existing provisioning create. The record
    reaches `created`.
+
+   A person prepares the dedicated home before this step. Each file is
+   owner-only, and the profile refuses `~/.raccoon` and `/`:
+
+   - `<TERMINALX_HOME>/local-vm/validation/restricted-lume.json` holds the P6
+     pin: profile, source commit, patch digest, executable digest and node.
+   - `<TERMINALX_HOME>/local-vm/bootstrap-artifacts/<sha>/lume` is the signed
+     P6 executable.
+   - `<TERMINALX_HOME>/local-vm/validation/restore-catalog.json` holds the P1
+     entry, with an Apple CDN URL, macOS 26, SHA-256 and byte count.
+   - `<TERMINALX_HOME>/local-vm/restore-images/<sha>.ipsw` is the P1 image.
+
+   The build is `cargo build --features vm-validation`.
 2. **Seed.** Phases 1.2 and 1.3 run again on this instance, with the probe in
    vsock client mode.
 3. **Launch.** The validation build runs the restricted bootstrap launch:

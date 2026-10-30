@@ -81,8 +81,16 @@ fn restore_from_catalog(root: &Path, catalog: &str) -> Result<Restore> {
     restore.verify()?;
     Ok(restore)
 }
+#[cfg(not(feature = "vm-validation"))]
 fn verified_restore(root: &Path) -> Result<Restore> {
     restore_from_catalog(root, include_str!("fixtures/macos-restore-catalog.json"))
+}
+/// Validation builds only: the one Apple restore entry a person pinned in the
+/// dedicated home, under the same Apple-CDN, macOS 26 and digest rules.
+#[cfg(feature = "vm-validation")]
+fn verified_restore(root: &Path) -> Result<Restore> {
+    let catalog = super::macos_validation::input(root, "restore-catalog.json", 64 * 1024)?;
+    restore_from_catalog(root, std::str::from_utf8(&catalog)?)
 }
 
 pub(super) fn account_capability() -> Value {

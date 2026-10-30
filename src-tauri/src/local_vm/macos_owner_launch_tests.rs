@@ -171,12 +171,17 @@ fn production_launch_cannot_acquire_an_unapproved_artifact_or_request_path() {
         &json!({"idempotencyKey":journal::new_id(),"executable":"/usr/bin/true","proof":true}),
     )
     .unwrap_err();
-    assert!(error.to_string().contains("no approved"));
+    // A release has no approved artifact; a validation build refuses until a
+    // dedicated home supplies its pins (every profile refusal says so, whatever
+    // TERMINALX_HOME the test inherits). Neither takes a request-supplied
+    // executable or proof.
+    let expected = if cfg!(feature = "vm-validation") { "Validation" } else { "no approved" };
+    assert!(error.to_string().contains(expected), "{error}");
     assert!(
         macos_provision::request("environment.runPersonalizedProvision", &json!({}))
             .unwrap_err()
             .to_string()
-            .contains("no approved")
+            .contains(expected)
     );
 }
 

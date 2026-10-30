@@ -39,6 +39,16 @@ struct Artifact {
     pin: ArtifactPin,
 }
 impl Artifact {
+    /// Validation builds only: the restricted executable a person pinned in the
+    /// dedicated home, verified like any original artifact.
+    #[cfg(feature = "vm-validation")]
+    fn validation(root: &Path) -> Result<Self> {
+        let pin: ArtifactPin = serde_json::from_slice(&super::super::macos_validation::input(root, "restricted-lume.json", 4096)?)?;
+        let artifact = Self { pin };
+        artifact.verify(root)?;
+        Ok(artifact)
+    }
+    #[cfg(not(feature = "vm-validation"))]
     fn production() -> Result<Self> {
         bail!("Restricted Lume catalog has no approved built/signed/accepted artifact; no executable or credential was accessed")
     }
@@ -471,8 +481,11 @@ fn execute(
 }
 
 pub(in crate::local_vm) fn request(params: &Value) -> Result<Value> {
+    #[cfg(not(feature = "vm-validation"))]
     let artifact = Artifact::production()?; // Before root/tool/reference discovery.
     let root = super::super::host::root()?;
+    #[cfg(feature = "vm-validation")]
+    let artifact = Artifact::validation(&root)?;
     let key = params["idempotencyKey"]
         .as_str()
         .context("Original restore request required")?;
