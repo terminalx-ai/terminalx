@@ -5,7 +5,6 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
     os::{
-        fd::AsRawFd,
         unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -123,8 +122,8 @@ fn execute_using(
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(dir.join("operation.lock"))?;
-    // SAFETY: lock owns its descriptor for the original command's lifetime.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // lock owns its descriptor for the original command's lifetime.
+    if !crate::local_vm::journal::try_exclusive(&lock)? {
         bail!("Original provisioning actor is owned")
     }
     if action == "run" && dir.join("restricted-owner-intent.json").try_exists()? {

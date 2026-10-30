@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
-use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -173,8 +173,8 @@ impl Supervisor {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(root.join("supervisor.lock"))?;
-        // SAFETY: lock owns the descriptor for the entire supervisor lifetime.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        // lock owns the descriptor for the entire supervisor lifetime.
+        if !crate::local_vm::journal::try_exclusive(&lock)? {
             bail!("A supervisor already owns this environment journal");
         }
         let retained = root.join("health.json").try_exists()?

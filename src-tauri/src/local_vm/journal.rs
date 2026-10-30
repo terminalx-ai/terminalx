@@ -608,9 +608,84 @@ impl Drop for Lock {
     }
 }
 
+/// How long an ownership lock waits out a stale holder. A flock belongs to the
+/// open file description, and a child that any thread has forked but not yet
+/// exec'd shares every descriptor (CLOEXEC acts only at exec; macOS has no
+/// close-on-fork). So a lock this process just closed can look held briefly.
+/// Real owners hold their locks far longer; contention after this is ownership.
+const LOCK_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Exclusive, non-blocking ownership lock. `Ok(false)` means another owner
+/// holds it. Release semantics are unchanged: a deliberately inherited lease
+/// still keeps the lock for as long as that child lives.
+pub(crate) fn try_exclusive(file: &File) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now() + LOCK_SETTLE;
+    loop {
+        // SAFETY: file owns the descriptor for this call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::EWOULDBLOCK) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            Some(libc::EWOULDBLOCK) => return Ok(false),
+            _ => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The full local_vm suite failed this way under load: a child another
+    /// thread had forked, but not yet exec'd, kept a just-closed lock held.
+    #[test]
+    fn ownership_lock_waits_out_a_forked_child_but_not_a_real_owner() {
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.lock");
+        let open = || OpenOptions::new().create(true).truncate(false).write(true).open(&path).unwrap();
+        let held = open();
+        assert!(try_exclusive(&held).unwrap());
+        let mut pipe = [0; 2];
+        // SAFETY: pipe writes two new descriptors into the array.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let signal = pipe[1];
+        let child = std::thread::spawn(move || {
+            let mut command = std::process::Command::new("/usr/bin/true");
+            // SAFETY: write and nanosleep are async-signal-safe in the forked child.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::write(signal, b"x".as_ptr().cast(), 1);
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    Ok(())
+                });
+            }
+            command.status().unwrap()
+        });
+        let mut byte = [0u8; 1];
+        // SAFETY: blocking read of one byte into a live buffer: the child has forked.
+        assert_eq!(unsafe { libc::read(pipe[0], byte.as_mut_ptr().cast(), 1) }, 1);
+        drop(held);
+        let probe = open();
+        // SAFETY: plain non-blocking flock on a live descriptor.
+        let raw = unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_ne!(raw, 0, "the forked child still shares the closed lock");
+        assert!(try_exclusive(&probe).unwrap(), "released once the child execs");
+        assert!(child.join().unwrap().success());
+        // SAFETY: closing the two pipe descriptors this test created.
+        unsafe { libc::close(pipe[0]); libc::close(pipe[1]) };
+
+        let started = std::time::Instant::now();
+        assert!(!try_exclusive(&open()).unwrap(), "a real owner (probe) still refuses others");
+        assert!(started.elapsed() >= LOCK_SETTLE);
+    }
+
     fn setup() -> (PathBuf, Journal, TaskInput) {
         let dir = std::env::temp_dir().join(format!("terminalx-local-{}", new_id()));
         let journal = Journal::open(&dir).unwrap();

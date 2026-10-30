@@ -378,9 +378,8 @@ impl Guest {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(base.join("runtime/local-vm-guest/owner.lock"))?;
-        use std::os::fd::AsRawFd;
-        // SAFETY: the file descriptor stays owned by Guest for its lifetime.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        // the file descriptor stays owned by Guest for its lifetime.
+        if !crate::local_vm::journal::try_exclusive(&lock)? {
             bail!("Another guest runtime owns this installation");
         }
         let path = base.join("runtime").join(STATE);

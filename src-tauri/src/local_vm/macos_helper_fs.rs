@@ -189,8 +189,8 @@ impl Directory {
     }
 }
 pub(super) fn lock_file(file: &File) -> Result<()> {
-    // SAFETY: descriptor remains owned for the guard lifetime; never unlink it.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // descriptor remains owned for the guard lifetime; never unlink it.
+    if !crate::local_vm::journal::try_exclusive(file)? {
         bail!("Original bootstrap actor/file is still owned")
     }
     Ok(())

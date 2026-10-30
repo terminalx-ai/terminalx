@@ -16,7 +16,6 @@ use std::{
     fs::OpenOptions,
     io::Read,
     os::{
-        fd::AsRawFd,
         unix::fs::{OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -443,8 +442,8 @@ fn guest_using(
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(directory.join("installer.lock"))?;
-    // SAFETY: lock owns its descriptor; never unlink/replace this inode.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // lock owns its descriptor; never unlink/replace this inode.
+    if !crate::local_vm::journal::try_exclusive(&lock)? {
         bail!("Original guest installer is active")
     }
     let mut record = if receipt_path.try_exists()? {

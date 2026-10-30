@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 use std::{
     io::Read,
     os::{
-        fd::AsRawFd,
         unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::Path,
@@ -121,8 +120,8 @@ fn install_using(
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path.join("installer.lock"))?;
-    // SAFETY: descriptor is owned for the full installer transaction.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // descriptor is owned for the full installer transaction.
+    if !crate::local_vm::journal::try_exclusive(&lock)? {
         bail!("Original tool installer is active")
     }
     let manifest = json!({"intent":intent,"profiles":catalog});

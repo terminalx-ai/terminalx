@@ -77,8 +77,8 @@ fn lock(path: &Path) -> Result<std::fs::File> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path.join("operation.lock"))?;
-    // SAFETY: lock owns its descriptor for the full preparation/RPC lifetime.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // lock owns its descriptor for the full preparation/RPC lifetime.
+    if !crate::local_vm::journal::try_exclusive(&lock)? {
         bail!("Guest key reference is in use");
     }
     Ok(lock)
@@ -269,8 +269,8 @@ pub(super) fn produce_using(
     {
         bail!("Unsafe original key producer lease")
     }
-    // SAFETY: lease owns the fd throughout this call and the child's lifetime.
-    if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // lease owns the fd throughout this call and the child's lifetime.
+    if !crate::local_vm::journal::try_exclusive(&lease)? {
         bail!("Original key producer is still owned; no recovery or replacement")
     }
     if !existed {

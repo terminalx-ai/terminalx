@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::{
     io::Read,
     net::Ipv4Addr,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -96,8 +96,8 @@ fn locked(root: &Path, key: &str) -> Result<(PathBuf, std::fs::File)> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(dir.join("operation.lock"))?;
-    // SAFETY: file owns this descriptor for the ledger transaction lifetime.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // file owns this descriptor for the ledger transaction lifetime.
+    if !crate::local_vm::journal::try_exclusive(&file)? {
         bail!("Bootstrap operation is already owned");
     }
     Ok((dir, file))
@@ -133,8 +133,8 @@ pub fn begin(root: &Path, key: &str, target: &Target, account: &AccountPlan) -> 
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(parent.join(format!("timeline-{}.lock", target.vm_fingerprint)))?;
-    // SAFETY: timeline owns the descriptor until the immutable plan is retained.
-    if unsafe { libc::flock(timeline.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    // timeline owns the descriptor until the immutable plan is retained.
+    if !crate::local_vm::journal::try_exclusive(&timeline)? {
         bail!("This VM bootstrap timeline is already owned");
     }
     let dir = directory(root, key)?;

@@ -3,7 +3,6 @@
 //! A dead host proxy is not evidence that a remote operation stopped.
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -69,9 +68,9 @@ impl Guard {
         let file = OpenOptions::new().create(true).truncate(false).write(true)
             .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(directory.join(format!("{name}.lock")))?;
-        // SAFETY: file owns the descriptor throughout this guard's lifetime.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("This environment is in use by attached desktop tools; stop that attachment before running a task");
+        // file owns the descriptor throughout this guard's lifetime.
+        if !crate::local_vm::journal::try_exclusive(&file)? {
+            return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)).context("This environment is in use by attached desktop tools; stop that attachment before running a task");
         }
         let marker = directory.join(format!("{name}.json"));
         Ok(Self { _file: file, marker })
