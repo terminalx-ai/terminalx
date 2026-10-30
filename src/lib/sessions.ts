@@ -158,12 +158,12 @@ export function subscribeSessionStore(listener: () => void): () => void {
 
 let booted = false;
 const workspaceRefreshVersions = new Map<string, number>();
+// Backfill can publish while the first list is being read. Subscribe first,
+// retaining only chronology until initialization supplies the session rows.
+const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
-  // Backfill can publish while the first list is being read. Subscribe first,
-  // retaining only chronology until initialization supplies the session rows.
-  const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
   try {
     await listen<SessionEntry>("session_updated", (e) => {
       if (state.loaded) upsertSession(e.payload);
@@ -171,14 +171,22 @@ export async function bootSessions() {
         { lastMessageAt: e.payload.lastMessageAt }, initialMessageTimes.get(e.payload.id),
       ));
     });
+    // A new live connection (#643): what changed during the gap was never
+    // heard of here, and a window that opened during it has read nothing yet.
+    await listen("local_runtime_reattached", () => void resyncSessions().catch(() => {}));
   } catch {
     /* outside a webview */
   }
-  // Projects and sessions are two file reads; the harness probe may shell out
-  // to a login shell and take seconds, so it lands on its own.
   // How the tabs are arranged is read alongside the sessions and not waited for: a window must never
   // fail to list its sessions over it. Until it lands, tabs are in the order they were opened.
   void bootTabLayouts();
+  await loadIndex();
+}
+
+let indexListened = false;
+async function loadIndex() {
+  // Projects and sessions are two file reads; the harness probe may shell out
+  // to a login shell and take seconds, so it lands on its own.
   const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
   set({ loaded: true, projects: projects.projects, lastProject: projects.lastSelected,
     sessions: sessions.map((session) => keepMessageTime(session, initialMessageTimes.get(session.id))),
@@ -186,6 +194,8 @@ export async function bootSessions() {
   initialMessageTimes.clear();
   void api.listHarnesses().then((harnesses) => set({ harnesses })).catch(() => {});
   void api.chatsDir().then((chatsPath) => set({ chatsPath })).catch(() => {});
+  if (indexListened) return;
+  indexListened = true;
   try {
     await listen<SessionEntry>("session_created", (e) => upsertSession(e.payload));
     await listen<string>("session_deleted", (e) => removeSessions([e.payload]));
@@ -197,6 +207,14 @@ export async function bootSessions() {
   } catch {
     /* outside a webview */
   }
+}
+
+/** Read the index again after a gap in the live connection: never send, start or stop anything. */
+async function resyncSessions() {
+  if (!state.loaded) return loadIndex();
+  await Promise.all([refreshSessions(), refreshHarnesses().catch(() => {})]);
+  await refreshProjects();
+  await Promise.all(state.projects.map((project) => refreshWorkspaces(project.path)));
 }
 
 export async function refreshSessions() {
