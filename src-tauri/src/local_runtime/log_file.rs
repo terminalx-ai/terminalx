@@ -27,20 +27,29 @@ pub fn previous(path: &Path) -> PathBuf {
 /// panic above all) lands in the current file too.
 pub struct Log {
     path: PathBuf,
+    file: File,
     written: u64,
+    /// Whether stdout and stderr follow the log to each new file.
+    redirect: bool,
 }
 
 impl Log {
     pub fn install(path: &Path) -> io::Result<Self> {
+        Self::open(path, true)
+    }
+
+    fn open(path: &Path, redirect_output: bool) -> io::Result<Self> {
         let full = std::fs::metadata(path).is_ok_and(|metadata| metadata.len() >= MAX_BYTES);
         let file = if full { start_afresh(path)? } else { open(path)? };
         let written = file.metadata()?.len();
-        redirect(&file)?;
-        Ok(Self { path: path.to_path_buf(), written })
+        if redirect_output { redirect(&file)?; }
+        Ok(Self { path: path.to_path_buf(), file, written, redirect: redirect_output })
     }
 
     fn rotate(&mut self) -> io::Result<()> {
-        redirect(&start_afresh(&self.path)?)?;
+        let file = start_afresh(&self.path)?;
+        if self.redirect { redirect(&file)?; }
+        self.file = file;
         self.written = 0;
         Ok(())
     }
@@ -70,22 +79,22 @@ impl Write for Log {
         if self.written >= MAX_BYTES && self.rotate().is_err() {
             self.written = 0;
         }
-        let count = io::stderr().write(bytes)?;
+        let count = self.file.write(bytes)?;
         self.written += count as u64;
         Ok(count)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        io::stderr().flush()
+        self.file.flush()
     }
 }
 
+// Never `install` here: it points this test process's own output at the file.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    // Not through `Log`: it points this test process's own output at the file.
     #[test]
     fn a_full_log_is_moved_aside_with_one_older_file_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -98,6 +107,31 @@ mod tests {
         assert_eq!(std::fs::metadata(previous(&path)).unwrap().len(), MAX_BYTES);
         assert_eq!(std::fs::read(&path).unwrap(), b"next\n");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn records_past_the_limit_go_to_a_fresh_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.log");
+        std::fs::write(&path, vec![b'x'; MAX_BYTES as usize - 4]).unwrap();
+        let mut log = Log::open(&path, false).unwrap();
+        log.write_all(b"last\n").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_BYTES + 1, "a record is never split across files");
+        log.write_all(b"first\n").unwrap();
+        log.write_all(b"second\n").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first\nsecond\n");
+        assert!(std::fs::read(previous(&path)).unwrap().ends_with(b"last\n"));
+    }
+
+    #[test]
+    fn a_log_already_full_when_the_runtime_starts_is_moved_aside_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.log");
+        std::fs::write(&path, vec![b'x'; MAX_BYTES as usize]).unwrap();
+        let mut log = Log::open(&path, false).unwrap();
+        log.write_all(b"started\n").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"started\n");
+        assert_eq!(std::fs::metadata(previous(&path)).unwrap().len(), MAX_BYTES);
     }
 
     #[test]

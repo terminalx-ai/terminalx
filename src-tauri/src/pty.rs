@@ -34,9 +34,14 @@ const TERM_GRACE: Duration = Duration::from_millis(400);
 /// every lock its caller holds (#661). Matches how long a prompt's paste is
 /// given to be read.
 pub(crate) const INPUT_STALL: Duration = Duration::from_secs(10);
+/// The longest one write may wait for room in all, however little at a time
+/// the program reads. Some writes are made under a lock other work shares (a
+/// tab's, or a shared prompt's sharing lock), and this is what bounds them.
+pub(crate) const INPUT_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The program in a pane took none of a write's input for [`INPUT_STALL`].
-/// What it had taken by then stays delivered; the rest was not written.
+/// The program in a pane took none of a write's input for [`INPUT_STALL`], or
+/// so little that the write ran past [`INPUT_DEADLINE`]. What it had taken by
+/// then stays delivered; the rest was not written.
 #[derive(Debug)]
 pub struct InputStalled {
     pub written: usize,
@@ -68,7 +73,8 @@ struct Input {
 impl Input {
     fn write(&mut self, data: &[u8]) -> Result<()> {
         let mut written = 0;
-        let mut progress = Instant::now();
+        let started = Instant::now();
+        let mut progress = started;
         while written < data.len() {
             match self.writer.write(&data[written..]) {
                 Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
@@ -80,7 +86,9 @@ impl Input {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 #[cfg(unix)]
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    let left = if self.stalled { Duration::ZERO } else { INPUT_STALL.saturating_sub(progress.elapsed()) };
+                    let left = if self.stalled { Duration::ZERO } else {
+                        INPUT_STALL.saturating_sub(progress.elapsed()).min(INPUT_DEADLINE.saturating_sub(started.elapsed()))
+                    };
                     if left.is_zero() || !ready(&self.room, libc::POLLOUT, Some(left))? {
                         self.stalled = true;
                         return Err(InputStalled { written, total: data.len() }.into());
@@ -831,8 +839,9 @@ impl Terminals {
     }
 
     /// Type `data` into the pane. Fails with [`InputStalled`] once the program
-    /// has taken none of it for [`INPUT_STALL`], so no caller waits on a
-    /// program that has stopped reading for longer than that.
+    /// has taken none of it for [`INPUT_STALL`], or the write has waited
+    /// [`INPUT_DEADLINE`] in all, so no caller waits on a program that has
+    /// stopped reading, or barely reads, for longer than that.
     pub fn write(&self, id: &str, data: &[u8]) -> Result<()> {
         let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
         let mut input = input.lock().unwrap();

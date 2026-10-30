@@ -187,6 +187,16 @@ impl AppState {
 
 }
 
+/// Quitting fences the runtime's sharing and paired devices, on the main
+/// thread. A runtime that has stopped answering is let go first, so those
+/// fences fail at once instead of each waiting out a timeout (#661).
+#[cfg(feature = "desktop")]
+fn let_go_of_unresponsive_runtime(state: &AppState) {
+    if state.runtime_health.unresponsive().is_some() {
+        if let Some(runtime) = state.runtime() { runtime.disconnect(); }
+    }
+}
+
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -774,6 +784,7 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
+                        let_go_of_unresponsive_runtime(&state);
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                         if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
@@ -810,6 +821,7 @@ pub fn run() {
                 // destroying the window first; the computer-use helper must
                 // not outlive the app on either path.
                 state.computer.shutdown();
+                let_go_of_unresponsive_runtime(&state);
                 state.pairing.stop();
                 if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                 state.browser.shutdown();

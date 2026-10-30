@@ -2332,13 +2332,16 @@ pub async fn load_tab_events(state: State<'_, AppState>, session_id: String, tab
 pub async fn session_share_create(state: State<'_, AppState>, session_id: String, settings: crate::local_sharing::LinkSettings, direct_only: bool) -> CmdResult<serde_json::Value> {
     state.pairing.create_share(session_id, settings, direct_only).await.map_err(err)
 }
+// Sharing reads and changes are runtime round trips, so none waits on the main thread (#661).
 #[tauri::command]
-pub fn session_share_status(state: State<'_, AppState>, session_id: String) -> CmdResult<serde_json::Value> {
-    state.pairing.share_status(&session_id).map_err(err)
+pub async fn session_share_status(state: State<'_, AppState>, session_id: String) -> CmdResult<serde_json::Value> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.share_status(&session_id).map_err(err)).await.map_err(err)?
 }
 #[tauri::command]
-pub fn session_share_change(state: State<'_, AppState>, session_id: String, action: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
-    state.pairing.change_share(&session_id, &action, params).map_err(err)
+pub async fn session_share_change(state: State<'_, AppState>, session_id: String, action: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.change_share(&session_id, &action, params).map_err(err)).await.map_err(err)?
 }
 #[tauri::command]
 pub fn session_join_pending(state: State<'_, AppState>) -> Option<String> { state.pairing.pending_join() }
@@ -2844,9 +2847,11 @@ pub async fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows:
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.resize(&id, cols, rows)).await.map_err(err)?.map_err(err)
 }
 
+/// Asked by every window as it loads: a runtime round trip, off the main thread.
 #[tauri::command]
-pub fn mobile_terminal_drivers(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
-    state.pairing.mobile_driven_tabs().map_err(err)
+pub async fn mobile_terminal_drivers(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.mobile_driven_tabs().map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

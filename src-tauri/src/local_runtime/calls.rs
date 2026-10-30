@@ -57,7 +57,9 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 let data = string(&params, "data")?;
                 if data.len() > 1024 * 1024 { bail!("terminal input is too large"); }
                 let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
-                manager.mobile.desktop_input(id, || terminals.write(id, &bytes))?;
+                // Queued, not written here: a program that is not reading
+                // must hold up neither this request nor the pane's gate (#661).
+                manager.typing.send(&manager.mobile, terminals, id, &bytes)?;
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }

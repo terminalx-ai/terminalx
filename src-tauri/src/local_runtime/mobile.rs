@@ -265,10 +265,22 @@ impl Registry {
         // owner's own loop need the registry meanwhile (#661).
         let gate = self.gate(pane);
         let _gate = gate.lock().unwrap();
+        self.refuse_if_driven(pane)?;
+        write()
+    }
+
+    /// Refuse desktop input to a pane a mobile device drives, before queueing
+    /// it. Only a first answer: [`Self::desktop_input`] asks again at the write.
+    pub(crate) fn check_desktop_input(&self, pane: &str) -> Result<()> {
+        self.prune();
+        self.refuse_if_driven(pane)
+    }
+
+    fn refuse_if_driven(&self, pane: &str) -> Result<()> {
         if self.0.lock().unwrap().drivers.values().any(|driver| driver.pane == pane) {
             bail!("A mobile device is driving this terminal.");
         }
-        write()
+        Ok(())
     }
 
     fn publish_drivers(&self, manager: &crate::session::SessionManager) {

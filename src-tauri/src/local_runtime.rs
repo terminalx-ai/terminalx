@@ -50,6 +50,7 @@ pub mod bridge;
 pub mod desktop;
 #[cfg(unix)]
 pub mod terminals;
+pub mod typing;
 #[cfg(all(unix, feature = "desktop"))]
 pub mod ui;
 
@@ -429,6 +430,19 @@ mod tests {
         assert!(life.enter().is_ok());
         assert!(life.command("runtime.attach", json!({"protocol": PROTOCOL})).is_ok());
         assert_eq!(life.status()["attachedClients"], 1);
+    }
+
+    #[test]
+    fn status_says_how_long_ago_the_owners_loop_finished_a_pass() {
+        let life = Lifetime::starting(Duration::ZERO);
+        assert!(life.status()["loopAgeMs"].is_null(), "no pass is owed before the loop starts");
+        life.ready();
+        assert!(life.status()["loopAgeMs"].as_u64().unwrap() < 1_000);
+        // A loop held up behind a lock stops turning; its age grows.
+        *life.turned.lock().unwrap() = Instant::now().checked_sub(Duration::from_secs(90));
+        assert!(life.status()["loopAgeMs"].as_u64().unwrap() >= 90_000);
+        life.turned();
+        assert!(life.status()["loopAgeMs"].as_u64().unwrap() < 1_000);
     }
 
     #[test]
