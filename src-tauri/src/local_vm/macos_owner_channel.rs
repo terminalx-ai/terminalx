@@ -53,6 +53,20 @@ struct Binding {
     output_share_id: String,
     config_sha256: String,
     paths: BTreeMap<String, Pin>,
+    // Version 3 only: the offline seed this VM was enrolled from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seed_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seed_receipt_sha256: Option<String>,
+}
+/// Guest root in the VM behind this owner holds the seeded key: helper
+/// authentication only. Built solely from a verified owner enrollment receipt;
+/// it confers no account consent, trust or readiness.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Enrolled {
+    pub(super) binding_digest: String,
+    pub(super) challenge_sha256: String,
+    pub(super) claims_sha256: String,
 }
 pub(super) fn canonical(value: &Value) -> Result<Vec<u8>> {
     fn encode(value: &Value) -> Result<String> {
@@ -332,7 +346,17 @@ impl Reference {
             "storage",
             "vm",
         ];
-        if ![1, 2].contains(&b.version)
+        // Version 3 exactly when the seed binding is present, as the owner decodes it.
+        let seeded = match (&b.seed_id, &b.seed_receipt_sha256) {
+            (None, None) => false,
+            (Some(id), Some(receipt)) => {
+                id.len() == 32 && id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                    && super::transport::validate_runtime_sha(receipt).is_ok()
+            }
+            _ => bail!("Original owner seed binding is partial"),
+        };
+        if !(if seeded { b.version == 3 } else { [1, 2].contains(&b.version) })
+            || (b.seed_id.is_some() && !seeded)
             || b.macos_major != 26
             || b.paths.keys().map(String::as_str).collect::<Vec<_>>() != roles
             || b.paths["operation"].path != path
@@ -497,6 +521,7 @@ impl Reference {
             "accountReceipt",
             "keyReceipt",
             "guestObservation",
+            "enrollment",
         ]
         .contains(&action)
         {
@@ -566,6 +591,43 @@ impl Reference {
         }
         self.socket(handshake)?;
         Ok(AuthenticatedReceipt { bytes: receipt })
+    }
+    /// Version 3: the owner's durable enrollment receipt over the MAC'd owner
+    /// channel. Accepted only as exactly helper authentication for this binding
+    /// and seed; account authentication, trust and readiness must stay false.
+    fn enrollment(&self) -> Result<Enrolled> {
+        if self.binding.version != 3 {
+            bail!("Seeded-key enrollment requires a version-3 owner binding")
+        }
+        let receipt = self.observe("enrollment", &journal::new_id())?;
+        let value: Value = serde_json::from_slice(&receipt.bytes)?;
+        let keys = [
+            "accountAuthenticated", "attempt", "bindingDigest", "bootstrapId", "challengeSha256", "claimsSha256",
+            "helperAuthenticated", "ownerEpoch", "ready", "seedId", "seedReceiptSha256", "trustAccepted", "version",
+        ];
+        let hex64 = |v: &Value| v.as_str().is_some_and(|s| super::transport::validate_runtime_sha(s).is_ok());
+        let mut found: Vec<&str> = value.as_object().map(|v| v.keys().map(String::as_str).collect()).unwrap_or_default();
+        found.sort_unstable();
+        if found != keys
+            || value["version"] != 2
+            || value["bindingDigest"] != journal::digest(&self.raw)
+            || value["ownerEpoch"] != self.binding.owner_epoch
+            || value["bootstrapId"] != self.binding.bootstrap_id
+            || value["seedId"].as_str() != self.binding.seed_id.as_deref()
+            || value["seedReceiptSha256"].as_str() != self.binding.seed_receipt_sha256.as_deref()
+            || value["helperAuthenticated"] != true
+            || ["accountAuthenticated", "trustAccepted", "ready"].iter().any(|k| value[*k] != false)
+            || !hex64(&value["challengeSha256"])
+            || !hex64(&value["claimsSha256"])
+            || value["attempt"].as_u64().is_none_or(|n| n > 8)
+        {
+            bail!("Owner enrollment receipt changed or promoted trust")
+        }
+        Ok(Enrolled {
+            binding_digest: journal::digest(&self.raw),
+            challenge_sha256: value["challengeSha256"].as_str().unwrap_or_default().into(),
+            claims_sha256: value["claimsSha256"].as_str().unwrap_or_default().into(),
+        })
     }
     fn guest_observation(&self) -> Result<Value> {
         if self.binding.version != 2 {

@@ -32,8 +32,7 @@ fn hex64(value: &Value) -> bool {
 /// their exact modes, plus the ids the version-3 binding will carry.
 fn validate_plan(plan: &Value) -> Result<()> {
     let ok_ids = plan["bootstrapId"].as_str().is_some_and(|v| journal::validate_id(v).is_ok())
-        && plan["seedId"].as_str().is_some_and(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
-        && plan["keyReference"].as_str().is_some_and(|v| journal::validate_id(v).is_ok());
+        && plan["seedId"].as_str().is_some_and(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
     let items = plan["items"].as_array().map(Vec::as_slice).unwrap_or_default();
     let ok_items = items.len() == ITEMS.len()
         && ITEMS.iter().zip(items).all(|((key, path, mode), item)| {
@@ -41,7 +40,7 @@ fn validate_plan(plan: &Value) -> Result<()> {
                 && item["size"].as_u64().is_some_and(|s| s > 0) && hex64(&item["sha256"])
                 && item.as_object().is_some_and(|o| o.len() == 7)
         });
-    let keys_ok = plan.as_object().is_some_and(|o| o.len() == 5) && plan["version"] == 1;
+    let keys_ok = plan.as_object().is_some_and(|o| o.len() == 4) && plan["version"] == 1;
     if !(ok_ids && ok_items && keys_ok) {
         bail!("Seed plan must name the three production items, root-owned with exact modes")
     }
@@ -85,23 +84,86 @@ fn read(dir: &Path, name: &str) -> Result<Option<Value>> {
     Ok(Some(serde_json::from_slice(&super::macos_keys::private_read(&path, 64 * 1024)?)?))
 }
 
-/// Records intent before the privileged seeder runs. Requires the original
-/// completed restore with no run record, and refuses any earlier seed state.
-pub(super) fn begin(root: &Path, key: &str, plan: &Value) -> Result<Value> {
-    validate_plan(plan)?;
-    if plan["bootstrapId"] != key {
-        bail!("Seed plan belongs to another bootstrap operation")
-    }
+/// The guest's `enrollment.json`, as the helper's `Seed::parse` reads it.
+fn guest_key_file(bootstrap_id: &str, seed_id: &str, enrollment_key: &[u8]) -> Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    super::macos_owner_channel::canonical(&json!({"bootstrapId": bootstrap_id,
+        "key": STANDARD.encode(enrollment_key), "seedId": seed_id, "version": 1}))
+}
+
+fn read_key(dir: &Path) -> Result<[u8; 32]> {
+    let text = super::macos_keys::private_read(&dir.join("enrollment.key"), 128)?;
+    let text = std::str::from_utf8(&text).context("Enrollment key is not text")?;
+    let bytes = (0..text.len())
+        .step_by(2)
+        .map(|i| text.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+        .collect::<Option<Vec<u8>>>()
+        .context("Enrollment key is not hex")?;
+    bytes.try_into().ok().context("Enrollment key is not 32 bytes")
+}
+
+/// Records intent before the privileged seeder runs. The host generates the
+/// per-VM enrollment key and seed id here and derives the guest key file and
+/// every item digest itself; callers supply only the plist and helper digests.
+/// The intent is durable first, then the owner-only `enrollment.key`; a crash
+/// between them leaves an unresolved intent that can only fence, never reseed.
+/// Requires the original completed restore with no run record.
+pub(super) fn begin(root: &Path, key: &str, plist: (u64, &str), program: (u64, &str)) -> Result<Value> {
+    use rand_core::RngCore;
     let dir = macos_provision::directory(root, key)?;
     let _lock = lock(&dir)?;
     macos_provision::created_for_bootstrap(root, key)?;
-    if state_in(&dir)? != "notSeeded" {
+    if state_in(&dir)? != "notSeeded" || dir.join("enrollment.key").try_exists()? {
         bail!("This VM already has seed history; it is never reseeded or replaced")
     }
-    let intent = json!({"version": 1, "plan": plan, "planDigest": journal::digest(&serde_json::to_vec(plan)?),
+    let mut enrollment_key = [0u8; 32];
+    let mut seed = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut enrollment_key);
+    rand_core::OsRng.fill_bytes(&mut seed);
+    let seed_id: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+    let guest = guest_key_file(key, &seed_id, &enrollment_key)?;
+    let item = |(name, path, mode): (&str, &str, &str), size: u64, sha256: &str| {
+        json!({"key": name, "path": path, "uid": 0, "gid": 0, "mode": mode, "size": size, "sha256": sha256})
+    };
+    let plan = json!({"version": 1, "bootstrapId": key, "seedId": seed_id, "items": [
+        item(ITEMS[0], plist.0, plist.1), item(ITEMS[1], program.0, program.1),
+        item(ITEMS[2], guest.len() as u64, &journal::digest(&guest))]});
+    validate_plan(&plan)?;
+    let intent = json!({"version": 1, "plan": plan, "planDigest": journal::digest(&serde_json::to_vec(&plan)?),
         "createdAt": journal::now(), "ready": false});
     write_new(&dir, "seed-intent.json", &intent)?;
-    Ok(json!({"seed": "seedOutcomeUnknown", "planDigest": intent["planDigest"], "ready": false}))
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir.join("enrollment.key"))?;
+    let hex: String = enrollment_key.iter().map(|b| format!("{b:02x}")).collect();
+    file.write_all(hex.as_bytes())?;
+    file.sync_all()?;
+    File::open(&dir)?.sync_all()?;
+    Ok(json!({"seed": "seedOutcomeUnknown", "seedId": seed_id, "planDigest": intent["planDigest"], "ready": false}))
+}
+
+/// The exact guest `enrollment.json` bytes for the privileged seeder, rebuilt
+/// from the private key and the recorded intent; their digest must match it.
+pub(super) fn guest_material(root: &Path, key: &str) -> Result<Vec<u8>> {
+    let dir = macos_provision::directory(root, key)?;
+    let intent = read(&dir, "seed-intent.json")?.context("Seed intent missing")?;
+    let seed_id = intent["plan"]["seedId"].as_str().context("Seed id missing")?;
+    let bytes = guest_key_file(key, seed_id, &read_key(&dir)?)?;
+    if intent["plan"]["items"][2]["sha256"] != journal::digest(&bytes) {
+        bail!("Enrollment key no longer matches the recorded seed intent")
+    }
+    Ok(bytes)
+}
+
+/// The owner-only key text for the version-3 owner hand-off, only once seeded.
+pub(super) fn owner_key(root: &Path, key: &str) -> Result<Vec<u8>> {
+    seeded(root, key)?;
+    let dir = macos_provision::directory(root, key)?;
+    guest_material(root, key)?;
+    super::macos_keys::private_read(&dir.join("enrollment.key"), 128)
 }
 
 /// Resolves the unknown outcome from the seeder's ownership-enabled readback.
@@ -132,7 +194,7 @@ pub(super) fn complete(root: &Path, key: &str, readback: &Value) -> Result<Value
     }
     let receipt = json!({"version": 1, "planDigest": intent["planDigest"], "readbackDigest": readback_digest,
         "bootstrapId": intent["plan"]["bootstrapId"], "seedId": intent["plan"]["seedId"],
-        "keyReference": intent["plan"]["keyReference"], "items": observed, "seeded": true, "ready": false});
+        "items": observed, "seeded": true, "ready": false});
     write_new(&dir, "seed-receipt.json", &receipt)?;
     Ok(json!({"seed": "seeded", "seedReceiptSha256": journal::digest(&serde_json::to_vec(&receipt)?), "ready": false}))
 }
@@ -172,13 +234,14 @@ pub(super) fn seeded(root: &Path, key: &str) -> Result<(Value, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const PLIST: (u64, &str) = (492, "2d1e06367b671df7af1ab236ac107c3f706a6b5068e43f809440d83ec64474e9");
+    const PROGRAM: (u64, &str) = (643392, "283ec5a8489d2a9330c13e229c38743f5bb2d1fbffb1d27feb4813df7067d1b1");
 
-    fn plan(key: &str) -> Value {
-        let items: Vec<Value> = ITEMS.iter().enumerate().map(|(i, (name, path, mode))| json!({"key": name, "path": path,
-            "uid": 0, "gid": 0, "mode": mode, "size": 10 + i, "sha256": format!("{i}").repeat(64)})).collect();
-        json!({"version": 1, "bootstrapId": key, "seedId": "ab".repeat(16), "keyReference": journal::new_id(), "items": items})
+    fn intent_plan(root: &Path, key: &str) -> Value {
+        read(&macos_provision::directory(root, key).unwrap(), "seed-intent.json").unwrap().unwrap()["plan"].clone()
     }
 
+    /// What the seeder core's readback reports for an exact seed.
     fn readback(plan: &Value) -> Value {
         let items: Vec<Value> = plan["items"].as_array().unwrap().iter().map(|item| {
             let mut item = item.clone();
@@ -190,21 +253,35 @@ mod tests {
 
     #[test]
     fn intent_then_exact_readback_seeds_once_and_gates_the_launch() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
         let (_dir, root, key) = macos_provision::created_for_tests();
-        let plan = plan(&key);
         assert!(seeded(&root, &key).is_err(), "no launch before seeding");
         assert_eq!(state(&root, &key).unwrap()["seed"], "notSeeded");
-        assert_eq!(begin(&root, &key, &plan).unwrap()["seed"], "seedOutcomeUnknown");
+        let begun = begin(&root, &key, PLIST, PROGRAM).unwrap();
+        assert_eq!(begun["seed"], "seedOutcomeUnknown");
+        let plan = intent_plan(&root, &key);
+        assert_eq!(plan["seedId"], begun["seedId"]);
+        let material = guest_material(&root, &key).unwrap();
+        let record: Value = serde_json::from_slice(&material).unwrap();
+        assert_eq!((record["bootstrapId"].as_str(), record["version"].as_u64()), (Some(key.as_str()), Some(1)));
+        assert_eq!(plan["items"][2]["sha256"], journal::digest(&material));
+        assert!(owner_key(&root, &key).is_err(), "no key hand-off before seeding");
         assert!(seeded(&root, &key).is_err(), "an unknown outcome never permits a launch");
-        assert!(begin(&root, &key, &plan).is_err(), "never reseeds");
+        assert!(begin(&root, &key, PLIST, PROGRAM).is_err(), "never reseeds");
         let done = complete(&root, &key, &readback(&plan)).unwrap();
         assert_eq!(done["seed"], "seeded");
         let (receipt, digest) = seeded(&root, &key).unwrap();
-        assert_eq!(digest, done["seedReceiptSha256"]);
-        assert_eq!(receipt["seedId"], plan["seedId"]);
+        assert_eq!((digest.as_str(), &receipt["seedId"]), (done["seedReceiptSha256"].as_str().unwrap(), &plan["seedId"]));
+        let hex = String::from_utf8(owner_key(&root, &key).unwrap()).unwrap();
+        let key_bytes = STANDARD.decode(record["key"].as_str().unwrap()).unwrap();
+        assert_eq!(hex, key_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let dir = macos_provision::directory(&root, &key).unwrap();
+        for name in ["seed-intent.json", "seed-receipt.json", "record.json"] {
+            let text = std::fs::read_to_string(dir.join(name)).unwrap();
+            assert!(!text.contains(&hex) && !text.contains(record["key"].as_str().unwrap()), "{name} holds no key");
+        }
         assert!(complete(&root, &key, &readback(&plan)).is_err(), "never completes twice");
-        let created = macos_provision::created_for_bootstrap(&root, &key).unwrap();
-        assert_eq!(created["status"], "created", "the provisioning record is unchanged");
+        assert_eq!(macos_provision::created_for_bootstrap(&root, &key).unwrap()["status"], "created");
     }
 
     #[test]
@@ -218,41 +295,43 @@ mod tests {
         ];
         for mutate in cases {
             let (_dir, root, key) = macos_provision::created_for_tests();
-            let plan = plan(&key);
-            begin(&root, &key, &plan).unwrap();
+            begin(&root, &key, PLIST, PROGRAM).unwrap();
+            let plan = intent_plan(&root, &key);
             let mut changed = readback(&plan);
             mutate(&mut changed);
             assert!(complete(&root, &key, &changed).is_err());
             assert_eq!(state(&root, &key).unwrap()["seed"], "fenced");
             assert!(complete(&root, &key, &readback(&plan)).is_err(), "a fence is not cleared by a later match");
-            assert!(seeded(&root, &key).is_err());
-            assert!(begin(&root, &key, &plan).is_err());
+            assert!(seeded(&root, &key).is_err() && owner_key(&root, &key).is_err());
+            assert!(begin(&root, &key, PLIST, PROGRAM).is_err());
         }
     }
 
     #[test]
-    fn plans_must_be_exact_production_items_for_this_operation() {
+    fn malformed_artifact_digests_write_nothing() {
         let (_dir, root, key) = macos_provision::created_for_tests();
-        let mutations: [fn(&mut Value); 6] = [
-            |p| p["items"][0]["path"] = json!("/Library/LaunchAgents/x.plist"),
-            |p| p["items"][1]["uid"] = json!(501),
-            |p| p["items"][2]["mode"] = json!("0644"),
-            |p| p["seedId"] = json!("AB".repeat(16)),
-            |p| p["extra"] = json!(1),
-            |p| p["bootstrapId"] = json!(journal::new_id()),
-        ];
-        for mutate in mutations {
-            let mut changed = plan(&key);
-            mutate(&mut changed);
-            assert!(begin(&root, &key, &changed).is_err(), "{changed}");
+        for (plist, program) in [((0, PLIST.1), PROGRAM), (PLIST, (1, "F".repeat(64).leak() as &str)), (PLIST, (1, "abc"))] {
+            assert!(begin(&root, &key, plist, program).is_err());
         }
-        assert_eq!(state(&root, &key).unwrap()["seed"], "notSeeded", "refusals write nothing");
+        let dir = macos_provision::directory(&root, &key).unwrap();
+        assert_eq!(state(&root, &key).unwrap()["seed"], "notSeeded");
+        assert!(!dir.join("enrollment.key").exists(), "no key without an intent");
+    }
+
+    #[test]
+    fn a_changed_private_key_never_reaches_the_seeder_or_owner() {
+        let (_dir, root, key) = macos_provision::created_for_tests();
+        begin(&root, &key, PLIST, PROGRAM).unwrap();
+        let path = macos_provision::directory(&root, &key).unwrap().join("enrollment.key");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        std::fs::write(&path, "0".repeat(64)).unwrap();
+        assert!(guest_material(&root, &key).is_err());
     }
 
     #[test]
     fn seeding_needs_the_original_completed_restore_without_a_run() {
         let dir = tempfile::tempdir().unwrap();
         let key = journal::new_id();
-        assert!(begin(dir.path(), &key, &plan(&key)).is_err(), "no provisioning record");
+        assert!(begin(dir.path(), &key, PLIST, PROGRAM).is_err(), "no provisioning record");
     }
 }

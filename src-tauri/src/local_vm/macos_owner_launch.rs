@@ -221,11 +221,18 @@ fn prepare(
     super::plan::validate(&manifest)?;
     let helper_bytes = canonical(&manifest)?;
     let h = &manifest["binding"];
+    // Version 3 only for an exactly seeded guest; an unresolved or fenced seed
+    // never launches, and an unseeded VM keeps the original version-2 binding.
+    let seed = match super::super::macos_seed::state(root, key)?["seed"].as_str() {
+        Some("notSeeded") => None,
+        Some("seeded") => Some(super::super::macos_seed::seeded(root, key)?),
+        _ => bail!("The guest seed is unresolved or fenced; no bootstrap launch until it is inspected"),
+    };
     let text = |v: &Value| -> Result<String> {
         Ok(v.as_str().context("Original typed field missing")?.into())
     };
     let binding = Binding {
-        version: 2,
+        version: if seed.is_some() { 3 } else { 2 },
         macos_major: 26,
         bootstrap_id: key.into(),
         owner_epoch: text(&h["ownerEpoch"])?,
@@ -244,6 +251,8 @@ fn prepare(
         output_share_id: text(&h["output"]["id"])?,
         config_sha256: journal::digest(&open(&vm)?.read("config.json", 64 * 1024, false)?),
         paths,
+        seed_id: seed.as_ref().map(|(receipt, _)| text(&receipt["seedId"])).transpose()?,
+        seed_receipt_sha256: seed.as_ref().map(|(_, digest)| digest.clone()),
     };
     let raw = canonical(&json!(binding))?;
     op.write_new("owner-intent.json", &raw)?;
@@ -252,6 +261,10 @@ fn prepare(
         .write_new("host-plan.json", &helper_bytes)?;
     let secret = entropy();
     op.write_new("control.capability", &secret)?;
+    if seed.is_some() {
+        // Owner-only, beside the capability; never in the binding, argv or a share.
+        op.write_new("enrollment.key", &super::super::macos_seed::owner_key(root, key)?)?;
+    }
     op.write_new("prepared.json",&serde_json::to_vec(&json!({"bindingDigest":journal::digest(&raw),"capabilityDigest":journal::digest(&secret),"ready":false}))?)?;
     Reference::reopen(&op_path)
 }

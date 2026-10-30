@@ -86,6 +86,8 @@ impl Fixture {
             output_share_id: get(&h["output"]["id"]),
             config_sha256: journal::digest(&std::fs::read(vm.join("config.json")).unwrap()),
             paths,
+            seed_id: None,
+            seed_receipt_sha256: None,
         };
         private(
             &op.join("owner-intent.json"),

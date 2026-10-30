@@ -475,3 +475,65 @@ fn native_exit_or_lost_startup_announcement_is_recorded_without_replacement() {
         assert_eq!(f.run().unwrap()["replacementAllowed"], false);
     }
 }
+
+/// Exact seed readback for the recorded intent, as the seeder core reports it.
+fn seed(f: &Fixture) {
+    use crate::local_vm::macos_seed;
+    macos_seed::begin(&f.root, &f.key, (492, &"a".repeat(64)), (643392, &"b".repeat(64))).unwrap();
+    let intent: Value = serde_json::from_slice(&std::fs::read(f.provision().join("seed-intent.json")).unwrap()).unwrap();
+    let items: Vec<Value> = intent["plan"]["items"].as_array().unwrap().iter().map(|item| {
+        let mut item = item.clone();
+        item["xattrs"] = json!([]);
+        item
+    }).collect();
+    macos_seed::complete(&f.root, &f.key, &json!({"version":1,"profile":"production","device":1,"items":items,"matchesReceipt":true})).unwrap();
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_unresolved_seed_never_launches() {
+    let f = Fixture::new();
+    crate::local_vm::macos_seed::begin(&f.root, &f.key, (492, &"a".repeat(64)), (643392, &"b".repeat(64))).unwrap();
+    assert!(f.run().unwrap_err().to_string().contains("unresolved or fenced"));
+    assert!(!f.op().join("owner-intent.json").exists());
+    assert!(!f.op().join("enrollment.key").exists());
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_seeded_launch_binds_version_3_and_accepts_only_exact_helper_enrollment() {
+    let f = Fixture::new();
+    seed(&f);
+    let result = f.run().unwrap();
+    assert_eq!((result["stage"].as_str(), result["ready"].as_bool()), (Some("originalOwnerConnected"), Some(false)));
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let (receipt, receipt_digest) = crate::local_vm::macos_seed::seeded(&f.root, &f.key).unwrap();
+    assert_eq!(reference.binding.version, 3);
+    assert_eq!(reference.binding.seed_id.as_deref(), receipt["seedId"].as_str());
+    assert_eq!(reference.binding.seed_receipt_sha256.as_deref(), Some(receipt_digest.as_str()));
+    let handed = std::fs::read(f.op().join("enrollment.key")).unwrap();
+    assert_eq!(handed, crate::local_vm::macos_seed::owner_key(&f.root, &f.key).unwrap());
+    assert_eq!(std::fs::metadata(f.op().join("enrollment.key")).unwrap().mode() & 0o777, 0o600);
+    let observed = std::fs::read_to_string(f.op().join("fixture-exec.json")).unwrap();
+    assert!(!observed.contains(std::str::from_utf8(&handed).unwrap()), "the key never reaches argv or environment");
+    let raw = std::fs::read(f.op().join("owner-intent.json")).unwrap();
+    assert!(!String::from_utf8_lossy(&raw).contains(std::str::from_utf8(&handed).unwrap()), "nor the binding");
+
+    let enrollment = json!({"version":2,"bindingDigest":journal::digest(&reference.raw),"ownerEpoch":reference.binding.owner_epoch,
+        "bootstrapId":f.key,"seedId":receipt["seedId"],"seedReceiptSha256":receipt_digest,"attempt":0,
+        "challengeSha256":"c".repeat(64),"claimsSha256":"d".repeat(64),
+        "helperAuthenticated":true,"accountAuthenticated":false,"trustAccepted":false,"ready":false});
+    private(&f.op().join("enrollment.json"), &canonical(&enrollment).unwrap());
+    let enrolled = reference.enrollment().unwrap();
+    assert_eq!(enrolled.challenge_sha256, "c".repeat(64));
+    assert_eq!(enrolled, reference.enrollment().unwrap(), "rereading never changes it");
+    assert!(reference.guest_observation().is_err(), "version 3 has no share observation");
+    for (field, value) in [("trustAccepted", json!(true)), ("accountAuthenticated", json!(true)), ("ready", json!(true)),
+        ("seedId", json!("0".repeat(32))), ("bindingDigest", json!("e".repeat(64))), ("helperAuthenticated", json!(false))] {
+        let mut forged = enrollment.clone();
+        forged[field] = value;
+        std::fs::remove_file(f.op().join("enrollment.json")).unwrap();
+        private(&f.op().join("enrollment.json"), &canonical(&forged).unwrap());
+        assert!(reference.enrollment().is_err(), "{field}");
+    }
+}
