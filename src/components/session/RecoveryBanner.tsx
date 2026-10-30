@@ -21,7 +21,7 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSignIn }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -41,7 +41,10 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   onQuestions: (id: string, answers: Record<string, string>) => void;
   onRetry: (model?: string) => void;
   onStop: () => void;
+  /** Continue in a new session, from a summary of this one. */
   onContinue: () => void;
+  /** Send "continue" in this same conversation, with no stop first. */
+  onSendContinue?: () => void;
   /** Signed out: sign the agent in again, where it can be (its terminal, or a shell running its login). */
   onSignIn?: () => void;
 }) {
@@ -49,6 +52,13 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   if (!kind && !waiting) return null;
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
   const offerModels = (kind === "capacity" || kind === "usage_limit") && !asks.length;
+  // "continue" only where the turn has ended or the agent's process has gone (a send starts it again): a usage
+  // limit once its window has reset, and signed out as the step after signing in. Not on a turn still open (a
+  // timeout, or an older log's failed tool), where it would queue behind it; not when delivery is unconfirmed,
+  // since typing clears the CLI's input and the unsent prompt with it; not over a request, which it would answer.
+  const limitReset = kind === "usage_limit" && limit?.resetsAt != null && limit.resetsAt <= now;
+  const offerSendContinue = !!onSendContinue && !asks.length
+    && (kind === "failed" || kind === "capacity" || kind === "disconnected" || kind === "signed_out" || limitReset);
   // Only a request to answer: the request's own card says it all, with stopping in its action bar.
   if (!kind && asks.length) {
     const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={onStop}>Stop session</Button>;
@@ -76,6 +86,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       {kind === "signed_out" && onSignIn && !asks.length && <Button size="sm" disabled={busy} onClick={onSignIn}>Sign in</Button>}
       {/* Signed out, a retry only fails again until the agent is signed in: it comes second, for after. */}
       {kind && kind !== "usage_limit" && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && !asks.length && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{kind === "signed_out" ? "Retry" : "Retry safely"}</Button>}
+      {offerSendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={onSendContinue}>Continue here</Button>}
       {offerModels && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
         <option value="" disabled>Choose another model</option>
         {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
