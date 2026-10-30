@@ -8,10 +8,13 @@ client's diagnosis, persistent logging, and recovery behavior from issue #162.
 ## Client behavior
 
 Failures retain a typed stage: local identity, authorization, assignment, control
-WebSocket connection, host proof, or established control session. Categories are
-service unavailable (HTTP 5xx), authentication (401), access denied (403), account
-entitlement, rate limited (429), network, timeout, protocol, local storage, and
-unknown. A 403 alone is not classified as lack of entitlement. Unknown errors are
+WebSocket connection, host proof, or established control session. A phone's relay
+connection has its own stages: the host data leg (phone attach), the E2EE
+handshake and device login (phone handshake), and after login (phone session).
+Categories are service unavailable (HTTP 5xx), authentication (401, or a refused
+device credential), access denied (403), account entitlement, rate limited (429),
+network, timeout, protocol, local storage, network changed, woke from sleep, local
+runtime, and unknown. A 403 alone is not classified as lack of entitlement. Unknown errors are
 not classified by searching their text.
 
 Settings → Devices displays the corresponding safe message. Service failures
@@ -22,6 +25,26 @@ waits for a connected control channel; LAN remains available during reconnection
 Successful host proof resets the consecutive attempt count and backoff. A later
 control close clears the live sender and retries with the director's reconnect
 hint. Retries continue indefinitely, with the existing maximum 90-second delay.
+
+A control channel can die without a close reaching the Mac (#666): after a Wi-Fi
+change the socket's source address is gone, and a close sent while the Mac slept
+is lost. The Mac only answers the cell's 20-second pings, so it never writes to
+such a socket and TCP never reports an error. The control loop therefore:
+
+- ends the session as `timeout` when no frame has arrived for 45 seconds (two
+  missed pings), measured across loop passes rather than per pass;
+- ends it as `network-changed` within 2 seconds when the socket's local address is
+  no longer on any interface;
+- ends it as `woke` when wall time has run more than 10 seconds ahead of the
+  monotonic clock between two 2-second ticks: macOS stops the monotonic clock
+  during sleep;
+- enables TCP keepalive (30 s idle, 5 s interval, 3 probes) on the control socket.
+
+Paired-device calls into the local runtime (`register`, `check`, `close` and every
+RPC) block on a local socket. They run on Tokio's blocking pool, so a stalled
+runtime (#661) cannot occupy the async workers the relay supervisor runs on.
+`register` and `check` give up after 15 seconds; an RPC is never abandoned, since
+it may still take effect.
 
 ## Diagnostic file
 
@@ -39,8 +62,13 @@ There is no upload. It retains the latest 128 events with a hard 64 KiB cap,
 including bounded reads on startup. Each write atomically replaces the snapshot;
 files are mode 0600 on Unix. Invalid or non-allowlisted old records are discarded.
 
-Records contain only timestamp, event (`started`, `failed`, `connected`), attempt,
-retry count, and optional typed failure stage/category/HTTP status. Attempt 1 is
+Records contain only timestamp, event, attempt, retry count, and optional typed
+failure stage/category/HTTP status. Control-channel events are `started`,
+`failed` and `connected`. Each phone connection through Relay adds
+`phone-requested` (the cell's `conn-open`), `phone-attached` (host data leg open),
+`phone-authenticated` (device login accepted), and `phone-closed` or `phone-failed`
+with its stage and category. Phone events use at most half the 128 records, so a
+phone retrying in a loop cannot push out the control channel's history. Attempt 1 is
 the initial connection, retry count 0. A control-session failure after a successful
 connection has attempt/retry count 0, before the next connection attempt starts.
 The connected event records the successful attempt before resetting the counter.
@@ -70,6 +98,13 @@ Coverage includes:
 - A subprocess with stdout/stderr discarded that still writes a safe diagnostic.
 - Retention across log reinitialization, bounds, Unix permissions, corrupt or
   oversized input, and disk failure without blocking status updates.
+- A cell that goes silent after host proof: the supervisor replaces the channel
+  and records `control-session`/`timeout`, while a channel the cell keeps pinging
+  is kept. Silence, a lost source address and sleep are also checked directly.
+- A `conn-open` whose data leg the cell refuses: `phone-requested` and
+  `phone-failed` (`phone-attach`, HTTP 503) are recorded without connection or
+  device identifiers, and the control channel stays up.
+- The phone-record cap.
 - Devices status updates through the actual frontend store: outage explanation,
   disabled Relay pairing during outage/reconnection, and a code after recovery.
 

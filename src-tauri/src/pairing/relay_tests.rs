@@ -104,9 +104,86 @@ fn verify_control_headers(
     Ok(response)
 }
 
-#[tokio::test]
-async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect() {
-    let directory = tempfile::tempdir().unwrap();
+// The callback's error type is fixed by tungstenite's server handshake API.
+#[allow(clippy::result_large_err)]
+fn refuse_data_leg(
+    request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+    _: tokio_tungstenite::tungstenite::handshake::server::Response,
+) -> std::result::Result<
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+    tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+> {
+    assert_eq!(request.uri().path(), "/v1/host/data/phone-connection");
+    Err(tokio_tungstenite::tungstenite::http::Response::builder()
+        .status(503)
+        .body(None)
+        .unwrap())
+}
+
+type CellSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+/// The cell's side of `open_control`, up to an acknowledged control channel.
+async fn accept_control(
+    listener: &tokio::net::TcpListener,
+    origin: &str,
+    generation: u64,
+) -> CellSocket {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut socket = tokio_tungstenite::accept_hdr_async(stream, verify_control_headers)
+        .await
+        .unwrap();
+    let hello: serde_json::Value =
+        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(hello["type"], "host-hello");
+    let (challenge, proof) = challenge(&HostKeypair::from_secret([5; 32]), origin);
+    socket
+        .send(Message::Text(challenge.to_string().into()))
+        .await
+        .unwrap();
+    let ack: serde_json::Value =
+        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(ack["type"], "host-challenge-ack");
+    assert_eq!(ack["proofB64"], proof);
+    socket.send(Message::Text(serde_json::json!({
+        "type": "host-hello-ack", "v": 1, "generation": generation,
+        "controlResumeSecret": general_purpose::URL_SAFE_NO_PAD.encode([6; 32]),
+        "leaseExpiresAt": now_ms() + 60_000, "activeConnIds": [], "pendingConns": [],
+    }).to_string().into())).await.unwrap();
+    socket
+}
+
+/// The Mac's side: the same steps as `connect_once`, without the account service.
+async fn connect_to_cell(
+    manager: Arc<PairingManager>,
+    context: AccountContext,
+    retry: &mut RetryState,
+    origin: String,
+    timing: ControlTiming,
+) -> Result<()> {
+    let keypair = HostKeypair::from_secret([5; 32]);
+    let assignment = RelayAssignment {
+        v: 1,
+        cell_url: origin,
+        assignment_epoch: 1,
+        lease: "synthetic-lease".into(),
+    };
+    let (socket, ack) = open_control(&context, &keypair, &assignment, "synthetic-relay-token").await?;
+    let (tx, rx) = mpsc::unbounded_channel();
+    let live = RelayLive {
+        tx,
+        director_url: "https://relay.example.invalid".into(),
+        cell_url: assignment.cell_url,
+        assignment_epoch: 1,
+        relay_host_id: keypair.host_id(),
+        generation: ack.generation,
+    };
+    retry.connected(&manager, live.clone());
+    control_loop(manager, socket, rx, live, context, keypair, timing)
+        .await
+        .context(Stage::ControlSession)
+}
+
+fn manager_with_diagnostics(directory: &std::path::Path) -> Arc<PairingManager> {
     let account = Arc::new(crate::account::AccountManager::default());
     account.set_context_for_test(Some(context()));
     let manager = Arc::new(PairingManager::new(account));
@@ -114,8 +191,21 @@ async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect()
         .diagnostics
         .lock()
         .unwrap()
-        .configure(directory.path().to_owned())
+        .configure(directory.to_owned())
         .unwrap();
+    manager
+}
+
+fn diagnostic_records(directory: &std::path::Path) -> Vec<serde_json::Value> {
+    let bytes =
+        std::fs::read_to_string(directory.join(super::super::diagnostics::FILE_NAME)).unwrap();
+    serde_json::from_str(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = manager_with_diagnostics(directory.path());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let server_origin = origin.clone();
@@ -123,29 +213,7 @@ async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect()
     let server = tokio::spawn(async move {
         let mut dropped = Some(dropped);
         for generation in 1..=2 {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_hdr_async(stream, verify_control_headers)
-                .await
-                .unwrap();
-            let hello: serde_json::Value =
-                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
-                    .unwrap();
-            assert_eq!(hello["type"], "host-hello");
-            let (challenge, proof) = challenge(&HostKeypair::from_secret([5; 32]), &server_origin);
-            socket
-                .send(Message::Text(challenge.to_string().into()))
-                .await
-                .unwrap();
-            let ack: serde_json::Value =
-                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
-                    .unwrap();
-            assert_eq!(ack["type"], "host-challenge-ack");
-            assert_eq!(ack["proofB64"], proof);
-            socket.send(Message::Text(serde_json::json!({
-                "type": "host-hello-ack", "v": 1, "generation": generation,
-                "controlResumeSecret": general_purpose::URL_SAFE_NO_PAD.encode([6; 32]),
-                "leaseExpiresAt": now_ms() + 60_000, "activeConnIds": [], "pendingConns": [],
-            }).to_string().into())).await.unwrap();
+            let mut socket = accept_control(&listener, &server_origin, generation).await;
             let invite: serde_json::Value =
                 serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
                     .unwrap();
@@ -191,28 +259,7 @@ async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect()
                 }
                 assert!(retry.reconnect);
                 assert_eq!(retry.attempts, if call == 3 { 3 } else { 1 });
-                let keypair = HostKeypair::from_secret([5; 32]);
-                let assignment = RelayAssignment {
-                    v: 1,
-                    cell_url: origin,
-                    assignment_epoch: 1,
-                    lease: "synthetic-lease".into(),
-                };
-                let (socket, ack) =
-                    open_control(&context, &keypair, &assignment, "synthetic-relay-token").await?;
-                let (tx, rx) = mpsc::unbounded_channel();
-                let live = RelayLive {
-                    tx,
-                    director_url: "https://relay.example.invalid".into(),
-                    cell_url: assignment.cell_url,
-                    assignment_epoch: 1,
-                    relay_host_id: keypair.host_id(),
-                    generation: ack.generation,
-                };
-                retry.connected(&manager, live.clone());
-                control_loop(manager, socket, rx, live, context, keypair)
-                    .await
-                    .context(Stage::ControlSession)
+                connect_to_cell(manager, context, retry, origin, ControlTiming::default()).await
             })
         },
     ));
@@ -278,6 +325,110 @@ async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect()
         "127.0.0.1",
         "fixture@example.invalid",
     ] {
+        assert!(!bytes.contains(sensitive));
+    }
+}
+
+/// The control loop must notice a cell that has gone quiet (#666): its timer
+/// spans loop passes, so the account tick cannot keep restarting it. A
+/// channel the cell keeps pinging is left alone.
+#[tokio::test]
+async fn a_control_channel_that_goes_silent_is_replaced_and_recorded() {
+    let timing = ControlTiming {
+        tick: Duration::from_millis(20),
+        silence: Duration::from_millis(250),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let manager = manager_with_diagnostics(directory.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server_origin = origin.clone();
+    let server = tokio::spawn(async move {
+        // The first channel looks open but never carries another frame, like
+        // one whose source address is gone.
+        let _silent = accept_control(&listener, &server_origin, 1).await;
+        let mut live = accept_control(&listener, &server_origin, 2).await;
+        // Four silence periods of pings, each answered.
+        for t in 0..20 {
+            live.send(Message::Text(serde_json::json!({ "type": "ping", "t": t }).to_string().into()))
+                .await
+                .unwrap();
+            let pong: serde_json::Value =
+                serde_json::from_str(live.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(pong, serde_json::json!({ "type": "pong", "t": t }));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        live
+    });
+    let supervisor = tokio::spawn(supervise_with(manager.clone(), move |manager, context, retry| {
+        Box::pin(connect_to_cell(manager, context, retry, origin.clone(), timing))
+    }));
+    wait_until(|| manager.current_relay().is_some_and(|live| live.generation == 2)).await;
+    let mut live_socket = server.await.unwrap();
+    // Still the second channel after a second of pings: no silence detected.
+    assert_eq!(manager.current_relay().unwrap().generation, 2);
+    manager.stopped.store(true, Ordering::SeqCst);
+    manager.current_relay().unwrap().shutdown();
+    assert!(matches!(live_socket.next().await.unwrap().unwrap(), Message::Close(_)));
+    supervisor.await.unwrap();
+    let records = diagnostic_records(directory.path());
+    let events: Vec<_> = records.iter().map(|record| record["event"].as_str().unwrap()).collect();
+    assert_eq!(events, ["started", "connected", "failed", "connected"]);
+    assert_eq!(
+        records[2]["failure"],
+        serde_json::json!({ "stage": "control-session", "category": "timeout", "httpStatus": null })
+    );
+}
+
+/// A phone that reaches the cell but whose data leg never attaches leaves a
+/// trace on the Mac (#666), and the control channel carries on.
+#[tokio::test]
+async fn a_phone_leg_that_cannot_attach_is_recorded_on_the_mac() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = manager_with_diagnostics(directory.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server_origin = origin.clone();
+    let server = tokio::spawn(async move {
+        let mut control = accept_control(&listener, &server_origin, 1).await;
+        control
+            .send(Message::Text(serde_json::json!({
+                "type": "conn-open", "connId": "phone-connection",
+                "connTicket": general_purpose::URL_SAFE_NO_PAD.encode([3; 32]),
+                "kind": "resume", "relayDeviceId": "phone-device", "attachDeadlineMs": 5_000,
+            }).to_string().into()))
+            .await
+            .unwrap();
+        // The cell refuses the host data leg's WebSocket upgrade.
+        let (data, _) = listener.accept().await.unwrap();
+        let refused = tokio_tungstenite::accept_hdr_async(data, refuse_data_leg).await;
+        assert!(refused.is_err());
+        control
+    });
+    let supervisor = tokio::spawn(supervise_with(manager.clone(), move |manager, context, retry| {
+        Box::pin(connect_to_cell(manager, context, retry, origin.clone(), ControlTiming::default()))
+    }));
+    let mut control = server.await.unwrap();
+    wait_until(|| {
+        diagnostic_records(directory.path())
+            .iter()
+            .any(|record| record["event"] == "phone-failed")
+    })
+    .await;
+    assert_eq!(manager.current_relay().unwrap().generation, 1);
+    manager.stopped.store(true, Ordering::SeqCst);
+    manager.current_relay().unwrap().shutdown();
+    assert!(matches!(control.next().await.unwrap().unwrap(), Message::Close(_)));
+    supervisor.await.unwrap();
+    let records = diagnostic_records(directory.path());
+    let events: Vec<_> = records.iter().map(|record| record["event"].as_str().unwrap()).collect();
+    assert_eq!(events, ["started", "connected", "phone-requested", "phone-failed"]);
+    assert_eq!(
+        records[3]["failure"],
+        serde_json::json!({ "stage": "phone-attach", "category": "service-unavailable", "httpStatus": 503 })
+    );
+    let bytes = serde_json::to_string(&records).unwrap();
+    for sensitive in ["phone-connection", "phone-device", "127.0.0.1"] {
         assert!(!bytes.contains(sensitive));
     }
 }
