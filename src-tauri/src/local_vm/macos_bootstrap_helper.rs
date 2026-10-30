@@ -20,7 +20,7 @@ use std::{
 };
 
 const MANIFEST_LIMIT: u64 = 32 * 1024;
-const KEYS_LIMIT: u64 = 64 * 1024;
+use super::authorized_keys_text::KEYS_LIMIT;
 const STATE: &str = ".terminalx-bootstrap-helper";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -377,33 +377,7 @@ struct WriteIntent {
     after_sha256: String,
 }
 fn appended(before: &[u8], key: &KeyManifest) -> Result<Vec<u8>> {
-    if before.len() as u64 > KEYS_LIMIT || before.contains(&0) {
-        bail!("Unsupported original authorized_keys")
-    }
-    let text = std::str::from_utf8(before)?;
-    let blob = key
-        .public_key
-        .split_once(' ')
-        .context("Public key missing")?
-        .1;
-    if text.contains("terminalx-bootstrap:") || text.split_whitespace().any(|part| part == blob) {
-        bail!("Existing bootstrap key/marker cannot be adopted or duplicated")
-    }
-    let mut after = before.to_vec();
-    if !after.is_empty() && after.last() != Some(&b'\n') {
-        after.push(b'\n');
-    }
-    after.extend(
-        format!(
-            "restrict {} terminalx-bootstrap:{}\n",
-            key.public_key, key.binding.bootstrap_id
-        )
-        .as_bytes(),
-    );
-    if after.len() as u64 > KEYS_LIMIT {
-        bail!("Authorized keys would exceed bound")
-    }
-    Ok(after)
+    super::authorized_keys_text::append(before, &key.public_key, &key.binding.bootstrap_id).map_err(anyhow::Error::msg)
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {

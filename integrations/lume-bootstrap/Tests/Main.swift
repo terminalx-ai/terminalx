@@ -53,6 +53,20 @@ import Darwin
                 "sessionRetained": service.session != nil]), as: UTF8.self))
             return
         }
+        // publish <owned directory> <count> <size>: the real TXPinnedPath.writeNew
+        // for enrollment-attempt-N.json records, for reader-race and path tests.
+        if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "publish",
+           let count = Int(CommandLine.arguments[3]), let size = Int(CommandLine.arguments[4]) {
+            let path = CommandLine.arguments[2]
+            var metadata = stat()
+            try txRequire(lstat(path, &metadata) == 0)
+            let directory = try TXPinnedPath(TXPathPin(path: path, device: UInt64(metadata.st_dev), inode: UInt64(metadata.st_ino)), directory: true)
+            for index in 0..<count {
+                try directory.writeNew("enrollment-attempt-\(index).json", Data(repeating: UInt8(65 + index), count: size))
+            }
+            print(String(decoding: try txJSON(["written": count]), as: UTF8.self))
+            return
+        }
         if CommandLine.arguments.count == 15, CommandLine.arguments[1] == "run" {
             let a = CommandLine.arguments
             try txRequire(a[3] == "--display" && a[4] == "none" && a[5] == "--vnc" && a[6] == "disabled"
@@ -126,12 +140,20 @@ import Darwin
             print(String(decoding: try txJSON(["claimed": state.claimed, "refusals": state.refusals, "fenced": state.fenced]), as: UTF8.self))
             return
         }
+        // <control-fd> <requests> guest <guest-fd> <wait-seconds>: the owner
+        // channel and a version-3 enrollment session in one owner, as in a VM.
+        if CommandLine.arguments.count == 6, CommandLine.arguments[3] == "guest",
+           let fd = Int32(CommandLine.arguments[1]), let requests = Int(CommandLine.arguments[2]),
+           let guest = Int32(CommandLine.arguments[4]), let wait = Double(CommandLine.arguments[5]) {
+            try serve(fd, requests, afterReceive: false, guest: (guest, wait))
+            return
+        }
         guard CommandLine.arguments.count == 3,
               let fd = Int32(CommandLine.arguments[1]), let requests = Int(CommandLine.arguments[2]),
               requests > 0 && requests < 100 else { throw TXBootstrapError.refused }
         try serve(fd, requests, afterReceive: false)
     }
-    static func serve(_ fd: Int32, _ requests: Int, afterReceive: Bool) throws {
+    static func serve(_ fd: Int32, _ requests: Int, afterReceive: Bool, guest: (Int32, Double)? = nil) throws {
         let launch = try TerminalXBootstrapLaunch.receive(fd)
         if afterReceive { return }
         try launch.validateVM(configPath: launch.binding.paths["config"]!.path,
@@ -161,6 +183,15 @@ import Darwin
             } catch { denied = true }
             try txRequire(denied)
         }
-        try TerminalXBootstrapOwner.fixture(launch: launch, view: view, configLease: lease, maximum: requests)
+        var enrollment: TXEnrollmentService?
+        if let (guestFd, wait) = guest {
+            let service = try TXEnrollmentService(launch: launch, confirmationWait: wait)
+            enrollment = service
+            Thread {
+                if let attempt = service.admit() { service.run(fd: guestFd, attempt: attempt, view: view) }
+                close(guestFd)
+            }.start()
+        }
+        try TerminalXBootstrapOwner.fixture(launch: launch, view: view, configLease: lease, maximum: requests, enrollment: enrollment)
     }
 }

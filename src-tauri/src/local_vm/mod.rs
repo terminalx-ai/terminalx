@@ -37,5 +37,7 @@ mod macos_tools;
 mod macos_helper_fs;
 #[allow(dead_code)] // No broker/CLI route until authenticated owner/share acquisition exists.
 mod macos_bootstrap_helper;
+#[allow(dead_code)] // Shared with the guest account child; used through the gated helper engine.
+mod authorized_keys_text;
 #[allow(dead_code)] // Candidate only; no approved profile or production launch route.
 mod macos_owner_channel;

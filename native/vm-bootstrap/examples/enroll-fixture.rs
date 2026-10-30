@@ -10,11 +10,11 @@ fn main() {
     use terminalx_vm_bootstrap::enroll;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (fd, seed_path, enroll_only) = match args.as_slice() {
-        [fd, seed] => (fd, seed, false),
-        [fd, seed, mode] if mode == "enroll-only" => (fd, seed, true),
+    let (fd, seed_path, mode) = match args.as_slice() {
+        [fd, seed] => (fd, seed, "echo"),
+        [fd, seed, mode] if mode == "enroll-only" || mode == "confirm" => (fd, seed, mode.as_str()),
         _ => {
-            eprintln!("usage: enroll-fixture <fd> <seed-file> [enroll-only]");
+            eprintln!("usage: enroll-fixture <fd> <seed-file> [enroll-only|confirm]");
             std::process::exit(64);
         }
     };
@@ -35,8 +35,20 @@ fn main() {
         let claims = json!({"euid": unsafe { libc::geteuid() }, "fixture": true});
         let (mut session, challenge) =
             enroll::enroll(&mut stream, &seed, &claims, Duration::from_secs(3))?;
-        if enroll_only {
+        if mode == "enroll-only" {
             return Ok(json!({"authenticated": true, "challengeSha256": challenge}));
+        }
+        if mode == "confirm" {
+            // Read-only observation of this host's personal accounts; no account
+            // file is opened or written.
+            let accounts = terminalx_vm_bootstrap::account::observe();
+            session.report_accounts(&mut stream, &accounts)?;
+            let account =
+                session.await_confirmation(&mut stream, &accounts, Duration::from_secs(30))?;
+            return Ok(
+                json!({"authenticated": true, "challengeSha256": challenge, "confirmed": account.name,
+                "confirmationSha256": account.confirmation_sha256}),
+            );
         }
         session.send(&mut stream, json!({"hello": "rust helper"}))?;
         let echo = session.receive(&mut stream)?;

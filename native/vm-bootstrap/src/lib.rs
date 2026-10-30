@@ -4,9 +4,12 @@
 #![cfg(target_os = "macos")]
 
 pub mod account;
+#[path = "../../../src-tauri/src/local_vm/authorized_keys_text.rs"]
+pub mod authorized_keys_text;
 pub mod disk;
 pub mod enroll;
 pub mod fsx;
+pub mod keys;
 pub mod probe;
 pub mod seed;
 pub mod wire;

@@ -207,10 +207,53 @@ reply, a missing key and a malformed seed binding.
   `stop-requested.json` once, answers, and only then stops. Exit evidence is
   only the original child-wait record.
 
-The guest side has `ConfirmedAccount` (constructible only from a confirmation
-tagged under a verified session) and a verified, non-reversible privilege drop.
-Still to come: the owner relaying the person's confirmation over the session,
-and the account child running the existing `authorized_keys` engine.
+**Account confirmation (2026-10-31).** After acceptance the helper reports
+the local personal accounts it observes (UID at least 501, `/Users/<name>`,
+home device and inode). The owner journals that as `account-observation.json`,
+with helper authentication only.
+
+The person confirms one of those accounts through `environment.confirmGuestAccount`:
+
+- It is gated by the onboarding capability and needs `confirm: true`.
+- It must quote the exact observation digest and one account from it, from the
+  original parent session, tab and conversation.
+- The host records `account-confirmation.json` exclusively before relaying it.
+  A retry re-presents those same bytes, and a different account is refused
+  for good.
+
+The owner checks the confirmation against its journaled observation and
+journals `account-confirmation-relay.json` exclusively; a lost-reply retry gets
+the same record. It then sends the confirmation over the tagged session.
+
+The helper accepts only an account it reported that still matches locally, and
+acknowledges with the confirmation digest. Only that acknowledgement makes
+`accountAuthenticated` true, recorded in `account-confirmation-answer.json` for
+that one account. Trust and readiness stay false.
+
+The confirmation request's payload digest joins all three owner-channel MACs.
+
+**Account child.**
+
+- `ConfirmedAccount` and `KeyGrant` can be built only from tagged session frames
+  (`#[non_exhaustive]` outside the crate).
+- `drop_to` returns a `Dropped` proof. `keys::install` requires that proof and
+  the exact confirmed home (device, inode, owner), so no account file is opened
+  earlier.
+- The install uses the desktop engine's `authorized_keys` transformation,
+  shared as one source file (`authorized_keys_text.rs`) compiled into both
+  crates with the same tests.
+- It journals intent before any effect in an account-private journal: no-follow
+  `.ssh` and `authorized_keys`, a private file mode, a lock, the before-snapshot,
+  and a single append.
+- Interruptions reconcile without replaying creation or appending twice, and a
+  changed file is reported as an unknown outcome.
+
+Still to come: the host-to-owner relay of the key grant over the session.
+
+**Record publication.** The owner's `writeNew` and the host's `write_new` now
+write under a unique hidden name and rename with `RENAME_EXCL`. Readers see no
+record or the complete one, and an existing target of any kind is never
+replaced. A fixture confirmed that the old writer let readers see prefixes.
 
 ## Account confirmation and effects
 

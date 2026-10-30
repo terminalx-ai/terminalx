@@ -283,6 +283,51 @@ class GuestTests(unittest.TestCase):
         result=json.loads((f.op/'guest-observation.json').read_bytes())
         self.assertFalse(result['helperAuthenticated']);self.assertFalse(result['ready'])
 
+class PublicationTests(unittest.TestCase):
+    """The real TXPinnedPath.writeNew: exclusive, atomic for readers, fail-closed."""
+    def directory(self):
+        temp = tempfile.TemporaryDirectory(prefix='txp-', dir='/private/tmp'); self.addCleanup(temp.cleanup)
+        path = Path(temp.name).resolve(); path.chmod(0o700)
+        return path
+    def publish(self, path, count=1, size=16):
+        return subprocess.run([str(BINARY), 'publish', str(path), str(count), str(size)], capture_output=True, timeout=60)
+    def test_readers_see_absent_or_complete_records_only(self):
+        import threading
+        size, count, seen, bad = 60000, 9, [], []
+        for _ in range(4):
+            path = self.directory(); done = threading.Event()
+            def reader():
+                while not done.is_set():
+                    for i in range(count):
+                        try: fd = os.open(path/f'enrollment-attempt-{i}.json', os.O_RDONLY | os.O_NOFOLLOW)
+                        except FileNotFoundError: continue
+                        with os.fdopen(fd, 'rb') as f:
+                            info = os.fstat(f.fileno()); data = f.read()
+                        seen.append(i)
+                        if len(data) != size or data != bytes([65 + i]) * size or info.st_nlink != 1: bad.append((i, len(data), info.st_nlink))
+            thread = threading.Thread(target=reader); thread.start()
+            result = self.publish(path, count, size); done.set(); thread.join()
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual(sorted(p.name for p in path.iterdir()), sorted(f'enrollment-attempt-{i}.json' for i in range(count)), 'no staged name remains')
+        self.assertEqual(bad, [], 'a reader saw a prefix or a second link')
+        self.assertTrue(seen, 'the reader observed published records')
+    def test_an_existing_target_of_any_kind_is_never_replaced(self):
+        outside = self.directory()/'outside'; outside.write_bytes(b'outside')
+        for make in [lambda t: t.write_bytes(b'original'), lambda t: t.symlink_to(outside), lambda t: t.mkdir()]:
+            path = self.directory(); target = path/'enrollment-attempt-0.json'; make(target)
+            before = os.lstat(target)
+            result = self.publish(path)
+            self.assertNotEqual(result.returncode, 0)
+            after = os.lstat(target)
+            self.assertEqual((before.st_ino, before.st_mode), (after.st_ino, after.st_mode))
+            self.assertEqual([p.name for p in path.iterdir()], ['enrollment-attempt-0.json'], 'no staged name remains')
+        self.assertEqual(outside.read_bytes(), b'outside')
+    def test_unsafe_or_aliased_directories_refuse_before_writing(self):
+        path = self.directory(); path.chmod(0o755)
+        self.assertNotEqual(self.publish(path).returncode, 0); self.assertEqual(list(path.iterdir()), [])
+        real = self.directory(); alias = self.directory()/'alias'; alias.symlink_to(real)
+        self.assertNotEqual(self.publish(alias).returncode, 0); self.assertEqual(list(real.iterdir()), [])
+
 ENROLL = 'terminalx-vm-enrollment-v2'
 def etag(key, domain, parts):
     message = b''.join(struct.pack('!I', len(v.encode())) + v.encode() for v in [ENROLL, domain] + parts)
@@ -407,6 +452,80 @@ class EnrollmentListenerTests(unittest.TestCase):
         g = Fixture(); self.addCleanup(g.finish); g.start(n=2)
         with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): g.call('stop')
         self.assertFalse((g.op/'stop-requested.json').exists())
+    def owner_with_guest(self, f, b, wait=8):
+        raw = wire(b); private(f.op/'owner-intent.json', raw); f.bd = digest(raw)
+        a, c = socket.socketpair(); a.settimeout(5); g, h = socket.socketpair()
+        f.process = subprocess.Popen([str(BINARY), str(c.fileno()), '16', 'guest', str(h.fileno()), str(wait)],
+            pass_fds=[c.fileno(), h.fileno()], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        c.close(); h.close()
+        send(a, {'binding': b64(raw), 'capability': b64(f.secret)}); read(a); a.close()
+        return g
+    def host(self, f, action, payload=None):
+        s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(str(f.op/'owner.sock'))
+        with s:
+            request = {'action': action, 'bindingDigest': f.bd, 'clientNonce': os.urandom(32).hex(), 'requestId': uid()}
+            if payload is not None: request['payload'] = b64(payload)
+            send(s, request); challenge = read(s)
+            parts = [f.bd, f.binding['ownerEpoch'], action, request['requestId'], request['clientNonce'], challenge['serverNonce']]
+            parts += [digest(payload)] if payload is not None else []
+            assert challenge['mac'] == tag(f.secret, 'owner', parts)
+            send(s, {'mac': tag(f.secret, 'host', parts)}); result = read(s)
+        raw = base64.b64decode(result['payload']); assert result['mac'] == tag(f.secret, 'receipt', parts + [digest(raw)])
+        return base64.b64decode(json.loads(raw)['receipt'])
+    def poll(self, f, action):
+        deadline = time.monotonic() + 6
+        while True:
+            try: return self.host(f, action)
+            except (EOFError, ConnectionResetError, AssertionError, socket.timeout):
+                if time.monotonic() > deadline: raise
+                time.sleep(0.2)
+    def test_only_the_persons_relayed_confirmation_authenticates_one_reported_account(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        g = self.owner_with_guest(f, b)
+        seed = f.root/'seed.json'
+        private(seed, wire({'bootstrapId': b['bootstrapId'], 'key': b64(self.key), 'seedId': b['seedId'], 'version': 1}))
+        helper = subprocess.Popen([str(HELPER), str(g.fileno()), str(seed), 'confirm'], pass_fds=[g.fileno()],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        g.close()
+        observed_bytes = self.poll(f, 'accountObservation')
+        observed = json.loads(observed_bytes)
+        self.assertEqual((observed['helperAuthenticated'], observed['accountAuthenticated'], observed['trustAccepted'], observed['ready']),
+                         (True, False, False, False))
+        mine = next(a for a in observed['accounts'] if a['uid'] == os.getuid())
+        def confirmation(**change):
+            value = {'version': 1, 'bindingDigest': f.bd, 'ownerEpoch': b['ownerEpoch'], 'observationSha256': digest(observed_bytes),
+                     'account': mine, 'parentSession': uid(), 'parentTab': uid(), 'parentConversation': 'original', 'confirmationId': uid()}
+            value.update(change); return wire(value)
+        refused = [confirmation(account={**mine, 'homeInode': mine['homeInode'] + 1}),
+                   confirmation(account={**mine, 'uid': 0}),
+                   confirmation(observationSha256='0' * 64),
+                   confirmation(bindingDigest='e' * 64),
+                   confirmation(parentSession='not-a-uuid')]
+        for bad in refused:
+            with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, 'confirmAccount', bad)
+        self.assertFalse((f.op/'account-confirmation-relay.json').exists(), 'no refused confirmation is journaled')
+        chosen = confirmation()
+        relay = self.host(f, 'confirmAccount', chosen)
+        record = json.loads(relay)
+        self.assertEqual((record['relayed'], record['accountAuthenticated'], record['confirmationSha256'], record['account']),
+                         (True, False, digest(chosen), mine))
+        self.assertEqual(self.host(f, 'confirmAccount', chosen), relay, 'a lost-reply retry gets the same record')
+        with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)):
+            self.host(f, 'confirmAccount', confirmation())
+        out, err = helper.communicate(timeout=30)
+        result = json.loads(out)
+        self.assertEqual((result['confirmed'], result['confirmationSha256']), (mine['name'], digest(chosen)), err.decode())
+        answer = json.loads(self.poll(f, 'accountAnswer'))
+        self.assertEqual((answer['outcome'], answer['accountAuthenticated'], answer['trustAccepted'], answer['ready']),
+                         ('confirmed', True, False, False))
+        self.assertEqual(json.loads((f.op/'account-confirmation-relay.json').read_bytes())['confirmationSha256'], digest(chosen))
+        texts = [p.read_bytes() for p in f.op.rglob('*') if p.is_file() and p.name != 'enrollment.key'] + [out, err]
+        self.assertFalse(any(self.key.hex().encode() in t or b64(self.key).encode() in t for t in texts))
+    def test_version_2_owner_serves_no_account_relay(self):
+        f = Fixture(); self.addCleanup(f.finish); b = f.binding; b['version'] = 2
+        f.start(n=3, binding=b)
+        for action, payload in [('accountObservation', None), ('confirmAccount', b'{}'), ('accountAnswer', None)]:
+            with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, action, payload)
     def test_version_2_owner_never_serves_an_enrollment_receipt(self):
         f = Fixture(); self.addCleanup(f.finish); b = f.binding; b['version'] = 2
         private(f.op/'enrollment.json', wire({'helperAuthenticated': True}))

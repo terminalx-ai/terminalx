@@ -81,7 +81,7 @@ final class TXGuestListener: NSObject, VZVirtioSocketListenerDelegate, @unchecke
     private var claimed = false
     // Version 3: seeded-key enrollment with a bounded refusal budget instead of
     // the version-2 single observation claim.
-    private let enrollment: TXEnrollmentService?
+    let enrollment: TXEnrollmentService?
     private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, device: VZVirtioSocketDevice) throws {
         self.launch = launch; self.view = view; self.device = device
         enrollment = launch.binding.version == 3 ? try TXEnrollmentService(launch: launch) : nil

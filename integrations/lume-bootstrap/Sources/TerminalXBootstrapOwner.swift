@@ -120,6 +120,8 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
     private var guestListener: AnyObject?
     // Asks the owned VM to stop; set only by the process that owns the VM.
     private var stopper: (@Sendable () -> Void)?
+    // Wakes the enrollment session after a relay is journaled.
+    private var onRelay: (@Sendable () -> Void)?
     // The original config lock's open description is held, never re-created.
     private let configLease: TXDescriptor
     private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32) throws {
@@ -177,15 +179,26 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
     private func connection(_ fd: Int32) throws {
         try TXWire.configure(fd)
         try check()
-        let request = try txObject(TXWire.read(fd), keys: ["action", "bindingDigest", "clientNonce", "requestId"])
+        let raw = try TXWire.read(fd)
+        // Only confirmAccount carries a payload, and its digest joins every MAC.
+        let request = try (try? txObject(raw, keys: ["action", "bindingDigest", "clientNonce", "payload", "requestId"]))
+            ?? txObject(raw, keys: ["action", "bindingDigest", "clientNonce", "requestId"])
         let action = try txString(request, "action")
+        var requestPayload: Data?
+        if request["payload"] != nil {
+            requestPayload = Data(base64Encoded: try txString(request, "payload"))
+            try txRequire(requestPayload.map { !$0.isEmpty && $0.count <= 16 * 1024 } ?? false)
+        }
+        try txRequire((requestPayload != nil) == (action == "confirmAccount"))
         let requestId = try txString(request, "requestId")
         let clientNonce = try txString(request, "clientNonce")
         _ = try txHex(clientNonce)
-        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop"].contains(action)
+        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop",
+            "accountObservation", "confirmAccount", "accountAnswer"].contains(action)
             && txString(request, "bindingDigest") == launch.bindingDigest)
         let nonce = txNonce()
         let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
+            + (requestPayload.map { [txDigest($0)] } ?? [])
         try TXWire.write(fd, txJSON(["serverNonce": nonce, "epoch": launch.binding.ownerEpoch,
                                     "mac": txTag(launch.capability, "owner", parts)]))
         let auth = try txObject(TXWire.read(fd), keys: ["mac"])
@@ -196,12 +209,19 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
         // Version 3 has no share trust path: only enrollment and an owner-mediated
         // stop are served, and neither is served for earlier versions.
+        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer"]
         try txRequire(launch.binding.version == 3
-            ? ["observe", "enrollment", "stop"].contains(action) : !["enrollment", "stop"].contains(action))
+            ? (["observe"] + enrolledOnly).contains(action) : !enrolledOnly.contains(action))
         switch action {
         case "guestObservation": receipt = try launch.pins["operation"]!.receipt("guest-observation.json")
         case "enrollment": receipt = try launch.pins["operation"]!.receipt("enrollment.json")
         case "stop": (receipt, stopAfterReply) = try requestStop()
+        case "accountObservation": receipt = try launch.pins["operation"]!.receipt("account-observation.json")
+        case "confirmAccount":
+            receipt = try TXAccountRelay.record(requestPayload!, launch: launch)
+            state.lock(); let wake = onRelay; state.unlock()
+            wake?()
+        case "accountAnswer": receipt = try launch.pins["operation"]!.receipt("account-confirmation-answer.json")
         case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
         case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
         default: receipt = Data()
@@ -227,6 +247,9 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         try operation.writeNew("stop-requested.json", txJSON(["version": 1, "bindingDigest": launch.bindingDigest,
             "ownerEpoch": launch.binding.ownerEpoch, "stopRequested": true, "exitConfirmed": false, "ready": false]))
         return (try operation.receipt("stop-requested.json"), stopper)
+    }
+    fileprivate func setRelayNotifier(_ wake: @escaping @Sendable () -> Void) {
+        state.lock(); onRelay = wake; state.unlock()
     }
     fileprivate func setStopper(_ stop: @escaping @Sendable () -> Void) {
         state.lock(); stopper = stop; state.unlock()
@@ -254,8 +277,10 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         return owner
     }
     #if TERMINALX_BOOTSTRAP_FIXTURES
-    static func fixture(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32, maximum: Int) throws {
+    static func fixture(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32, maximum: Int,
+                        enrollment: TXEnrollmentService? = nil) throws {
         let owner = try TerminalXBootstrapOwner(launch: launch, view: view, configLease: configLease)
+        if let enrollment { owner.setRelayNotifier { enrollment.relayRecorded() } }
         // The fixture's "VM" stops by ending the owner, as Lume's run returns.
         owner.setStopper { [weak owner] in owner?.close() }
         owner.serve(maximum: maximum)
@@ -292,7 +317,9 @@ extension TerminalXBootstrapOwner {
                 guard let owner else { throw TXBootstrapError.refused }
                 try owner.check()
             }
-            owner.guestListener = try TXGuestListener.install(launch: launch, view: guestView, service: service)
+            let listener = try TXGuestListener.install(launch: launch, view: guestView, service: service)
+            owner.guestListener = listener
+            if let enrollment = listener.enrollment { owner.setRelayNotifier { enrollment.relayRecorded() } }
         }
         return owner
     }

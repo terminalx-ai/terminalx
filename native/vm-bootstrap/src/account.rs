@@ -15,6 +15,7 @@ fn refused(reason: impl Into<String>) -> io::Error {
 
 /// A local account the person confirmed for this VM. No public constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConfirmedAccount {
     pub name: String,
     pub uid: u32,
@@ -37,6 +38,25 @@ fn short_name(name: &str) -> bool {
 }
 
 impl ConfirmedAccount {
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        name: &str,
+        uid: u32,
+        gid: u32,
+        home: &str,
+        home_device: u64,
+        home_inode: u64,
+    ) -> ConfirmedAccount {
+        ConfirmedAccount {
+            name: name.into(),
+            uid,
+            gid,
+            home: home.into(),
+            home_device,
+            home_inode,
+            confirmation_sha256: "c".repeat(64),
+        }
+    }
     /// Exactly `{accountConfirmation: {confirmed: true, confirmationSha256, gid,
     /// home, homeDevice, homeInode, name, uid}}`, a personal account (UID ≥ 501,
     /// non-wheel group, `/Users/<name>`).
@@ -147,6 +167,51 @@ impl ConfirmedAccount {
     }
 }
 
+/// One personal account as the helper reports it, or `None` when it is not a
+/// personal account with its own `/Users/<name>` home directory.
+pub fn describe(name: &str, uid: u32, gid: u32, home: &str) -> Option<Value> {
+    use std::os::unix::fs::MetadataExt;
+    if !short_name(name)
+        || !(501..65534).contains(&uid)
+        || gid == 0
+        || home != format!("/Users/{name}")
+    {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(home).ok()?;
+    (meta.is_dir() && meta.uid() == uid).then(|| {
+        serde_json::json!({"gid": gid, "home": home, "homeDevice": meta.dev(), "homeInode": meta.ino(), "name": name, "uid": uid})
+    })
+}
+
+/// The local personal accounts, sorted by uid and bounded. Observations only:
+/// the person, not this helper, chooses which one TerminalX may use.
+pub fn observe() -> Vec<Value> {
+    let mut accounts = Vec::new();
+    // SAFETY: the account database iterator is used from this one thread and
+    // each entry's strings are copied before the next call.
+    unsafe {
+        libc::setpwent();
+        loop {
+            let entry = libc::getpwent();
+            if entry.is_null() || accounts.len() >= 64 {
+                break;
+            }
+            let text =
+                |p: *const libc::c_char| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+            let (name, home) = (text((*entry).pw_name), text((*entry).pw_dir));
+            if let Some(account) = describe(&name, (*entry).pw_uid, (*entry).pw_gid, &home) {
+                accounts.push(account);
+            }
+        }
+        libc::endpwent();
+    }
+    accounts.sort_by_key(|a| a["uid"].as_u64());
+    accounts.dedup();
+    accounts.truncate(16);
+    accounts
+}
+
 impl Session {
     /// The only way to obtain a `ConfirmedAccount`: the next owner frame, tagged
     /// under this verified session, carrying the person's confirmation.
@@ -155,6 +220,51 @@ impl Session {
         stream: &mut impl Stream,
     ) -> io::Result<ConfirmedAccount> {
         ConfirmedAccount::from_body(&self.receive(stream)?)
+    }
+
+    /// Reports the observed accounts for the person to choose from.
+    pub fn report_accounts(
+        &mut self,
+        stream: &mut impl Stream,
+        accounts: &[Value],
+    ) -> io::Result<()> {
+        self.send(stream, serde_json::json!({"accounts": accounts}))
+    }
+
+    /// Waits up to `wait` for the person's confirmation. It is accepted only for
+    /// exactly one of the accounts this helper reported, and only while the
+    /// local account still matches; the owner is told either way.
+    pub fn await_confirmation(
+        &mut self,
+        stream: &mut impl Stream,
+        reported: &[Value],
+        wait: std::time::Duration,
+    ) -> io::Result<ConfirmedAccount> {
+        self.set_wait(wait);
+        let account = self.receive_confirmation(stream)?;
+        let observed = serde_json::json!({"gid": account.gid, "home": account.home, "homeDevice": account.home_device,
+            "homeInode": account.home_inode, "name": account.name, "uid": account.uid});
+        let checked = if reported.contains(&observed) {
+            account.check_local()
+        } else {
+            Err(refused(
+                "the confirmation names an account this helper did not report",
+            ))
+        };
+        let digest = account.confirmation_sha256.clone();
+        match checked {
+            Ok(()) => {
+                self.send(
+                    stream,
+                    serde_json::json!({"accountConfirmed": {"confirmationSha256": digest}}),
+                )?;
+                Ok(account)
+            }
+            Err(error) => {
+                self.send(stream, serde_json::json!({"accountRefused": {"confirmationSha256": digest, "reason": error.to_string()}}))?;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -203,7 +313,7 @@ pub fn verify_dropped(
 /// Drops this process (meant to be a freshly forked child of the root helper)
 /// to the confirmed account: supplementary groups, then group, then user. It
 /// refuses unless it starts as root and the local account still matches.
-pub fn drop_to(account: &ConfirmedAccount) -> io::Result<()> {
+pub fn drop_to(account: &ConfirmedAccount) -> io::Result<Dropped> {
     if ids().euid != 0 {
         return Err(refused(
             "the account child must start as root to drop privileges",
@@ -222,7 +332,27 @@ pub fn drop_to(account: &ConfirmedAccount) -> io::Result<()> {
     }
     // SAFETY: probing that root cannot be regained; success is a failure.
     let regained = unsafe { libc::setuid(0) } == 0;
-    verify_dropped(ids(), account, regained)
+    verify_dropped(ids(), account, regained)?;
+    Ok(Dropped {
+        account: account.clone(),
+    })
+}
+
+/// Proof that this process is now the confirmed account, permanently. Only
+/// `drop_to` makes one, so account files are reachable only after the drop.
+#[derive(Debug)]
+pub struct Dropped {
+    account: ConfirmedAccount,
+}
+
+impl Dropped {
+    pub fn account(&self) -> &ConfirmedAccount {
+        &self.account
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(account: ConfirmedAccount) -> Dropped {
+        Dropped { account }
+    }
 }
 
 #[cfg(test)]
@@ -310,5 +440,87 @@ mod tests {
         );
         assert!(verify_dropped(Ids { euid: 0, ..exact }, &account, false).is_err());
         assert!(verify_dropped(Ids { egid: 0, ..exact }, &account, false).is_err());
+    }
+
+    #[test]
+    fn the_observation_lists_this_personal_account_and_never_system_ones() {
+        let accounts = observe();
+        let me = me();
+        let mine = json!({"gid": me["accountConfirmation"]["gid"], "home": me["accountConfirmation"]["home"],
+            "homeDevice": me["accountConfirmation"]["homeDevice"], "homeInode": me["accountConfirmation"]["homeInode"],
+            "name": me["accountConfirmation"]["name"], "uid": me["accountConfirmation"]["uid"]});
+        assert!(accounts.contains(&mine), "{accounts:?}");
+        assert!(accounts
+            .iter()
+            .all(|a| a["uid"].as_u64().unwrap() >= 501 && a["gid"] != 0));
+        assert!(describe("root", 0, 0, "/var/root").is_none());
+        assert!(describe("nobody", 4294967294, 4294967294, "/var/empty").is_none());
+        assert!(
+            describe("someone", 502, 20, "/Users/other").is_none(),
+            "home must be /Users/<name>"
+        );
+    }
+
+    #[test]
+    fn a_confirmation_counts_only_for_a_reported_matching_account_and_is_answered() {
+        use crate::wire::{read_frame, write_frame};
+        use std::{
+            os::unix::net::UnixStream,
+            time::{Duration, Instant},
+        };
+        let key = [0x21; 32];
+        let body = me();
+        let reported = observe();
+        let other = {
+            let mut b = body.clone();
+            b["accountConfirmation"]["homeInode"] = json!(1);
+            b
+        };
+        for (confirmation, reported, accepted) in [
+            (&body, reported.clone(), true),
+            (&other, reported.clone(), false),
+            (&body, vec![], false),
+        ] {
+            let (mut helper, mut owner) = UnixStream::pair().unwrap();
+            let mut session = Session::fixture(key);
+            write_frame(
+                &mut owner,
+                &Session::owner_frame(&key, 0, confirmation),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            let result = session.await_confirmation(&mut helper, &reported, Duration::from_secs(1));
+            assert_eq!(result.is_ok(), accepted, "{result:?}");
+            let answer = Session::helper_body(
+                &key,
+                0,
+                &read_frame(&mut owner, Instant::now() + Duration::from_secs(1)).unwrap(),
+            )
+            .unwrap();
+            let digest = json!("c".repeat(64));
+            if accepted {
+                assert_eq!(
+                    answer,
+                    json!({"accountConfirmed": {"confirmationSha256": digest}})
+                );
+            } else {
+                assert_eq!(answer["accountRefused"]["confirmationSha256"], digest);
+            }
+        }
+    }
+
+    #[test]
+    fn no_confirmation_within_the_wait_selects_nothing() {
+        use std::{
+            os::unix::net::UnixStream,
+            time::{Duration, Instant},
+        };
+        let (mut helper, _owner) = UnixStream::pair().unwrap();
+        let mut session = Session::fixture([0x22; 32]);
+        let started = Instant::now();
+        assert!(session
+            .await_confirmation(&mut helper, &observe(), Duration::from_millis(200))
+            .is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

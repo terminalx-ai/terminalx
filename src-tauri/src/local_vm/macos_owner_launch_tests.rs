@@ -569,3 +569,48 @@ fn native_version_2_owner_has_no_stop() {
     assert!(reference.stop().is_err());
     assert!(!f.op().join("stop-requested.json").exists());
 }
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_only_the_persons_confirmation_from_the_original_parent_is_relayed_once() {
+    let f = Fixture::new();
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let digest = journal::digest(&reference.raw);
+    let account = |name: &str, uid: u32| json!({"gid": 20, "home": format!("/Users/{name}"), "homeDevice": 1, "homeInode": uid + 100, "name": name, "uid": uid});
+    let observation = canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501), account("other", 502)],
+        "helperAuthenticated": true, "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
+    private(&f.op().join("account-observation.json"), &observation);
+    let (bytes, observed) = reference.account_observation().unwrap();
+    assert_eq!(bytes, observation);
+    let confirmation = |chosen: Value, session: &str| super::super::AccountConfirmation {
+        confirm: true, observation_sha256: journal::digest(&observation), account: chosen,
+        parent_session: session.into(), parent_tab: reference.binding.parent_tab.clone(),
+        parent_conversation: reference.binding.parent_conversation.clone(),
+    };
+    let original = reference.binding.parent_session.clone();
+    assert!(reference.confirm_account(&confirmation(observed["accounts"][0].clone(), &journal::new_id())).is_err(), "another parent");
+    assert!(reference.confirm_account(&confirmation(account("ghost", 503), &original)).is_err(), "unobserved account");
+    let mut unconfirmed = confirmation(observed["accounts"][0].clone(), &original);
+    unconfirmed.confirm = false;
+    assert!(reference.confirm_account(&unconfirmed).is_err());
+    assert!(!f.op().join("account-confirmation.json").exists(), "refusals record nothing");
+    let relay = reference.confirm_account(&confirmation(observed["accounts"][0].clone(), &original)).unwrap();
+    assert_eq!((relay["relayed"].as_bool(), relay["accountAuthenticated"].as_bool()), (Some(true), Some(false)));
+    let recorded = std::fs::read(f.op().join("account-confirmation.json")).unwrap();
+    assert_eq!(reference.confirm_account(&confirmation(observed["accounts"][0].clone(), &original)).unwrap(), relay, "a retry relays the same record");
+    assert!(reference.confirm_account(&confirmation(observed["accounts"][1].clone(), &original)).is_err(), "never re-chosen");
+    assert_eq!(std::fs::read(f.op().join("account-confirmation.json")).unwrap(), recorded);
+    let answer = json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "confirmationSha256": journal::digest(&recorded), "account": observed["accounts"][0], "outcome": "confirmed",
+        "accountAuthenticated": true, "trustAccepted": false, "ready": false});
+    private(&f.op().join("account-confirmation-answer.json"), &canonical(&answer).unwrap());
+    assert_eq!(reference.account_answer().unwrap(), answer);
+    let mut forged = answer.clone();
+    forged["trustAccepted"] = json!(true);
+    std::fs::remove_file(f.op().join("account-confirmation-answer.json")).unwrap();
+    private(&f.op().join("account-confirmation-answer.json"), &canonical(&forged).unwrap());
+    assert!(reference.account_answer().is_err());
+}

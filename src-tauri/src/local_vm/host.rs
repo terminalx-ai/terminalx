@@ -165,6 +165,11 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         "environment.createPersonalized" | "environment.runPersonalizedProvision" => {
             confirm(&params)?;super::macos_provision::request(method,&params)
         }
+        // The person's choice of one guest-reported account; never inferred.
+        "environment.guestAccounts" => super::macos_owner_channel::guest_accounts(&params),
+        "environment.confirmGuestAccount" => {
+            confirm(&params)?;super::macos_owner_channel::confirm_guest_account(&params)
+        }
         "environment.reconcileProvision" => super::provisioning::reconcile(&journal, params),
         "environment.bootstrapDeliveryStatus" => {
             let env=environment(&journal,&params)?;

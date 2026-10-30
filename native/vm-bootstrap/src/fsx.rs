@@ -183,6 +183,47 @@ impl Dir {
         self.open_file(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)
     }
 
+    /// Exclusive and atomic for readers: written and synced under a unique
+    /// hidden name, then renamed with RENAME_EXCL, which fails if `name` exists
+    /// in any form. A reader sees no file or the complete one.
+    pub fn publish_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let target = component(name)?;
+        let staged = format!(".{name}.{}.partial", crate::hex(&crate::random::<16>()?));
+        let staged_c = component(&staged)?;
+        let mut file = self.create_new(&staged, 0o600)?;
+        let result = file
+            .write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .and_then(|_| {
+                // SAFETY: both names are single components under this directory descriptor.
+                let code = unsafe {
+                    libc::renameatx_np(
+                        self.fd(),
+                        staged_c.as_ptr(),
+                        self.fd(),
+                        target.as_ptr(),
+                        libc::RENAME_EXCL,
+                    )
+                };
+                if code == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            });
+        if result.is_err() {
+            // SAFETY: removes only the staged name this call created.
+            unsafe { libc::unlinkat(self.fd(), staged_c.as_ptr(), 0) };
+        }
+        result?;
+        // SAFETY: fsync of the open directory makes the rename durable.
+        if unsafe { libc::fsync(self.fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn open_append(&self, name: &str, mode: libc::mode_t) -> io::Result<File> {
         self.open_file(name, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT, mode)
     }
@@ -198,6 +239,18 @@ impl Dir {
             ));
         }
         Ok((file, stat))
+    }
+
+    /// Read-write, without following a link, requiring a regular file.
+    pub fn open_regular_rw(&self, name: &str) -> io::Result<File> {
+        let file = self.open_file(name, libc::O_RDWR | libc::O_NONBLOCK, 0)?;
+        if fstat(file.as_raw_fd())?.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "regular file required",
+            ));
+        }
+        Ok(file)
     }
 
     /// Entry names, excluding `.` and `..`.

@@ -147,8 +147,12 @@ final class TXEnrollmentService: @unchecked Sendable {
     private let lock = NSLock()
     private var attempts = 0
     private var retained: TXEnrollmentSession?
+    private let confirmationWait: Double
+    private let relayed = DispatchSemaphore(value: 0)
 
-    init(launch: TerminalXBootstrapLaunch) throws {
+    /// `confirmationWait` bounds how long the session waits for the person.
+    init(launch: TerminalXBootstrapLaunch, confirmationWait: Double = 6 * 3600) throws {
+        self.confirmationWait = confirmationWait
         try txRequire(launch.binding.version == 3)
         guard let seedId = launch.binding.seedId, let receipt = launch.binding.seedReceiptSha256 else {
             throw TXBootstrapError.refused
@@ -176,6 +180,7 @@ final class TXEnrollmentService: @unchecked Sendable {
     func run(fd: Int32, attempt: Int, view: TXOwnedVM) {
         let operation = launch.pins["operation"]!
         var committed = false
+        var finished = false
         do {
             try launch.check(); try view.check()
             let session = try TXEnrollment.accept(fd: fd, key: key, binding: binding, journal: {
@@ -191,10 +196,32 @@ final class TXEnrollmentService: @unchecked Sendable {
             })
             lock.lock(); retained = session; lock.unlock()
             gate.finish(authenticated: true)
+            finished = true
+            try converse(fd: fd, session: session, view: view)
         } catch {
             // A durable receipt claims even if the acceptance reply was lost: the
             // enrollment is never repeated or replaced, and its session is gone.
-            gate.finish(authenticated: committed)
+            // Later journals record how far the account conversation got.
+            if !finished { gate.finish(authenticated: committed) }
         }
+    }
+    /// Wakes the session once the host journals a relay.
+    func relayRecorded() { relayed.signal() }
+    /// After enrollment: journal the helper's account observation, wait for the
+    /// person's confirmation to be journaled by the owner channel, relay it over
+    /// the session, and journal the helper's answer. Nothing here chooses.
+    private func converse(fd: Int32, session: TXEnrollmentSession, view: TXOwnedVM) throws {
+        let operation = launch.pins["operation"]!
+        _ = try TXAccountRelay.observe(try session.receive(fd), launch: launch, challengeSha256: session.challengeSha256)
+        let deadline = DispatchTime.now() + confirmationWait
+        var relay = try? operation.receipt("account-confirmation-relay.json")
+        while relay == nil {
+            try txRequire(DispatchTime.now() < deadline)
+            _ = relayed.wait(timeout: .now() + 1)
+            relay = try? operation.receipt("account-confirmation-relay.json")
+        }
+        try launch.check(); try view.check()
+        try session.send(fd, TXAccountRelay.frame(relay!))
+        _ = try TXAccountRelay.answer(try session.receive(fd), relay: relay!, launch: launch)
     }
 }

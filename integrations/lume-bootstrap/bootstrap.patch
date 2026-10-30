@@ -315,8 +315,115 @@
          // Audio configuration
          let soundDeviceConfiguration = VZVirtioSoundDeviceConfiguration()
 --- /dev/null
++++ b/libs/lume/src/TerminalXBootstrap/TerminalXAccountRelay.swift
+@@ -0,0 +1,104 @@
++// Design "Account confirmation and effects", owner side. After enrollment the
++// helper reports local personal accounts. Only the person's confirmation,
++// recorded by the host and delivered over the MAC'd owner channel, is relayed
++// back over the tagged session. The helper's acknowledgement is the only source
++// of accountAuthenticated, and only for that one account; trust and readiness
++// stay false. Every step is journaled exclusively and never re-chosen.
++import Foundation
++import Darwin
++
++enum TXAccountRelay {
++    static let relayKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "confirmationSha256", "account",
++        "relayed", "accountAuthenticated", "trustAccepted", "ready"]
++    static let observationKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "challengeSha256", "accounts",
++        "helperAuthenticated", "accountAuthenticated", "trustAccepted", "ready"]
++
++    /// A personal account exactly as the helper reports it.
++    static func account(_ value: Any?) throws -> [String: Any] {
++        guard let account = value as? [String: Any],
++              Swift.Set(account.keys) == ["gid", "home", "homeDevice", "homeInode", "name", "uid"],
++              let name = account["name"] as? String, let uid = account["uid"] as? Int, let gid = account["gid"] as? Int,
++              let home = account["home"] as? String, let device = account["homeDevice"] as? Int,
++              let inode = account["homeInode"] as? Int else { throw TXBootstrapError.refused }
++        let bytes = Array(name.utf8)
++        try txRequire(!bytes.isEmpty && bytes.count <= 32 && (97...122).contains(bytes[0])
++            && bytes.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || [45, 46, 95].contains($0) }
++            && (501..<65534).contains(uid) && gid > 0 && home == "/Users/\(name)" && device >= 0 && inode > 0)
++        return account
++    }
++
++    /// Journals the helper's first session frame: `{accounts: [...]}`.
++    static func observe(_ body: [String: Any], launch: TerminalXBootstrapLaunch, challengeSha256: String) throws -> Data {
++        guard Swift.Set(body.keys) == ["accounts"], let list = body["accounts"] as? [Any], list.count <= 16 else {
++            throw TXBootstrapError.refused
++        }
++        let accounts = try list.map(account)
++        let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
++            "challengeSha256": challengeSha256, "accounts": accounts,
++            "helperAuthenticated": true, "accountAuthenticated": false, "trustAccepted": false, "ready": false])
++        try launch.pins["operation"]!.writeNew("account-observation.json", record)
++        return record
++    }
++
++    /// Validates the host's confirmation against the journaled observation and
++    /// journals it once. The same confirmation returns the same record (a lost
++    /// reply); any other confirmation, for any account, is refused for good.
++    static func record(_ confirmation: Data, launch: TerminalXBootstrapLaunch) throws -> Data {
++        let operation = launch.pins["operation"]!
++        let c = try txObject(confirmation, keys: ["version", "bindingDigest", "ownerEpoch", "observationSha256", "account",
++            "parentSession", "parentTab", "parentConversation", "confirmationId"])
++        try txRequire(c["version"] as? Int == 1 && txString(c, "bindingDigest") == launch.bindingDigest
++            && txString(c, "ownerEpoch") == launch.binding.ownerEpoch)
++        for id in [try txString(c, "parentSession"), try txString(c, "parentTab"), try txString(c, "confirmationId")] {
++            try txRequire(UUID(uuidString: id) != nil)
++        }
++        let conversation = try txString(c, "parentConversation")
++        try txRequire(!conversation.isEmpty && conversation.utf8.count <= 256 && conversation.utf8.allSatisfy { $0 >= 32 && $0 < 127 })
++        let observation = try operation.receipt("account-observation.json")
++        try txRequire(txString(c, "observationSha256") == txDigest(observation))
++        let observed = try txObject(observation, keys: observationKeys)
++        guard let accounts = observed["accounts"] as? [[String: Any]] else { throw TXBootstrapError.refused }
++        let chosen = try account(c["account"])
++        let encoded = try txJSON(chosen)
++        try txRequire(try accounts.contains { try txJSON($0) == encoded })
++        let digest = txDigest(confirmation)
++        if let existing = try? operation.receipt("account-confirmation-relay.json") {
++            try txRequire(txString(txObject(existing, keys: relayKeys), "confirmationSha256") == digest)
++            return existing
++        }
++        let relay = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
++            "confirmationSha256": digest, "account": chosen, "relayed": true,
++            "accountAuthenticated": false, "trustAccepted": false, "ready": false])
++        try operation.writeNew("account-confirmation-relay.json", relay)
++        return relay
++    }
++
++    /// The session frame for a journaled relay, in the helper's confirmation form.
++    static func frame(_ relay: Data) throws -> [String: Any] {
++        let r = try txObject(relay, keys: relayKeys)
++        guard var account = r["account"] as? [String: Any] else { throw TXBootstrapError.refused }
++        account["confirmed"] = true
++        account["confirmationSha256"] = try txString(r, "confirmationSha256")
++        return ["accountConfirmation": account]
++    }
++
++    /// Journals the helper's answer. Only an exact acknowledgement of this
++    /// confirmation authenticates the account; trust and readiness stay false.
++    static func answer(_ body: [String: Any], relay: Data, launch: TerminalXBootstrapLaunch) throws -> Data {
++        let r = try txObject(relay, keys: relayKeys)
++        let digest = try txString(r, "confirmationSha256")
++        let confirmed: Bool
++        if let ack = body["accountConfirmed"] as? [String: Any], body.count == 1, Swift.Set(ack.keys) == ["confirmationSha256"] {
++            try txRequire(txString(ack, "confirmationSha256") == digest)
++            confirmed = true
++        } else if let refusal = body["accountRefused"] as? [String: Any], body.count == 1 {
++            try txRequire(txString(refusal, "confirmationSha256") == digest)
++            confirmed = false
++        } else { throw TXBootstrapError.refused }
++        let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
++            "confirmationSha256": digest, "account": r["account"]!, "outcome": confirmed ? "confirmed" : "refused",
++            "accountAuthenticated": confirmed, "trustAccepted": false, "ready": false])
++        try launch.pins["operation"]!.writeNew("account-confirmation-answer.json", record)
++        return record
++    }
++}
+--- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXBootstrapFiles.swift
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,169 @@
 +import Foundation
 +import Darwin
 +
@@ -387,7 +494,8 @@
 +    }
 +    func receipt(_ name: String) throws -> Data {
 +        try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json",
-+            "enrollment.key", "enrollment.json", "stop-requested.json"].contains(name))
++            "enrollment.key", "enrollment.json", "stop-requested.json",
++            "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json"].contains(name))
 +        try check()
 +        let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
 +        try txRequire(child >= 0)
@@ -404,13 +512,24 @@
 +    func arm(_ bytes: Data) throws { try writeNew("owner-started.json", bytes) }
 +    func writeNew(_ name: String, _ bytes: Data) throws {
 +        try txRequire(directory && (["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json",
-+            "enrollment.json", "stop-requested.json"].contains(name) || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
++            "enrollment.json", "stop-requested.json", "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json"].contains(name)
++            || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
 +        try check()
-+        let file = try TXDescriptor(openat(fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
++        // Exclusive and atomic for readers: written and synced under a unique
++        // hidden name, then renamed with RENAME_EXCL, which fails if `name`
++        // exists in any form (file, link, directory). A reader sees no record or
++        // the complete one, never a prefix or a second link. Faults leave no `name`.
++        let staged = ".\(name).\(UUID().uuidString.lowercased()).partial"
++        let file = try TXDescriptor(openat(fd, staged, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
++        var published = false
++        defer { if !published { _ = unlinkat(fd, staged, 0) } }
 +        let written = bytes.withUnsafeBytes { Darwin.write(file.raw, $0.baseAddress, $0.count) }
-+        try txRequire(written == bytes.count && fsync(file.raw) == 0 && fsync(fd) == 0)
++        try txRequire(written == bytes.count && fsync(file.raw) == 0)
 +        try check()
-+        // Any prefix/missing result is fenced by O_EXCL on a later attempt.
++        try txRequire(renameatx_np(fd, staged, fd, name, UInt32(RENAME_EXCL)) == 0)
++        published = true
++        try txRequire(fsync(fd) == 0)
++        try check()
 +    }
 +}
 +
@@ -476,7 +595,7 @@
 +}
 --- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXBootstrapOwner.swift
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,327 @@
 +import Foundation
 +import Darwin
 +
@@ -599,6 +718,8 @@
 +    private var guestListener: AnyObject?
 +    // Asks the owned VM to stop; set only by the process that owns the VM.
 +    private var stopper: (@Sendable () -> Void)?
++    // Wakes the enrollment session after a relay is journaled.
++    private var onRelay: (@Sendable () -> Void)?
 +    // The original config lock's open description is held, never re-created.
 +    private let configLease: TXDescriptor
 +    private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32) throws {
@@ -656,15 +777,26 @@
 +    private func connection(_ fd: Int32) throws {
 +        try TXWire.configure(fd)
 +        try check()
-+        let request = try txObject(TXWire.read(fd), keys: ["action", "bindingDigest", "clientNonce", "requestId"])
++        let raw = try TXWire.read(fd)
++        // Only confirmAccount carries a payload, and its digest joins every MAC.
++        let request = try (try? txObject(raw, keys: ["action", "bindingDigest", "clientNonce", "payload", "requestId"]))
++            ?? txObject(raw, keys: ["action", "bindingDigest", "clientNonce", "requestId"])
 +        let action = try txString(request, "action")
++        var requestPayload: Data?
++        if request["payload"] != nil {
++            requestPayload = Data(base64Encoded: try txString(request, "payload"))
++            try txRequire(requestPayload.map { !$0.isEmpty && $0.count <= 16 * 1024 } ?? false)
++        }
++        try txRequire((requestPayload != nil) == (action == "confirmAccount"))
 +        let requestId = try txString(request, "requestId")
 +        let clientNonce = try txString(request, "clientNonce")
 +        _ = try txHex(clientNonce)
-+        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop"].contains(action)
++        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop",
++            "accountObservation", "confirmAccount", "accountAnswer"].contains(action)
 +            && txString(request, "bindingDigest") == launch.bindingDigest)
 +        let nonce = txNonce()
 +        let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
++            + (requestPayload.map { [txDigest($0)] } ?? [])
 +        try TXWire.write(fd, txJSON(["serverNonce": nonce, "epoch": launch.binding.ownerEpoch,
 +                                    "mac": txTag(launch.capability, "owner", parts)]))
 +        let auth = try txObject(TXWire.read(fd), keys: ["mac"])
@@ -675,12 +807,19 @@
 +        if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
 +        // Version 3 has no share trust path: only enrollment and an owner-mediated
 +        // stop are served, and neither is served for earlier versions.
++        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer"]
 +        try txRequire(launch.binding.version == 3
-+            ? ["observe", "enrollment", "stop"].contains(action) : !["enrollment", "stop"].contains(action))
++            ? (["observe"] + enrolledOnly).contains(action) : !enrolledOnly.contains(action))
 +        switch action {
 +        case "guestObservation": receipt = try launch.pins["operation"]!.receipt("guest-observation.json")
 +        case "enrollment": receipt = try launch.pins["operation"]!.receipt("enrollment.json")
 +        case "stop": (receipt, stopAfterReply) = try requestStop()
++        case "accountObservation": receipt = try launch.pins["operation"]!.receipt("account-observation.json")
++        case "confirmAccount":
++            receipt = try TXAccountRelay.record(requestPayload!, launch: launch)
++            state.lock(); let wake = onRelay; state.unlock()
++            wake?()
++        case "accountAnswer": receipt = try launch.pins["operation"]!.receipt("account-confirmation-answer.json")
 +        case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
 +        case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
 +        default: receipt = Data()
@@ -706,6 +845,9 @@
 +        try operation.writeNew("stop-requested.json", txJSON(["version": 1, "bindingDigest": launch.bindingDigest,
 +            "ownerEpoch": launch.binding.ownerEpoch, "stopRequested": true, "exitConfirmed": false, "ready": false]))
 +        return (try operation.receipt("stop-requested.json"), stopper)
++    }
++    fileprivate func setRelayNotifier(_ wake: @escaping @Sendable () -> Void) {
++        state.lock(); onRelay = wake; state.unlock()
 +    }
 +    fileprivate func setStopper(_ stop: @escaping @Sendable () -> Void) {
 +        state.lock(); stopper = stop; state.unlock()
@@ -733,8 +875,10 @@
 +        return owner
 +    }
 +    #if TERMINALX_BOOTSTRAP_FIXTURES
-+    static func fixture(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32, maximum: Int) throws {
++    static func fixture(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32, maximum: Int,
++                        enrollment: TXEnrollmentService? = nil) throws {
 +        let owner = try TerminalXBootstrapOwner(launch: launch, view: view, configLease: configLease)
++        if let enrollment { owner.setRelayNotifier { enrollment.relayRecorded() } }
 +        // The fixture's "VM" stops by ending the owner, as Lume's run returns.
 +        owner.setStopper { [weak owner] in owner?.close() }
 +        owner.serve(maximum: maximum)
@@ -771,7 +915,9 @@
 +                guard let owner else { throw TXBootstrapError.refused }
 +                try owner.check()
 +            }
-+            owner.guestListener = try TXGuestListener.install(launch: launch, view: guestView, service: service)
++            let listener = try TXGuestListener.install(launch: launch, view: guestView, service: service)
++            owner.guestListener = listener
++            if let enrollment = listener.enrollment { owner.setRelayNotifier { enrollment.relayRecorded() } }
 +        }
 +        return owner
 +    }
@@ -914,7 +1060,7 @@
 +}
 --- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXEnrollment.swift
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,227 @@
 +// TXGuestProtocol version 2: seeded-key enrollment (design "Enrollment
 +// protocol"). A valid proof establishes only that guest root in this exact VM
 +// holds the per-VM key the host seeded offline. It is not binary attestation
@@ -1064,8 +1210,12 @@
 +    private let lock = NSLock()
 +    private var attempts = 0
 +    private var retained: TXEnrollmentSession?
++    private let confirmationWait: Double
++    private let relayed = DispatchSemaphore(value: 0)
 +
-+    init(launch: TerminalXBootstrapLaunch) throws {
++    /// `confirmationWait` bounds how long the session waits for the person.
++    init(launch: TerminalXBootstrapLaunch, confirmationWait: Double = 6 * 3600) throws {
++        self.confirmationWait = confirmationWait
 +        try txRequire(launch.binding.version == 3)
 +        guard let seedId = launch.binding.seedId, let receipt = launch.binding.seedReceiptSha256 else {
 +            throw TXBootstrapError.refused
@@ -1093,6 +1243,7 @@
 +    func run(fd: Int32, attempt: Int, view: TXOwnedVM) {
 +        let operation = launch.pins["operation"]!
 +        var committed = false
++        var finished = false
 +        do {
 +            try launch.check(); try view.check()
 +            let session = try TXEnrollment.accept(fd: fd, key: key, binding: binding, journal: {
@@ -1108,11 +1259,33 @@
 +            })
 +            lock.lock(); retained = session; lock.unlock()
 +            gate.finish(authenticated: true)
++            finished = true
++            try converse(fd: fd, session: session, view: view)
 +        } catch {
 +            // A durable receipt claims even if the acceptance reply was lost: the
 +            // enrollment is never repeated or replaced, and its session is gone.
-+            gate.finish(authenticated: committed)
++            // Later journals record how far the account conversation got.
++            if !finished { gate.finish(authenticated: committed) }
 +        }
++    }
++    /// Wakes the session once the host journals a relay.
++    func relayRecorded() { relayed.signal() }
++    /// After enrollment: journal the helper's account observation, wait for the
++    /// person's confirmation to be journaled by the owner channel, relay it over
++    /// the session, and journal the helper's answer. Nothing here chooses.
++    private func converse(fd: Int32, session: TXEnrollmentSession, view: TXOwnedVM) throws {
++        let operation = launch.pins["operation"]!
++        _ = try TXAccountRelay.observe(try session.receive(fd), launch: launch, challengeSha256: session.challengeSha256)
++        let deadline = DispatchTime.now() + confirmationWait
++        var relay = try? operation.receipt("account-confirmation-relay.json")
++        while relay == nil {
++            try txRequire(DispatchTime.now() < deadline)
++            _ = relayed.wait(timeout: .now() + 1)
++            relay = try? operation.receipt("account-confirmation-relay.json")
++        }
++        try launch.check(); try view.check()
++        try session.send(fd, TXAccountRelay.frame(relay!))
++        _ = try TXAccountRelay.answer(try session.receive(fd), relay: relay!, launch: launch)
 +    }
 +}
 --- /dev/null
@@ -1201,7 +1374,7 @@
 +    private var claimed = false
 +    // Version 3: seeded-key enrollment with a bounded refusal budget instead of
 +    // the version-2 single observation claim.
-+    private let enrollment: TXEnrollmentService?
++    let enrollment: TXEnrollmentService?
 +    private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, device: VZVirtioSocketDevice) throws {
 +        self.launch = launch; self.view = view; self.device = device
 +        enrollment = launch.binding.version == 3 ? try TXEnrollmentService(launch: launch) : nil

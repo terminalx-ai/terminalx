@@ -68,6 +68,43 @@ pub(super) struct Enrolled {
     pub(super) challenge_sha256: String,
     pub(super) claims_sha256: String,
 }
+/// What the person confirmed in TerminalX: one observed account, shown from
+/// the exact observation digest, in the original parent conversation.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct AccountConfirmation {
+    pub(super) confirm: bool,
+    pub(super) observation_sha256: String,
+    pub(super) account: Value,
+    pub(super) parent_session: String,
+    pub(super) parent_tab: String,
+    pub(super) parent_conversation: String,
+}
+fn operation(params: &Value) -> Result<Reference> {
+    let key = params["idempotencyKey"].as_str().context("Original bootstrap operation required")?;
+    journal::validate_id(key)?;
+    Reference::reopen(&super::host::root()?.join("bo").join(key))
+}
+/// Read-only: the accounts the enrolled helper reported, for the person to
+/// choose from, and any answer to an earlier confirmation.
+pub(super) fn guest_accounts(params: &Value) -> Result<Value> {
+    let reference = operation(params)?;
+    let (bytes, observation) = reference.account_observation()?;
+    let answer = reference.account_answer().ok();
+    let authenticated = answer.as_ref().is_some_and(|a| a["accountAuthenticated"] == true);
+    Ok(json!({"observationSha256": journal::digest(&bytes), "accounts": observation["accounts"], "helperAuthenticated": true,
+        "accountAuthenticated": authenticated, "answer": answer, "trustAccepted": false, "ready": false}))
+}
+/// The person's explicit confirmation of one reported account.
+pub(super) fn confirm_guest_account(params: &Value) -> Result<Value> {
+    let reference = operation(params)?;
+    let confirmation: AccountConfirmation = serde_json::from_value(json!({"confirm": params["confirm"],
+        "observationSha256": params["observationSha256"], "account": params["account"],
+        "parentSession": params["parentSession"], "parentTab": params["parentTab"],
+        "parentConversation": params["parentConversation"]}))?;
+    let relay = reference.confirm_account(&confirmation)?;
+    Ok(json!({"relay": relay, "accountAuthenticated": false, "trustAccepted": false, "ready": false}))
+}
 pub(super) fn canonical(value: &Value) -> Result<Vec<u8>> {
     fn encode(value: &Value) -> Result<String> {
         Ok(match value {
@@ -491,7 +528,7 @@ impl Reference {
         };
         // Metadata only locates the original peer. A fresh mutual challenge on
         // this exact socket must succeed before the recovered pin is retained.
-        self.observe_using(&handshake, "observe", &journal::new_id())?;
+        self.observe_using(&handshake, "observe", &journal::new_id(), None)?;
         self.root.publish(
             "owner-handshake.json",
             &canonical(&serde_json::to_value(handshake)?)?,
@@ -523,6 +560,8 @@ impl Reference {
             "guestObservation",
             "enrollment",
             "stop",
+            "accountObservation",
+            "accountAnswer",
         ]
         .contains(&action)
         {
@@ -530,13 +569,14 @@ impl Reference {
         }
         journal::validate_id(request_id)?;
         let handshake: Handshake = fs::json(&self.root, "owner-handshake.json", 32 * 1024)?;
-        self.observe_using(&handshake, action, request_id)
+        self.observe_using(&handshake, action, request_id, None)
     }
     fn observe_using(
         &self,
         handshake: &Handshake,
         action: &str,
         request_id: &str,
+        payload: Option<&[u8]>,
     ) -> Result<AuthenticatedReceipt> {
         let mut stream = UnixStream::connect(self.socket(handshake)?)
             .context("Connect original private owner socket")?;
@@ -545,17 +585,20 @@ impl Reference {
         rand_core::OsRng.fill_bytes(&mut nonce);
         let client_nonce = encode_hex(&nonce);
         let binding_digest = journal::digest(&self.raw);
-        send(
-            &mut stream,
-            &json!({"action":action,"bindingDigest":binding_digest,"clientNonce":client_nonce,"requestId":request_id}),
-        )?;
+        let mut request = json!({"action":action,"bindingDigest":binding_digest,"clientNonce":client_nonce,"requestId":request_id});
+        if let Some(payload) = payload {
+            request["payload"] = json!(STANDARD.encode(payload));
+        }
+        send(&mut stream, &request)?;
         let challenge: Challenge =
             serde_json::from_slice(&read(&mut stream).context("Read owner challenge")?)?;
         super::transport::validate_runtime_sha(&challenge.server_nonce)?;
         if challenge.epoch != self.binding.owner_epoch {
             bail!("Owner epoch changed")
         }
-        let parts = [
+        // A payload's digest joins every MAC, so it cannot be swapped in transit.
+        let payload_digest = payload.map(journal::digest);
+        let mut parts = vec![
             binding_digest.as_str(),
             self.binding.owner_epoch.as_str(),
             action,
@@ -563,6 +606,7 @@ impl Reference {
             client_nonce.as_str(),
             challenge.server_nonce.as_str(),
         ];
+        parts.extend(payload_digest.as_deref());
         verify(&self.secret, "owner", &parts, &challenge.mac)?;
         self.socket(handshake)?;
         send(
@@ -645,6 +689,87 @@ impl Reference {
             bail!("Owner stop record changed or claimed an exit")
         }
         Ok(value)
+    }
+    /// Version 3: the helper's account observation, exactly as the owner
+    /// journaled it, and its digest. Observation only; nothing is chosen.
+    fn account_observation(&self) -> Result<(Vec<u8>, Value)> {
+        if self.binding.version != 3 {
+            bail!("Account confirmation requires a version-3 owner binding")
+        }
+        let receipt = self.observe("accountObservation", &journal::new_id())?;
+        let value: Value = serde_json::from_slice(&receipt.bytes)?;
+        let mut keys: Vec<&str> = value.as_object().map(|v| v.keys().map(String::as_str).collect()).unwrap_or_default();
+        keys.sort_unstable();
+        if keys != ["accountAuthenticated", "accounts", "bindingDigest", "challengeSha256", "helperAuthenticated", "ownerEpoch", "ready", "trustAccepted", "version"]
+            || value["version"] != 1
+            || value["bindingDigest"] != journal::digest(&self.raw)
+            || value["ownerEpoch"] != self.binding.owner_epoch
+            || value["helperAuthenticated"] != true
+            || ["accountAuthenticated", "trustAccepted", "ready"].iter().any(|k| value[*k] != false)
+            || !value["accounts"].is_array()
+        {
+            bail!("Owner account observation changed or promoted trust")
+        }
+        Ok((receipt.bytes, value))
+    }
+    /// The person's confirmation of one observed account, from the original
+    /// parent session, tab and conversation. Recorded once, exclusively, before
+    /// it is relayed: a retry re-presents the same choice, and a different
+    /// account is refused for good. Relaying authenticates nothing by itself.
+    fn confirm_account(&self, confirmation: &AccountConfirmation) -> Result<Value> {
+        let (bytes, observation) = self.account_observation()?;
+        if !confirmation.confirm
+            || confirmation.observation_sha256 != journal::digest(&bytes)
+            || !observation["accounts"].as_array().is_some_and(|a| a.contains(&confirmation.account))
+            || confirmation.parent_session != self.binding.parent_session
+            || confirmation.parent_tab != self.binding.parent_tab
+            || confirmation.parent_conversation != self.binding.parent_conversation
+        {
+            bail!("Confirm exactly one observed account from the original parent conversation")
+        }
+        let record = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&self.raw),
+            "ownerEpoch": self.binding.owner_epoch, "observationSha256": confirmation.observation_sha256,
+            "account": confirmation.account, "parentSession": self.binding.parent_session,
+            "parentTab": self.binding.parent_tab, "parentConversation": self.binding.parent_conversation,
+            "confirmationId": journal::new_id()}))?;
+        if !self.root.exists("account-confirmation.json")? {
+            self.root.write_new("account-confirmation.json", &record)?;
+        }
+        let recorded = self.root.read("account-confirmation.json", 32 * 1024, true)?;
+        let retained: Value = serde_json::from_slice(&recorded)?;
+        if retained["account"] != confirmation.account || retained["observationSha256"] != confirmation.observation_sha256 {
+            bail!("A different account was already confirmed for this VM; it is never re-chosen")
+        }
+        let handshake: Handshake = fs::json(&self.root, "owner-handshake.json", 32 * 1024)?;
+        let receipt = self.observe_using(&handshake, "confirmAccount", &journal::new_id(), Some(&recorded))?;
+        let relay: Value = serde_json::from_slice(&receipt.bytes)?;
+        if relay != json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+            "confirmationSha256": journal::digest(&recorded), "account": confirmation.account, "relayed": true,
+            "accountAuthenticated": false, "trustAccepted": false, "ready": false})
+        {
+            bail!("Owner relay record changed or promoted trust")
+        }
+        Ok(relay)
+    }
+    /// The helper's answer to the relayed confirmation. Only an exact
+    /// acknowledgement authenticates that one account; trust and readiness stay false.
+    fn account_answer(&self) -> Result<Value> {
+        if self.binding.version != 3 {
+            bail!("Account confirmation requires a version-3 owner binding")
+        }
+        let recorded = self.root.read("account-confirmation.json", 32 * 1024, true)?;
+        let retained: Value = serde_json::from_slice(&recorded)?;
+        let receipt = self.observe("accountAnswer", &journal::new_id())?;
+        let answer: Value = serde_json::from_slice(&receipt.bytes)?;
+        let confirmed = answer["outcome"] == "confirmed";
+        if answer != json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+            "confirmationSha256": journal::digest(&recorded), "account": retained["account"],
+            "outcome": if confirmed { "confirmed" } else { "refused" }, "accountAuthenticated": confirmed,
+            "trustAccepted": false, "ready": false})
+        {
+            bail!("Owner account answer changed or promoted trust")
+        }
+        Ok(answer)
     }
     fn guest_observation(&self) -> Result<Value> {
         if self.binding.version != 2 {

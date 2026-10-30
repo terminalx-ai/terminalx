@@ -33,7 +33,9 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   `ba8d9424…`) the latest clean rebuild is 22,032,184 bytes, SHA-256
   `996cdc9381935c802efc9f86af2e8927e71c82e0be8c1e82b7d1f93fb53fbe09`; with the
   owner-mediated stop (patch `de251c45…`), 22,051,688 bytes, SHA-256
-  `15b95b0ce2d45a684c113999615b0fcb47f0b6b1c663e60b4fbdd5fd6a7af59a`.
+  `15b95b0ce2d45a684c113999615b0fcb47f0b6b1c663e60b4fbdd5fd6a7af59a`; with atomic
+  record writes and the account-confirmation relay (patch `aa85a1d9…`), SHA-256
+  `524ab87bc362862cfe1a412e092af8172e542f58f5f9dd793630b757ada1524a`.
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those

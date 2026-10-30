@@ -170,6 +170,45 @@ fn canonical(value: &Value) -> Vec<u8> {
 }
 
 impl Session {
+    /// Bounds the next waits, such as for a person's confirmation; frames keep
+    /// their sequence and tag checks whatever the wait.
+    pub fn set_wait(&mut self, wait: Duration) {
+        self.deadline = wait;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(key: [u8; 32]) -> Session {
+        Session {
+            key,
+            sent: 0,
+            received: 0,
+            deadline: Duration::from_secs(2),
+        }
+    }
+
+    /// Test owner side: a tagged owner frame, and a checked helper frame.
+    #[cfg(test)]
+    pub(crate) fn owner_frame(key: &[u8; 32], seq: u64, body: &Value) -> Vec<u8> {
+        canonical(
+            &json!({"body": body, "seq": seq, "tag": tag(key, "frame", &[OWNER, &seq.to_string(), &sha256(&canonical(body))])}),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn helper_body(key: &[u8; 32], seq: u64, frame: &[u8]) -> io::Result<Value> {
+        let frame: Value = serde_json::from_slice(frame)?;
+        verify(
+            key,
+            "frame",
+            &[
+                HELPER,
+                &seq.to_string(),
+                &sha256(&canonical(&frame["body"])),
+            ],
+            frame["tag"].as_str().unwrap_or(""),
+        )?;
+        Ok(frame["body"].clone())
+    }
+
     fn frame_tag(&self, direction: &str, seq: u64, body: &Value) -> String {
         tag(
             &self.key,

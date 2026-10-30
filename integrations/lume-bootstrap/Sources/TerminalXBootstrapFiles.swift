@@ -68,7 +68,8 @@ final class TXPinnedPath: @unchecked Sendable {
     }
     func receipt(_ name: String) throws -> Data {
         try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json",
-            "enrollment.key", "enrollment.json", "stop-requested.json"].contains(name))
+            "enrollment.key", "enrollment.json", "stop-requested.json",
+            "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json"].contains(name))
         try check()
         let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         try txRequire(child >= 0)
@@ -85,13 +86,24 @@ final class TXPinnedPath: @unchecked Sendable {
     func arm(_ bytes: Data) throws { try writeNew("owner-started.json", bytes) }
     func writeNew(_ name: String, _ bytes: Data) throws {
         try txRequire(directory && (["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json",
-            "enrollment.json", "stop-requested.json"].contains(name) || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
+            "enrollment.json", "stop-requested.json", "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json"].contains(name)
+            || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
         try check()
-        let file = try TXDescriptor(openat(fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
+        // Exclusive and atomic for readers: written and synced under a unique
+        // hidden name, then renamed with RENAME_EXCL, which fails if `name`
+        // exists in any form (file, link, directory). A reader sees no record or
+        // the complete one, never a prefix or a second link. Faults leave no `name`.
+        let staged = ".\(name).\(UUID().uuidString.lowercased()).partial"
+        let file = try TXDescriptor(openat(fd, staged, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
+        var published = false
+        defer { if !published { _ = unlinkat(fd, staged, 0) } }
         let written = bytes.withUnsafeBytes { Darwin.write(file.raw, $0.baseAddress, $0.count) }
-        try txRequire(written == bytes.count && fsync(file.raw) == 0 && fsync(fd) == 0)
+        try txRequire(written == bytes.count && fsync(file.raw) == 0)
         try check()
-        // Any prefix/missing result is fenced by O_EXCL on a later attempt.
+        try txRequire(renameatx_np(fd, staged, fd, name, UInt32(RENAME_EXCL)) == 0)
+        published = true
+        try txRequire(fsync(fd) == 0)
+        try check()
     }
 }
 
