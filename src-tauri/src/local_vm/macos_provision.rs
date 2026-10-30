@@ -88,7 +88,7 @@ fn verified_restore(root: &Path) -> Result<Restore> {
 pub(super) fn account_capability() -> Value {
     json!({"available":false,"reason":"Pinned Lume 0.6.1 exposes ordinary restore/background run, but no public personalized Setup Assistant/account/public-key/host-key capture command. Its offline setup changes the fixed account/security settings and is excluded. The internal VNC helper is not a durable authenticated account receipt interface."})
 }
-fn directory(root: &Path, key: &str) -> Result<PathBuf> {
+pub(super) fn directory(root: &Path, key: &str) -> Result<PathBuf> {
     journal::validate_id(key)?;
     Ok(root.join("macos-provision-operations").join(key))
 }
@@ -319,10 +319,21 @@ pub(super) fn created_for_bootstrap(root: &Path, key: &str) -> Result<Value> {
     Ok(record)
 }
 
+/// A completed original restore for other modules' fixtures: the disposable
+/// directory, its canonical root and the operation key.
+#[cfg(test)]
+pub(super) fn created_for_tests() -> (tempfile::TempDir, PathBuf, String) {
+    let (dir, restore, lume) = tests::fixture();
+    let key = journal::new_id();
+    execute_using(dir.path(), &key, &restore, &lume, "create", || Ok(())).unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    (dir, root, key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> (tempfile::TempDir, Restore, PathBuf) {
+    pub(super) fn fixture() -> (tempfile::TempDir, Restore, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("synthetic.ipsw");
         std::fs::write(&file, b"synthetic restore fixture").unwrap();

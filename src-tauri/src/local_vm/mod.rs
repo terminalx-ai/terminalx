@@ -28,6 +28,8 @@ pub(crate) mod linux_activation;
 mod macos_endpoint;
 pub(crate) mod macos_delivery;
 pub(crate) mod macos_provision;
+#[allow(dead_code)] // For the privileged seeder (slice 5) and the version-3 launch; neither is routed yet.
+mod macos_seed;
 mod macos_tools;
 #[allow(dead_code)] // Shared storage for the gated helper and candidate owner channel.
 mod macos_helper_fs;
