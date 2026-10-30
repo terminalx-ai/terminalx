@@ -20,8 +20,16 @@ type StreamRecord = {
   subscriptionId?: string;
 };
 
+/**
+ * The socket closed, or the relay refused it, with this code. `reason` and
+ * `wasClean` are what the close event said, and are left out when there was
+ * no close event (a refused relay hello). The reason is what tells a relay
+ * close (4408) from iOS ending the stream itself (1001 "Stream end
+ * encountered", #669). React Native never sets `wasClean`, so on the phone it
+ * is always false.
+ */
 export class RelayOuterError extends Error {
-  constructor(readonly code: number) {
+  constructor(readonly code: number, readonly reason = "", readonly wasClean?: boolean) {
     super(`relay_outer_${code}`);
   }
 }
@@ -59,7 +67,7 @@ export class RelayClient {
   private terminalStreams = new Map<number, (result: unknown) => void>();
   private terminalSnapshots = new Map<number, { meta: Record<string, unknown>; chunks: string[] }>();
   private listeners = new Set<(event: RelayEvent) => void>();
-  private stateListeners = new Set<(state: RelayConnectionState) => void>();
+  private stateListeners = new Set<(state: RelayConnectionState, cause?: Error) => void>();
   private state: RelayConnectionState = "disconnected";
   private connectPromise: Promise<void> | null = null;
   private resolveConnect: (() => void) | null = null;
@@ -107,8 +115,13 @@ export class RelayClient {
       }
     };
     socket.onmessage = (event) => void this.handleMessage(event.data).catch((error: unknown) => this.fail(asError(error)));
-    socket.onerror = () => this.fail(direct ? new Error("WebSocket connection failed (network unavailable or connection refused)") : new RelayOuterError(1006));
-    socket.onclose = (event) => this.fail(new RelayOuterError(event.code || 1006));
+    // React Native fires a bare "error" and then, at once, a "close" that
+    // carries the reason. Let that close speak first; the error stands in
+    // only when no close follows.
+    socket.onerror = () => queueMicrotask(() => {
+      if (this.socket === socket) this.fail(direct ? new Error("WebSocket connection failed (network unavailable or connection refused)") : new RelayOuterError(1006));
+    });
+    socket.onclose = (event) => this.fail(new RelayOuterError(event.code || 1006, event.reason ?? "", event.wasClean ?? false));
     return this.connectPromise;
   }
 
@@ -143,7 +156,8 @@ export class RelayClient {
     return () => this.listeners.delete(listener);
   }
 
-  subscribeState(listener: (state: RelayConnectionState) => void): () => void {
+  /** `cause` comes with "disconnected": what ended the connection, the same error its pending requests fail with. */
+  subscribeState(listener: (state: RelayConnectionState, cause?: Error) => void): () => void {
     this.stateListeners.add(listener);
     listener(this.state);
     return () => this.stateListeners.delete(listener);
@@ -223,7 +237,7 @@ export class RelayClient {
 
   private fail(error: Error): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
-    this.setState("disconnected");
+    this.setState("disconnected", error);
     const socket = this.socket;
     this.socket = null;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
@@ -310,9 +324,9 @@ export class RelayClient {
     } else if (frame.opcode === 6) listener({ type: "error", streamId: frame.streamId, seq: frame.seq, message: new TextDecoder().decode(frame.payload) });
   }
 
-  private setState(state: RelayConnectionState): void {
+  private setState(state: RelayConnectionState, cause?: Error): void {
     this.state = state;
-    for (const listener of this.stateListeners) listener(state);
+    for (const listener of this.stateListeners) listener(state, cause);
   }
 }
 

@@ -3,7 +3,7 @@ import nacl from "tweetnacl";
 import { deriveKeySchedule } from "./e2ee-session";
 import { encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
-import { RelayClient } from "./relay-client";
+import { RelayClient, RelayOuterError } from "./relay-client";
 
 class FakeSocket {
   static readonly OPEN = 1;
@@ -13,7 +13,7 @@ class FakeSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
+  onclose: ((event: { code: number; reason?: string; wasClean?: boolean }) => void) | null = null;
   sent: unknown[] = [];
 
   send(value: unknown) { this.sent.push(value); }
@@ -91,6 +91,8 @@ class EncryptedPeer extends FakeSocket {
       expect(value.deviceToken).toBe("test-device-token");
       expect(value.transcriptHashB64).toBe(encodeBase64(schedule.transcriptHash));
       this.encrypted({ type: "e2ee_authenticated", v: 2, transcriptHashB64: value.transcriptHashB64 });
+    } else if (value.method === "session.sync") {
+      // Never answered: the request is still in flight when the socket closes.
     } else if (value.method === "pairing.getEndpoints") {
       this.encrypted({ id: value.id, ok: true, result: { v: 1, relay: relayEndpoint,
         resumeConfirmation: { v: 1, reqId: value.params.resumeConfirmReqId, currentVersion: 1, acceptedAs: "current", renewed: false, resumeExpiresAt: Date.now() + 60_000 },
@@ -128,4 +130,44 @@ it("rejects a refused invite before sending the inner device credential", async 
   await expect(connecting).rejects.toMatchObject({ code: 4001 });
   expect(socket.sent).toHaveLength(1);
   expect(String(socket.sent[0])).not.toContain("test-device-token");
+});
+
+// #669/#670: the close code alone cannot tell a relay close from iOS ending the stream.
+describe("a connection that closes with requests in flight", () => {
+  const open = async () => {
+    const socket = new EncryptedPeer();
+    const client = new RelayClient({ relay: relayEndpoint, credential: "test-resume", credentialKind: "resume", credentialVersion: 1, deviceToken: "test-device-token",
+      desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket });
+    const connected = client.connect();
+    socket.onopen?.();
+    await connected;
+    const states: [string, Error | undefined][] = [];
+    client.subscribeState((state, cause) => states.push([state, cause]));
+    return { socket, client, states, pending: client.request("session.sync") };
+  };
+
+  it("keeps the close code, reason and wasClean, and fails what was in flight with them", async () => {
+    const { socket, states, pending } = await open();
+    socket.onclose?.({ code: 1001, reason: "Stream end encountered", wasClean: false });
+    const error = await pending.catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(RelayOuterError);
+    expect(error).toMatchObject({ code: 1001, reason: "Stream end encountered", wasClean: false, message: "relay_outer_1001" });
+    expect(states.at(-1)).toEqual(["disconnected", error]);
+  });
+
+  it("lets the close that follows a socket error carry its reason", async () => {
+    const { socket, pending } = await open();
+    // React Native: a bare error, then at once a close with the reason.
+    socket.onerror?.();
+    socket.onclose?.({ code: 1006, reason: "The network connection was lost." });
+    await expect(pending).rejects.toMatchObject({ code: 1006, reason: "The network connection was lost.", wasClean: false });
+  });
+
+  it("still fails at once on an error that no close follows", async () => {
+    const { socket, pending } = await open();
+    socket.onerror?.();
+    const error = await pending.catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ code: 1006, reason: "" });
+    expect((error as RelayOuterError).wasClean).toBeUndefined();
+  });
 });
