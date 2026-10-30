@@ -423,6 +423,10 @@ pub struct CliTab {
     /// Set when this CLI's `SessionStart` hook arrives; what the thread that
     /// types into the pane waits on.
     pub ready: Arc<tui::Ready>,
+    /// Set by the first record this launch's transcript gains. With `ready`,
+    /// what says the CLI got past its own startup: until either, an exit
+    /// is a failure to start, said with its last line (#667).
+    pub recorded: bool,
     pub tail: Arc<tui::Tail>,
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
@@ -518,6 +522,10 @@ pub struct TabRuntime {
     /// runs `/help` or `/model` by itself and no `Stop` closes it, so the
     /// next prompt is where that prompt's time starts (`prompt_taken`).
     turn_by_command: bool,
+    /// Something in the open turn said the agent's provider refused its
+    /// sign-in (#667). Claude Code says so in a record and still ends the
+    /// turn with its `Stop` hook, so the end is told here.
+    signed_out_in_turn: bool,
     pub last_activity: Instant,
     pub recovery: Option<RecoveryKind>,
     /// When the session watcher raised a silence/delivery warning, if it did.
@@ -558,6 +566,7 @@ impl TabRuntime {
     fn open_turn(&mut self) {
         if !self.turn_open {
             self.turn_by_command = false;
+            self.signed_out_in_turn = false;
             self.turn_opener = Some(("session", "prompt"));
             self.compact_completed = false;
             self.compact_boundary_at = None;
@@ -1057,6 +1066,7 @@ impl SessionManager {
                 compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None,
                 turn_started_at: None,
                 turn_by_command: false,
+                signed_out_in_turn: false,
                 last_activity: Instant::now(),
                 recovery: None,
                 stalled_at: None,
@@ -1133,6 +1143,13 @@ impl SessionManager {
         self.observer.agent_event(&ev);
         self.sink.emit("agent_event", &ev);
         ev
+    }
+
+    /// The agent's provider refused the sign-in it was launched with (#667).
+    /// In a cloud workspace, the organization grant it started on is
+    /// reported, so the service can refresh it or say it needs a sign-in.
+    fn sign_in_refused(&self, rt: &TabRuntime) {
+        crate::cloud_grants::reject_launch(&rt.launch_key());
     }
 
     fn needs_recovery(&self, rt: &mut TabRuntime, kind: RecoveryKind) {
@@ -1630,7 +1647,8 @@ impl SessionManager {
         }
         if let Err(error) = &outcome {
             if let Ok(rt) = self.runtime(session_id, tab_id) {
-                self.apply(&mut rt.lock().unwrap(), Payload::Error { message: format!("{error:#}"), fatal: false }, None);
+                let message = format!("{error:#}");
+                self.apply(&mut rt.lock().unwrap(), Payload::Error { detail: recovery::detail(&message), message, fatal: false }, None);
             }
         }
         outcome.map_err(|error| anyhow!(RecoveryKind::classify(&error.to_string()).message()))
@@ -1870,7 +1888,7 @@ impl SessionManager {
                 }
                 Action::Write(line) => {
                     if let Err(e) = self.write(rt, &line) {
-                        self.apply(rt, Payload::Error { message: format!("Connection write failed: {e:#}"), fatal: false }, None);
+                        self.apply(rt, Payload::Error { message: format!("Connection write failed: {e:#}"), fatal: false, detail: None }, None);
                     }
                 }
                 Action::Emit(p) => self.apply(rt, p, None),
@@ -2772,7 +2790,10 @@ impl SessionManager {
             Ok(false) => self.announce_pane(&rt),
             Ok(true) => {},
             Err(error) => {
-                self.apply(&mut rt, Payload::Error { message: format!("{error:#}"), fatal: false }, None);
+                // Why the agent could not start (Codex too old, not installed)
+                // is TerminalX's own word: its line is shown under the error (#667).
+                let message = format!("{error:#}");
+                self.apply(&mut rt, Payload::Error { detail: recovery::detail(&message), message, fatal: false }, None);
                 return Err(anyhow!(RecoveryKind::classify(&error.to_string()).message()));
             }
         }
@@ -2795,15 +2816,19 @@ impl SessionManager {
     /// The process in a PTY pane exited. Hooks normally close the turn
     /// first; when they do not, what becomes of the tab is `cli_gone`'s to say.
     pub fn pane_exited(&self, pane_id: &str, code: Option<i32>) {
+        // First: a CLI whose sign-in was refused reports the grant it was
+        // launched with, which is forgotten just below (#667).
+        if let Some((entry, tab)) = self.tab_of_pane(pane_id) {
+            if let Ok(rt_arc) = self.runtime(&entry.id, &tab.id) {
+                self.cli_gone(&rt_arc, pane_id, code, TurnStatus::Error);
+            }
+        }
         // A delayed exit from a replaced pane must not forget what its
         // successor was launched with (its grant, its configuration and MCP
         // file).
         if !self.terminals.is_running(pane_id) {
             crate::cloud_grants::forget_launch(pane_id);
         }
-        let Some((entry, tab)) = self.tab_of_pane(pane_id) else { return };
-        let Ok(rt_arc) = self.runtime(&entry.id, &tab.id) else { return };
-        self.cli_gone(&rt_arc, pane_id, code, TurnStatus::Error);
     }
 
     fn pane_event(rt: &TabRuntime) -> Option<TabPtyEvent> {
@@ -2943,6 +2968,7 @@ impl SessionManager {
             // Claude Code runs its SessionStart hook the moment it is up;
             // Codex has no session, and so no hook, until a prompt makes one.
             ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
+            recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
             awaiting_delivery: None,
@@ -3318,6 +3344,9 @@ impl SessionManager {
         // Check before activity, receipt expiry, or any record is applied.
         if !Self::has_tail(&rt, tail) { return; }
         rt.last_activity = Instant::now();
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.recorded = true;
+        }
         if !payloads.is_empty() {
             self.stall_disproved(&mut rt);
         }
@@ -3599,6 +3628,25 @@ impl SessionManager {
         self.end_open_turn(rt, status, final_text);
     }
 
+    /// Close the open turn of a CLI that exited before it ever worked
+    /// (#667): it failed, with the line the CLI left as its reason, and as a
+    /// refused sign-in when that line says so. The latch as for
+    /// [`Self::close_open_turn`].
+    fn fail_open_turn(&self, rt: &mut TabRuntime, exit: &recovery::EarlyExit) {
+        if !rt.turn_open {
+            return;
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            if !p.turn_tail.closing() {
+                return;
+            }
+        }
+        let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
+        let final_text = exit.sign_in_refused.then(|| RecoveryKind::SignedOut.message().to_string());
+        let payload = Payload::TurnCompleted { status: TurnStatus::Error, final_text, usage: None, duration_ms, head: None, auth_failed: exit.sign_in_refused, detail: exit.detail.clone() };
+        self.apply(rt, payload, None);
+    }
+
     /// Publish the boundary of the turn that is open, whatever the latch
     /// says. `turn_open` is the guard: the boundary clears it, so this cannot
     /// publish a second one for the same turn. The latch is taken on the way,
@@ -3611,7 +3659,7 @@ impl SessionManager {
             let _ = p.turn_tail.closing();
         }
         let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
-        self.apply(rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false }, None);
+        self.apply(rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false, detail: None }, None);
     }
 
     /// Send a prompt to the CLI as keystrokes. A tab mid-turn writes anyway:
@@ -3851,7 +3899,7 @@ impl SessionManager {
         if let Readiness::Blocked(message) = readiness {
             log::warn!("[{}] the CLI is on a first-run screen: {message}", rt.key());
             rt.turn_open = false;
-            self.apply(rt, Payload::Error { message: message.to_string(), fatal: false }, None);
+            self.apply(rt, Payload::Error { message: message.to_string(), fatal: false, detail: None }, None);
             self.set_status(rt, TabStatus::Idle);
             if let Some(receipt) = receipt {
                 let _ = receipt.send(Err(format!("{message} The prepared prompt is retained.")));
@@ -4090,7 +4138,16 @@ impl SessionManager {
                 {
                     let rt = rt_arc.lock().unwrap();
                     if !mine(&rt) { return HookReply::default(); }
-                    if let Engine::Cli(p) = &rt.engine { p.ready.mark(); }
+                    if let Engine::Cli(p) = &rt.engine {
+                        p.ready.mark();
+                        // Codex runs this hook only once a prompt has made a
+                        // session, past its own account check: the grant it
+                        // was given is accepted. Claude Code runs it before
+                        // asking its provider anything, which proves nothing.
+                        if !p.ready.announces_start() {
+                            crate::cloud_grants::launch_worked(&rt.launch_key());
+                        }
+                    }
                 }
                 if kind == CliKind::Codex {
                     if let Some(id) = frame.payload["session_id"].as_str() {
@@ -4487,7 +4544,10 @@ impl SessionManager {
             if payload.is_turn_boundary() && rt.stalled_at.take().is_some() && rt.recovery.take().is_some() {
                 self.publish(rt, Payload::Recovery { kind: None }, None);
             }
-            if let Some(kind) = recovery::failure(&payload) { self.needs_recovery(rt, kind); }
+            if let Some(kind) = recovery::failure(&payload) {
+                rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
+                self.needs_recovery(rt, kind);
+            }
         }
         match &payload {
             Payload::TurnStarted { provider_session_id: Some(pid), .. } => {
@@ -4526,7 +4586,7 @@ impl SessionManager {
             self.record_activity(rt, TabStatus::Completed, store::activity::Source::Replay);
         }
         let payload = match payload {
-            Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, .. } => {
+            Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
                 let head = index::get(&rt.session_id).ok().and_then(|e| git::snapshot_tree(Path::new(&e.cwd)).ok());
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
@@ -4544,11 +4604,25 @@ impl SessionManager {
                     });
                 }
                 let duration_ms = duration_ms.or_else(|| rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64));
-                Payload::TurnCompleted { status, final_text, usage, duration_ms, head, auth_failed }
+                let auth_failed = auth_failed || (subagent.is_none() && std::mem::take(&mut rt.signed_out_in_turn));
+                Payload::TurnCompleted { status, final_text, usage, duration_ms, head, auth_failed, detail }
             }
             other => other,
         };
+        let main = subagent.is_none();
+        let sign_in_refused = main && matches!(&payload, Payload::TurnCompleted { auth_failed: true, .. });
+        let worked = main && matches!(&payload, Payload::TurnCompleted { status: TurnStatus::Ok, auth_failed: false, .. });
         self.publish(rt, payload, subagent);
+        if sign_in_refused {
+            // A reply drawn after the refusal may have taken the recovery back.
+            if rt.recovery != Some(RecoveryKind::SignedOut) {
+                self.needs_recovery(rt, RecoveryKind::SignedOut);
+            }
+            self.sign_in_refused(rt);
+        } else if worked {
+            // A turn the provider answered: the grant it ran on is accepted.
+            crate::cloud_grants::launch_worked(&rt.launch_key());
+        }
 
         if is_boundary {
             rt.turn_open = false;
@@ -4623,7 +4697,7 @@ impl SessionManager {
             let duration_ms = rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
             let status = if code == Some(0) { TurnStatus::Aborted } else { TurnStatus::Error };
             let final_text = (status == TurnStatus::Error).then(|| format!("The agent exited unexpectedly (code {}).", code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())));
-            self.publish(&mut rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false }, None);
+            self.publish(&mut rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false, detail: None }, None);
         }
         rt.queued.clear();
         if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind); }

@@ -169,6 +169,19 @@ describe("createWorkspace", () => {
     expect(api.cloudWorkspacePreflight).toHaveBeenLastCalledWith([], null, "claude");
   });
 
+  // terminalx-saas #241: a stored login its provider refused is one to sign in again, not one to connect.
+  it("refuses a first prompt for an agent whose login the provider refused, saying to sign it in again", async () => {
+    const refusedLogin = { kind: "agent-credential", cloneUrl: null, agent: "codex", status: "failed" as const, errorCode: "cloud_agent_credential_reauth_required", retryable: false };
+    const { api, calls } = fakeApi({ cloudWorkspacePreflight: vi.fn(async () => ({ ready: false, checks: [refusedLogin] })) });
+    const refused = (await createWorkspace(api, form({ agent: "codex" })).catch((e: unknown) => e)) as CreateRefused;
+    expect(refused.code).toBe("cloud_agent_credential_reauth_required");
+    expect(calls).toEqual([]);
+    const owner = createErrorMessage(refused.code, refused.detail, true);
+    expect(owner).toBe("Codex sign-in for this organization was revoked or expired, so it can't run a first prompt. Sign in again in Settings → Organizations → Agent logins, or create the workspace without a prompt.");
+    expect(mentionsAgentLogins(owner)).toBe(true);
+    expect(createErrorMessage(refused.code, refused.detail, false)).toContain("An owner or admin can sign it in again");
+  });
+
   it("creates without a first prompt whatever the agent's login, and asks nothing about it", async () => {
     const { api, calls } = fakeApi();
     await createWorkspace(api, form({ prompt: "  " }));

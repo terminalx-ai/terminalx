@@ -285,8 +285,13 @@ pub enum Payload {
         /// Tree id of the checkout when the turn closed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head: Option<String>,
+        /// The agent's provider refused its sign-in (#667).
         #[serde(default)]
         auth_failed: bool,
+        /// A failed turn's last words from the agent itself, when it exited
+        /// before it ever worked: bounded and redacted (`recovery::detail`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     SettingsChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,6 +484,10 @@ pub enum Payload {
         message: String,
         #[serde(default)]
         fatal: bool,
+        /// What a launch that was refused said: bounded and redacted
+        /// (`recovery::detail`), shown under the allowlisted message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     Unknown {
         kind: String,

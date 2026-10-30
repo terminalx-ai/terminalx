@@ -195,6 +195,12 @@ impl Ready {
         }
     }
 
+    /// Whether the `SessionStart` hook has arrived at all: the CLI got past
+    /// its own startup (its sign-in included).
+    pub fn marked(&self) -> bool {
+        self.at.lock().unwrap().is_some()
+    }
+
     /// Whether the CLI has been up long enough to have finished drawing.
     pub fn settled(&self) -> bool {
         self.at.lock().unwrap().is_some_and(|at| at.elapsed() >= READY_SETTLE)

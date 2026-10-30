@@ -1328,11 +1328,11 @@ mod tests {
     fn paged_tail_keeps_whole_turns_in_sequence_order() {
         let events = vec![
             prompt(1),
-            event(2, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }),
+            event(2, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }),
             prompt(3),
-            event(4, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }),
+            event(4, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }),
             prompt(5),
-            event(6, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }),
+            event(6, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }),
         ];
         let (tail, has_more) = select_event_tail(events.into_iter().rev().map(Ok), None, 2, tail_event_byte_limit("test").unwrap()).unwrap();
         assert!(has_more);

@@ -34,7 +34,8 @@ export type WorkItem =
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
   | { kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] }
   | { kind: "status"; text: string; initiatingPrompt?: string; key: string; seq: number }
-  | { kind: "error"; text: string; key: string; seq: number }
+  /** `detail`: the agent's (or its launch's) own words under the error (#667). */
+  | { kind: "error"; text: string; detail?: string; key: string; seq: number }
   | { kind: "compaction"; preTokens?: number; postTokens?: number; summary?: string; lifecycle?: CompactionOperation; uncertain?: boolean; key: string; seq: number }
   | { kind: "retry"; attempt: number; maxRetries: number; reason?: string; key: string; seq: number }
   | { kind: "subagent"; agentId: string; label?: string; done: boolean; key: string; seq: number }
@@ -48,6 +49,8 @@ export interface Turn {
   prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number };
   work: WorkItem[];
   finalText?: string;
+  /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
+  detail?: string;
   completed?: { status: string; durationMs?: number; ts: string; head?: string };
   usage?: { contextUsed?: number; contextMax?: number };
   toolCount: number;
@@ -357,6 +360,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean, options: { 
           if (payload.status !== "ok") turn.finalText = payload.finalText;
           else if (!lastText) turn.work.push({ kind: "text", text: payload.finalText, key: `f${event.seq}`, seq: event.seq, messageTs: event.messageTs });
         }
+        if (payload.status !== "ok" && payload.detail) turn.detail = payload.detail;
         if (payload.usage) {
           if (payload.usage.contextUsed != null) contextUsed = payload.usage.contextUsed;
           if (payload.usage.contextMax != null) contextMax = payload.usage.contextMax;
@@ -508,7 +512,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean, options: { 
         break;
       case "error": {
         const turn = ensureTurn(event);
-        turn.work.push({ kind: "error", text: payload.message, key: `e${event.seq}`, seq: event.seq });
+        turn.work.push({ kind: "error", text: payload.message, detail: payload.detail, key: `e${event.seq}`, seq: event.seq });
         break;
       }
       case "settings_changed":
