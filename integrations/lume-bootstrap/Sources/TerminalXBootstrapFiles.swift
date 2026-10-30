@@ -113,13 +113,13 @@ struct TXBinding: Codable {
     let outputShareId: String
     let configSha256: String
     let paths: [String: TXPathPin]
-    static let roles: Set<String> = ["operation", "storage", "vm", "config", "disk", "nvram", "input", "output"]
-    static let keys: Set<String> = ["version", "macosMajor", "bootstrapId", "ownerEpoch", "nonce", "environmentId", "generation", "vmFingerprint", "restoreSha256", "runtimeSha256", "helperManifestSha256", "executableSha256", "parentSession", "parentTab", "parentConversation", "inputShareId", "outputShareId", "configSha256", "paths"]
+    static let roles: Swift.Set<String> = ["operation", "storage", "vm", "config", "disk", "nvram", "input", "output"]
+    static let keys: Swift.Set<String> = ["version", "macosMajor", "bootstrapId", "ownerEpoch", "nonce", "environmentId", "generation", "vmFingerprint", "restoreSha256", "runtimeSha256", "helperManifestSha256", "executableSha256", "parentSession", "parentTab", "parentConversation", "inputShareId", "outputShareId", "configSha256", "paths"]
     static func decode(_ bytes: Data) throws -> Self {
         let object = try txObject(bytes, keys: keys)
         guard let paths = object["paths"] as? [String: [String: Any]] else { throw TXBootstrapError.refused }
-        try txRequire(Set(paths.keys) == roles)
-        for pin in paths.values { try txRequire(Set(pin.keys) == ["path", "device", "inode"]) }
+        try txRequire(Swift.Set(paths.keys) == roles)
+        for pin in paths.values { try txRequire(Swift.Set(pin.keys) == ["path", "device", "inode"]) }
         let binding = try JSONDecoder().decode(Self.self, from: bytes)
         try txRequire([1, 2].contains(binding.version) && binding.macosMajor == 26 && !binding.parentConversation.isEmpty && binding.parentConversation.utf8.count <= 256
             && binding.parentConversation.utf8.allSatisfy { $0 >= 32 && $0 < 127 })
@@ -130,7 +130,7 @@ struct TXBinding: Codable {
         for hash in [binding.nonce, binding.vmFingerprint, binding.restoreSha256, binding.runtimeSha256,
                      binding.helperManifestSha256, binding.executableSha256, binding.configSha256] { _ = try txHex(hash) }
         try txRequire(binding.inputShareId != binding.outputShareId
-            && Set(binding.paths.values.map { "\($0.device):\($0.inode)" }).count == roles.count)
+            && Swift.Set(binding.paths.values.map { "\($0.device):\($0.inode)" }).count == roles.count)
         let vm = binding.paths["vm"]!.path
         try txRequire(URL(fileURLWithPath: vm).deletingLastPathComponent().path == binding.paths["storage"]!.path)
         for (role, name) in [("config", "config.json"), ("disk", "disk.img"), ("nvram", "nvram.bin")] {

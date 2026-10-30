@@ -36,7 +36,9 @@
     "build:local-runtime": "node scripts/build-local-runtime.mjs",
     "test:local-runtime-build": "vitest run scripts/build-local-runtime.test.mjs",
     "build:terminalx-launcher": "node scripts/build-terminalx-launcher.mjs",
-    "test:terminalx-launcher": "vitest run scripts/build-terminalx-launcher.test.mjs"
+    "test:terminalx-launcher": "vitest run scripts/build-terminalx-launcher.test.mjs",
+    "build:vm-bootstrap": "node scripts/build-vm-bootstrap.mjs",
+    "test:vm-bootstrap": "cargo test --offline --locked --manifest-path native/vm-bootstrap/Cargo.toml && TX_VM_BOOTSTRAP_BUILD=1 vitest run scripts/build-vm-bootstrap.test.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

@@ -31,7 +31,7 @@ enum TXGuestProtocol {
         let reply = try txObject(TXWire.read(fd), keys: ["challengeSha256", "claims"])
         try txRequire(txString(reply, "challengeSha256") == txDigest(challenge))
         guard let claims = reply["claims"] as? [String: Any] else { throw TXBootstrapError.refused }
-        try txRequire(Set(claims.keys) == ["accountName", "accountHome", "uid", "osVersion", "osBuild", "helperSha256", "input", "output"])
+        try txRequire(Swift.Set(claims.keys) == ["accountName", "accountHome", "uid", "osVersion", "osBuild", "helperSha256", "input", "output"])
         try txRequire(txString(claims, "accountName") == txString(plan, "accountName")
             && txString(claims, "accountHome") == txString(plan, "accountHome")
             && txString(claims, "helperSha256") == txString(plan, "helperSha256"))
@@ -44,7 +44,7 @@ enum TXGuestProtocol {
             && !build.isEmpty && build.count <= 32 && build.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) })
         var nodes: [String] = []
         for role in ["input", "output"] {
-            guard let node = claims[role] as? [String: Any], Set(node.keys) == ["device", "inode"],
+            guard let node = claims[role] as? [String: Any], Swift.Set(node.keys) == ["device", "inode"],
                   let device = node["device"] as? UInt64, let inode = node["inode"] as? UInt64 else { throw TXBootstrapError.refused }
             try txRequire(inode > 0)
             nodes.append("\(device):\(inode)")

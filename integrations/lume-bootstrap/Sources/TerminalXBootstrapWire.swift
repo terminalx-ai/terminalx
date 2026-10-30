@@ -20,13 +20,13 @@ func txHex(_ value: String, bytes: Int = 32) throws -> Data {
 func txJSON(_ value: [String: Any]) throws -> Data {
     try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
 }
-func txObject(_ data: Data, keys: Set<String>) throws -> [String: Any] {
+func txObject(_ data: Data, keys: Swift.Set<String>) throws -> [String: Any] {
     try txRequire(data.count <= 256 * 1024)
     guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         throw TXBootstrapError.refused
     }
     // Canonical wire encoding also refuses duplicate keys and alternate spellings.
-    try txRequire(Set(object.keys) == keys && txJSON(object) == data)
+    try txRequire(Swift.Set(object.keys) == keys && txJSON(object) == data)
     return object
 }
 func txString(_ object: [String: Any], _ key: String) throws -> String {

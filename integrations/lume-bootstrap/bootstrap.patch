@@ -432,13 +432,13 @@
 +    let outputShareId: String
 +    let configSha256: String
 +    let paths: [String: TXPathPin]
-+    static let roles: Set<String> = ["operation", "storage", "vm", "config", "disk", "nvram", "input", "output"]
-+    static let keys: Set<String> = ["version", "macosMajor", "bootstrapId", "ownerEpoch", "nonce", "environmentId", "generation", "vmFingerprint", "restoreSha256", "runtimeSha256", "helperManifestSha256", "executableSha256", "parentSession", "parentTab", "parentConversation", "inputShareId", "outputShareId", "configSha256", "paths"]
++    static let roles: Swift.Set<String> = ["operation", "storage", "vm", "config", "disk", "nvram", "input", "output"]
++    static let keys: Swift.Set<String> = ["version", "macosMajor", "bootstrapId", "ownerEpoch", "nonce", "environmentId", "generation", "vmFingerprint", "restoreSha256", "runtimeSha256", "helperManifestSha256", "executableSha256", "parentSession", "parentTab", "parentConversation", "inputShareId", "outputShareId", "configSha256", "paths"]
 +    static func decode(_ bytes: Data) throws -> Self {
 +        let object = try txObject(bytes, keys: keys)
 +        guard let paths = object["paths"] as? [String: [String: Any]] else { throw TXBootstrapError.refused }
-+        try txRequire(Set(paths.keys) == roles)
-+        for pin in paths.values { try txRequire(Set(pin.keys) == ["path", "device", "inode"]) }
++        try txRequire(Swift.Set(paths.keys) == roles)
++        for pin in paths.values { try txRequire(Swift.Set(pin.keys) == ["path", "device", "inode"]) }
 +        let binding = try JSONDecoder().decode(Self.self, from: bytes)
 +        try txRequire([1, 2].contains(binding.version) && binding.macosMajor == 26 && !binding.parentConversation.isEmpty && binding.parentConversation.utf8.count <= 256
 +            && binding.parentConversation.utf8.allSatisfy { $0 >= 32 && $0 < 127 })
@@ -449,7 +449,7 @@
 +        for hash in [binding.nonce, binding.vmFingerprint, binding.restoreSha256, binding.runtimeSha256,
 +                     binding.helperManifestSha256, binding.executableSha256, binding.configSha256] { _ = try txHex(hash) }
 +        try txRequire(binding.inputShareId != binding.outputShareId
-+            && Set(binding.paths.values.map { "\($0.device):\($0.inode)" }).count == roles.count)
++            && Swift.Set(binding.paths.values.map { "\($0.device):\($0.inode)" }).count == roles.count)
 +        let vm = binding.paths["vm"]!.path
 +        try txRequire(URL(fileURLWithPath: vm).deletingLastPathComponent().path == binding.paths["storage"]!.path)
 +        for (role, name) in [("config", "config.json"), ("disk", "disk.img"), ("nvram", "nvram.bin")] {
@@ -538,7 +538,7 @@
 +        try check()
 +        try txRequire(actual.count == 2)
 +        let expected = [(binding.paths["input"]!.path, true), (binding.paths["output"]!.path, false)]
-+        try txRequire(Set(actual.map { "\($0.0):\($0.1)" }) == Set(expected.map { "\($0.0):\($0.1)" }))
++        try txRequire(Swift.Set(actual.map { "\($0.0):\($0.1)" }) == Swift.Set(expected.map { "\($0.0):\($0.1)" }))
 +    }
 +    func validateMountedShares(_ actual: [(String, String, Bool)]) throws {
 +        try check()
@@ -758,13 +758,13 @@
 +func txJSON(_ value: [String: Any]) throws -> Data {
 +    try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
 +}
-+func txObject(_ data: Data, keys: Set<String>) throws -> [String: Any] {
++func txObject(_ data: Data, keys: Swift.Set<String>) throws -> [String: Any] {
 +    try txRequire(data.count <= 256 * 1024)
 +    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
 +        throw TXBootstrapError.refused
 +    }
 +    // Canonical wire encoding also refuses duplicate keys and alternate spellings.
-+    try txRequire(Set(object.keys) == keys && txJSON(object) == data)
++    try txRequire(Swift.Set(object.keys) == keys && txJSON(object) == data)
 +    return object
 +}
 +func txString(_ object: [String: Any], _ key: String) throws -> String {
@@ -904,7 +904,7 @@
 +        let reply = try txObject(TXWire.read(fd), keys: ["challengeSha256", "claims"])
 +        try txRequire(txString(reply, "challengeSha256") == txDigest(challenge))
 +        guard let claims = reply["claims"] as? [String: Any] else { throw TXBootstrapError.refused }
-+        try txRequire(Set(claims.keys) == ["accountName", "accountHome", "uid", "osVersion", "osBuild", "helperSha256", "input", "output"])
++        try txRequire(Swift.Set(claims.keys) == ["accountName", "accountHome", "uid", "osVersion", "osBuild", "helperSha256", "input", "output"])
 +        try txRequire(txString(claims, "accountName") == txString(plan, "accountName")
 +            && txString(claims, "accountHome") == txString(plan, "accountHome")
 +            && txString(claims, "helperSha256") == txString(plan, "helperSha256"))
@@ -917,7 +917,7 @@
 +            && !build.isEmpty && build.count <= 32 && build.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) })
 +        var nodes: [String] = []
 +        for role in ["input", "output"] {
-+            guard let node = claims[role] as? [String: Any], Set(node.keys) == ["device", "inode"],
++            guard let node = claims[role] as? [String: Any], Swift.Set(node.keys) == ["device", "inode"],
 +                  let device = node["device"] as? UInt64, let inode = node["inode"] as? UInt64 else { throw TXBootstrapError.refused }
 +            try txRequire(inode > 0)
 +            nodes.append("\(device):\(inode)")

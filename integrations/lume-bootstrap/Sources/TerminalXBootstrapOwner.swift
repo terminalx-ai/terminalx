@@ -71,7 +71,7 @@ final class TerminalXBootstrapLaunch: @unchecked Sendable {
         try check()
         try txRequire(actual.count == 2)
         let expected = [(binding.paths["input"]!.path, true), (binding.paths["output"]!.path, false)]
-        try txRequire(Set(actual.map { "\($0.0):\($0.1)" }) == Set(expected.map { "\($0.0):\($0.1)" }))
+        try txRequire(Swift.Set(actual.map { "\($0.0):\($0.1)" }) == Swift.Set(expected.map { "\($0.0):\($0.1)" }))
     }
     func validateMountedShares(_ actual: [(String, String, Bool)]) throws {
         try check()
