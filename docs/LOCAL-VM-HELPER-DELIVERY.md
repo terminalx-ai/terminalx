@@ -196,8 +196,21 @@ version 3:
 the real Rust helper. It covers refusals, the budget fence, the claim, a lost
 reply, a missing key and a malformed seed binding.
 
-The host still writes version-2 bindings. Writing version 3 needs the seed
-journal (slice 4, `macos_seed.rs`) and key delivery from the private reference.
+**Host (2026-10-31).**
+
+- `macos_seed.rs` generates the key and seed id and journals intent, then an
+  exact readback receipt or a fence. It never reseeds.
+- The launch writes a version-3 binding and an owner-only `enrollment.key` hand-off
+  only for an exactly seeded guest. An unresolved or fenced seed never launches.
+- `Reference::enrollment()` accepts only an exact helper-authentication receipt.
+- `Reference::stop()` asks a version-3 owner to stop its VM. The owner journals
+  `stop-requested.json` once, answers, and only then stops. Exit evidence is
+  only the original child-wait record.
+
+The guest side has `ConfirmedAccount` (constructible only from a confirmation
+tagged under a verified session) and a verified, non-reversible privilege drop.
+Still to come: the owner relaying the person's confirmation over the session,
+and the account child running the existing `authorized_keys` engine.
 
 ## Account confirmation and effects
 

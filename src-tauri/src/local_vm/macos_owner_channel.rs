@@ -522,6 +522,7 @@ impl Reference {
             "keyReceipt",
             "guestObservation",
             "enrollment",
+            "stop",
         ]
         .contains(&action)
         {
@@ -628,6 +629,22 @@ impl Reference {
             challenge_sha256: value["challengeSha256"].as_str().unwrap_or_default().into(),
             claims_sha256: value["claimsSha256"].as_str().unwrap_or_default().into(),
         })
+    }
+    /// Version 3: asks the owner to stop its VM. The owner journals the request
+    /// once and never claims an exit; exit evidence is only the original
+    /// child-wait record. Returns the exact stop record.
+    fn stop(&self) -> Result<Value> {
+        if self.binding.version != 3 {
+            bail!("Owner-mediated stop requires a version-3 owner binding")
+        }
+        let receipt = self.observe("stop", &journal::new_id())?;
+        let value: Value = serde_json::from_slice(&receipt.bytes)?;
+        let expected = json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+            "stopRequested": true, "exitConfirmed": false, "ready": false});
+        if value != expected {
+            bail!("Owner stop record changed or claimed an exit")
+        }
+        Ok(value)
     }
     fn guest_observation(&self) -> Result<Value> {
         if self.binding.version != 2 {

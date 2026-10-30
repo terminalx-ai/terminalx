@@ -68,7 +68,7 @@ final class TXPinnedPath: @unchecked Sendable {
     }
     func receipt(_ name: String) throws -> Data {
         try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json",
-            "enrollment.key", "enrollment.json"].contains(name))
+            "enrollment.key", "enrollment.json", "stop-requested.json"].contains(name))
         try check()
         let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         try txRequire(child >= 0)
@@ -85,7 +85,7 @@ final class TXPinnedPath: @unchecked Sendable {
     func arm(_ bytes: Data) throws { try writeNew("owner-started.json", bytes) }
     func writeNew(_ name: String, _ bytes: Data) throws {
         try txRequire(directory && (["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json",
-            "enrollment.json"].contains(name) || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
+            "enrollment.json", "stop-requested.json"].contains(name) || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
         try check()
         let file = try TXDescriptor(openat(fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
         let written = bytes.withUnsafeBytes { Darwin.write(file.raw, $0.baseAddress, $0.count) }

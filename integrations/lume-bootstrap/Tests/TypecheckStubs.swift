@@ -11,4 +11,5 @@ import Virtualization
         }
     }
     var virtualMachineHandle: VirtualMachineHandle { fatalError("typecheck only") }
+    func stop() async throws { fatalError("typecheck only") }
 }

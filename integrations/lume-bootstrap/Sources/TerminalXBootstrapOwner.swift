@@ -118,6 +118,8 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
     private let state = NSLock()
     private var closed = false
     private var guestListener: AnyObject?
+    // Asks the owned VM to stop; set only by the process that owns the VM.
+    private var stopper: (@Sendable () -> Void)?
     // The original config lock's open description is held, never re-created.
     private let configLease: TXDescriptor
     private init(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32) throws {
@@ -180,7 +182,7 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         let requestId = try txString(request, "requestId")
         let clientNonce = try txString(request, "clientNonce")
         _ = try txHex(clientNonce)
-        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment"].contains(action)
+        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop"].contains(action)
             && txString(request, "bindingDigest") == launch.bindingDigest)
         let nonce = txNonce()
         let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
@@ -190,12 +192,16 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         try txRequire(txEqualTag(txString(auth, "mac"), txTag(launch.capability, "host", parts)))
         try check()
         let receipt: Data
+        var stopAfterReply: (@Sendable () -> Void)?
         if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
-        // Version 3 has no share trust path; only the enrollment receipt is served.
-        try txRequire((launch.binding.version == 3) == (action == "enrollment") || action == "observe")
+        // Version 3 has no share trust path: only enrollment and an owner-mediated
+        // stop are served, and neither is served for earlier versions.
+        try txRequire(launch.binding.version == 3
+            ? ["observe", "enrollment", "stop"].contains(action) : !["enrollment", "stop"].contains(action))
         switch action {
         case "guestObservation": receipt = try launch.pins["operation"]!.receipt("guest-observation.json")
         case "enrollment": receipt = try launch.pins["operation"]!.receipt("enrollment.json")
+        case "stop": (receipt, stopAfterReply) = try requestStop()
         case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
         case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
         default: receipt = Data()
@@ -206,6 +212,24 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
             "receiptSha256": txDigest(receipt), "consoleAvailable": false, "ready": false])
         try TXWire.write(fd, txJSON(["payload": payload.base64EncodedString(),
                                     "mac": txTag(launch.capability, "receipt", parts + [txDigest(payload)])]))
+        // Journaled, then answered, then the VM is asked to stop.
+        stopAfterReply?()
+    }
+    /// Owner-mediated stop for a version-3 run: journals the request once, then
+    /// returns the stop to run after the reply is sent. A repeated request returns
+    /// the same record and never stops again. It never claims the VM or owner exited; the host's
+    /// original child-wait record is the exit evidence.
+    private func requestStop() throws -> (Data, (@Sendable () -> Void)?) {
+        let operation = launch.pins["operation"]!
+        if let existing = try? operation.receipt("stop-requested.json") { return (existing, nil) }
+        state.lock(); let stopper = stopper; state.unlock()
+        guard let stopper else { throw TXBootstrapError.refused }
+        try operation.writeNew("stop-requested.json", txJSON(["version": 1, "bindingDigest": launch.bindingDigest,
+            "ownerEpoch": launch.binding.ownerEpoch, "stopRequested": true, "exitConfirmed": false, "ready": false]))
+        return (try operation.receipt("stop-requested.json"), stopper)
+    }
+    fileprivate func setStopper(_ stop: @escaping @Sendable () -> Void) {
+        state.lock(); stopper = stop; state.unlock()
     }
     private func serve(maximum: Int?) {
         var count = 0
@@ -232,6 +256,8 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
     #if TERMINALX_BOOTSTRAP_FIXTURES
     static func fixture(launch: TerminalXBootstrapLaunch, view: TXOwnedVM, configLease: Int32, maximum: Int) throws {
         let owner = try TerminalXBootstrapOwner(launch: launch, view: view, configLease: configLease)
+        // The fixture's "VM" stops by ending the owner, as Lume's run returns.
+        owner.setStopper { [weak owner] in owner?.close() }
         owner.serve(maximum: maximum)
     }
     #endif
@@ -258,6 +284,9 @@ extension TerminalXBootstrapOwner {
             }
         }
         let owner = try start(launch: launch, view: view, configLease: configLease)
+        if launch.binding.version == 3 {
+            owner.setStopper { Task { @MainActor in try? await service.stop() } }
+        }
         if launch.binding.version >= 2 {
             let guestView = TXOwnedVM { [weak owner] in
                 guard let owner else { throw TXBootstrapError.refused }

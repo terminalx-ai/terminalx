@@ -537,3 +537,30 @@ fn native_seeded_launch_binds_version_3_and_accepts_only_exact_helper_enrollment
         assert!(reference.enrollment().is_err(), "{field}");
     }
 }
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_owner_mediated_stop_is_recorded_once_and_exit_comes_from_the_child_wait() {
+    let f = Fixture::new();
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let stopped = reference.stop().unwrap();
+    assert_eq!((stopped["stopRequested"].as_bool(), stopped["exitConfirmed"].as_bool()), (Some(true), Some(false)));
+    let recorded = std::fs::read(f.op().join("stop-requested.json")).unwrap();
+    f.drain();
+    assert_eq!(f.run().unwrap()["stage"], "originalChildExited");
+    assert_eq!(f.run().unwrap()["replacementAllowed"], false);
+    assert!(reference.stop().is_err(), "no owner remains to stop again");
+    assert_eq!(std::fs::read(f.op().join("stop-requested.json")).unwrap(), recorded);
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_version_2_owner_has_no_stop() {
+    let f = Fixture::new();
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    assert!(reference.stop().is_err());
+    assert!(!f.op().join("stop-requested.json").exists());
+}

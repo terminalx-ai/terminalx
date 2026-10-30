@@ -395,6 +395,18 @@ class EnrollmentListenerTests(unittest.TestCase):
         self.assertEqual((served, payload['action']), (receipt, 'enrollment'))
         for action in ['guestObservation', 'accountReceipt']:
             with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): f.call(action)
+    def test_owner_mediated_stop_is_version_3_only_and_answered_before_stopping(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        f.start(n=3, binding=b)
+        payload, record = f.call('stop')
+        self.assertEqual(json.loads(record), {'bindingDigest': f.bd, 'exitConfirmed': False, 'ownerEpoch': b['ownerEpoch'],
+                                              'ready': False, 'stopRequested': True, 'version': 1})
+        f.process.communicate(timeout=15)
+        self.assertEqual(f.process.returncode, 0, 'the fixture owner stopped as the VM would')
+        self.assertEqual((f.op/'stop-requested.json').read_bytes(), record)
+        g = Fixture(); self.addCleanup(g.finish); g.start(n=2)
+        with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): g.call('stop')
+        self.assertFalse((g.op/'stop-requested.json').exists())
     def test_version_2_owner_never_serves_an_enrollment_receipt(self):
         f = Fixture(); self.addCleanup(f.finish); b = f.binding; b['version'] = 2
         private(f.op/'enrollment.json', wire({'helperAuthenticated': True}))
