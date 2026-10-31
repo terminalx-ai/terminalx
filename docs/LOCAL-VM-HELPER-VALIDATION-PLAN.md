@@ -100,8 +100,8 @@ G and H, and is defined [below](#guest-to-host-boundary-checks-b1b7).
 | Storage | `~/.raccoon/vm-validation/r1/storage/` (absent on 2026-10-30) | `<TERMINALX_HOME>/local-vm/macos-vms/<key>/`, with a dedicated `TERMINALX_HOME=~/.raccoon/vm-validation/r2/home` (`store/mod.rs:41` reads that variable) |
 | Created by | Installed pinned Lume 0.6.1 CLI, with the same arguments as TerminalX's create | The TerminalX validation build's existing create path |
 | Restore image | The one pinned IPSW (P1) | The same image, as a reviewed catalog entry |
-| Hardware | 4 vCPU, 8 GB memory, 160 GB logical sparse disk, 1024x768, NAT. Identical to `macos_provision.rs:135` and `:164`–`:185` | Same |
-| Shares | None | The restricted profile's read-only input and read-write output |
+| Hardware | 4 vCPU, 8 GB memory, 160 GB logical sparse disk, 1024x768, NAT. Identical to `macos_provision.rs:142` and `:177`–`:186` (at `9aced4b1`) | Same |
+| Shares | None | The version-2 bootstrap's read-only input and read-write receipt. Run 2's seed is the person's validation-probe seed, which writes no TerminalX seed journal, so the launch binds version 2 and the probe's version-1 hello reaches the version-2 observation. Onboarding's seeded version-3 launch mounts no share (since `95d481d1`) and would refuse that hello. |
 | Console | One foreground Lume window for the person (needs an explicit exception, see approval scope) | None. Setup Assistant is never advanced and no account is created. |
 | Evidence | `~/.raccoon/task-coordination/pro114-pro117/acceptance/helper-validation/r1/` | `…/helper-validation/r2/` |
 
@@ -160,7 +160,7 @@ Guards that keep it that way:
 | P7 | TerminalX validation build | Run 2 | **Partly built.** The owner-mediated stop exists for version-3 owners: a MAC'd `stop` request is journaled once, answered, then the VM is asked to stop, and exit evidence is only the host's child-wait record (native tests with the compiled owner). The seeded version-3 launch and enrollment receipt exist too. The cargo feature `vm-validation` (never in a release) reads the P6 pin and the P1 entry only from owner-only files under a dedicated, non-default `TERMINALX_HOME`; see Run 2 below. Release builds still refuse both. | A reviewed source slice that acquires only the P6 artifact, under a validation profile and the dedicated `TERMINALX_HOME`; creates through the existing path using the P1 entry; and supports an owner-mediated stop. Without that stop, Run 2 is not runnable. |
 | P8 | Probe vsock client mode | Run 2 | **Implemented** in `wire.rs`. Fixture-tested over socketpairs against the owner's exact framing; never run against the real listener. | Run 2 itself. |
 | P9 | Person and console | Run 1 | Not arranged | The person is available for the `sudo` steps, Setup Assistant and Login Items. The console exception is approved. |
-| P10 | Capacity | Runs 1, 2 | 128.9 GiB free; 0 VM processes | Re-checked at preflight against the bounds above. |
+| P10 | Capacity | Runs 1, 2 | **Not met.** 128.9 GiB free on 2026-10-30, but 29 GiB available on the Data volume (99% used) on 2026-11-01 (`df`). Run 1 needs the IPSW size plus 90 GiB. Nothing was deleted. | The user frees space or names another volume ([next approval packet](#next-approval-packet-2026-11-01)). Re-checked at preflight against the bounds above. |
 
 ## Validation probe and seed items
 
@@ -401,10 +401,14 @@ they exist.
    The build is `cargo build --features vm-validation`.
 2. **Seed.** Phases 1.2 and 1.3 run again on this instance, with the probe in
    vsock client mode.
-3. **Launch.** The validation build runs the restricted bootstrap launch:
-   shares, `--terminalx-bootstrap-fd`, `--display none`, `--vnc disabled`
-   (`macos_owner_launch.rs:258`–`:285`). There is no viewer, Setup Assistant is
-   never advanced and no account is created.
+3. **Launch.** The validation build runs the restricted bootstrap launch as
+   version 2 (no TerminalX seed journal; see the target table): its input and
+   receipt shares, `--terminalx-bootstrap-fd`, `--display none`,
+   `--vnc disabled` (`command` at `macos_owner_launch.rs:292`, `9aced4b1`).
+   There is no viewer, Setup Assistant is never advanced and no account is
+   created. G3 and G5 concern the vsock connection and the listener, which
+   versions 2 and 3 share; the version-3 enrollment session itself is not
+   exercised here.
 4. **Observe and stop.** The probe connects within its window, the owner
    journals the attempt and sends its offer, and the probe records it. Then an
    owner-mediated stop, followed by the offline readback from 1.5.
@@ -538,6 +542,62 @@ person's real SSH agent, keys or tokens.
 | B5 | Owner listener | Connection attempts from a second disposable VM | Only this VM's device reaches its owner; the other is refused within the refusal budget (extends G5). |
 | B6 | Import bounds | A guest that declares more than 128 artifacts or 256 MiB for one task | Import stops at the budget without fetching the rest, the task completes with the refusal in its detail, and the imported files and `retained.json` are unchanged afterwards. Source tests cover this with small limits (`artifact_import.rs`). |
 | B7 | Patch import | A guest-written patch that targets `../`, `.git` and a symlink | Refused with no write. Source tests already cover this (`real_guest_patch_cannot_leave_the_checkout_reach_git_metadata_or_follow_a_symlink`); the live case confirms the installed `git`. |
+
+## Next approval packet (2026-11-01)
+
+Prepared for review. Only the first question below is asked; nothing else is
+requested or implied, and nothing here has been run. Source is at `9aced4b1`
+(branch `raccoon/pro-114-vm-foundation-continue`, local only). Readiness and
+acceptance are false. The user's 2026-10-31 decisions stand
+([host requests](LOCAL-VM-HELPER-DELIVERY.md#host-requests-and-the-guest-boundary)).
+No independent source work remains that does not need one of these inputs.
+
+### Order
+
+1. **Capacity, then P1.** Free space for the restore image and Run 1, then
+   download one IPSW. The Run 1 run sheet is then regenerated with its
+   recorded values, which needs no approval.
+2. **Run 1** (G1, G2, G4 and the disable part of G6) with the ad hoc probe.
+   It tests the assumptions most likely to break the design, so it comes
+   before any signing or packaging. If G1, G2 or G4 fails, tracks (a) and (b)
+   are re-planned first ([outcomes](#outcomes)).
+3. **(a) Release identity and signing**, then **Run 2** (G3, G5), which needs
+   the restricted Lume signed with the virtualization entitlement.
+4. **(b) Seed-daemon packaging review**, then slice 5 source, its signing (a),
+   and H1–H6.
+5. **F0–F7** last, on a separate erased Mac with a signed, notarized release.
+
+### Tracks
+
+| Track | Available now (read-only) | Must come from the user | Not verified |
+| --- | --- | --- | --- |
+| (c) Run 1 | Installed Lume 0.6.1 (`a369d637…fc904`, Cua team `YCK386LBJ7`); probe `283ec5a8…`, seed tool `29bde7fd…` and plist `2d1e0636…` from `6aa26b4a` in `passes/20261030-helper-impl/artifacts/`; [run sheet](LOCAL-VM-HELPER-RUN-SHEET.md), written but incomplete (P1 and the probe's Developer ID absent) | Capacity; approval of P1; later the Run 1 scope ([draft](#draft-approval-scope-for-a-future-coordinated-run)); the person for `sudo`, Setup Assistant and Login Items; the console exception | The IPSW's URL, build, SHA-256 and size; the restore and boot durations on this Mac |
+| (a) Signing, catalog, adoption | Restricted Lume build 13 at `~/.raccoon/vm-build/lume-3350f504/work-13/build/release/lume` (22,131,000 bytes, `dd34b876…`, patch `019f29dc…`, upstream `3350f504`, ad hoc); guest helper `terminalx-vm-bootstrap` `ad345587…` and probe `4aaf0f9b…` from `c0b01b92` in `passes/20261031-guest-helper/artifacts/` (ad hoc); the repo pins no TerminalX team (`APPLE_SIGNING_IDENTITY` at build time) | Which identity is TerminalX's release identity; approval of each signing, notarization and catalog entry | The installed `/Applications/TerminalX.app` 0.2.21 (`com.terminalx.next`) shows team `AQ6323SP66` (`codesign -dv`, read-only). That is an observation, not an approved release identity. |
+| (b) Seed-daemon packaging | The design ([privileged host step](LOCAL-VM-HELPER-DELIVERY.md#decision-the-privileged-host-step), [seeder contract](LOCAL-VM-HELPER-DELIVERY.md#seeder-contract)), H1–H6, the seeder core in `native/vm-bootstrap`; slice 5 not started | A review of the packaging design before any implementation | Everything about the daemon on a real host |
+| (c) Run 2, B, H, F | Run 2 specified above; B1–B7 and H1–H6 defined; F0–F7 defined | Separate approvals once their inputs exist; a separate erased Apple-silicon Mac on macOS 26 for F | All |
+
+### First question
+
+> Run 1 needs the restore image's size plus 90 GiB free; this Mac's Data
+> volume has 29 GiB. Will you free that space on this Mac yourself, or name
+> another volume for the Run 1 image and VM? Nothing has been deleted or
+> moved, and nothing will be until you answer.
+
+The hold applies because cleanup and restore-image downloads are reserved for
+the user, and the retained and comparison VMs must be preserved. This work's
+own superseded offline-build folders (`~/.raccoon/vm-build/lume-3350f504/work`
+and `work-3` to `work-12`, about 11 GB by `du`) and this worktree's Cargo
+build (about 3.8 GB) are
+far too small to close the gap; they are listed only so the user can include
+them.
+
+The question after it, once space exists, is P1: approve selecting and
+downloading one Apple macOS 26 IPSW into `~/.raccoon/vm-validation/restore/`.
+The proposed selection is the image `VZMacOSRestoreImage.fetchLatestSupported`
+names for this Mac, which is what Lume uses (`DarwinImageLoader.swift:33`). Its
+URL, build, SHA-256, size and that selection source are recorded. The
+download runs in the background; there is no window, VM, `sudo`, signing or
+catalog change.
 
 ## Draft approval scope for a future coordinated run
 

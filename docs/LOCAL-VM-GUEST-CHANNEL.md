@@ -1,5 +1,11 @@
 # macOS26 guest observation channel and remaining authentication boundary
 
+**Scope (2026-10-31).** This describes the version-2 share-based observation.
+Onboarding now uses version-3 seeded-key enrollment over the session
+([delivery design](LOCAL-VM-HELPER-DELIVERY.md#enrollment-protocol-txguestprotocol-version-2)),
+and a version-3 VM has no share since `95d481d1`. The share echo below remains
+only for versions 1 and 2, including the validation Run 2 target.
+
 This source candidate removes the pre-launch requirement for guest mount inode,
 UID and OS-build observations. It does **not** authenticate the guest helper or
 enable fresh creation. The restricted Lume profile is still unadopted; its exact

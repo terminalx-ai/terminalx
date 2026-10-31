@@ -184,9 +184,10 @@ events, shares or socket frames.
   the seeded key*. `accountAuthenticated`, `trustAccepted` and `ready` stay
   false.
 
-Shares are no longer the trust path. The read-only input share may still carry
-bulk artifacts, accepted only against digests sent over the authenticated
-session. The version-1 share-echo observation remains for retained histories.
+Shares are no longer the trust path. Since `95d481d1` a version-3 VM has no
+share at all; anything bulk would travel over the authenticated session. The
+version-1 share-echo observation remains for versions 1 and 2 and retained
+histories.
 
 ### Implemented wire form (2026-10-31)
 
