@@ -536,7 +536,7 @@ person's real SSH agent, keys or tokens.
 | B3 | Credentials | The guest session's environment and listening sockets during a legacy `cua sb exec` and a personalized RPC, with a synthetic host agent and a host config that forwards it | No `SSH_AUTH_SOCK`, forwarded agent, TerminalX token or provider key appears in either guest session, including Lume's `/usr/bin/ssh` fallback. |
 | B4 | Desktop endpoints | The guest worker's tool list and its MCP configuration | Only guest Driver and browser tools, and only `local-vm-computer --stdio --task <bound target>`. No host desktop or host socket. |
 | B5 | Owner listener | Connection attempts from a second disposable VM | Only this VM's device reaches its owner; the other is refused within the refusal budget (extends G5). |
-| B6 | Import bounds | A guest that declares many artifacts | Today this records the open gap (no per-task quota). Once a quota exists, import stops at it and keeps the task's records. |
+| B6 | Import bounds | A guest that declares more than 128 artifacts or 256 MiB for one task | Import stops at the budget without fetching the rest, the task completes with the refusal in its detail, and the imported files and `retained.json` are unchanged afterwards. Source tests cover this with small limits (`artifact_import.rs`). |
 | B7 | Patch import | A guest-written patch that targets `../`, `.git` and a symlink | Refused with no write. Source tests already cover this (`real_guest_patch_cannot_leave_the_checkout_reach_git_metadata_or_follow_a_symlink`); the live case confirms the installed `git`. |
 
 ## Draft approval scope for a future coordinated run

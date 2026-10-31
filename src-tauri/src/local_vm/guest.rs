@@ -75,7 +75,7 @@ use crate::sink::EventSink;
 
 pub const MAX_RPC_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FILES_BYTES: usize = 11 * 1024 * 1024;
-const MAX_ARTIFACT_BYTES: usize = 12 * 1024 * 1024;
+pub(super) const MAX_ARTIFACT_BYTES: usize = 12 * 1024 * 1024;
 const PAGE_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
 const INSTALL: &str = super::transport::LINUX_INSTALL;

@@ -185,7 +185,16 @@ The host journal is in `$TERMINALX_HOME/local-vm`, separate from guest data.
 It preserves parent session/tab/message links, approved input, provider choices,
 worker/resume identities, contiguous events, results and artifact manifests.
 Artifacts are integrity checked and copied into the host journal's artifact
-store before completion releases the host's workflow lease. Guest deletion
+store before completion releases the host's workflow lease. The host imports
+at most 128 artifacts and 256 MiB per task, counted across every poll, retry
+and restart in `artifacts/<task>/retained.json`, which records each
+admission before its payload is fetched. Each artifact keeps the guest's 12
+MiB bound. A manifest with duplicate ids, invalid sizes or digests, or changed
+metadata for an imported artifact is refused before anything is fetched. New
+artifacts beyond the budget are refused in manifest order and never fetched:
+the task still completes, its detail names how many were refused, and those
+stay in the guest for explicit export. Imported files are never deleted to
+make room. Guest deletion
 keeps these records and historical usage events. Artifacts currently have no
 automatic expiration (`expiresAt: null`); their retained copies remain until
 the user explicitly removes that local history. Export them using the task

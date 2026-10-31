@@ -571,28 +571,25 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
     if seq != guest.last_event_seq {
         bail!("Guest event cursor mismatch; reconcile history before continuing");
     }
-    // Retain evidence before terminal state allows the next workflow to run.
-    for artifact in &guest.artifacts {
-        ensure_running(stopped)?;
-        journal::validate_id(&artifact.id)?;
-        let directory = host::root()?.join("artifacts").join(&task.target.task_id);
-        journal::private_directory(&directory)?;
-        let path = directory.join(&artifact.id);
-        if path.exists() {
-            continue;
-        }
-        let response = host::guest_rpc(
-            env,
-            "task.artifact",
-            json!({"target":task.target,"artifactId":artifact.id}),
-        )?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(host::field(&response, "contentBase64")?)?;
-        if bytes.len() as u64 != artifact.bytes || journal::digest(&bytes) != artifact.sha256 {
-            bail!("Guest artifact integrity mismatch");
-        }
-        journal::atomic_private_write(&path, &bytes)?;
-    }
+    // Retain evidence before terminal state allows the next workflow to run,
+    // within the host's own per-task budget. Refused artifacts stay in the guest.
+    let known = journal::bound(&mut journal.read()?, &task.target)?.artifacts.clone();
+    let imported = super::artifact_import::import(
+        &host::root()?.join("artifacts").join(&task.target.task_id),
+        &known,
+        &guest.artifacts,
+        super::artifact_import::LIMITS,
+        |artifact| {
+            ensure_running(stopped)?;
+            let response = host::guest_rpc(
+                env,
+                "task.artifact",
+                json!({"target":task.target,"artifactId":artifact.id}),
+            )?;
+            Ok(base64::engine::general_purpose::STANDARD
+                .decode(host::field(&response, "contentBase64")?)?)
+        },
+    )?;
     journal.transaction(|s| {
         let t = journal::bound(s, &task.target)?;
         if t.status.terminal() {
@@ -602,9 +599,12 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
         t.worker_tab_id = guest.worker_tab_id;
         t.provider_conversation_id = guest.provider_conversation_id;
         t.status = guest.status;
-        t.artifacts = guest.artifacts;
+        t.artifacts = imported.retained.clone();
         t.outcome = guest.outcome;
-        t.detail = guest.detail;
+        t.detail = match (guest.detail, &imported.refused) {
+            (Some(detail), Some(refused)) => Some(format!("{detail} {refused}")),
+            (detail, refused) => refused.clone().or(detail),
+        };
         t.updated_at = journal::now();
         Ok(())
     })

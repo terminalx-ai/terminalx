@@ -841,7 +841,7 @@ What a process in the guest, including guest root, can reach on the host.
 | Channel | The guest can | The guest cannot | Tests | Not verified or open |
 | --- | --- | --- | --- | --- |
 | Task replies (`task.*`) | Return at most 32 MiB of JSON per call (`process::run`) and append its own events | Change the task, VM, generation, input or transport identity: the supervisor compares each reply with the host's record, and the personalized route rechecks request and response (`validate_route`, `validate_response`) | `transport.rs`, `macos_transport_tests.rs` | — |
-| Artifact import (automatic on poll) | Have the host keep the bytes it declares, under `local-vm/artifacts/<task>/<uuid>`, after a size and SHA-256 check, written privately and atomically | Choose a host path: ids must be UUIDs in the host's own directory | No host-side test of the import loop | **Open:** no per-task count or total quota, only the per-call bound. A guest can fill host disk there. No other host file is read or written. |
+| Artifact import (automatic on poll) | Have the host keep at most 128 artifacts and 256 MiB per task, each checked for size and SHA-256, under `local-vm/artifacts/<task>/<uuid>` | Choose a host path (ids must be UUIDs in the host's directory); exceed the budget, which a ledger counts across polls, retries, omissions, restarts and concurrent polls before fetching; change an imported artifact; send duplicate or malformed declarations | `artifact_import.rs` tests (since the artifact-limit checkpoint) | — |
 | Patch import (`task.applyPatch`) | Supply patch bytes | Apply them: only a host request with `confirm` and a host-chosen repository root applies one, after `git apply --check --index`, once per receipt. A patch cannot write outside the work tree, into `.git` (any case) or through a symlink. | `real_git_patch_import_preserves_dirty_host_work`; `real_guest_patch_cannot_leave_the_checkout_reach_git_metadata_or_follow_a_symlink` (new) | The patch is code the guest wrote. Review it before running anything from that checkout. |
 | Inputs sent to the guest | Read the files the host selected | Read other host files: at most 64 files and 10 MiB, canonicalized inside the chosen root, credential paths refused, bytes pinned to the approved hashes | `real_files_require_approved_bytes_and_reject_symlink_escape` | — |
 | Host credentials and tokens | — | Receive the host control token, socket, hook tokens or Cua daemon tokens (`process::remove_control_credentials`). On the personalized path, any inherited variable (`env_clear`). | `process.rs`; the transport, delivery, first-connection and owner fixtures assert no `SSH_AUTH_SOCK`, `TERMINALX_NEXT_TOKEN`, `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` | Provider sign-in happens inside the guest; nothing is imported |
@@ -868,8 +868,9 @@ source review, within its own channels the guest cannot do any of these:
 
 Three limits remain:
 
-- **Disk use.** The guest can fill host disk through artifact import (no
-  quota) and the bootstrap's writable share.
+- **Disk use.** Artifact import is bounded per task (128 artifacts, 256 MiB).
+  Each new task adds its own budget, and the bootstrap's writable share is
+  unbounded.
 - **Network.** It can reach host services listening on all interfaces, as any
   LAN peer can.
 - **Guest-written content.** Patches and text it writes reach the host as
