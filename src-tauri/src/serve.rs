@@ -143,11 +143,25 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    #[cfg(unix)]
+    if let Some(code) = crate::local_vm::attachment::run_stdio_cli() { return code; }
+    #[cfg(unix)]
+    if let Some(code) = crate::container_vm::run_stdio_cli() { return code; }
+    #[cfg(unix)]
+    if let Some(code) = crate::local_vm::desktop::run_cli() { return code; }
     // A hook process is short lived and answers before anything else starts.
     if crate::hooks::run_statusline_cli() || crate::hooks::run_hook_cli() {
         return 0;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("local-vm-rpc") {
+        return crate::local_vm::guest::run_rpc_cli(&args[1..]);
+    }
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("local-vm-bootstrap") {
+        return crate::local_vm::macos_delivery::run_cli(&args[1..]);
+    }
     // So is Git's credential helper and the `gh` shim (`cloud_github`).
     if args.first().map(String::as_str) == Some(crate::cloud_github::SUBCOMMAND) {
         return crate::cloud_github::run_cli(&args[1..]);
@@ -170,7 +184,8 @@ pub fn main() -> i32 {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     #[cfg(all(target_os = "macos", feature = "local-ui"))]
     let outcome = if options.runtime_kind == RuntimeKind::Local && !options.self_test
-        && std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1") {
+        && std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1")
+        && !crate::local_vm::guest::Guest::installation_present().unwrap_or(true) {
         crate::local_runtime::platform::run(move || run(options))
     } else { run(options) };
     #[cfg(not(all(target_os = "macos", feature = "local-ui")))]
@@ -205,6 +220,10 @@ struct Runtime {
     /// What moves an issue's pipeline when a turn ends (#433); idle until
     /// the agent tabs are served.
     pipelines: Arc<RuntimeObserver>,
+    #[cfg(unix)]
+    guest: Option<Arc<crate::local_vm::guest::Guest>>,
+    #[cfg(unix)]
+    vm_supervisor: Option<crate::local_vm::supervisor::Supervisor>,
 }
 
 fn run(options: Options) -> Result<()> {
@@ -220,6 +239,13 @@ fn run(options: Options) -> Result<()> {
         bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
     }
     let data_dir = crate::store::root().context("open the state directory")?;
+    #[cfg(unix)]
+    let guest_mode = crate::local_vm::guest::Guest::installed_for_root(&data_dir)?;
+    #[cfg(not(unix))]
+    let guest_mode = false;
+    if guest_mode && (options.runtime_kind != RuntimeKind::Local || options.relay_link.is_some() || options.project_root.is_some()) {
+        bail!("Pinned guest cannot expose cloud, relay or generic project routing");
+    }
     let _owner = if options.runtime_kind == RuntimeKind::Local {
         Some(crate::local_runtime::Owner::acquire(&data_dir)?)
     } else {
@@ -256,7 +282,7 @@ fn run(options: Options) -> Result<()> {
             log::error!("start the environment checkout watcher: {error}");
         }
     }
-    let runtime = start(&options)?;
+    let mut runtime = start(&options, guest_mode)?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
         report_activity(&runtime, cloud.clone(), origin);
     }
@@ -326,6 +352,7 @@ fn run(options: Options) -> Result<()> {
                             // standing service, not a detached desktop owner.
                             options.relay_link.is_some()
                                 || runtime.manager.has_background_work()
+                                || local_vm_busy()
                                 || runtime.manager.idle_process_roots().is_none()
                                 || crate::issue_pipeline::engine::holding() != 0
                                 // An enabled schedule/issue watcher is an
@@ -349,7 +376,7 @@ fn run(options: Options) -> Result<()> {
         });
         Ok(())
     };
-    shutdown(&runtime);
+    shutdown(&mut runtime);
     println!("{}", json!({ "type": "stopped", "ok": outcome.is_ok() }));
     outcome
 }
@@ -438,8 +465,15 @@ fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstr
 }
 
 /// The desktop's `setup`, less everything that needs a window.
-fn start(options: &Options) -> Result<Runtime> {
-    let lifetime = (options.runtime_kind == RuntimeKind::Local)
+fn local_vm_busy() -> bool {
+    #[cfg(unix)]
+    { crate::local_vm::supervisor::has_work() }
+    #[cfg(not(unix))]
+    { false }
+}
+
+fn start(options: &Options, guest_mode: bool) -> Result<Runtime> {
+    let lifetime = (options.runtime_kind == RuntimeKind::Local && !guest_mode)
         .then(|| crate::local_runtime::Lifetime::starting(Duration::from_secs(options.idle_grace_seconds)));
     let project_root = match &options.project_root {
         Some(root) => {
@@ -487,6 +521,8 @@ fn start(options: &Options) -> Result<Runtime> {
         control_endpoint.clone(),
     );
     manager.follow_pane_exits();
+    #[cfg(unix)]
+    let guest = crate::local_vm::guest::Guest::installed(manager.clone(), sink.clone())?;
     let hooked = manager.clone();
     let mut service = crate::control::ControlService::headless(
         sink.clone(),
@@ -494,11 +530,19 @@ fn start(options: &Options) -> Result<Runtime> {
         control_endpoint.clone(),
         options.runtime_kind.as_str().into(),
     );
+    #[cfg(unix)]
+    { service = service.with_guest(guest.clone()); }
     if let Some(lifetime) = &lifetime {
         service = service.with_local_lifetime(lifetime.clone());
         #[cfg(unix)]
         lifetime.set_stream_socket(crate::local_runtime::stream::start(&control_endpoint, sink.clone(), terminals.clone(), lifetime.clone())?);
     }
+    #[cfg(unix)]
+    let vm_supervisor = if !options.self_test {
+        lifetime.as_ref().map(|life| crate::local_vm::supervisor::Supervisor::start(life.clone())).transpose()?
+    } else { None };
+    #[cfg(unix)]
+    if vm_supervisor.is_some() { service=service.with_vm_controller(); }
     let hook_lifetime = lifetime.clone();
     let socket = crate::hooks::serve(control_endpoint, move |frame| {
         let _request = match hook_lifetime.as_ref().map(|life| life.enter()).transpose() {
@@ -509,7 +553,7 @@ fn start(options: &Options) -> Result<Runtime> {
     }, move |request| service.handle(request))
         .context("listen on the hook and control socket")?;
     log::info!("hook socket at {}", socket.display());
-    if options.runtime_kind == RuntimeKind::Local && options.relay_link.is_none() && !options.self_test {
+    if options.runtime_kind == RuntimeKind::Local && !guest_mode && options.relay_link.is_none() && !options.self_test {
         manager.follow_terminals();
         let pipeline_host = Arc::new(crate::issue_pipeline::host::LocalHost::new(sink.clone(), manager.clone()));
         pipelines.attach(pipeline_host.clone());
@@ -549,7 +593,8 @@ fn start(options: &Options) -> Result<Runtime> {
             crate::local_runtime::workspaces::start_retention(manager.clone(), lifetime.clone());
         }
     }
-    Ok(Runtime { lifetime, sink, host, terminals, manager, socket, project_root, interrupted, pipelines })
+    Ok(Runtime { lifetime, sink, host, terminals, manager, socket, project_root, interrupted, pipelines,
+        #[cfg(unix)] guest, #[cfg(unix)] vm_supervisor })
 }
 
 /// Serve the workspace through the relay in the background, and report
@@ -758,8 +803,13 @@ fn start_relay_host(
     });
 }
 
-fn shutdown(runtime: &Runtime) {
+fn shutdown(runtime: &mut Runtime) {
+    if let Some(lifetime)=&runtime.lifetime { lifetime.begin_shutdown(); }
+    #[cfg(unix)]
+    if let Some(guest)=&runtime.guest {guest.shutdown();}
     runtime.manager.begin_shutdown();
+    #[cfg(unix)]
+    if let Some(supervisor)=&mut runtime.vm_supervisor {supervisor.shutdown();}
     let panes: Vec<_> = runtime.terminals.panes().into_iter().map(|pane| pane.id).collect();
     runtime.terminals.kill_all_and_wait(&panes, Duration::from_secs(5));
     runtime.host.kill_all_and_wait(Duration::from_secs(5));

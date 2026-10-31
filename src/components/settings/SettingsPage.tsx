@@ -28,8 +28,9 @@ import { ShortcutsTab } from "./ShortcutsTab";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
+import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
 
-const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "environments", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
@@ -41,6 +42,7 @@ const TAB_LABEL: Record<Tab, string> = {
   appearance: "Appearance",
   organizations: "Organizations",
   agents: "Agents",
+  environments: "Environments",
   transcription: "Transcription",
   integrations: "Integrations",
   storage: "Storage",
@@ -126,6 +128,7 @@ export function SettingsPage({
             {tab === "appearance" && <AppearanceTab onOpenUsage={onOpenUsage} />}
             {tab === "organizations" && <OrganizationsTab />}
             {tab === "agents" && <AgentsTab onOpenSkills={onOpenSkills} />}
+            {tab === "environments" && <EnvironmentsTab />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}
             {tab === "storage" && (

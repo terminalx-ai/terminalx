@@ -1,6 +1,6 @@
 name: Release terminalx-serve
 
-# Publishes the headless cloud-workspace runtime as runtime-only prereleases.
+# Publishes cloud-workspace and macOS guest runtimes as runtime-only prereleases.
 # The TerminalX cloud server polls them and provisions the newest compatible
 # `terminalx-serve-linux-x64`, checked against SHA256SUMS and gated on the
 # `protocol` in `terminalx-serve.json`.
@@ -121,6 +121,8 @@ jobs:
             asset: terminalx-serve-linux-x64
           - runner: ubuntu-22.04-arm
             asset: terminalx-serve-linux-arm64
+          - runner: macos-15
+            asset: terminalx-serve-macos-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -134,6 +136,9 @@ jobs:
           grep -q '^runtime-protocol = [0-9]' src-tauri/serve/Cargo.toml || { echo "::error::no runtime-protocol in src-tauri/serve/Cargo.toml"; exit 1; }
       - name: Show the Rust toolchain
         run: rustup show && cargo --version
+      - name: Verify the macOS guest artifact architecture
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
       - name: Build terminalx-serve (release)
         working-directory: src-tauri/serve
         run: cargo build --locked --release --bin terminalx-serve
@@ -141,7 +146,16 @@ jobs:
         working-directory: src-tauri/serve
         run: ../target/release/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
       - name: Report the glibc floor
+        if: runner.os == 'Linux'
         run: objdump -T src-tauri/target/release/terminalx-serve | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - name: Verify macOS executable and guest helper failure behavior
+        if: runner.os == 'macOS'
+        run: |
+          file src-tauri/target/release/terminalx-serve | grep 'Mach-O 64-bit executable arm64'
+          # An uninstalled guest must refuse identity-scoped RPCs before it
+          # starts a runtime or reaches any desktop/control endpoint.
+          printf '%s' '{"method":"describe","params":{}}' | src-tauri/target/release/terminalx-serve local-vm-rpc - > "$RUNNER_TEMP/guest-rpc.json"
+          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["ok"] is False' "$RUNNER_TEMP/guest-rpc.json"
       - name: Stage the asset
         run: |
           mkdir -p "$RUNNER_TEMP/out"
@@ -191,6 +205,8 @@ jobs:
               'protocol': int(crate['metadata']['terminalx']['runtime-protocol']),
               'commit': os.environ['REF'],
               'builtAt': os.environ['BUILT_AT'],
+              'localVmProtocol': 1,
+              'guestPlatform': 'aarch64-apple-darwin',
           }
           with open('assets/terminalx-serve.json', 'w') as f:
               json.dump(manifest, f, indent=2)
@@ -218,13 +234,13 @@ jobs:
               exit 0
             fi
           fi
-          files=(terminalx-serve-linux-x64 terminalx-serve-linux-arm64 terminalx-serve.json)
+          files=(terminalx-serve-linux-x64 terminalx-serve-linux-arm64 terminalx-serve-macos-arm64 terminalx-serve.json)
           sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
           gh release create "$TAG" "${files[@]}" SHA256SUMS \
             --target "$REF" --prerelease --latest=false \
             --title "$TAG" \
-            --notes "Cloud workspace runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest."
+            --notes "Cloud workspace and macOS arm64 guest runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest. Guest providers and desktop driver are separately installed."
       - name: Prune runtime prereleases beyond the newest ${{ env.KEEP_RUNTIME_RELEASES }}
         env:
           GH_TOKEN: ${{ github.token }}

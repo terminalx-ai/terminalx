@@ -103,10 +103,10 @@ Usage:
   terminalx pipelines show PIPELINE [--project PROJECT] [--json]
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines stop|resume|advance|review|merge|refresh PIPELINE [--project PROJECT] [--json]
-  terminalx vm status|start|stop [--json]
-  terminalx vm tools [TOOL] [--json]
-  terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
-  terminalx vm screenshot [--out PATH] [--json]
+  terminalx vm inventory|status|start|stop [--json]
+  terminalx vm tools [TOOL] --target JSON [--json]
+  terminalx vm call TOOL [ARGUMENTS_JSON] --target JSON [--json]
+  terminalx vm screenshot [--out PATH] --target JSON [--json]
   terminalx skills get terminalx-cli|computer-use|local-vm [--full] [--json]
 
 Computer use (desktop apps on macOS, Linux and Windows):
@@ -148,6 +148,10 @@ struct Parsed {
 /// Returns an exit code when this invocation is the CLI, otherwise lets the
 /// desktop app continue into Tauri.
 pub fn run_cli() -> Option<i32> {
+    #[cfg(unix)]
+    if let Some(code) = crate::local_vm::attachment::run_stdio_cli() { return Some(code); }
+    #[cfg(unix)]
+    if let Some(code) = crate::container_vm::run_stdio_cli() { return Some(code); }
     let all: Vec<String> = std::env::args().collect();
     let invoked = all
         .first()
@@ -459,8 +463,9 @@ fn parse_with_stdin(
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "vm" => {
             let action = tokens.required_front("vm action (status, start, stop, tools, call or screenshot)")?;
-            let params = match action.as_str() {
-                "status" | "start" | "stop" => json!({}),
+            let target = tokens.option("--target")?.map(|raw| serde_json::from_str::<serde_json::Value>(&raw).map_err(|_| invalid("--target must be a JSON computer identity"))).transpose()?;
+            let mut params = match action.as_str() {
+                "inventory" | "status" | "start" | "stop" => json!({}),
                 "call" => {
                     let tool = tokens.required_front("tool name")?;
                     let arguments = tokens.take_front().unwrap_or_else(|| "{}".into());
@@ -470,6 +475,7 @@ fn parse_with_stdin(
                 "screenshot" => json!({"out": tokens.option("--out")?}),
                 other => return Err(invalid(format!("Unknown vm action {other}."))),
             };
+            if let Some(target) = target { params["target"] = target; }
             tokens.finish()?;
             // The first start downloads the desktop image.
             let timeout = Duration::from_secs(if action == "start" { 25 * 60 } else { 150 });

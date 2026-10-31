@@ -4335,38 +4335,38 @@ pub async fn rename_branch(app: AppHandle, project_path: String, from: String, t
     .map_err(err)?
 }
 
-/// The Local VM (`local_vm.rs`): where it stands, and the reader's controls.
+/// The Local VM (`container_vm.rs`): where it stands, and the reader's controls.
 /// Each runs the container runtime's CLI, so off the async runtime.
-async fn local_vm<F>(call: F) -> CmdResult<crate::local_vm::VmStatus>
+async fn local_vm<F>(call: F) -> CmdResult<crate::container_vm::VmStatus>
 where
-    F: FnOnce() -> anyhow::Result<crate::local_vm::VmStatus> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<crate::container_vm::VmStatus> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(call).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
-pub async fn local_vm_status() -> CmdResult<crate::local_vm::VmStatus> {
-    local_vm(|| Ok(crate::local_vm::status())).await
+pub async fn local_vm_status() -> CmdResult<crate::container_vm::VmStatus> {
+    local_vm(|| Ok(crate::container_vm::status())).await
 }
 
 #[tauri::command]
-pub async fn local_vm_start() -> CmdResult<crate::local_vm::VmStatus> {
-    local_vm(crate::local_vm::start).await
+pub async fn local_vm_start() -> CmdResult<crate::container_vm::VmStatus> {
+    local_vm(crate::container_vm::start).await
 }
 
 #[tauri::command]
-pub async fn local_vm_stop() -> CmdResult<crate::local_vm::VmStatus> {
-    local_vm(crate::local_vm::stop).await
+pub async fn local_vm_stop() -> CmdResult<crate::container_vm::VmStatus> {
+    local_vm(crate::container_vm::stop).await
 }
 
 #[tauri::command]
-pub async fn local_vm_reset() -> CmdResult<crate::local_vm::VmStatus> {
-    local_vm(crate::local_vm::reset).await
+pub async fn local_vm_reset() -> CmdResult<crate::container_vm::VmStatus> {
+    local_vm(crate::container_vm::reset).await
 }
 
 #[tauri::command]
-pub async fn local_vm_start_runtime() -> CmdResult<crate::local_vm::VmStatus> {
-    local_vm(crate::local_vm::start_runtime).await
+pub async fn local_vm_start_runtime() -> CmdResult<crate::container_vm::VmStatus> {
+    local_vm(crate::container_vm::start_runtime).await
 }
 
 /// What deleting a workspace would cost: the git state of its tree plus how
@@ -4528,4 +4528,14 @@ pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -
 #[tauri::command]
 pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<String>) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account, legacy_email.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+/// Selected-task operations run off the window thread. The adapter owns the
+/// immutable environment binding and never falls back to local tools.
+#[tauri::command]
+pub async fn local_vm_request(method: String, params: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> CmdResult<serde_json::Value> {
+    #[cfg(unix)]
+    { let sessions = state.sessions().map_err(err)?; tauri::async_runtime::spawn_blocking(move || sessions.local_vm(&method, params).map_err(err)).await.map_err(err)? }
+    #[cfg(not(unix))]
+    { let _ = (method, params, state); Err("Local macOS VMs require an Apple Silicon Mac".into()) }
 }

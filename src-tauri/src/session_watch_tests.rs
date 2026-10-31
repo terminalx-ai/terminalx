@@ -1855,6 +1855,25 @@ fn a_codex_tab_keeps_its_own_mode_under_a_stance_that_mode_launches() {
     assert!(!codex::asks_every_tool(&rig.launch_mode().unwrap()), "the reader took the tab out of asking");
 }
 
+#[test]
+fn authenticated_codex_non_gating_hooks_acknowledge_without_overriding_native_policy() {
+    for mode in ["bypassPermissions", "auto", "plan"] {
+        let rig = Rig::in_mode(CliKind::Codex, mode);
+        let frame = HookFrame { session:SESSION.into(),tab:TAB.into(),token:rig.token.clone(),
+            event:"PreToolUse".into(),payload:json!({"tool_name":"Bash","tool_input":{"command":"fixture action"}}) };
+        let reply = rig.manager.on_hook_pumping(frame.clone(), |_,_|{});
+        assert_eq!(reply.output,Some(json!({})),"{mode}");
+        assert!(reply.refused.is_none());
+        assert_eq!(rig.launch_mode().as_deref(),Some(mode));
+        let wrong = HookFrame {token:"not-this-launch".into(),..frame.clone()};
+        let reply = rig.manager.on_hook_pumping(wrong,|_,_|{});
+        assert!(reply.refused.is_some() && reply.output.is_none());
+        rig.manager.begin_shutdown();
+        let reply = rig.manager.on_hook_pumping(frame,|_,_|{});
+        assert!(reply.refused.is_some() && reply.output.is_none());
+    }
+}
+
 /// The CLI is only restarted between turns, so a mode chosen in the chat
 /// mid-turn is not the mode the turn is being judged under, and is not shown
 /// as if it were.

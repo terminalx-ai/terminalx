@@ -9,7 +9,20 @@ description: >-
 # Local VM
 
 TerminalX's Local VM is a Linux (XFCE) desktop in a container on this machine, with Firefox. The
-user sees it live in TerminalX's right panel, Computer tab, and may take control of it.
+user can open its viewer in TerminalX's right panel, Computer tab, and take control. Routine
+agent actions work in the background; opening the viewer is optional.
+
+The shared environment inventory also lists enrolled macOS Lume guests. Linux currently supports
+attached desktop tools; macOS supports explicitly submitted guest tasks. Selecting a computer does
+not move the host agent, shell or files. Linux guest-task execution and attached macOS desktop tools
+are not supported by these routes. Fresh secure macOS creation remains unavailable in the pinned profile.
+
+In Computer, select an existing Linux environment and attach its desktop tools to the stopped agent
+tab before starting it. That exact runtime and container ID are retained for this conversation and
+used for its `computer` MCP. Starting a container does not attach it to every agent. Stop this tab's
+agent before changing the attachment. A missing/stopped/replaced target fails rather than silently
+choosing the host, another container or another OS. For macOS, use the conversation's Local VM tasks
+picker and capability check; only the selected prompt and files are submitted to the exact guest generation.
 
 ## Rules
 
@@ -27,13 +40,18 @@ Use the executable you resolved (`terminalx`, `tnx`, or the app's own binary). A
 machine-readable output.
 
 ```text
+terminalx vm inventory --json       # existing Linux/macOS identities and supported routes
 terminalx vm status                  # no_runtime, runtime_down, not_created, stopped or running
 terminalx vm start                   # start it (the first start downloads about 450 MB)
-terminalx vm screenshot [--out PATH] # the whole screen as a PNG on this machine; read it to see it
-terminalx vm tools [TOOL]            # the driver's tools, or one tool's argument schema
-terminalx vm call TOOL [JSON]        # run one tool in the VM
+terminalx vm screenshot --target TARGET_JSON [--out PATH] # the whole screen as a PNG on this machine; read it to see it
+terminalx vm tools [TOOL] --target TARGET_JSON            # the driver's tools, or one tool's argument schema
+terminalx vm call TOOL [JSON] --target TARGET_JSON        # run one tool in the VM
 terminalx vm stop
 ```
+
+For `tools`, `call` and `screenshot`, copy the selected Linux entry's complete `target` object from
+`vm inventory` into `--target`, shell-quoted as one JSON argument. Keep that object for the task;
+never refresh it to a replacement implicitly. Missing or incompatible identities are refused.
 
 When `status` is not `running`:
 
@@ -45,17 +63,17 @@ When `status` is not `running`:
 ## Driving it
 
 The tools come from the VM's computer-use driver and change with its version, so read their
-schemas with `terminalx vm tools TOOL` before calling one you have not used this session.
+schemas with `terminalx vm tools TOOL --target TARGET_JSON` before calling one you have not used this session.
 Most actions target a window: `pid` and `window_id` from `list_windows`, and an `element_index`
 from `get_window_state` (preferred over pixel coordinates).
 
 A typical check of a web app:
 
-1. `terminalx vm status --json`; start it if needed.
+1. `terminalx vm inventory --json`; choose the exact supported target. Start it only when authorized, then explicitly select its resulting identity.
 2. Start the dev server on this machine as usual (say on port 3000).
 3. Open it in the VM's browser:
-   `terminalx vm call launch_app '{"name":"firefox","urls":["http://host.docker.internal:3000"]}'`
-4. `terminalx vm screenshot` and read the PNG.
-5. To interact: `terminalx vm call list_windows '{}'` for the window, `get_window_state` with its
+   `terminalx vm call --target TARGET_JSON launch_app '{"name":"firefox","urls":["http://host.docker.internal:3000"]}'`
+4. `terminalx vm screenshot --target TARGET_JSON` and read the PNG.
+5. To interact: `terminalx vm call --target TARGET_JSON list_windows '{}'` for the window, `get_window_state` with its
    `pid` and `window_id` for elements, then `click` / `type_text` / `hotkey` with them. Take a
    screenshot after each step that should change the screen.

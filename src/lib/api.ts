@@ -317,7 +317,7 @@ export interface WorkspaceRemoveOptions {
   expectedSessions: string[];
 }
 
-/** Where the Local VM stands (`local_vm.rs`). */
+/** Where the Local VM stands (`container_vm.rs`). */
 export type LocalVmState = "no_runtime" | "runtime_down" | "not_created" | "stopped" | "running";
 export interface LocalVmStatus {
   state: LocalVmState;

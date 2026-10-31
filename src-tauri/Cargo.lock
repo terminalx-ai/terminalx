@@ -5640,6 +5640,7 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "libc",
  "raccoon",
  "serde_json",
  "tempfile",

@@ -43,6 +43,22 @@ use crate::{git, pty, store};
 #[path = "session_follow.rs"]
 pub mod follow;
 
+/// A guest task's validated desktop binding is exclusive. The optional host
+/// container must neither add another desktop nor probe a runtime in the guest.
+fn computer_launch_config(
+    mut config: crate::cloud_config::LaunchConfig,
+    guest: crate::cloud_config::LaunchConfig,
+    host_args: impl FnOnce(bool) -> Result<String>,
+) -> Result<crate::cloud_config::LaunchConfig> {
+    if guest.args.is_empty() {
+        config.args.push_str(&host_args(config.args.contains("--append-system-prompt"))?);
+    } else {
+        config.env.extend(guest.env);
+        config.args.push_str(&guest.args);
+    }
+    Ok(config)
+}
+
 #[derive(Clone)]
 pub struct PendingAsk {
     pub tool_use_id: String,
@@ -1553,6 +1569,18 @@ impl SessionManager {
         })
     }
 
+    /// Serialize selection with agent launch. A live CLI keeps its original
+    /// MCP command until it exits; changing the picker must never reroute it.
+    pub fn select_computer(&self, session_id: &str, tab_id: &str, conversation: Option<String>, target: Option<crate::computer_targets::Target>) -> Result<crate::computer_targets::Selection> {
+        let runtime = self.runtime(session_id, tab_id)?;
+        let runtime = runtime.lock().unwrap();
+        if runtime.child.is_some() || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id)) {
+            bail!("Stop this tab's agent before changing its desktop attachment. Its current tools remain bound to the original computer.");
+        }
+        if let Some(target) = &target { crate::computer_targets::validate_attachment(target,session_id,tab_id,conversation.clone())?; }
+        index::update_tab(session_id, tab_id, |tab| crate::computer_targets::save(tab, conversation, target))
+    }
+
     pub fn running_tabs(&self) -> Vec<RunningTab> {
         let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         runtimes
@@ -2124,6 +2152,7 @@ impl SessionManager {
     }
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
+        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let tab = &self.launching(rt, tab);
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -2132,6 +2161,7 @@ impl SessionManager {
     }
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
+        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let tab = &self.launching(rt, tab);
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -3210,6 +3240,13 @@ impl SessionManager {
         // bound secrets, prompts and MCP servers. Before the grants, so an
         // agent credential always wins.
         let config = crate::cloud_config::launch_config(&tab.harness, &pane);
+        #[cfg(unix)]
+        let guest = crate::local_vm::guest::launch_config(&rt.session_id, &rt.tab_id, &tab.harness)?;
+        #[cfg(not(unix))]
+        let guest = crate::cloud_config::LaunchConfig::default();
+        let config = computer_launch_config(config, guest, |appends_prompt| {
+            crate::computer_targets::launch_args(&rt.session_id, tab, appends_prompt)
+        })?;
         env.extend(config.env);
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
@@ -3221,9 +3258,7 @@ impl SessionManager {
                 None => unset.push(name),
             }
         }
-        // The Local VM's driver, while the reader has it on (`local_vm.rs`).
-        let computer = crate::local_vm::launch_args(&tab.harness, config.args.contains("--append-system-prompt"));
-        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}", launch.command, config.args, computer), &unset);
+        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}", launch.command, config.args), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
@@ -4301,6 +4336,9 @@ impl SessionManager {
             log::warn!("hook {} for {}/{} refused by pid {} at {}: {reason}", frame.event, frame.session, frame.tab, std::process::id(), self.control.socket.display());
             HookReply::refused(reason)
         };
+        if matches!(frame.event.as_str(), "PreToolUse" | "PermissionRequest") && self.accepting_work().is_err() {
+            return refuse("The runtime is stopping; no tool decision was admitted".into());
+        }
         let rt_arc = match self.runtime(&frame.session, &frame.tab) {
             Ok(rt_arc) => rt_arc,
             Err(error) => return refuse(format!("this TerminalX has no such tab ({error:#})")),
@@ -4451,6 +4489,9 @@ impl SessionManager {
                 // A settings restart/teardown may have replaced this launch
                 // while its transcript was being drained above.
                 if !mine(&rt) { return HookReply::default(); }
+                if frame.event == "PreToolUse" && rt.stopping {
+                    return refuse("The worker is stopping; no tool decision was admitted".into());
+                }
                 if frame.event == "UserPromptSubmit" && source == claude::transcript::PromptSource::Reader {
                     if let Engine::Cli(p) = &mut rt.engine {
                         for echo in p.echoed.iter_mut().filter(|echo| echo.submitted && !echo.queued && !echo.command) {
@@ -4490,6 +4531,14 @@ impl SessionManager {
                 drop(rt);
                 if frame.event == "UserPromptSubmit" {
                     self.observer.automation_running(&frame.session, &frame.tab);
+                }
+                if kind == CliKind::Codex && frame.event == "PreToolUse" {
+                    // This authenticated launch's mode does not ask our UI
+                    // about every tool. Explicitly acknowledge no added hook
+                    // decision: None is a lost decision to the local-owner
+                    // bridge and must continue to fail closed. `{}` preserves
+                    // the CLI's own sandbox/rules; it is not an Allow decision.
+                    return HookReply { output: Some(serde_json::json!({})), refused: None };
                 }
             }
             // The CLI is asking in its own TUI, which means our permission
@@ -5008,6 +5057,30 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn a_bound_guest_provider_never_receives_or_probes_the_host_container() {
+        use crate::cloud_config::LaunchConfig;
+        for args in [" --strict-mcp-config --mcp-config 'guest binding'", " -c 'mcp_servers={guest_computer={}}'", " -c 'mcp_servers={}'"] {
+            let cloud = LaunchConfig { env: vec![("CLOUD_SETTING".into(), "kept".into())], args: " --model configured".into() };
+            let guest = LaunchConfig { env: vec![("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), "bound".into())], args: args.into() };
+            let merged = computer_launch_config(cloud, guest, |_| panic!("must not inspect or route the host container")).unwrap();
+            assert_eq!(merged.args, format!(" --model configured{args}"));
+            assert_eq!(merged.env, [("CLOUD_SETTING".into(), "kept".into()), ("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), "bound".into())]);
+        }
+    }
+
+    #[test]
+    fn a_host_provider_keeps_the_container_and_existing_prompt() {
+        use crate::cloud_config::LaunchConfig;
+        let cloud = LaunchConfig { env: vec![], args: " --append-system-prompt 'workspace'".into() };
+        let merged = computer_launch_config(cloud, LaunchConfig::default(), |appends_prompt| {
+            Ok(crate::container_vm::agent_args("claude", "docker", &"a".repeat(64), appends_prompt))
+        }).unwrap();
+        assert!(merged.args.contains("cua-driver"));
+        assert_eq!(merged.args.matches("--append-system-prompt").count(), 1);
+        assert!(merged.args.starts_with(" --append-system-prompt 'workspace' --mcp-config "));
+    }
 
     #[test]
     fn permission_timeout_disconnects_before_runtime_lock_cleanup() {

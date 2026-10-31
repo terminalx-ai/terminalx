@@ -47,6 +47,7 @@ export function RightPanel({
   workingTree = false,
   sessionId,
   mentionTabId,
+  conversation = null,
   statusKey = "",
   rootName,
   labelMode,
@@ -73,6 +74,7 @@ export function RightPanel({
   workingTree?: boolean;
   sessionId?: string;
   mentionTabId?: string | null;
+  conversation?: string | null;
   statusKey?: string;
   rootName?: string;
   labelMode?: "base" | "branch";
@@ -280,7 +282,7 @@ export function RightPanel({
           </div>
         )}
         {/* Only while shown: it holds a live connection to the desktop. */}
-        {computer && tab === "computer" && <ComputerPanel active />}
+        {computer && tab === "computer" && <ComputerPanel active context={sessionId && mentionTabId ? { sessionId, tabId: mentionTabId, conversation } : undefined} />}
         <div className={cn("h-full", tab !== "files" && "hidden")}>
           <FileTree
             key={refreshTick}
