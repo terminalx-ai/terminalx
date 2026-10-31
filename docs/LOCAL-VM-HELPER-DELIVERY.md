@@ -455,9 +455,62 @@ acknowledged-answer digest must be the evidence behind the ledger's account
 receipt. Every other record still needs the transport binding itself.
 Before the pin the ledger is not `trustObserved`, so nothing resolves.
 
-**Still to join.** The first strict SSH connection, which verifies the pin
-and the account, home and target, is not wired. Transport admission
-(`require_available()`) and live runs remain closed.
+**Still to join, as written before 2026-10-31.** The first strict SSH
+connection, which verifies the pin and the account, home and target, was not
+wired. Transport admission (`require_available()`) and live runs remain
+closed.
+
+**First strict SSH connection (source and fixtures only, 2026-10-31).**
+`macos_first_connection.rs` adds it behind those gates. Nothing has
+connected to anything.
+
+- **Connection.** It is built only through the existing transport plan
+  (`command_for`, which `command_using` now wraps):
+  - `-F none` and `StrictHostKeyChecking=yes`, against the single retained
+    `known_hosts` line for the pinned key;
+  - the produced private key as the only identity, just re-verified against
+    its retained public key;
+  - no agent, password, forwarding, proxy or control socket.
+
+  Nothing accepts new keys, runs `ssh-keyscan` or writes a pin other than the
+  existing exact one.
+- **Remote check.** It is fixed, uses base-system tools only and has no
+  effect. In the guest it checks:
+  - the account's uid, gid, name and directory-service home;
+  - the home's identity: not a link, same owner, device and inode;
+  - that `.ssh` and `authorized_keys` are private, not links, owned by the
+    account, with one link;
+  - the exact `restrict <key> terminalx-bootstrap:<id>` line exactly once (the
+    line now comes from the shared `authorized_keys_text::line`);
+  - the guest's own root-owned public host key, equal to the pin.
+
+  Only then does it read a fresh nonce from stdin and echo it.
+- **Reply.** It must be at most 4 KiB and exactly
+  `{stage: firstConnectionVerified, bootstrapId, uid, nonce}`. Then
+  `first-connection.json` is recorded exclusively, with the binding, target,
+  account, trust digest, key reference, `known_hosts` digest, public-key
+  digest, remote-command digest and nonce, and `ready: false`. A failed,
+  timed-out, oversized, refused or different reply records nothing; the check
+  has no effect, so it may run again.
+- **Stale receipts.** A receipt that no longer matches the binding, trust, key
+  or pin stays fenced and is never replaced.
+- **Delivery.** `deliver` runs the verification after the key is ready. The
+  first `upload` refuses unless the receipt matches.
+- **Admission.** `verify` and `deliver` both refuse at `require_available()`
+  before any process, key access, pin write or network effect.
+- **Tests.** They use a synthetic SSH stand-in, a script in a disposable
+  fixture root that checks the strict argv, the pinned line, the sole
+  identity and stdin. They cover:
+  - the exact receipt and its single run;
+  - nine bad replies: exit, timeout, oversized, not JSON, refusal, another
+    nonce, account or bootstrap, extra field;
+  - a changed VM or pin refused before any process starts;
+  - four altered receipts;
+  - delivery's upload waiting for the receipt;
+  - the production entries refusing.
+- **Not done.** No real `ssh` ran, not even to localhost. A recorded check
+  here comes from fixtures and is not live acceptance, trust or readiness.
+  `sshVerified` in the host-key status stays false.
 
 ### Guest helper executable
 
