@@ -29,9 +29,13 @@ These are source, fixture and local-build results only:
 - **Still absent or held.** The restore catalog is still empty. The bundled
   seed daemon (Option A) is not implemented, and its packaging is held for a
   separate review.
-- **Refused or false.** Person-only steps refuse in this build
-  ([person approval](#person-approval-for-person-only-actions)). Readiness and
-  acceptance stay false.
+- **Host requests, not person approvals.** On 2026-10-31 the user rejected a
+  per-operation human-presence approval and confirmed that host agents may
+  control VMs. Account confirmation, key install and host-key pin are trusted
+  host requests with their exact bindings kept
+  ([host requests and the guest boundary](#host-requests-and-the-guest-boundary)).
+  They stay unreachable in production while the owner artifact, admission and
+  runtime gates refuse. Readiness and acceptance stay false.
 - **Resources used.** No live, privileged or restore-image operation was
   performed. The only downloads were source repositories for the offline Lume
   build, and the only disk images were disposable test images.
@@ -50,13 +54,13 @@ port-49871 listener. The key never crosses a share or the socket.
 
 | # | Stage | Actor | Effect | What it establishes |
 | --- | --- | --- | --- | --- |
-| 1 | Consent | Person, TerminalX guided Create | Chooses macOS26, the intended account name, and approves installing the TerminalX VM helper in this VM | Host-side human intent; must never be agent-callable. No shipped path meets this yet: an agent holding the runtime token can also send the existing `environment.create` consent ([person approval](#person-approval-for-person-only-actions)) |
+| 1 | Consent | The person, or an agent on the trusted host, through TerminalX guided Create | Chooses macOS26, the intended account name, and installing the TerminalX VM helper in this VM | Host-side intent. Host agents may send it (decision 2026-10-31, [host requests](#host-requests-and-the-guest-boundary)). The seed daemon's own approval stays in macOS System Settings (H3) |
 | 2 | Restore | Existing pinned `lume create --ipsw` | VM created and stopped | Existing `createReceipt` |
 | 3 | Offline seed | New privileged seeder | Writes exactly three root-owned items to the guest Data volume | Seed receipt from readback with ownership enabled |
 | 4 | First boot | Existing `run` | launchd starts the helper before any login | Nothing by itself |
 | 5 | Enrollment | Helper ↔ restricted owner listener | HMAC proof of the seeded key | `helperAuthenticated`: guest root in this exact VM holds the key |
 | 6 | Setup Assistant | Person, in the owned console | Creates the account and makes any security choices | Human-only; unchanged from the console proposal |
-| 7 | Account confirmation | Helper reports; person confirms in TerminalX | Authenticated account observation matched to stage-1 intent | `accountAuthenticated` for that one account, once a verified person approval exists. This build refuses the confirmation ([person approval](#person-approval-for-person-only-actions)) |
+| 7 | Account confirmation | Helper reports; the host confirms in TerminalX | Authenticated account observation matched to stage-1 intent | `accountAuthenticated` for that one account, after the helper's acknowledgement. The confirmation is a trusted host request, never recorded as a person's approval |
 | 8 | Account effects | Helper child after dropping to that account | Existing restricted `authorized_keys` engine | Existing receipts |
 | 9 | Retirement | Helper, after the owner's acknowledgement | Deletes key, binary and plist | Retirement receipt (the helper's own claim to the owner) |
 
@@ -250,24 +254,19 @@ the local personal accounts it observes (UID at least 501, `/Users/<name>`,
 home device and inode). The owner journals that as `account-observation.json`,
 with helper authentication only.
 
-**Prepared flow versus this build.** The steps below are the prepared relay
-for the person to confirm one of those accounts through
-`environment.confirmGuestAccount`. In this build that call refuses before any
-lookup or effect, because no person approval can be verified (see
-[person approval](#person-approval-for-person-only-actions)). In TerminalX's
-own flow, the relay, the helper's acknowledgement, the key grant and install,
-and the host-key pin below all wait on a future verified approval mechanism.
+**Host request (since 2026-10-31).** The person, or an agent on the trusted
+host, confirms one of those accounts through `environment.confirmGuestAccount`
+([host requests](#host-requests-and-the-guest-boundary)). Until 2026-10-31 this
+step refused for want of a verified person approval; that gate is removed and
+kept only as history ([person approval](#person-approval-for-person-only-actions)).
+Production still cannot reach it: no version-3 owner launches
+(`Artifact::production()` refuses) and personalized admission is closed.
 
-- Host-level fixtures reach these steps only with a test-only approver.
-- The Python suite drives the owner's relay directly, because the restricted
-  owner does not verify approvals yet. The person-approval section covers
-  this direct path.
-- The onboarding capability, `confirm: true` and the parent IDs scope a
-  request. They do not prove that a person made it, because an agent holding
-  the shared runtime token can send the same values.
+- The onboarding capability, `confirm: true` and the parent IDs scope the
+  request to this bootstrap's original conversation. They are not evidence of
+  a person's consent, and nothing records them as such.
 
-Once a verified approval is presented, the prepared confirmation works like
-this:
+The confirmation works like this:
 
 - It is gated by the onboarding capability and needs `confirm: true`.
 - It must quote the exact observation digest and one account from it, from the
@@ -297,13 +296,13 @@ accounts.
   changes and explains stale-list refusals and safe retries. It shows a
   pending choice as immutable and states that confirmation is not trust or
   SSH readiness. Nothing is confirmed on load.
-- **This build.** `personApproval.available` is false. The section keeps the
-  reports visible, disables choosing, installing and pinning, shows the
-  reason, and sends nothing.
+- **No approval lock.** Since 2026-10-31 status reports no
+  `personApproval`, and the section offers each step whenever the evidence
+  allows it. It stays read-only in a read-only tab.
 
-The checkbox is an interface step, not proof of consent. The prepared requests
-carry no approval, and how a verified approval reaches the host is part of
-the undecided mechanism.
+The checkbox is an interface step for whoever uses the section. It is not
+recorded as proof of consent, and an agent's identical request is accepted on
+the same terms.
 
 **Record publication.** The owner's `writeNew` and the host's `write_new` now
 write under a unique hidden name and rename with `RENAME_EXCL`. Readers see no
@@ -355,12 +354,10 @@ The helper's `child::Forking` installer works as follows:
 **Per-VM key producer (2026-10-31).** `environment.grantGuestKey` (onboarding
 capability, `confirm: true`, original parent session, tab and conversation
 only) takes no key material and refuses `publicKey`, `privateKey` and
-`keyReference` parameters. In this build it refuses before any lookup or
-effect, because no person approval can be verified. The prepared route below
-runs only with a verified approval, which today means fixtures with a
-test-only approver. With one, the host:
+`keyReference` parameters. Since 2026-10-31 it is a trusted host request, no
+longer refused for want of a person approval. The host:
 
-1. Requires the helper's exact acknowledgement of the person's confirmed
+1. Requires the helper's exact acknowledgement of the confirmed
    account. Before it, and after a refusal, nothing is bound, reserved or
    generated.
 2. Binds the key to immutable identities verified through the owner: the
@@ -423,9 +420,8 @@ confirmation", up to but not including the first SSH connection.
    `environment.confirmGuestHostKey` (onboarding capability, `confirm: true`,
    original parent only) takes the observation digest and the exact
    fingerprint shown for review. It refuses `hostKey`, `publicKey` and
-   `knownHosts` parameters. In this build it refuses before any lookup or
-   effect, because no person approval can be verified. With a verified
-   approval (today only a fixture's test-only approver), it then:
+   `knownHosts` parameters. Since 2026-10-31 it is a trusted host request,
+   no longer refused for want of a person approval. It then:
    - records `host-key-confirmation.json` exclusively; a different
      observation or key is refused for good and never re-pinned;
    - requires that the confirmed account is the account planned at Create;
@@ -436,9 +432,8 @@ confirmation", up to but not including the first SSH connection.
    line, `StrictHostKeyChecking=yes`, no accept-new, and the produced
    original key as the only identity.
 4. **UI.** The review shows the fingerprint and how to check it in the VM's
-   own Terminal. In the prepared flow, **Pin host key** needs an explicit
-   consent checkbox. In this build it is disabled, and the checkbox alone
-   would not be proof: the host requires a verified approval. A pinned key is
+   own Terminal. **Pin host key** needs an explicit checkbox in the UI, which
+   is an interface step, not a recorded approval. A pinned key is
    described as not yet a verified SSH connection, and `changed` is an alert
    with no action.
 
@@ -520,7 +515,7 @@ connected to anything.
     journal (no lock, repair or rewrite) for the one current environment
     bound to this bootstrap. It then requires all of:
     - the existing binding and retained-ledger checks;
-    - the transport's trusted host key equal to the person's pin;
+    - the transport's trusted host key equal to the recorded pin;
     - the canonical `recorded` receipt;
     - the receipt's key digest equal to the reference's retained public key,
       read from its record without opening the private key.
@@ -549,7 +544,7 @@ connection and every guest RPC need one.
   | VM, environment id and generation | The original completed restore (`macos_provision::created_for_bootstrap`), whose endpoint pin is re-verified |
   | Sandbox | That pin's recorded `local:terminalx-<key>` (new read-only `macos_endpoint::pinned_sandbox`) |
   | Account and home | The ledger's account receipt (`retained`) |
-  | Host key and trust | The ledger's trust receipt, which must equal the person's pin in `host-key-confirmation.json` (key, fingerprint, observation digest, key reference, account) |
+  | Host key and trust | The ledger's trust receipt, which must equal the recorded pin in `host-key-confirmation.json` (key, fingerprint, observation digest, key reference, account) |
   | Per-VM key | The produced original reference, accepted only through `retained_public` (version-3 binding for this bootstrap, VM and account) |
   | Runtime | An `ApprovedRuntime` |
 
@@ -573,8 +568,8 @@ connection and every guest RPC need one.
   Nothing in source pins the TerminalX release signing identity or a runtime
   catalog entry. Taking the running executable's digest would bind a local
   development build. So no approved runtime exists in this build. That
-  depends on the held signing and distribution work, not on either open
-  consent choice.
+  depends on the held signing and distribution work, not on either consent
+  decision (both answered 2026-10-31).
 - **Tests.**
   - **Native, against the compiled owner, after the real version-3 key,
     grant and pin:**
@@ -659,8 +654,9 @@ against the helper and the seeder's production profile.
 - **Not done.**
   - **Distribution:** the helper is not signed, catalog-pinned or seeded
     (held), and it has never run in a guest.
-  - **Approval:** past the account report, every step waits on the host's
-    person approval, which this build refuses.
+  - **Approval:** until 2026-10-31, every step past the account report
+    waited on a person approval this build refused. They are now trusted
+    host requests.
   - **Retirement:** added later the same day, see the next section.
 
 ### Helper retirement
@@ -781,7 +777,114 @@ against the helper and the seeder's production profile.
   - Removing the seeded files in a real guest needs the held seeding,
     signing and live steps.
 
+## Host requests and the guest boundary
+
+### Decisions (answered 2026-10-31)
+
+The user answered both open choices:
+
+1. **Consent mechanism: "No."** The proposed Touch ID, login-password or
+   Secure Enclave approval is rejected. No other per-operation human-presence
+   approval replaces it, and neither desktop-only consent nor a platform-wide
+   agent isolation redesign was selected.
+2. **Existing onboarding: "No."** `configure`, `environment.create` and
+   `environment.setupAction` stay available.
+
+The user then said: "Agent running on my host reaching to VM is not an
+issue." An agent on the host controlling a VM is intended, trusted-host
+behavior. What matters is the guest's reach into the host.
+
+### What changed in source
+
+- **Trusted host requests.** `environment.confirmGuestAccount`,
+  `environment.grantGuestKey` and `environment.confirmGuestHostKey` no longer
+  require a person approval. The person, or an agent in the bootstrap's
+  original parent conversation, may send them.
+  - `person_approval.rs` is removed, with its test-only approver.
+  - Status no longer reports `personApproval`, and the UI no longer locks the
+    steps.
+  - A record says what was requested and from which conversation. It never
+    says a person approved.
+- **Kept.**
+  - The onboarding capability, `confirm: true` and the original parent
+    session, tab and conversation.
+  - The exact owner-verified observation digest and fingerprint, and the
+    account planned at Create.
+  - The one original per-VM key; caller-supplied keys and references are
+    refused.
+  - Exclusive once-only records: an identical retry returns the same record,
+    and anything else is refused and never re-chosen or replaced.
+  - The owner channel's MACs and sequence numbers.
+  - Every production gate: `Artifact::production()`, `require_available()`
+    and `ApprovedRuntime::production()`.
+- **Host SSH agent.** `cua` and `lume` child processes no longer inherit
+  `SSH_AUTH_SOCK` (the legacy SSH row below).
+
+### Steps that stay human-only
+
+These are human-only for reasons other than excluding host agents:
+
+| Step | Why | Source |
+| --- | --- | --- |
+| Setup Assistant and the guest's first account | The person creates the account and its password in the guest. The helper never drives Setup Assistant. | [Account confirmation and effects](#account-confirmation-and-effects); validation F5 |
+| Remote Login in the guest | A macOS setting inside the guest. TerminalX never turns it on or creates host keys. | Same section; the UI's `awaitingHostKey` text |
+| Guest permission prompts and provider sign-in | macOS privacy prompts and the provider's own sign-in, inside the guest | Validation F5; setup action descriptions |
+| Seed daemon approval | macOS keeps a registered daemon in `RequiresApproval` until the person enables it in System Settings. TerminalX never approves. | Validation H3 and F4 |
+| Disabling the helper in Login Items | The person's control. TerminalX never re-enables it. | [Retirement and person control](#retirement-and-person-control) |
+| Held live and packaging steps | The restore-image download, signing, the coordinated runs and acceptance each need their own approval | [Validation plan](LOCAL-VM-HELPER-VALIDATION-PLAN.md#draft-approval-scope-for-a-future-coordinated-run) |
+
+### Guest-to-host boundary (source review, 2026-10-31)
+
+What a process in the guest, including guest root, can reach on the host.
+"Tests" names the evidence in source. Nothing here was run against a live VM.
+
+| Channel | The guest can | The guest cannot | Tests | Not verified or open |
+| --- | --- | --- | --- | --- |
+| Task replies (`task.*`) | Return at most 32 MiB of JSON per call (`process::run`) and append its own events | Change the task, VM, generation, input or transport identity: the supervisor compares each reply with the host's record, and the personalized route rechecks request and response (`validate_route`, `validate_response`) | `transport.rs`, `macos_transport_tests.rs` | — |
+| Artifact import (automatic on poll) | Have the host keep the bytes it declares, under `local-vm/artifacts/<task>/<uuid>`, after a size and SHA-256 check, written privately and atomically | Choose a host path: ids must be UUIDs in the host's own directory | No host-side test of the import loop | **Open:** no per-task count or total quota, only the per-call bound. A guest can fill host disk there. No other host file is read or written. |
+| Patch import (`task.applyPatch`) | Supply patch bytes | Apply them: only a host request with `confirm` and a host-chosen repository root applies one, after `git apply --check --index`, once per receipt. A patch cannot write outside the work tree, into `.git` (any case) or through a symlink. | `real_git_patch_import_preserves_dirty_host_work`; `real_guest_patch_cannot_leave_the_checkout_reach_git_metadata_or_follow_a_symlink` (new) | The patch is code the guest wrote. Review it before running anything from that checkout. |
+| Inputs sent to the guest | Read the files the host selected | Read other host files: at most 64 files and 10 MiB, canonicalized inside the chosen root, credential paths refused, bytes pinned to the approved hashes | `real_files_require_approved_bytes_and_reject_symlink_escape` | — |
+| Host credentials and tokens | — | Receive the host control token, socket, hook tokens or Cua daemon tokens (`process::remove_control_credentials`). On the personalized path, any inherited variable (`env_clear`). | `process.rs`; the transport, delivery, first-connection and owner fixtures assert no `SSH_AUTH_SOCK`, `TERMINALX_NEXT_TOKEN`, `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` | Provider sign-in happens inside the guest; nothing is imported |
+| SSH, personalized path | Answer as the pinned host key | Use any forwarding: `-F none`, `IdentityAgent=none`, `ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes`, `ProxyCommand=none`, `ControlMaster=no`, `PermitLocalCommand=no`, `StrictHostKeyChecking=yes` against one pinned line | `ssh_plan_pins_guest_host_key_account_and_target_without_inherited_authentication` | Admission is closed; never run live |
+| SSH, legacy path (`cua sb exec`) | Run as the guest account that Lume signs in to | Since this checkpoint, reach the host SSH agent through `SSH_AUTH_SOCK` (`process::without_host_agent`) | `guest_session_tools_never_inherit_the_host_ssh_agent` (new) | Pinned Cua 0.7.0 calls `lume ssh` (`cua-vmm` `lume/mod.rs`). Lume tries its built-in client first, then falls back to `/usr/bin/ssh` with the user's `~/.ssh/config`, `StrictHostKeyChecking=no` and the inherited environment. In that fallback, a user config that names an agent with `IdentityAgent` and enables `ForwardAgent`, or sets `RemoteForward` or `SendEnv`, for the VM's address would still apply. Not verified live. |
+| Computer and MCP endpoints | Serve its own Driver tools to the host's attachment adapter, which carries back data | Reach the host desktop: the guest worker gets only guest native and browser tools (`desktop.rs`); provider MCP names only `local-vm-computer --stdio --task <bound target>`; no host Unix socket is forwarded or shared | `provider_mcp_configs_only_name_the_bound_guest_proxy` | — |
+| Shares | During the version-3 bootstrap launch only: read `bo/<key>/input` (the helper manifest, no secret) and write `bo/<key>/receipt` | Read the enrollment key or `control.capability`, which are never in a share. No production host code reads the writable share (`acquire_authenticated()` refuses). Personalized Create passes no share. | The restore fixture asserts no `--shared-dir`; owner launch tests | The writable share is a leftover of the version-2 design; a later binding change can drop it. VirtioFS confinement is Apple's and untested here. What `cua sb create` shares on the legacy path is not verified. |
+| Network | Use NAT egress, and reach host services listening on all interfaces, as a LAN peer would: TerminalX's nearby pairing listener on `0.0.0.0:6768` (`pairing/direct.rs`) and anything else the user runs that way | Reach host loopback services: TerminalX's local listeners bind `127.0.0.1`, as does Lume's API at the pinned commit (`127.0.0.1:7777`) | — | Live vmnet reachability and the user's other listeners are not verified |
+| Restricted Lume owner | Reach its vsock listener for this exact VM and, with the seeded key, deliver only the allowlisted records (enrollment, account observation, key result, host-key observation, retirement), each MAC'd | Promote trust: every record keeps `trustAccepted` and `ready` false and the host revalidates it. No display, VNC or clipboard is enabled. | Swift protocol suite; native owner tests | Never run against a real VM (G5) |
+| Seed daemon (planned, held) | — | Reach it: it writes three items to an unbooted guest volume before first boot, and accepts requests only from the signed TerminalX app (H4) | Seeder-core fixtures on disposable images | Not implemented (slice 5) |
+| Guest text read by host agents | Put any text in transcripts, outcomes, artifacts and screenshots | Act on the host by itself | — | A host agent that follows instructions written by the guest acts with its own host authority. Treat guest output as untrusted input. |
+| Hypervisor escape | — | — | — | Not assessed. Virtualization.framework isolation is assumed, not tested. |
+
+**Answer to "the VM cannot do sensitive things to the host, right?"** By
+source review, within its own channels the guest cannot do any of these:
+
+- read host files beyond what the host sends;
+- obtain host tokens or, since this checkpoint, the host SSH agent through the
+  environment;
+- reach the host desktop or loopback services;
+- write outside two host-private directories: its task's artifact store, and
+  the bootstrap's writable share;
+- change a host checkout without a host request.
+
+Three limits remain:
+
+- **Disk use.** The guest can fill host disk through artifact import (no
+  quota) and the bootstrap's writable share.
+- **Network.** It can reach host services listening on all interfaces, as any
+  LAN peer can.
+- **Guest-written content.** Patches and text it writes reach the host as
+  data. Host agents and people must review that data before acting on it.
+
+None of this has been checked live, and no claim is made about hypervisor
+escape.
+
 ## Person approval for person-only actions
+
+**Superseded on 2026-10-31.** The user rejected this design and confirmed
+that host agents may control VMs
+([decisions](#decisions-answered-2026-10-31)). The approval contract below was
+implemented and then removed the same day. This section is kept as the record
+of what was proposed and why.
 
 ### What the source shows (2026-10-31)
 
@@ -850,7 +953,7 @@ Proposed recommendation, pending the user's choice and the platform
 verification: consent option A, with C's scoped tab token later as defense
 in depth. Nothing of consent option A is implemented.
 
-### Approval contract (implemented; production has no approver)
+### Approval contract (implemented, then removed on 2026-10-31)
 
 - **Document.** Canonical JSON with exactly these fields: `version` 1,
   `approvalId` (UUID), `action`, `bootstrapId`, `inputsSha256`,
@@ -905,25 +1008,19 @@ in depth. Nothing of consent option A is implemented.
   Settings opt-in toggle, which is also reachable with the token.
   `environment.createPersonalized` is already closed by `require_available()`.
 
-### Decision required
+### Decision required (answered 2026-10-31)
 
-Two choices remain open for the user:
+The two choices this section asked for were:
 
-1. **The consent mechanism** (the consent options above). Consent option A
-   is the proposal. It needs platform verification, and the signing and
-   keychain-entitlement work that is separately held.
+1. **The consent mechanism** (the consent options above).
 2. **Existing onboarding consent.** Whether `configure`,
    `environment.create` and `environment.setupAction` should also fail closed
    until that mechanism exists.
 
-Until a mechanism is chosen, verified and built, this build cannot perform
-any of these:
-
-- account confirmation, key install or host-key pin;
-- anything downstream of them: `accountAuthenticated`, the key grant, the
-  trust receipts, or the first strict SSH connection.
-
-No acceptance run may count any of them as the person's consent.
+The user answered "No" to both. Consent option A was not adopted, and the
+existing onboarding stays available
+([decisions](#decisions-answered-2026-10-31)). No acceptance run counts any
+of these steps as a person's consent, because none records one.
 
 ## Account confirmation and effects
 
@@ -932,19 +1029,13 @@ No acceptance run may count any of them as the person's consent.
 - It observes local accounts with UID ≥ 501 through the existing `getpwuid_r`
   lookup (no password fields), plus home device/inode and the OS version/build,
   and reports them over the authenticated session.
-- The host matches a candidate to the stage-1 intent. In the prepared flow,
-  TerminalX then asks the person to confirm that exact account in the parent
-  session's UI.
-  - That click, its consent checkbox and the parent session/tab/conversation
-    are not human-approved intent. An agent holding the shared runtime token
-    can send the same request.
-  - The human-approved intent the remaining gates call for needs a verified,
-    one-time person approval
-    ([person approval](#person-approval-for-person-only-actions)).
-  - This build has no such approval, so it refuses the confirmation before
-    any effect.
-- Only after a confirmation accepted with such an approval does the host send
-  the confirmed intent over the session. The helper forks a
+- The host matches a candidate to the stage-1 intent. The parent session's UI
+  offers that exact account; the person or an agent in that conversation
+  confirms it as a trusted host request
+  ([host requests](#host-requests-and-the-guest-boundary)). The click, its
+  checkbox and the parent IDs are not recorded as anyone's approval.
+- Only after the host records that confirmation does it send the confirmed
+  intent over the session. The helper forks a
   child that calls `initgroups`/`setgid`/`setuid` to that account and verifies
   real and effective IDs. The child opens the home by descriptor and runs the
   existing restricted `authorized_keys` engine. Account files are never written

@@ -32,7 +32,7 @@ not exist yet are named as missing, never filled with stand-ins.
   attached-desktop path pins Cua's `cua-driver` 0.28.0. That pilot path is not
   the onboarding path validated here.
 
-## Three groups of checks
+## Four groups of checks
 
 **Guest facts G1–G6** are properties of macOS 26 and Virtualization. They do not
 depend on how the host obtains root. So a person-run `sudo` seed stands in for
@@ -64,6 +64,10 @@ are never read as host acceptance. No H procedure runs before G1–G6 pass.
 **Fresh-Mac packaging acceptance F0–F7** covers the finished end-user flow on
 a Mac with no developer tooling. It comes last, after G and H, and is defined
 [below](#fresh-mac-packaging-acceptance-f0f7).
+
+**Guest-to-host boundary B1–B7** checks live what the source review found
+about the guest's reach into the host. It runs in the same disposable VM as
+G and H, and is defined [below](#guest-to-host-boundary-checks-b1b7).
 
 ## Why two runs, one target at a time
 
@@ -493,11 +497,11 @@ install them.
 | --- | --- | --- | --- | --- |
 | F0 | Host eligibility | Evaluator, read-only | `sw_vers`, `hw.model`, a listing showing absence and a digest of `/etc/paths` | The Mac is Apple silicon on macOS 26. None of these exist: `/opt/homebrew`, `/usr/local/bin/brew`, Xcode, the Command Line Tools, `lume`, `cua`, `~/.lume`, `~/.cua`, `~/.local/bin`, a TerminalX LaunchDaemon, or shell-profile `PATH` additions. |
 | F1 | Install | Person | Installer digest and the `spctl --assess` result | TerminalX installs through its normal signed, notarized installer. Gatekeeper accepts it without any override. |
-| F2 | Disclosure and downloads | Person confirms; the app downloads | Screenshots, and the owner journal showing intent before each effect | Before anything is downloaded, the app shows the restore image, runtime and helper byte counts, the VM resources (4 vCPU, 8 GB, 160 GB sparse), the expected disk use and the retained storage. The shown sizes equal the catalog pins. Each artifact passes its SHA-256 and signature checks before use. An agent holding the runtime token can also send today's Create consent (`environment.create`). Whether it must carry a verified person approval is an open user decision ([person approval](LOCAL-VM-HELPER-DELIVERY.md#decision-required)). |
+| F2 | Disclosure and downloads | Person confirms; the app downloads | Screenshots, and the owner journal showing intent before each effect | Before anything is downloaded, the app shows the restore image, runtime and helper byte counts, the VM resources (4 vCPU, 8 GB, 160 GB sparse), the expected disk use and the retained storage. The shown sizes equal the catalog pins. Each artifact passes its SHA-256 and signature checks before use. An agent on the host may also send the Create request; that is intended (decision 2026-10-31, [host requests](LOCAL-VM-HELPER-DELIVERY.md#host-requests-and-the-guest-boundary)). The check is what the app shows, not who sent the request. |
 | F3 | Download failure and interruption | Evaluator injects the faults; the person recovers | Journal entries, the UI state and the partial-file state | The faults are: network loss mid-download, quitting the app mid-download, too little disk at admission, and a corrupted file. In each case a partial or mismatched file is never used, and the error is shown in TerminalX. Recovery is an explicit action in TerminalX. Create is never replayed, and nothing silently retries an uncertain effect. |
 | F4 | Native helper consent | Person | `SMAppService` status log and System Settings screenshots | Approval happens only in macOS's own UI (H3). Declining leaves a TerminalX wait state, with no fallback to Terminal, `sudo` or an admin script. |
 | F5 | Guest Setup Assistant and guest permissions | Person, in the guest | Screenshots and owner journal receipts | The person completes Setup Assistant and grants any guest permission in the guest's own System Settings. No SIP, TCC or profile change is made, and there is no fixed account or autologin. |
-| F6 | Completion | Person confirms the account; automation does the rest | Account confirmation, enrollment and retirement receipts, plus a verified one-time person approval for each of the account confirmation, the key install and the host-key pin | The flow reaches the design's retirement receipt (stage 9) through TerminalX alone. A checkbox, the parent IDs or the shared runtime token are not evidence of the person's confirmation. Not runnable in the current build, which refuses those three steps before any effect until a verified approval mechanism exists ([person approval](LOCAL-VM-HELPER-DELIVERY.md#person-approval-for-person-only-actions)). |
+| F6 | Completion | The person or a host agent confirms the account; automation does the rest | Account confirmation, enrollment and retirement receipts | The flow reaches the design's retirement receipt (stage 9) through TerminalX alone. No record claims a person's approval: the account confirmation, key install and host-key pin are trusted host requests ([host requests](LOCAL-VM-HELPER-DELIVERY.md#host-requests-and-the-guest-boundary)). Not runnable in the current build: the owner artifact, personalized admission and the approved runtime still refuse. |
 | F7 | Post-run audit | Evaluator, read-only | A diff of the F0 probes | Only `TerminalX.app`, its private data root and the approved seed daemon were added. There is still no Homebrew, Xcode or Command Line Tools, Lume or Cua on `PATH`, Spaces, or shell-profile change. |
 
 **Fail, explicitly:** the phase fails if any step requires the person to do
@@ -515,6 +519,25 @@ A Command Line Tools install prompt appearing at any point also fails it.
 All of these are future work: G1–G6, H1–H6, every artifact above that is not
 yet in its finished form, a signed and notarized release, the distribution
 review, a separate fresh Mac and its own future approval.
+
+## Guest-to-host boundary checks (B1–B7)
+
+The source review in
+[the delivery design](LOCAL-VM-HELPER-DELIVERY.md#guest-to-host-boundary-source-review-2026-10-31)
+lists what the guest can and cannot reach. These cases are what a coordinated
+live run must add. None has been run. Each runs in the approved disposable
+VM, with synthetic stand-ins for every credential, and never with the
+person's real SSH agent, keys or tokens.
+
+| # | Check | Evidence | Pass |
+| --- | --- | --- | --- |
+| B1 | Network reach | The host's listening sockets (`lsof -nP -iTCP -sTCP:LISTEN`) before the run, then connection attempts from the guest to the NAT gateway | Loopback-only host services are unreachable from the guest. Every reachable host port maps to a listener on all interfaces, and each is recorded. |
+| B2 | Shares | `mount` in the guest, plus the VM configuration on the host | A personalized guest sees no host share after the bootstrap launch. During it, only `bo/<key>/input` (read-only) and `bo/<key>/receipt` are shared. A legacy VM has none, or each one is recorded. |
+| B3 | Credentials | The guest session's environment and listening sockets during a legacy `cua sb exec` and a personalized RPC, with a synthetic host agent and a host config that forwards it | No `SSH_AUTH_SOCK`, forwarded agent, TerminalX token or provider key appears in either guest session, including Lume's `/usr/bin/ssh` fallback. |
+| B4 | Desktop endpoints | The guest worker's tool list and its MCP configuration | Only guest Driver and browser tools, and only `local-vm-computer --stdio --task <bound target>`. No host desktop or host socket. |
+| B5 | Owner listener | Connection attempts from a second disposable VM | Only this VM's device reaches its owner; the other is refused within the refusal budget (extends G5). |
+| B6 | Import bounds | A guest that declares many artifacts | Today this records the open gap (no per-task quota). Once a quota exists, import stops at it and keeps the task's records. |
+| B7 | Patch import | A guest-written patch that targets `../`, `.git` and a symlink | Refused with no write. Source tests already cover this (`real_guest_patch_cannot_leave_the_checkout_reach_git_metadata_or_follow_a_symlink`); the live case confirms the installed `git`. |
 
 ## Draft approval scope for a future coordinated run
 
