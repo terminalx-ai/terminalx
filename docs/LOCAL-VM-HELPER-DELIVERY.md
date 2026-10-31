@@ -360,12 +360,17 @@ synthetic keys against the compiled owner, and the Python suite drives the
 real owner with the protocol's reference helper, because an unprivileged
 Rust helper stops at `refused`.
 
-**Still to join.**
+**Transport join.** After the pin, the post-trust transport's
+`macos_keys::resolve` accepts the version-3 key record for the same
+reference. It requires the record to name exactly the transport binding's
+reference, bootstrap, environment, generation, VM and full account, and its
+acknowledged-answer digest must be the evidence behind the ledger's account
+receipt. Every other record still needs the transport binding itself.
+Before the pin the ledger is not `trustObserved`, so nothing resolves.
 
-- The transport's `macos_keys::resolve` checks a transport-shaped binding, so
-  it does not yet accept this version-3 key record for the same reference.
-- The first strict SSH connection that verifies the pin, and the account,
-  home and target, is not wired, and live runs are held.
+**Still to join.** The first strict SSH connection, which verifies the pin
+and the account, home and target, is not wired. Transport admission
+(`require_available()`) and live runs remain closed.
 
 **Unresolved invariant: person-only methods are not yet person-only against
 agents.** The persistent owner accepts `local_vm.request` from any holder of

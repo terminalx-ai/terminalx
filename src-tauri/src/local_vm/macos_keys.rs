@@ -184,7 +184,35 @@ pub(super) fn resolve(
     budget: Duration,
 ) -> Result<std::fs::File> {
     binding.check_retained(root)?;
-    Ok(resolve_in(root, &binding.key_reference, &Bound::of(binding)?, verifier, budget)?.0)
+    let bound = transport_bound(root, binding)?;
+    Ok(resolve_in(root, &binding.key_reference, &bound, verifier, budget)?.0)
+}
+/// The binding this reference's record must hold for the transport: the
+/// transport binding itself, or the version-3 key produced for exactly this
+/// reference, bootstrap, VM and account, whose helper-acknowledged answer is the
+/// evidence behind the ledger's account receipt. Anything else stays refused.
+fn transport_bound(root: &Path, binding: &Binding) -> Result<Bound> {
+    let path = directory(root, binding)?;
+    let record: Value = serde_json::from_slice(&private_read(&path.join("record.json"), 32 * 1024)?)?;
+    let produced = &record["binding"];
+    if produced["version"] != 3 {
+        return Bound::of(binding);
+    }
+    let retained = super::macos_personalization::retained(root, &binding.bootstrap_id, &binding.target)?;
+    let (a, t) = (&binding.account, &binding.target);
+    if produced["keyReference"] != binding.key_reference.as_str()
+        || produced["bootstrapId"] != binding.bootstrap_id.as_str()
+        || produced["environmentId"] != t.environment_id.as_str()
+        || produced["generation"] != t.generation.as_str()
+        || produced["vmFingerprint"] != t.vm_fingerprint.as_str()
+        || produced["account"]
+            != json!({"gid": a.gid, "home": a.home, "homeDevice": a.home_device, "homeInode": a.home_inode,
+                "name": a.short_name, "uid": a.uid})
+        || produced["answerSha256"] != retained.account.bootstrap_observation_digest.as_str()
+    {
+        bail!("Per-guest key reference belongs to another immutable binding");
+    }
+    Bound::of(produced)
 }
 /// The retained reference, verified as the same original private file and
 /// pairing, for any immutable binding. Returns the held lock and the record.

@@ -863,6 +863,16 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
         assert!(reference.confirm_host_key(&f.root, confirmation).is_err());
     }
     assert!(!f.op().join("host-key-confirmation.json").exists());
+    let (unpinned_utility, _) = producer(&f, 7);
+    let plan_reference = serde_json::from_slice::<Value>(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap())
+        .unwrap()["intent"]["account"]["sshKeyReference"].as_str().unwrap().to_string();
+    let early = crate::local_vm::macos_transport::Binding {
+        bootstrap_id: f.key.clone(),
+        target: serde_json::from_value(serde_json::from_slice::<Value>(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap()).unwrap()["intent"]["target"].clone()).unwrap(),
+        account: crate::local_vm::macos_account::Account { short_name: "personal".into(), uid: 501, gid: 20, home: "/Users/personal".into(), home_device: 1, home_inode: 601 },
+        runtime_sha256: "c".repeat(64), trust_digest: "d".repeat(64), key_reference: plan_reference,
+    };
+    assert!(crate::local_vm::macos_keys::resolve(&f.root, &early, &unpinned_utility, Duration::from_secs(5)).is_err(), "no transport key before the pin");
     let ledger = |f: &Fixture| serde_json::from_slice::<Value>(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap()).unwrap();
     assert_eq!(ledger(&f)["status"], "planned");
 
@@ -883,6 +893,25 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     assert!(plan.args.iter().any(|a| a == "StrictHostKeyChecking=yes") && !plan.args.iter().any(|a| a.contains("accept-new") || a.contains("StrictHostKeyChecking=no")));
     assert!(plan.args.iter().any(|a| a.ends_with(&format!("{}/private_key", record["intent"]["account"]["sshKeyReference"].as_str().unwrap()))),
         "the produced original key is the only identity");
+
+    // The post-trust transport resolves the produced original key only for this
+    // exact binding and the ledger's evidence; a changed record is refused.
+    let (utility, _) = producer(&f, 7);
+    let transport = crate::local_vm::macos_transport::Binding {
+        bootstrap_id: f.key.clone(), target: target.clone(), account: retained.account.account.clone(),
+        runtime_sha256: "c".repeat(64), trust_digest: journal::digest(&serde_json::to_vec(&retained.trust).unwrap()),
+        key_reference: record["intent"]["account"]["sshKeyReference"].as_str().unwrap().into(),
+    };
+    crate::local_vm::macos_keys::resolve(&f.root, &transport, &utility, Duration::from_secs(5)).unwrap();
+    let key_record = f.root.join("macos-personalization-keys").join(&transport.key_reference).join("record.json");
+    let original = std::fs::read(&key_record).unwrap();
+    let mut forged: Value = serde_json::from_slice(&original).unwrap();
+    forged["binding"]["answerSha256"] = json!("e".repeat(64));
+    forged["inputDigest"] = json!(journal::digest(&serde_json::to_vec(&forged["binding"]).unwrap()));
+    journal::atomic_private_write(&key_record, &serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert!(crate::local_vm::macos_keys::resolve(&f.root, &transport, &utility, Duration::from_secs(5)).is_err(), "not the ledger's evidence");
+    journal::atomic_private_write(&key_record, &original).unwrap();
+    crate::local_vm::macos_keys::resolve(&f.root, &transport, &utility, Duration::from_secs(5)).unwrap();
 
     // A changed observation is shown as changed and is never pinned.
     let (changed, changed_key) = host_key_observation(&f, &reference, &result, 10);
