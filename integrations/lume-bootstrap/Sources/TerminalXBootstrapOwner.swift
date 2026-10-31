@@ -194,7 +194,7 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         let clientNonce = try txString(request, "clientNonce")
         _ = try txHex(clientNonce)
         try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop",
-            "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer"].contains(action)
+            "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer", "hostKeyObservation"].contains(action)
             && txString(request, "bindingDigest") == launch.bindingDigest)
         let nonce = txNonce()
         let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
@@ -209,7 +209,8 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
         if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
         // Version 3 has no share trust path: only enrollment and an owner-mediated
         // stop are served, and neither is served for earlier versions.
-        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer"]
+        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer",
+            "hostKeyObservation"]
         try txRequire(launch.binding.version == 3
             ? (["observe"] + enrolledOnly).contains(action) : !enrolledOnly.contains(action))
         switch action {
@@ -227,6 +228,7 @@ final class TerminalXBootstrapOwner: @unchecked Sendable {
             state.lock(); let wake = onRelay; state.unlock()
             wake?()
         case "keyAnswer": receipt = try launch.pins["operation"]!.receipt("key-install-result.json")
+        case "hostKeyObservation": receipt = try launch.pins["operation"]!.receipt("host-key-observation.json")
         case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
         case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
         default: receipt = Data()

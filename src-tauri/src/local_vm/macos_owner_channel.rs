@@ -80,6 +80,18 @@ pub(super) struct AccountConfirmation {
     pub(super) parent_tab: String,
     pub(super) parent_conversation: String,
 }
+/// What the person confirmed after reviewing the guest's host key: the exact
+/// fingerprint shown from one observation, in the original parent conversation.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct HostKeyConfirmation {
+    pub(super) confirm: bool,
+    pub(super) observation_sha256: String,
+    pub(super) fingerprint: String,
+    pub(super) parent_session: String,
+    pub(super) parent_tab: String,
+    pub(super) parent_conversation: String,
+}
 fn operation(params: &Value) -> Result<Reference> {
     let key = params["idempotencyKey"].as_str().context("Original bootstrap operation required")?;
     journal::validate_id(key)?;
@@ -136,12 +148,17 @@ fn account_status(reference: &Reference) -> Result<Value> {
         Err(_) if authenticated => json!({"stage": "notGranted"}),
         Err(_) => Value::Null,
     };
+    let host_key = match key["stage"].as_str() {
+        Some("publicKeyInstalled") => reference.host_key_status()?,
+        _ => Value::Null,
+    };
     let chosen = match reference.root.exists("account-confirmation.json")? {
         true => serde_json::from_slice::<Value>(&reference.root.read("account-confirmation.json", 32 * 1024, true)?)?["account"].clone(),
         false => Value::Null,
     };
     Ok(json!({"observationSha256": journal::digest(&bytes), "accounts": observation["accounts"], "helperAuthenticated": true,
-        "accountAuthenticated": authenticated, "chosen": chosen, "answer": answer, "key": key, "trustAccepted": false, "ready": false}))
+        "accountAuthenticated": authenticated, "chosen": chosen, "answer": answer, "key": key, "hostKey": host_key,
+        "trustAccepted": false, "ready": false}))
 }
 /// The person's explicit confirmation of one reported account.
 pub(super) fn confirm_guest_account(params: &Value) -> Result<Value> {
@@ -171,6 +188,21 @@ pub(super) fn grant_guest_key(params: &Value) -> Result<Value> {
     }
     let relay = reference.grant_guest_key_using(&super::host::root()?, Path::new("/usr/bin/ssh-keygen"), Duration::from_secs(15))?;
     Ok(json!({"relay": relay, "installed": false, "trustAccepted": false, "ready": false}))
+}
+/// The person's confirmation of the guest's SSH host key after reviewing its
+/// fingerprint, from the original parent. No key is accepted from the caller;
+/// only the owner's observation is pinned. It makes no SSH connection, and the
+/// first connection, not this, verifies the pin.
+pub(super) fn confirm_guest_host_key(params: &Value) -> Result<Value> {
+    if ["hostKey", "publicKey", "knownHosts"].iter().any(|name| !params[*name].is_null()) {
+        bail!("Host keys are never accepted from a caller")
+    }
+    let reference = operation(params)?;
+    let confirmation: HostKeyConfirmation = serde_json::from_value(json!({"confirm": params["confirm"],
+        "observationSha256": params["observationSha256"], "fingerprint": params["fingerprint"],
+        "parentSession": params["parentSession"], "parentTab": params["parentTab"],
+        "parentConversation": params["parentConversation"]}))?;
+    reference.confirm_host_key(&super::host::root()?, &confirmation)
 }
 /// This VM's one original SSH key: `planned`, the reference its provisioning
 /// intent minted, published in `key-intent.json` and produced under exactly
@@ -676,6 +708,7 @@ impl Reference {
             "accountObservation",
             "accountAnswer",
             "keyAnswer",
+            "hostKeyObservation",
         ]
         .contains(&action)
         {
@@ -924,6 +957,12 @@ impl Reference {
     /// the VM existed, and that intent's digest. The post-trust transport uses
     /// the same reference; no other is ever minted for this VM.
     fn planned_key(&self, root: &Path) -> Result<(String, String)> {
+        let (plan, digest) = self.plan(root)?;
+        Ok((plan.ssh_key_reference, digest))
+    }
+    /// The account plan this bootstrap's provisioning intent recorded before the
+    /// VM existed, checked against this owner's VM, and the intent's digest.
+    fn plan(&self, root: &Path) -> Result<(super::macos_personalization::AccountPlan, String)> {
         // SAFETY: geteuid has no memory preconditions.
         let dir = Directory::open(&root.join("macos-personalization").join(&self.binding.bootstrap_id), unsafe { libc::geteuid() }, true)?;
         let record: Value = fs::json(&dir, "record.json", 64 * 1024)?;
@@ -940,7 +979,7 @@ impl Reference {
         }
         let plan: super::macos_personalization::AccountPlan = serde_json::from_value(record["intent"]["account"].clone())?;
         journal::validate_id(&plan.ssh_key_reference)?;
-        Ok((plan.ssh_key_reference, digest))
+        Ok((plan, digest))
     }
     /// The SSH public key grant for the account the helper confirmed: recorded
     /// once, exclusively, then relayed. Bound to that confirmation, the exact
@@ -983,6 +1022,9 @@ impl Reference {
     /// The helper's install result for the recorded grant. Only its own
     /// `publicKeyInstalled` counts; unknown and refused never become success.
     fn key_result(&self) -> Result<Value> {
+        Ok(self.key_result_bytes()?.1)
+    }
+    fn key_result_bytes(&self) -> Result<(Vec<u8>, Value)> {
         let recorded = self.root.read("key-grant.json", 32 * 1024, true)?;
         let retained: Value = serde_json::from_slice(&recorded)?;
         let receipt = self.observe("keyAnswer", &journal::new_id())?;
@@ -995,7 +1037,96 @@ impl Reference {
         {
             bail!("Owner key install result changed or claimed trust")
         }
-        Ok(result)
+        Ok((receipt.bytes, result))
+    }
+    /// Version 3: the guest's existing public host key, exactly as the owner
+    /// journaled the helper's report after the helper's own `publicKeyInstalled`
+    /// for this grant. Evidence for the person's review; never trust by itself.
+    fn host_key_observation(&self) -> Result<(Vec<u8>, Value)> {
+        let (result_bytes, result) = self.key_result_bytes()?;
+        if result["stage"] != "publicKeyInstalled" {
+            bail!("The host key is reported only after the helper installed TerminalX's key")
+        }
+        let grant = self.root.read("key-grant.json", 32 * 1024, true)?;
+        let receipt = self.observe("hostKeyObservation", &journal::new_id())?;
+        let value: Value = serde_json::from_slice(&receipt.bytes)?;
+        let host_key = value["hostKey"].as_str().unwrap_or_default();
+        if super::macos_personalization::public_key(host_key).is_err()
+            || value != json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+                "grantSha256": journal::digest(&grant), "keyResultSha256": journal::digest(&result_bytes),
+                "keyReference": result["keyReference"], "hostKey": host_key, "observed": true, "trustAccepted": false, "ready": false})
+        {
+            bail!("Owner host-key observation changed or claimed trust")
+        }
+        Ok((receipt.bytes, value))
+    }
+    /// Read-only: where the host-key review stands. A recorded confirmation
+    /// whose observation no longer matches is `changed` and is never re-pinned.
+    fn host_key_status(&self) -> Result<Value> {
+        let observed = self.host_key_observation().ok();
+        if !self.root.exists("host-key-confirmation.json")? {
+            return Ok(match observed {
+                Some((bytes, observation)) => json!({"stage": "awaitingReview", "observationSha256": journal::digest(&bytes),
+                    "hostKey": observation["hostKey"], "fingerprint": super::macos_personalization::public_key(observation["hostKey"].as_str().unwrap_or_default())?,
+                    "sshVerified": false, "ready": false}),
+                None => json!({"stage": "awaitingHostKey", "sshVerified": false, "ready": false}),
+            });
+        }
+        let retained: Value = serde_json::from_slice(&self.root.read("host-key-confirmation.json", 32 * 1024, true)?)?;
+        let changed = observed.is_some_and(|(bytes, _)| retained["observationSha256"] != journal::digest(&bytes).as_str());
+        Ok(json!({"stage": if changed { "changed" } else { "confirmed" }, "hostKey": retained["hostKey"],
+            "fingerprint": retained["fingerprint"], "sshVerified": false, "ready": false}))
+    }
+    /// The person's confirmation of the exact fingerprint shown from the
+    /// owner's observation, from the original parent. Recorded once; a different
+    /// key or observation is refused for good and never re-pinned. Then the
+    /// existing ledger records the acknowledged account and this host key, which
+    /// the strict SSH plan pins. No SSH connection is made here.
+    fn confirm_host_key(&self, root: &Path, confirmation: &HostKeyConfirmation) -> Result<Value> {
+        let (bytes, observation) = self.host_key_observation()?;
+        let host_key = observation["hostKey"].as_str().unwrap_or_default();
+        let fingerprint = super::macos_personalization::public_key(host_key)?;
+        let b = &self.binding;
+        if !confirmation.confirm
+            || confirmation.observation_sha256 != journal::digest(&bytes)
+            || confirmation.fingerprint != fingerprint
+            || confirmation.parent_session != b.parent_session
+            || confirmation.parent_tab != b.parent_tab
+            || confirmation.parent_conversation != b.parent_conversation
+        {
+            bail!("Confirm the exact host key fingerprint shown, from the original parent conversation")
+        }
+        let (answer_bytes, answer) = self.account_answer_bytes()?;
+        let a = &answer["account"];
+        let (plan, _) = self.plan(root)?;
+        if answer["outcome"] != "confirmed" || a["name"] != plan.short_name.as_str() || a["home"] != plan.home().as_str() {
+            bail!("The confirmed account is not the account planned for this VM; its host key is not pinned")
+        }
+        let account = super::macos_account::Account {
+            short_name: plan.short_name.clone(),
+            uid: a["uid"].as_u64().and_then(|n| u32::try_from(n).ok()).context("Confirmed account uid missing")?,
+            gid: a["gid"].as_u64().and_then(|n| u32::try_from(n).ok()).context("Confirmed account gid missing")?,
+            home: plan.home(),
+            home_device: a["homeDevice"].as_u64().context("Confirmed account home device missing")?,
+            home_inode: a["homeInode"].as_u64().context("Confirmed account home inode missing")?,
+        };
+        let record = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": b.owner_epoch,
+            "observationSha256": journal::digest(&bytes), "keyResultSha256": observation["keyResultSha256"],
+            "grantSha256": observation["grantSha256"], "keyReference": observation["keyReference"],
+            "account": {"name": a["name"], "uid": a["uid"]}, "hostKey": host_key, "fingerprint": fingerprint,
+            "parentSession": b.parent_session, "parentTab": b.parent_tab, "parentConversation": b.parent_conversation,
+            "confirmationId": journal::new_id()}))?;
+        if !self.root.exists("host-key-confirmation.json")? {
+            self.root.write_new("host-key-confirmation.json", &record)?;
+        }
+        let retained: Value = serde_json::from_slice(&self.root.read("host-key-confirmation.json", 32 * 1024, true)?)?;
+        if retained["observationSha256"] != journal::digest(&bytes).as_str() || retained["hostKey"] != host_key {
+            bail!("A different host key was already confirmed for this VM; it is never replaced")
+        }
+        let ledger = super::macos_personalization::retain_confirmed_trust(root, &b.bootstrap_id, account,
+            &journal::digest(&answer_bytes), host_key, &journal::digest(&bytes))?;
+        Ok(json!({"confirmation": retained, "ledgerStatus": ledger["status"], "hostKeyConfirmed": true,
+            "sshVerified": false, "ready": false}))
     }
     fn guest_observation(&self) -> Result<Value> {
         if self.binding.version != 2 {

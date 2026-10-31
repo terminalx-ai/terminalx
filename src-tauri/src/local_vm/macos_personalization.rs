@@ -56,7 +56,7 @@ impl AccountPlan {
         }
         Ok(())
     }
-    fn home(&self) -> String {
+    pub(super) fn home(&self) -> String {
         format!("/Users/{}", self.short_name)
     }
 }
@@ -271,6 +271,48 @@ pub fn retain_trust(root: &Path, key: &str, receipt: &TrustReceipt) -> Result<Va
     record["trustReceipt"] = json!(receipt);
     record["status"] = json!("trustObserved");
     retain(&dir, &record)?;
+    Ok(record)
+}
+
+/// Version-3 trust: the account the helper acknowledged for the person's
+/// confirmation and the host key the person confirmed, both for this original
+/// operation, recorded together once under the ledger lock. The account must
+/// be the one planned at Create. A retry with the same receipts returns the
+/// record; any other account or host key is refused and never replaces it.
+pub(super) fn retain_confirmed_trust(
+    root: &Path,
+    key: &str,
+    account: super::macos_account::Account,
+    answer_digest: &str,
+    confirmed_key: &str,
+    observation_digest: &str,
+) -> Result<Value> {
+    let (dir, _lock) = locked(root, key)?;
+    let mut record = read(&dir)?;
+    let target: Target = serde_json::from_value(record["intent"]["target"].clone())?;
+    let plan: AccountPlan = serde_json::from_value(record["intent"]["account"].clone())?;
+    let account = AccountReceipt { target: target.clone(), account, bootstrap_observation_digest: answer_digest.into() };
+    confirm_account(&target, &plan, &account)?;
+    let account_value = serde_json::to_value(&account)?;
+    let trust = TrustReceipt {
+        target,
+        account_receipt_digest: journal::digest(&serde_json::to_vec(&account_value)?),
+        host_key: confirmed_key.into(),
+        host_key_fingerprint: public_key(confirmed_key)?,
+        bootstrap_observation_digest: observation_digest.into(),
+    };
+    host_key(&trust)?;
+    let trust_value = serde_json::to_value(&trust)?;
+    match record["status"].as_str() {
+        Some("planned") => {
+            record["accountReceipt"] = account_value;
+            record["trustReceipt"] = trust_value;
+            record["status"] = json!("trustObserved");
+            retain(&dir, &record)?;
+        }
+        Some("trustObserved") if record["accountReceipt"] == account_value && record["trustReceipt"] == trust_value => {}
+        _ => bail!("This VM's bootstrap history already records another account or host key; it is never replaced"),
+    }
     Ok(record)
 }
 

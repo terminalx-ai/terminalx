@@ -56,6 +56,7 @@ interface Requests {
   "environment.desktop": { params: { environmentId: string; target?: LocalVmTaskTarget }; result: LocalVmJson };
   "environment.releaseDesktop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
   "environment.guestAccountConfirmations": { params: { parentSession: string; parentTab: string; parentConversation: string }; result: { bootstraps: LocalVmGuestAccountStatus[] } };
+  "environment.confirmGuestHostKey": { params: { idempotencyKey: string; confirm: true; observationSha256: string; fingerprint: string; parentSession: string; parentTab: string; parentConversation: string }; result: LocalVmJson };
   "environment.grantGuestKey": { params: { idempotencyKey: string; confirm: true; parentSession: string; parentTab: string; parentConversation: string }; result: LocalVmJson };
   "environment.confirmGuestAccount": { params: { idempotencyKey: string; confirm: true; observationSha256: string; account: LocalVmGuestAccount; parentSession: string; parentTab: string; parentConversation: string }; result: LocalVmJson };
   "task.submit": { params: LocalVmSubmission; result: LocalVmTask };

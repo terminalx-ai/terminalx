@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { localVmRequest } from "@/lib/localVm";
@@ -93,6 +93,7 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
         {checkButton}
       </div> : null}
       {outcome === "confirmed" && !item.key ? checkButton : null}
+      {outcome === "confirmed" && item.hostKey ? <HostKeyReview item={item} session={session} tab={tab} conversation={conversation} readOnly={readOnly} reload={reload} checkButton={checkButton} /> : null}
     </>;
   } else if (item.chosen) {
     body = <>
@@ -124,6 +125,54 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
   return <div className="space-y-2 rounded-md border border-border p-3">
     <p className="font-medium">Choose the guest account for this VM</p>
     {body}
+    {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+  </div>;
+}
+
+/** The person's review of the guest's SSH host key, as the authenticated helper
+ *  reported it. Pinning needs the exact fingerprint shown and explicit consent;
+ *  a different key is refused, and pinning is not a verified SSH connection. */
+function HostKeyReview({ item, session, tab, conversation, readOnly, reload, checkButton }: {
+  item: LocalVmGuestAccountStatus; session: SessionEntry; tab: TabEntry; conversation: string; readOnly: boolean; reload: () => Promise<void>; checkButton: ReactNode;
+}) {
+  const hostKey = item.hostKey;
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const lock = useRef(false);
+  useEffect(() => { setConsent(false); }, [hostKey?.observationSha256]);
+  if (!hostKey) return null;
+
+  async function pin() {
+    if (lock.current || readOnly || !consent || !hostKey?.observationSha256 || !hostKey.fingerprint) return;
+    lock.current = true; setBusy(true); setError(null);
+    try {
+      await localVmRequest("environment.confirmGuestHostKey", { idempotencyKey: item.idempotencyKey, confirm: true,
+        observationSha256: hostKey.observationSha256, fingerprint: hostKey.fingerprint,
+        parentSession: session.id, parentTab: tab.id, parentConversation: conversation });
+    } catch (error) {
+      setError(`${errorMessage(error)} A pinned host key is never replaced.`);
+    } finally { await reload(); lock.current = false; setBusy(false); }
+  }
+
+  const fingerprint = <code className="break-all font-mono">{hostKey.fingerprint}</code>;
+  return <div className="space-y-2 border-t border-border pt-2">
+    <p className="font-medium">SSH host key</p>
+    {hostKey.stage === "awaitingHostKey" ? <>
+      <p role="status">Waiting for this VM's SSH host key. If Remote Login is off in the VM, turn it on for this account in System Settings. TerminalX never turns it on or creates host keys.</p>
+      {checkButton}
+    </> : null}
+    {hostKey.stage === "awaitingReview" ? <>
+      <p>The helper in this VM reported this SSH host key fingerprint: {fingerprint}</p>
+      <p className="text-muted-foreground">To check it yourself, run <code className="font-mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> in the VM&apos;s Terminal and compare.</p>
+      <label className="flex items-start gap-2 leading-relaxed"><input type="checkbox" checked={consent} disabled={busy || readOnly} onChange={(event) => setConsent(event.target.checked)} /><span>I reviewed this fingerprint and allow TerminalX to pin it for SSH to this VM. A different key will be refused.</span></label>
+      <div className="flex gap-2">
+        <Button type="button" size="sm" disabled={busy || readOnly || !consent} onClick={() => void pin()}>{busy ? "Pinning…" : "Pin host key"}</Button>
+        {checkButton}
+      </div>
+    </> : null}
+    {hostKey.stage === "confirmed" ? <p role="status">Host key pinned: {fingerprint}. TerminalX has not connected over SSH yet; the first connection checks this exact key and stops on any mismatch.</p> : null}
+    {hostKey.stage === "changed" ? <p role="alert" className="text-destructive">This VM now reports a different SSH host key than the pinned one ({fingerprint}). TerminalX refuses to connect and never replaces the pinned key. Inspect the VM.</p> : null}
     {error ? <p role="alert" className="text-destructive">{error}</p> : null}
   </div>;
 }

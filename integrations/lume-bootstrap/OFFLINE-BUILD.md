@@ -37,7 +37,9 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   record writes and the account-confirmation relay (patch `aa85a1d9…`), SHA-256
   `524ab87bc362862cfe1a412e092af8172e542f58f5f9dd793630b757ada1524a`; with the key
   grant (patch `88198099…`), SHA-256
-  `6fe3cf29f6d5c35150cdf51b17760e0d9ec10a92d04b78f4ac61d8d1ab3ade61`.
+  `6fe3cf29f6d5c35150cdf51b17760e0d9ec10a92d04b78f4ac61d8d1ab3ade61`; with the
+  host-key observation (patch `85d79fd0…`), SHA-256
+  `4023c44590199f8b404baa1f3332e1fb14ceb9868ebbf78cc7e43fe816e3b5be`.
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those

@@ -233,6 +233,9 @@ final class TXEnrollmentService: @unchecked Sendable {
         }
         try launch.check(); try view.check()
         try session.send(fd, TXAccountRelay.grantFrame(grant!))
-        _ = try TXAccountRelay.keyResult(try session.receive(fd), relay: grant!, launch: launch)
+        let result = try TXAccountRelay.keyResult(try session.receive(fd), relay: grant!, launch: launch)
+        // Only after the helper's own install: the guest's existing public host key.
+        guard (try JSONSerialization.jsonObject(with: result) as? [String: Any])?["stage"] as? String == "publicKeyInstalled" else { return }
+        _ = try TXAccountRelay.hostKey({ try session.receive(fd) }, result: result, deadline: deadline, launch: launch)
     }
 }

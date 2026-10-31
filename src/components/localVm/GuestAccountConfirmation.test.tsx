@@ -109,6 +109,37 @@ describe("guest account confirmation", () => {
     expect((await screen.findByRole("button", { name: "Install SSH key" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("pins a host key only after reviewing the exact fingerprint with consent, and never presents it as SSH readiness", async () => {
+    const installed = { chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed" as const, accountAuthenticated: true, account: personal }, key: { stage: "publicKeyInstalled" as const, installed: true } };
+    const fingerprint = "SHA256:xcTb/ZL8NmQsvo9k2j/c7dIyp7nvDnswfPZHlzcZwz0";
+    listing = [status({ ...installed, hostKey: { stage: "awaitingHostKey", sshVerified: false, ready: false } })];
+    const { unmount } = mount();
+    expect(await screen.findByText(/Waiting for this VM's SSH host key.*never turns it on or creates host keys/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Pin host key" })).toBeNull();
+    unmount();
+    listing = [status({ ...installed, hostKey: { stage: "awaitingReview", observationSha256: "c".repeat(64), fingerprint, sshVerified: false, ready: false } })];
+    mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
+      if (args.method === "environment.confirmGuestHostKey") { listing = [status({ ...installed, hostKey: { stage: "confirmed", fingerprint, sshVerified: false, ready: false } })]; return { hostKeyConfirmed: true }; }
+      return { bootstraps: listing };
+    });
+    mount();
+    expect(await screen.findByText(fingerprint)).toBeTruthy();
+    const pin = screen.getByRole("button", { name: "Pin host key" }) as HTMLButtonElement;
+    expect(pin.disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText(/I reviewed this fingerprint and allow TerminalX to pin it/));
+    expect(pin.disabled).toBe(false);
+    fireEvent.click(pin);
+    await waitFor(() => expect(calls("environment.confirmGuestHostKey")).toHaveLength(1));
+    expect(calls("environment.confirmGuestHostKey")[0][1].params).toEqual({ idempotencyKey: "boot-1", confirm: true, observationSha256: "c".repeat(64),
+      fingerprint, parentSession: session.id, parentTab: tab.id, parentConversation: "original" });
+    expect(await screen.findByText(/Host key pinned.*has not connected over SSH yet.*stops on any mismatch/)).toBeTruthy();
+    cleanup();
+    listing = [status({ ...installed, hostKey: { stage: "changed", fingerprint, sshVerified: false, ready: false } })];
+    mount();
+    expect((await screen.findByRole("alert")).textContent).toMatch(/different SSH host key.*never replaces the pinned key/);
+    expect(screen.queryByRole("button", { name: "Pin host key" })).toBeNull();
+  });
+
   it("reports a refused account or key install without treating it as success", async () => {
     listing = [status({ chosen: personal, answer: { outcome: "refused", accountAuthenticated: false, account: personal } })];
     const { unmount } = mount();

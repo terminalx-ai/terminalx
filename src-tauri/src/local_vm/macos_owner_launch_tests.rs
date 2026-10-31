@@ -653,6 +653,10 @@ fn replace(path: &Path, bytes: &[u8]) {
 /// person's confirmation of `personal` from the original parent. Returns the
 /// chosen account and the recorded confirmation.
 fn confirmed_choice(f: &Fixture, reference: &Reference) -> (Value, Vec<u8>) {
+    choose(f, reference, 0)
+}
+/// As `confirmed_choice`, choosing the `pick`th reported account (`personal`, `other`).
+fn choose(f: &Fixture, reference: &Reference, pick: usize) -> (Value, Vec<u8>) {
     let digest = journal::digest(&reference.raw);
     let (receipt, receipt_digest) = crate::local_vm::macos_seed::seeded(&f.root, &f.key).unwrap();
     private(&f.op().join("enrollment.json"), &canonical(&json!({"version":2,"bindingDigest":digest,"ownerEpoch":reference.binding.owner_epoch,
@@ -664,12 +668,13 @@ fn confirmed_choice(f: &Fixture, reference: &Reference) -> (Value, Vec<u8>) {
         "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501), account("other", 502)], "helperAuthenticated": true,
         "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
     private(&f.op().join("account-observation.json"), &observation);
+    let chosen = [account("personal", 501), account("other", 502)][pick].clone();
     reference.confirm_account(&super::super::AccountConfirmation {
-        confirm: true, observation_sha256: journal::digest(&observation), account: account("personal", 501),
+        confirm: true, observation_sha256: journal::digest(&observation), account: chosen.clone(),
         parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
         parent_conversation: reference.binding.parent_conversation.clone(),
     }).unwrap();
-    (account("personal", 501), std::fs::read(f.op().join("account-confirmation.json")).unwrap())
+    (chosen, std::fs::read(f.op().join("account-confirmation.json")).unwrap())
 }
 fn answer(reference: &Reference, recorded: &[u8], account: &Value, outcome: &str) -> Vec<u8> {
     canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
@@ -790,4 +795,133 @@ fn native_an_interrupted_key_creation_is_pending_and_never_repeated_or_granted()
         "parentConversation": reference.binding.parent_conversation});
     let listed = super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap();
     assert_eq!(listed["bootstraps"][0]["key"]["stage"], "keyPending");
+}
+
+/// Through the produced grant and the helper's own `publicKeyInstalled`.
+fn installed(f: &Fixture, pick: usize) -> (Reference, Vec<u8>) {
+    seed(f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let (utility, _) = producer(f, 7);
+    let (account, recorded) = choose(f, &reference, pick);
+    private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
+    let relay = reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).unwrap();
+    let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
+    let result = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
+        "grantSha256": journal::digest(&grant), "keyReference": relay["keyReference"], "stage": "publicKeyInstalled", "installed": true,
+        "trustAccepted": false, "ready": false})).unwrap();
+    private(&f.op().join("key-install-result.json"), &result);
+    (reference, result)
+}
+fn host_key_observation(f: &Fixture, reference: &Reference, result: &[u8], fill: u8) -> (Vec<u8>, String) {
+    use base64::Engine;
+    let mut bytes = 11_u32.to_be_bytes().to_vec();
+    bytes.extend(b"ssh-ed25519");
+    bytes.extend(32_u32.to_be_bytes());
+    bytes.extend([fill; 32]);
+    let host_key = format!("ssh-ed25519 {}", base64::engine::general_purpose::STANDARD.encode(bytes));
+    let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
+    let observation = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
+        "grantSha256": journal::digest(&grant), "keyResultSha256": journal::digest(result),
+        "keyReference": serde_json::from_slice::<Value>(result).unwrap()["keyReference"], "hostKey": host_key, "observed": true,
+        "trustAccepted": false, "ready": false})).unwrap();
+    replace(&f.op().join("host-key-observation.json"), &observation);
+    (observation, host_key)
+}
+fn host_key_confirmation(reference: &Reference, observation: &[u8], fingerprint: &str) -> super::super::HostKeyConfirmation {
+    super::super::HostKeyConfirmation {
+        confirm: true, observation_sha256: journal::digest(observation), fingerprint: fingerprint.into(),
+        parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
+        parent_conversation: reference.binding.parent_conversation.clone(),
+    }
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_changed_key_is_never_pinned() {
+    let f = Fixture::new();
+    let (reference, result) = installed(&f, 0);
+    let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
+        "parentConversation": reference.binding.parent_conversation});
+    let status = || super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap()["bootstraps"][0]["hostKey"].clone();
+    assert_eq!(status()["stage"], "awaitingHostKey");
+    let (observation, host_key) = host_key_observation(&f, &reference, &result, 9);
+    let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
+    let pending = status();
+    assert_eq!((pending["stage"].as_str(), pending["fingerprint"].as_str(), pending["sshVerified"].as_bool(), pending["ready"].as_bool()),
+        (Some("awaitingReview"), Some(fingerprint.as_str()), Some(false), Some(false)));
+
+    // Nothing is pinned without the exact fingerprint shown, from the original parent.
+    let mut refused = vec![host_key_confirmation(&reference, &observation, "SHA256:another"),
+        host_key_confirmation(&reference, b"another observation", &fingerprint)];
+    let mut unconfirmed = host_key_confirmation(&reference, &observation, &fingerprint);
+    unconfirmed.confirm = false;
+    let mut elsewhere = host_key_confirmation(&reference, &observation, &fingerprint);
+    elsewhere.parent_tab = journal::new_id();
+    refused.extend([unconfirmed, elsewhere]);
+    for confirmation in &refused {
+        assert!(reference.confirm_host_key(&f.root, confirmation).is_err());
+    }
+    assert!(!f.op().join("host-key-confirmation.json").exists());
+    let ledger = |f: &Fixture| serde_json::from_slice::<Value>(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap()).unwrap();
+    assert_eq!(ledger(&f)["status"], "planned");
+
+    let confirmed = reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap();
+    assert_eq!((confirmed["hostKeyConfirmed"].as_bool(), confirmed["sshVerified"].as_bool(), confirmed["ready"].as_bool(),
+        confirmed["ledgerStatus"].as_str()), (Some(true), Some(false), Some(false), Some("trustObserved")));
+    assert_eq!(reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap()["confirmation"],
+        confirmed["confirmation"], "a retry returns the same confirmation");
+    assert_eq!(status()["stage"], "confirmed");
+
+    // The existing strict plan pins exactly this key; no accept-new, no other source.
+    let record = ledger(&f);
+    let target: crate::local_vm::macos_personalization::Target = serde_json::from_value(record["intent"]["target"].clone()).unwrap();
+    let retained = crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap();
+    assert_eq!((retained.trust.host_key.as_str(), retained.account.account.short_name.as_str()), (host_key.as_str(), "personal"));
+    let plan = crate::local_vm::macos_personalization::ssh_plan(&f.root, &f.key, &target, "192.168.64.7".parse().unwrap(), &"c".repeat(64), "status", json!({})).unwrap();
+    assert!(plan.known_hosts.ends_with(&format!(" {host_key}\n")) && plan.known_hosts.lines().count() == 1);
+    assert!(plan.args.iter().any(|a| a == "StrictHostKeyChecking=yes") && !plan.args.iter().any(|a| a.contains("accept-new") || a.contains("StrictHostKeyChecking=no")));
+    assert!(plan.args.iter().any(|a| a.ends_with(&format!("{}/private_key", record["intent"]["account"]["sshKeyReference"].as_str().unwrap()))),
+        "the produced original key is the only identity");
+
+    // A changed observation is shown as changed and is never pinned.
+    let (changed, changed_key) = host_key_observation(&f, &reference, &result, 10);
+    assert_eq!(status()["stage"], "changed");
+    let changed_fingerprint = crate::local_vm::macos_personalization::public_key(&changed_key).unwrap();
+    let error = reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &changed, &changed_fingerprint)).unwrap_err();
+    assert!(format!("{error:#}").contains("never replaced"), "{error:#}");
+    assert_eq!(ledger(&f)["trustReceipt"], record["trustReceipt"]);
+    assert_eq!(crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap().trust.host_key, host_key);
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_no_host_key_is_pinned_before_the_helpers_install_or_for_an_unplanned_account() {
+    let f = Fixture::new();
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let (utility, _) = producer(&f, 7);
+    let (account, recorded) = confirmed_choice(&f, &reference);
+    private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
+    let relay = reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).unwrap();
+    let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
+    let refused = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
+        "grantSha256": journal::digest(&grant), "keyReference": relay["keyReference"], "stage": "refused", "installed": false,
+        "trustAccepted": false, "ready": false})).unwrap();
+    private(&f.op().join("key-install-result.json"), &refused);
+    let (observation, host_key) = host_key_observation(&f, &reference, &refused, 9);
+    let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
+    assert!(reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).is_err(), "after a refused install");
+    assert!(!f.op().join("host-key-confirmation.json").exists());
+    drop(reference);
+
+    // The person confirmed `other`, not the account planned at Create.
+    let g = Fixture::new();
+    let (reference, result) = installed(&g, 1);
+    let (observation, host_key) = host_key_observation(&g, &reference, &result, 9);
+    let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
+    let error = reference.confirm_host_key(&g.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap_err();
+    assert!(format!("{error:#}").contains("not the account planned"), "{error:#}");
+    assert!(!g.op().join("host-key-confirmation.json").exists());
 }

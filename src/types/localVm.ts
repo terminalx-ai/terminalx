@@ -290,6 +290,17 @@ export interface LocalVmGuestAccount {
 
 export type LocalVmGuestKeyStage = "notGranted" | "keyPending" | "grantPending" | "publicKeyInstalled" | "outcomeUnknown" | "refused";
 
+/** The guest's existing SSH host key, as the owner observed it after the helper's
+ *  own install, and where the person's review stands. Never SSH verification. */
+export interface LocalVmGuestHostKeyStatus {
+  stage: "awaitingHostKey" | "awaitingReview" | "confirmed" | "changed";
+  observationSha256?: string;
+  hostKey?: string;
+  fingerprint?: string;
+  sshVerified: false;
+  ready: false;
+}
+
 /** Where one bootstrap's account confirmation stands, as the host verified it. */
 export interface LocalVmGuestAccountStatus {
   idempotencyKey: string;
@@ -299,6 +310,7 @@ export interface LocalVmGuestAccountStatus {
   chosen?: LocalVmGuestAccount | null;
   answer?: { outcome: "confirmed" | "refused"; accountAuthenticated: boolean; account: LocalVmGuestAccount } | null;
   key?: { stage: LocalVmGuestKeyStage; installed?: boolean } | null;
+  hostKey?: LocalVmGuestHostKeyStatus | null;
   accountAuthenticated: boolean;
   trustAccepted: false;
   ready: false;

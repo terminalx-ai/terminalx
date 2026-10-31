@@ -10,6 +10,7 @@ pub mod child;
 pub mod disk;
 pub mod enroll;
 pub mod fsx;
+pub mod hostkey;
 pub mod keys;
 pub mod probe;
 pub mod seed;

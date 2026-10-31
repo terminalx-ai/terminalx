@@ -316,7 +316,7 @@
          let soundDeviceConfiguration = VZVirtioSoundDeviceConfiguration()
 --- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXAccountRelay.swift
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,213 @@
 +// Design "Account confirmation and effects", owner side. After enrollment the
 +// helper reports local personal accounts. Only the person's confirmation,
 +// recorded by the host and delivered over the MAC'd owner channel, is relayed
@@ -470,6 +470,50 @@
 +        return ["keyGrant": ["keyReference": try txString(r, "keyReference"), "publicKey": try txString(r, "publicKey")]]
 +    }
 +
++    static let keyResultKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "grantSha256", "keyReference",
++        "stage", "installed", "trustAccepted", "ready"]
++    static let hostKeyKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "grantSha256", "keyResultSha256",
++        "keyReference", "hostKey", "observed", "trustAccepted", "ready"]
++
++    /// One `ssh-ed25519 <blob>` public key with its exact 51-byte wire encoding.
++    static func ed25519(_ key: String) -> Bool {
++        let parts = key.split(separator: " ", omittingEmptySubsequences: false)
++        guard parts.count == 2, parts[0] == "ssh-ed25519", let blob = Data(base64Encoded: String(parts[1])), blob.count == 51 else {
++            return false
++        }
++        let bytes = [UInt8](blob)
++        return Array(bytes[0..<4]) == [0, 0, 0, 11] && Array(bytes[4..<15]) == Array("ssh-ed25519".utf8)
++            && Array(bytes[15..<19]) == [0, 0, 0, 32]
++    }
++
++    /// Only after the helper's own `publicKeyInstalled`: waits for its report of
++    /// the guest's existing public host key for the same reference and journals
++    /// it once. `hostKeyPending` frames keep waiting until `deadline`. Evidence
++    /// for the person's review on the host; trust and readiness stay false.
++    static func hostKey(_ receive: () throws -> [String: Any], result: Data, deadline: DispatchTime,
++                        launch: TerminalXBootstrapLaunch) throws -> Data {
++        let r = try txObject(result, keys: keyResultKeys)
++        try txRequire(r["stage"] as? String == "publicKeyInstalled" && r["installed"] as? Bool == true)
++        let reference = try txString(r, "keyReference")
++        while true {
++            let body = try receive()
++            if body.count == 1, let pending = body["hostKeyPending"] as? [String: Any] {
++                try txRequire(Swift.Set(pending.keys) == ["keyReference"] && txString(pending, "keyReference") == reference
++                    && DispatchTime.now() < deadline)
++                continue
++            }
++            guard body.count == 1, let report = body["hostKey"] as? [String: Any],
++                  Swift.Set(report.keys) == ["keyReference", "publicKey"] else { throw TXBootstrapError.refused }
++            let key = try txString(report, "publicKey")
++            try txRequire(txString(report, "keyReference") == reference && ed25519(key))
++            let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
++                "grantSha256": try txString(r, "grantSha256"), "keyResultSha256": txDigest(result), "keyReference": reference,
++                "hostKey": key, "observed": true, "trustAccepted": false, "ready": false])
++            try launch.pins["operation"]!.writeNew("host-key-observation.json", record)
++            return record
++        }
++    }
++
 +    /// Journals the helper's install result. Only the helper's own
 +    /// `publicKeyInstalled` for this reference counts as installed; an unknown
 +    /// outcome or refusal is recorded as such and never becomes success.
@@ -561,7 +605,7 @@
 +        try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json",
 +            "enrollment.key", "enrollment.json", "stop-requested.json",
 +            "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json",
-+            "key-grant-relay.json", "key-install-result.json"].contains(name))
++            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json"].contains(name))
 +        try check()
 +        let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
 +        try txRequire(child >= 0)
@@ -579,7 +623,7 @@
 +    func writeNew(_ name: String, _ bytes: Data) throws {
 +        try txRequire(directory && (["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json",
 +            "enrollment.json", "stop-requested.json", "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json",
-+            "key-grant-relay.json", "key-install-result.json"].contains(name)
++            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json"].contains(name)
 +            || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
 +        try check()
 +        // Exclusive and atomic for readers: written and synced under a unique
@@ -662,7 +706,7 @@
 +}
 --- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXBootstrapOwner.swift
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,334 @@
 +import Foundation
 +import Darwin
 +
@@ -859,7 +903,7 @@
 +        let clientNonce = try txString(request, "clientNonce")
 +        _ = try txHex(clientNonce)
 +        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop",
-+            "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer"].contains(action)
++            "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer", "hostKeyObservation"].contains(action)
 +            && txString(request, "bindingDigest") == launch.bindingDigest)
 +        let nonce = txNonce()
 +        let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
@@ -874,7 +918,8 @@
 +        if launch.binding.version == 2 && ["accountReceipt", "keyReceipt"].contains(action) { throw TXBootstrapError.refused }
 +        // Version 3 has no share trust path: only enrollment and an owner-mediated
 +        // stop are served, and neither is served for earlier versions.
-+        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer"]
++        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer",
++            "hostKeyObservation"]
 +        try txRequire(launch.binding.version == 3
 +            ? (["observe"] + enrolledOnly).contains(action) : !enrolledOnly.contains(action))
 +        switch action {
@@ -892,6 +937,7 @@
 +            state.lock(); let wake = onRelay; state.unlock()
 +            wake?()
 +        case "keyAnswer": receipt = try launch.pins["operation"]!.receipt("key-install-result.json")
++        case "hostKeyObservation": receipt = try launch.pins["operation"]!.receipt("host-key-observation.json")
 +        case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
 +        case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
 +        default: receipt = Data()
@@ -1132,7 +1178,7 @@
 +}
 --- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXEnrollment.swift
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,241 @@
 +// TXGuestProtocol version 2: seeded-key enrollment (design "Enrollment
 +// protocol"). A valid proof establishes only that guest root in this exact VM
 +// holds the per-VM key the host seeded offline. It is not binary attestation
@@ -1368,7 +1414,10 @@
 +        }
 +        try launch.check(); try view.check()
 +        try session.send(fd, TXAccountRelay.grantFrame(grant!))
-+        _ = try TXAccountRelay.keyResult(try session.receive(fd), relay: grant!, launch: launch)
++        let result = try TXAccountRelay.keyResult(try session.receive(fd), relay: grant!, launch: launch)
++        // Only after the helper's own install: the guest's existing public host key.
++        guard (try JSONSerialization.jsonObject(with: result) as? [String: Any])?["stage"] as? String == "publicKeyInstalled" else { return }
++        _ = try TXAccountRelay.hostKey({ try session.receive(fd) }, result: result, deadline: deadline, launch: launch)
 +    }
 +}
 --- /dev/null

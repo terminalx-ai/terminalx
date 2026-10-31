@@ -317,9 +317,79 @@ post-trust producer is unchanged and still gated by `require_available()`.
 **Install SSH key** only after the helper's acknowledgement, and **Retry with
 the original key** while pending. It never offers a retry after a result.
 
-Still to join: the post-trust transport's `macos_keys::resolve` checks the
-record's transport binding, so it does not yet accept this version-3 record
-for the same reference. That join belongs with the host-key trust step.
+**Host-key review (2026-10-31).** This is the design's "Final trust
+confirmation", up to but not including the first SSH connection.
+
+1. **Helper.** Only after its own `publicKeyInstalled`, `hostkey::report_host_key`
+   reads the existing `/etc/ssh/ssh_host_ed25519_key.pub`:
+   - The directory and file must be root-owned, writable by no one else,
+     not linked or aliased, bounded, and unchanged across the read.
+   - Only `ssh-ed25519 <blob>` is reported, with the comment dropped.
+   - The private host key is never opened. Nothing is generated, and sshd
+     and Remote Login are never changed.
+   - While the key is absent, the helper sends `hostKeyPending` about once a
+     second, then `{hostKey: {keyReference, publicKey}}`.
+2. **Owner.** It accepts pending frames only for the installed reference and
+   within its conversation deadline. It journals `host-key-observation.json`
+   once, binding the grant and key-result digests, with
+   `trustAccepted: false` and `ready: false`, and serves it as
+   `hostKeyObservation`.
+3. **Host.** `environment.guestAccounts` reports the host key as
+   `awaitingHostKey`, `awaitingReview` (with the fingerprint), `confirmed` or
+   `changed`, always with `sshVerified: false` and `ready: false`.
+   `environment.confirmGuestHostKey` (onboarding capability, `confirm: true`,
+   original parent only) takes the observation digest and the exact
+   fingerprint the person reviewed. It refuses `hostKey`, `publicKey` and
+   `knownHosts` parameters. It then:
+   - records `host-key-confirmation.json` exclusively; a different
+     observation or key is refused for good and never re-pinned;
+   - requires that the confirmed account is the account planned at Create;
+   - writes the existing ledger's account and trust receipts together, once,
+     under the ledger lock (`retain_confirmed_trust`).
+
+   The existing `ssh_plan` then pins exactly that key: one `known_hosts`
+   line, `StrictHostKeyChecking=yes`, no accept-new, and the produced
+   original key as the only identity.
+4. **UI.** The review shows the fingerprint and how to check it in the VM's
+   own Terminal. **Pin host key** needs explicit consent. A pinned key is
+   described as not yet a verified SSH connection, and `changed` is an alert
+   with no action.
+
+No SSH scan, connection or real host key is used. Native tests pin
+synthetic keys against the compiled owner, and the Python suite drives the
+real owner with the protocol's reference helper, because an unprivileged
+Rust helper stops at `refused`.
+
+**Still to join.**
+
+- The transport's `macos_keys::resolve` checks a transport-shaped binding, so
+  it does not yet accept this version-3 key record for the same reference.
+- The first strict SSH connection that verifies the pin, and the account,
+  home and target, is not wired, and live runs are held.
+
+**Unresolved invariant: person-only methods are not yet person-only against
+agents.** The persistent owner accepts `local_vm.request` from any holder of
+the runtime control token. App-launched tabs receive that token as
+`TERMINALX_NEXT_TOKEN`, and the desktop client reads the same token from
+`run/control.token`. The onboarding check runs only on the desktop client
+(`Sessions::local_vm`).
+
+As a result, an agent in a TerminalX tab can call any person-only method:
+`environment.create`/setup consent, `confirmGuestAccount`, `grantGuestKey`
+and `confirmGuestHostKey`. The parent IDs it passes are its own, which it
+knows.
+
+Integrity holds: no method accepts key material, and every piece of
+evidence is owner-authenticated. Consent does not hold.
+
+Closing this needs an owner-side person gate that does not rest on the
+shared token or on caller-supplied IDs. One option is the person approving
+through the desktop's question flow, as issue writes do with
+`issue_control::Ask`.
+
+Until that exists, no acceptance run may count account consent or host-key
+consent as the person's. Default builds have no version-3 bootstrap, so
+there is no exposure today.
 
 **On-screen confirmation.** Each conversation's Local VM section lists only the
 bootstraps whose original parent is that session, tab and conversation

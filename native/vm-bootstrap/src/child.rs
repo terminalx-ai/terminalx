@@ -118,6 +118,7 @@ impl Installer for Forking {
 
 /// After the confirmation: waits up to `wait` for the key grant, installs it
 /// through `installer`, and reports `{keyResult: {keyReference, stage}}`.
+/// Returns the stage and the grant's key reference.
 pub fn grant_and_report(
     session: &mut Session,
     stream: &mut impl Stream,
@@ -125,7 +126,7 @@ pub fn grant_and_report(
     bootstrap_id: &str,
     wait: Duration,
     installer: &mut impl Installer,
-) -> io::Result<String> {
+) -> io::Result<(String, String)> {
     session.set_wait(wait);
     let grant = session.receive_key_grant(stream, bootstrap_id)?;
     let stage = installer.install(account, &grant);
@@ -133,7 +134,7 @@ pub fn grant_and_report(
         stream,
         json!({"keyResult": {"keyReference": grant.key_reference, "stage": stage}}),
     )?;
-    Ok(stage)
+    Ok((stage, grant.key_reference))
 }
 
 #[cfg(test)]
@@ -203,7 +204,7 @@ mod tests {
         )
         .unwrap();
         let mut session = Session::fixture(key);
-        let stage = grant_and_report(
+        let (stage, reference) = grant_and_report(
             &mut session,
             &mut helper,
             account,
@@ -212,6 +213,7 @@ mod tests {
             installer,
         )
         .unwrap();
+        assert_eq!(reference, REFERENCE);
         let reported = Session::helper_body(
             &key,
             0,

@@ -151,6 +151,50 @@ enum TXAccountRelay {
         return ["keyGrant": ["keyReference": try txString(r, "keyReference"), "publicKey": try txString(r, "publicKey")]]
     }
 
+    static let keyResultKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "grantSha256", "keyReference",
+        "stage", "installed", "trustAccepted", "ready"]
+    static let hostKeyKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "grantSha256", "keyResultSha256",
+        "keyReference", "hostKey", "observed", "trustAccepted", "ready"]
+
+    /// One `ssh-ed25519 <blob>` public key with its exact 51-byte wire encoding.
+    static func ed25519(_ key: String) -> Bool {
+        let parts = key.split(separator: " ", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0] == "ssh-ed25519", let blob = Data(base64Encoded: String(parts[1])), blob.count == 51 else {
+            return false
+        }
+        let bytes = [UInt8](blob)
+        return Array(bytes[0..<4]) == [0, 0, 0, 11] && Array(bytes[4..<15]) == Array("ssh-ed25519".utf8)
+            && Array(bytes[15..<19]) == [0, 0, 0, 32]
+    }
+
+    /// Only after the helper's own `publicKeyInstalled`: waits for its report of
+    /// the guest's existing public host key for the same reference and journals
+    /// it once. `hostKeyPending` frames keep waiting until `deadline`. Evidence
+    /// for the person's review on the host; trust and readiness stay false.
+    static func hostKey(_ receive: () throws -> [String: Any], result: Data, deadline: DispatchTime,
+                        launch: TerminalXBootstrapLaunch) throws -> Data {
+        let r = try txObject(result, keys: keyResultKeys)
+        try txRequire(r["stage"] as? String == "publicKeyInstalled" && r["installed"] as? Bool == true)
+        let reference = try txString(r, "keyReference")
+        while true {
+            let body = try receive()
+            if body.count == 1, let pending = body["hostKeyPending"] as? [String: Any] {
+                try txRequire(Swift.Set(pending.keys) == ["keyReference"] && txString(pending, "keyReference") == reference
+                    && DispatchTime.now() < deadline)
+                continue
+            }
+            guard body.count == 1, let report = body["hostKey"] as? [String: Any],
+                  Swift.Set(report.keys) == ["keyReference", "publicKey"] else { throw TXBootstrapError.refused }
+            let key = try txString(report, "publicKey")
+            try txRequire(txString(report, "keyReference") == reference && ed25519(key))
+            let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
+                "grantSha256": try txString(r, "grantSha256"), "keyResultSha256": txDigest(result), "keyReference": reference,
+                "hostKey": key, "observed": true, "trustAccepted": false, "ready": false])
+            try launch.pins["operation"]!.writeNew("host-key-observation.json", record)
+            return record
+        }
+    }
+
     /// Journals the helper's install result. Only the helper's own
     /// `publicKeyInstalled` for this reference counts as installed; an unknown
     /// outcome or refusal is recorded as such and never becomes success.

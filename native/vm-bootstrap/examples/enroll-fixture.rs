@@ -50,7 +50,7 @@ fn main() {
             let state =
                 std::env::temp_dir().join(format!("tx-helper-state-{}", std::process::id()));
             let mut installer = terminalx_vm_bootstrap::child::Forking { state };
-            let stage = terminalx_vm_bootstrap::child::grant_and_report(
+            let (stage, key_reference) = terminalx_vm_bootstrap::child::grant_and_report(
                 &mut session,
                 &mut stream,
                 &account,
@@ -58,9 +58,23 @@ fn main() {
                 Duration::from_secs(30),
                 &mut installer,
             )?;
+            // Only after its own install: the guest's existing public host key,
+            // read from root-owned /etc/ssh. Never generated or changed.
+            let host_key = if stage == "publicKeyInstalled" {
+                terminalx_vm_bootstrap::hostkey::report_host_key(
+                    &mut session,
+                    &mut stream,
+                    &key_reference,
+                    std::path::Path::new("/etc/ssh"),
+                    0,
+                    Duration::from_secs(30),
+                )?
+            } else {
+                None
+            };
             return Ok(
                 json!({"authenticated": true, "challengeSha256": challenge, "confirmed": account.name,
-                "confirmationSha256": account.confirmation_sha256, "keyStage": stage}),
+                "confirmationSha256": account.confirmation_sha256, "keyStage": stage, "hostKey": host_key}),
             );
         }
         session.send(&mut stream, json!({"hello": "rust helper"}))?;
