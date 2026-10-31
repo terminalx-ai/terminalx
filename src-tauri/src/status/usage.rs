@@ -105,6 +105,9 @@ struct PollState {
     last_attempt: Option<i64>,
     last_manual: Option<i64>,
     retry_at: Option<i64>,
+    /// The pause in `retry_at` follows a failure on this machine, before any
+    /// request reached the provider, so a manual refresh may clear it.
+    local_failure: bool,
     failures: u32,
     in_flight: bool,
     error: Option<String>,
@@ -320,6 +323,13 @@ fn begin_claude_refresh(inner: &mut Inner, now: i64, manual: bool, cadence: Opti
     let reset_due = claude_revalidate_at(inner).is_some_and(|at| at <= now);
     let floor = background_floor(cadence);
     let poll = &mut inner.claude;
+    // Reading Claude Code's login asks nothing of the provider, so the button
+    // starts that backoff over; only the timer is held by it.
+    if manual && poll.local_failure && !poll.in_flight {
+        poll.retry_at = None;
+        poll.failures = 0;
+        poll.local_failure = false;
+    }
     if poll.in_flight || poll.retry_at.is_some_and(|at| now < at)
         || (!manual && !reset_due && poll.last_attempt.is_some_and(|at| now.saturating_sub(at) < floor)) {
         return false;
@@ -541,6 +551,7 @@ fn finish_claude_refresh(inner: &mut Inner, generation: u64, answer: Result<Vec<
             }
             inner.claude.last_success = Some(now);
             inner.claude.retry_at = None;
+            inner.claude.local_failure = false;
             inner.claude.error = None;
             inner.claude.failures = 0;
             Ok(())
@@ -551,6 +562,7 @@ fn finish_claude_refresh(inner: &mut Inner, generation: u64, answer: Result<Vec<
             let backoff = (60_000_i64.saturating_mul(1_i64 << shift)).min(CLAUDE_MAX_BACKOFF_MS);
             let retry_at = error.downcast_ref::<claude_oauth::RetryAfter>().map(|retry| retry.0).unwrap_or(0);
             inner.claude.retry_at = Some(completed_at.saturating_add(backoff).max(retry_at));
+            inner.claude.local_failure = error.is::<claude_oauth::CredentialError>();
             inner.claude.error = Some(format!("{error:#}"));
             Err(error)
         }
@@ -617,7 +629,7 @@ impl UsageStore {
             inner.claude_generation
         };
         let answer = account.as_ref().context("Claude account attribution is unavailable; check the system Claude login")
-            .and_then(|_| claude_oauth::read_token().context("Claude Code OAuth credentials were not found"))
+            .and_then(|_| claude_oauth::read_token().map_err(anyhow::Error::from))
             .and_then(|token| claude_oauth::fetch(&token, now));
         let current_account = claude_account_identity();
         let mut inner = self.inner.lock().unwrap();
@@ -825,6 +837,40 @@ mod tests {
         assert_eq!(claude_revalidate_at(&inner), Some(180_000));
         assert!(!begin_claude_refresh(&mut inner, 10_000, false, None));
         assert!(begin_claude_refresh(&mut inner, 180_000, false, None));
+    }
+
+    /// #664: a credential read that failed on this machine kept the button
+    /// from retrying for up to four hours. The timer still backs off; the
+    /// button starts the backoff over. A provider's Retry-After holds both.
+    #[test]
+    fn manual_refresh_clears_a_local_credential_backoff_but_not_a_provider_one() {
+        use claude_oauth::CredentialError;
+        let mut inner = Inner::default();
+        let cadence = Some(MINUTE);
+        // Many failures in, as on the machine in the issue.
+        inner.claude.failures = 9;
+        assert!(begin_claude_refresh(&mut inner, 0, false, cadence));
+        let timed_out = CredentialError::TimedOut(Duration::from_secs(3)).into();
+        assert!(finish_claude_refresh(&mut inner, 0, Err(timed_out), 0, 3_000).is_err());
+        assert_eq!(inner.claude.retry_at, Some(3_000 + CLAUDE_MAX_BACKOFF_MS));
+        assert_eq!(inner.claude.error.as_deref(), Some("Claude Code keychain read timed out after 3 s"));
+        assert!(!begin_claude_refresh(&mut inner, MINUTE, false, cadence));
+        assert!(begin_claude_refresh(&mut inner, MINUTE, true, cadence));
+        // In flight, a second press is still refused and clears nothing.
+        assert!(!begin_claude_refresh(&mut inner, MINUTE, true, cadence));
+        let failed = CredentialError::Failed(Some(51)).into();
+        finish_claude_refresh(&mut inner, 0, Err(failed), MINUTE, MINUTE + 100).unwrap_err();
+        // The ladder started over: one minute, not the four-hour ceiling.
+        assert_eq!(inner.claude.retry_at, Some(2 * MINUTE + 100));
+        assert_eq!(inner.claude.error.as_deref(), Some("Claude Code keychain read failed (exit 51)"));
+        assert!(begin_claude_refresh(&mut inner, MINUTE + 200, true, cadence));
+        let limited = claude_oauth::RetryAfter(30 * MINUTE).into();
+        finish_claude_refresh(&mut inner, 0, Err(limited), MINUTE + 200, MINUTE + 300).unwrap_err();
+        assert!(!begin_claude_refresh(&mut inner, 2 * MINUTE, true, cadence));
+        assert!(begin_claude_refresh(&mut inner, 30 * MINUTE, true, cadence));
+        // A request that reached the provider and failed holds the button too.
+        finish_claude_refresh(&mut inner, 0, Err(anyhow::anyhow!("Claude OAuth usage request failed with HTTP 500")), 30 * MINUTE, 30 * MINUTE).unwrap_err();
+        assert!(!begin_claude_refresh(&mut inner, 30 * MINUTE + 1, true, cadence));
     }
 
     const MINUTE: i64 = 60_000;

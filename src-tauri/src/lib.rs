@@ -165,6 +165,8 @@ pub struct AppState {
     manager: std::sync::Mutex<Option<session::SessionManager>>,
     runtime: std::sync::Mutex<Option<Arc<local_runtime::desktop::Desktop>>>,
     runtime_error: std::sync::Mutex<String>,
+    /// Re-establishes `runtime` after a loss, without reloading a window.
+    runtime_supervisor: local_runtime::supervisor::Supervisor,
     /// Whether the attached runtime still answers (#661).
     runtime_health: local_runtime::ui::Health,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
@@ -247,6 +249,7 @@ pub fn run() {
         manager: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(None),
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
+        runtime_supervisor: Default::default(),
         runtime_health: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
@@ -347,10 +350,16 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
-            if let Err(error) = local_runtime::ui::connect(app.handle()) {
-                log::error!("attach background runtime: {error:#}");
-                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
-                app.state::<AppState>().runtime_health.attach_failed(&error);
+            let state = app.state::<AppState>();
+            state.runtime_supervisor.start(app.handle())?;
+            match local_runtime::supervisor::attach(app.handle()) {
+                Ok(generation) => state.runtime_supervisor.attached(generation),
+                Err(error) => {
+                    *state.runtime_error.lock().unwrap() = format!("{error:#}");
+                    log::error!("attach background runtime: {error:#}");
+                    state.runtime_health.attach_failed(&error);
+                    state.runtime_supervisor.unattached(&error);
+                }
             }
             local_runtime::ui::watch(app.handle());
             work_claims.start(app.handle().clone());
@@ -559,6 +568,7 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
             commands::tab_handoff,
@@ -784,6 +794,8 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
+                        // The app goes with it: nothing may attach again.
+                        state.runtime_supervisor.halt();
                         let_go_of_unresponsive_runtime(&state);
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
@@ -821,6 +833,7 @@ pub fn run() {
                 // destroying the window first; the computer-use helper must
                 // not outlive the app on either path.
                 state.computer.shutdown();
+                state.runtime_supervisor.halt();
                 let_go_of_unresponsive_runtime(&state);
                 state.pairing.stop();
                 if let Some(runtime) = state.runtime() { runtime.disconnect(); }

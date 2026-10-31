@@ -1,25 +1,14 @@
 //! Window connection state and preferences. Unavailable transport is a separate
 //! state, never an empty list of agents or an instruction to recover their turns.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::client::unanswered;
-use super::desktop::Desktop;
+pub use super::supervisor::ConnectionState;
 use crate::{AppState, store::settings::{self, QuitBehavior}};
-
-#[derive(Serialize)]
-#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum ConnectionState {
-    Connected { epoch: String, running_agents: usize, terminals: usize },
-    Unavailable { message: String },
-    /// The runtime is there but does not answer. Reconnecting reaches the same
-    /// wedged process; only restarting it recovers (#661). `epoch` names the
-    /// attached runtime, if any, so a restart cannot stop its replacement.
-    Unresponsive { message: String, epoch: Option<String> },
-}
 
 /// How often the watchdog asks the runtime whether it is answering.
 const PROBE_EVERY: Duration = Duration::from_secs(5);
@@ -70,49 +59,49 @@ impl Health {
 
     /// Attaching failed. A runtime that took the connection and never
     /// answered, or turned it away as too busy, is not responding: only a
-    /// restart reaches it. Any other failure is not this watch's to say.
+    /// restart reaches it, however often the supervisor tries again. Any
+    /// other failure is not this watch's to say.
     pub(crate) fn attach_failed(&self, error: &anyhow::Error) {
         *self.0.lock().unwrap() = Watch { unresponsive: unanswered(error).then(|| format!("{error:#}")), ..Watch::default() };
     }
 
-    fn clear(&self) {
+    /// A new attachment, or a restart: nothing is known about it yet.
+    pub(crate) fn clear(&self) {
         *self.0.lock().unwrap() = Watch::default();
     }
-}
-
-
-fn failed(runtime: &Desktop, error: anyhow::Error) -> ConnectionState {
-    let message = format!("{error:#}");
-    if unanswered(&error) { ConnectionState::Unresponsive { message, epoch: Some(runtime.epoch().into()) } } else { ConnectionState::Unavailable { message } }
 }
 
 /// Ask the attached runtime, every few seconds, whether it still answers and
 /// its loop still turns, and tell every window when that changes. A runtime
 /// wedged behind one lock otherwise looks attached and healthy for good (#661).
+/// A closed attachment is the supervisor's: its attempts to attach again say
+/// whether the runtime answers ([`Health::attach_failed`]).
 pub(crate) fn watch(app: &AppHandle) {
     let app = app.clone();
     let spawned = std::thread::Builder::new().name("local-runtime-watchdog".into()).spawn(move || loop {
         std::thread::sleep(PROBE_EVERY);
         let state = app.state::<AppState>();
-        let Some(runtime) = state.runtime() else { continue };
+        let Some(runtime) = state.runtime().filter(|runtime| runtime.attachment().is_ok()) else { continue };
         let outcome = runtime.probe();
         if let Err(error) = &outcome { log::warn!("local runtime probe: {error:#}"); }
         if state.runtime_health.probed(runtime.epoch(), outcome) {
-            let _ = app.emit("local_runtime_health", ());
+            let _ = app.emit("local_runtime_state", ());
         }
     });
     if let Err(error) = spawned { log::error!("start the local runtime watchdog: {error}"); }
 }
 
 /// Whether a window that found runtime `seen` not responding (none when it
-/// found none attached) may restart the one `attached` now. A window that
-/// asks after another has already replaced it must not stop the replacement.
-fn restart_reaches(seen: Option<&str>, attached: &str) -> bool {
-    seen == Some(attached)
+/// found none attached) may restart now. `attached` is the runtime attached
+/// now, if any, and `unresponsive` whether it is still found not responding.
+/// A window that asks after another has already restarted it, or after the
+/// runtime came back, stops nothing: not the replacement, not the recovered one.
+fn restart_reaches(seen: Option<&str>, attached: Option<&str>, unresponsive: bool) -> bool {
+    unresponsive && attached.is_none_or(|attached| seen == Some(attached))
 }
 
-/// One reconnect or restart at a time, for every window.
-static RECONNECT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// One restart at a time, for every window.
+static RESTART: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Presentation-only observer installed once per window process. Scheduling and
 /// activity accounting remain in the owner; reopening does not replay usage.
@@ -140,127 +129,70 @@ pub(crate) fn observe(app: &AppHandle) {
     }));
 }
 
-pub(crate) fn connect(app: &AppHandle) -> anyhow::Result<Arc<Desktop>> {
+fn status(app: &AppHandle, window: &str) -> ConnectionState {
     let state = app.state::<AppState>();
-    let source = app.path().resource_dir()?.join("local-runtime/terminalx-serve");
-    let home = crate::store::root()?;
-    let log = app.path().app_log_dir().ok().map(|dir| dir.join("runtime.log"));
-    let client = super::launch::connect_desktop(&source,&home,&app.config().identifier,log.as_deref())?;
-    let next = Arc::new(Desktop::connect(client,Arc::new(app.clone()))?);
-    let endpoint = state.window_endpoint.get().ok_or_else(|| anyhow::anyhow!("The private desktop endpoint is not ready."))?.clone();
-    next.activate_window(endpoint, |next| {
-        let mut current = state.runtime.lock().unwrap();
-        anyhow::ensure!(current.is_none(), "The desktop connection changed while attaching.");
-        state.pairing.attach_runtime(next.clone());
-        *current = Some(next.clone());
-        Ok(())
-    })?;
-    Ok(next)
+    let runtime = state.runtime();
+    let unattached = state.runtime_error.lock().unwrap().clone();
+    let status = state.runtime_supervisor.status(window, runtime.as_deref(), &unattached);
+    judged(status, state.runtime_health.unresponsive(), runtime.as_ref().map(|runtime| runtime.epoch()))
 }
 
-fn connected(runtime: &Desktop) -> anyhow::Result<ConnectionState> {
-    let running_agents = runtime.sessions()?.running_tabs()?.len();
-    let terminals = runtime.terminals()?.shells()?.iter().filter(|shell| !shell.exited).count();
-    let epoch = runtime.attachment()?.epoch;
-    Ok(ConnectionState::Connected { epoch, running_agents, terminals })
+/// What a window is told: the supervisor's status, unless the runtime
+/// `epoch` (none when it never attached) is found not responding.
+/// Reconnecting, by itself or on "Try again", reaches the same wedged
+/// process; only a restart recovers (#661). A runtime that retrying cannot
+/// reach for another reason, or one stopped for quit, is said as such.
+fn judged(status: ConnectionState, unresponsive: Option<String>, epoch: Option<&str>) -> ConnectionState {
+    match (unresponsive, status) {
+        (Some(message), ConnectionState::Connected { .. } | ConnectionState::Connecting { .. }) =>
+            ConnectionState::Unresponsive { message, epoch: epoch.map(str::to_owned) },
+        (_, status) => status,
+    }
 }
 
+/// Off the main thread: reading an attachment can wait on a socket write.
 #[tauri::command]
-pub async fn local_runtime_status(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<ConnectionState, String> {
-    let unresponsive = state.runtime_health.unresponsive();
-    let Some(runtime) = state.runtime() else {
-        let message = state.runtime_error.lock().unwrap().clone();
-        return Ok(if unresponsive.is_some() { ConnectionState::Unresponsive { message, epoch: None } } else { ConnectionState::Unavailable { message } });
-    };
-    // Asking again would only wait out the same timeout.
-    if let Some(message) = unresponsive { return Ok(ConnectionState::Unresponsive { message, epoch: Some(runtime.epoch().into()) }); }
-    tauri::async_runtime::spawn_blocking(move || {
-        runtime.window_connection(window.label()).and_then(|()| connected(&runtime)).unwrap_or_else(|error| failed(&runtime, error))
-    })
-        .await.map_err(|error| error.to_string())
+pub async fn local_runtime_status(app: AppHandle, window: tauri::WebviewWindow) -> Result<ConnectionState, String> {
+    tauri::async_runtime::spawn_blocking(move || status(&app, window.label())).await.map_err(|error| error.to_string())
 }
 
-/// A failed attach: what every window is told, and what the watchdog knows.
-fn attach_failed(app: &AppHandle, error: anyhow::Error) -> String {
-    let message = format!("{error:#}");
-    let state = app.state::<AppState>();
-    *state.runtime_error.lock().unwrap() = message.clone();
-    state.runtime_health.attach_failed(&error);
-    message
-}
-
+/// "Try again": attempt now whatever the supervisor is re-establishing. It
+/// never reloads a window and never replays a request.
 #[tauri::command]
 pub async fn local_runtime_reconnect(app: AppHandle, window: tauri::WebviewWindow) -> Result<ConnectionState, String> {
-    let _reconnect = RECONNECT.lock().await;
-    let previous = app.state::<AppState>().runtime();
-    let Some(previous) = previous else {
-        return tauri::async_runtime::spawn_blocking(move || {
-            let next = connect(&app).map_err(|error| attach_failed(&app, error))?;
-            let result = connected(&next).map_err(|error| format!("{error:#}"))?;
-            let _ = app.emit("local_runtime_reattached", ());
-            Ok(result)
-        }).await.map_err(|error| error.to_string())?;
-    };
-    // A failed PTY reader must not revoke healthy windows or the owner lease.
-    // The requesting page reloads to acquire fresh taps and replay snapshots.
-    if previous.attachment().is_ok() {
-        let label = window.label().to_owned();
-        return tauri::async_runtime::spawn_blocking(move || {
-            connected(&previous).map_err(|error| format!("{error:#}"))?;
-            if previous.window_connection(&label).is_err() {
-                // A newer shared failure must not be mistaken for a view-only
-                // failure or return the earlier control snapshot as success.
-                previous.attachment().map_err(|error| format!("{error:#}"))?;
-                previous.detach_window(&label);
-            }
-            connected(&previous).map_err(|error| format!("{error:#}"))
-        }).await.map_err(|error| error.to_string())?;
-    }
-    if !app.state::<AppState>().runtime().as_ref().is_some_and(|current| Arc::ptr_eq(current, &previous)) {
-        return Err("The desktop connection changed while reconnecting. Try again.".into());
-    }
     tauri::async_runtime::spawn_blocking(move || {
-        let next = Arc::new(previous.reconnect().map_err(|error| format!("Could not reconnect to the running owner: {error:#}. Reopen TerminalX if it has stopped."))?);
-        let status = connected(&next).map_err(|error| format!("{error:#}"))?;
-        let state = app.state::<AppState>();
-        let endpoint = state.window_endpoint.get().ok_or("The private desktop endpoint is not ready.")?.clone();
-        next.activate_window(endpoint, |next| {
-            let mut current = state.runtime.lock().unwrap();
-            anyhow::ensure!(current.as_ref().is_some_and(|current| Arc::ptr_eq(current, &previous)),
-                "The desktop connection changed while reconnecting. Try again.");
-            state.pairing.attach_runtime(next.clone());
-            *current = Some(next.clone());
-            Ok(())
-        }).map_err(|error| format!("Could not activate window services: {error:#}"))?;
-        let _ = app.emit("local_runtime_reattached", ());
-        Ok(status)
-    }).await.map_err(|error| error.to_string())?
+        app.state::<AppState>().runtime_supervisor.retry_now();
+        status(&app, window.label())
+    }).await.map_err(|error| error.to_string())
 }
 
-/// Stop the runtime without asking it and start a fresh one (#661). Its
-/// agents and terminals stop with it; each agent resumes its conversation
-/// from the provider's transcript when its tab next starts. `epoch` is the
-/// runtime the window found not responding (none when it never attached): a
-/// window that asks after another has already restarted it stops nothing.
+/// Stop the runtime without asking it, and have the supervisor attach a fresh
+/// one through discovery (#661). Its agents and terminals stop with it; each
+/// agent resumes its conversation from the provider's transcript when its tab
+/// next starts, and windows re-attach in place as after any reconnect. `epoch`
+/// is the runtime the window found not responding (none when it never
+/// attached): a window that asks after another has already restarted it
+/// stops nothing.
 #[tauri::command]
-pub async fn local_runtime_restart(app: AppHandle, epoch: Option<String>) -> Result<ConnectionState, String> {
-    let _reconnect = RECONNECT.lock().await;
+pub async fn local_runtime_restart(app: AppHandle, window: tauri::WebviewWindow, epoch: Option<String>) -> Result<ConnectionState, String> {
+    let _restart = RESTART.lock().await;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        if let Some(current) = state.runtime().filter(|current| !restart_reaches(epoch.as_deref(), current.epoch())) {
-            return Ok(connected(&current).unwrap_or_else(|error| failed(&current, error)));
+        let attached = state.runtime();
+        if !restart_reaches(epoch.as_deref(), attached.as_ref().map(|runtime| runtime.epoch()), state.runtime_health.unresponsive().is_some()) {
+            return Ok(status(&app, window.label()));
         }
         let home = crate::store::root().map_err(|error| format!("{error:#}"))?;
         super::launch::kill_owner(&home).map_err(|error| format!("Could not stop the TerminalX runtime: {error:#}"))?;
-        // Nothing more is sent to the process that was stopped.
+        log::info!("stopped the unresponsive local runtime; attaching a fresh one");
         *state.runtime_error.lock().unwrap() = "The TerminalX runtime is restarting.".into();
-        if let Some(previous) = state.runtime.lock().unwrap().take() { previous.disconnect(); }
         state.runtime_health.clear();
-        let next = connect(&app).map_err(|error| attach_failed(&app, error))?;
-        log::info!("restarted the local runtime");
-        let status = connected(&next).map_err(|error| format!("{error:#}"))?;
-        let _ = app.emit("local_runtime_reattached", ());
-        Ok(status)
+        // Nothing more is sent to the process that was stopped. Dropping its
+        // attachment reports the loss, and the supervisor's next attempt,
+        // made now, starts a fresh runtime.
+        if let Some(previous) = attached { previous.disconnect(); }
+        state.runtime_supervisor.retry_now();
+        Ok(status(&app, window.label()))
     }).await.map_err(|error| error.to_string())?
 }
 
@@ -330,9 +262,32 @@ mod tests {
     }
 
     #[test]
+    fn a_runtime_found_not_responding_is_said_so_in_place_of_connected_or_reconnecting() {
+        let connected = || ConnectionState::Connected { epoch: "wedged".into(), generation: 1, view: 0 };
+        let connecting = || ConnectionState::Connecting { terminal: false, attempt: 3, retry_in_ms: 500, down_ms: 20_000,
+            message: "Could not reconnect to the background runtime".into() };
+        let finding = || Some("The TerminalX runtime did not answer runtime.liveness within 15 seconds.".to_string());
+        assert_eq!(judged(connected(), None, Some("wedged")), connected());
+        assert_eq!(judged(connected(), finding(), Some("wedged")),
+            ConnectionState::Unresponsive { message: finding().unwrap(), epoch: Some("wedged".into()) });
+        // Its attachment closed, and attaching again goes unanswered.
+        assert_eq!(judged(connecting(), finding(), Some("wedged")),
+            ConnectionState::Unresponsive { message: finding().unwrap(), epoch: Some("wedged".into()) });
+        assert!(matches!(judged(connecting(), finding(), None), ConnectionState::Unresponsive { epoch: None, .. }),
+            "a runtime that never let this desktop attach");
+        // Quitting, or another desktop holding the runtime: no restart is offered.
+        let stopping = || ConnectionState::Unavailable { message: "TerminalX is stopping its background runtime.".into() };
+        assert_eq!(judged(stopping(), finding(), Some("wedged")), stopping());
+    }
+
+    #[test]
     fn a_restart_reaches_only_the_runtime_its_window_found_not_responding() {
-        assert!(restart_reaches(Some("wedged"), "wedged"));
-        assert!(!restart_reaches(Some("wedged"), "replacement"), "a late click must not stop the replacement");
-        assert!(!restart_reaches(None, "replacement"), "a window that found none attached cannot name this one");
+        assert!(restart_reaches(Some("wedged"), Some("wedged"), true));
+        assert!(restart_reaches(None, None, true), "a runtime that never let this desktop attach");
+        assert!(!restart_reaches(Some("wedged"), Some("replacement"), true), "a late click must not stop the replacement");
+        assert!(!restart_reaches(None, Some("replacement"), true), "a window that found none attached cannot name this one");
+        // A second window's click after the first restarted it, while the
+        // fresh runtime is still being attached in place of the old one.
+        assert!(!restart_reaches(Some("wedged"), Some("wedged"), false), "a restart already under way, or a runtime that recovered");
     }
 }

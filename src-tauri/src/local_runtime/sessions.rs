@@ -179,6 +179,10 @@ impl Sessions {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
     }
 
+    pub fn submit_waiting(&self, session: &str, tab: &str, seq: u64) -> Result<bool> {
+        self.tab("submitWaiting", session, tab, json!({"seq":seq}))
+    }
+
     pub fn prepare_continuation(&self, session: &str, tab: &str) -> Result<crate::continuation::Context> {
         self.tab("prepareContinuation", session, tab, json!({}))
     }

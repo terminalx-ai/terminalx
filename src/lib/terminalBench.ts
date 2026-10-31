@@ -6,6 +6,7 @@ import { enterTerminalView } from "@/lib/tabViews";
 import { rendererOf } from "@/lib/terminalCounters";
 import { fitTerminal } from "@/lib/terminalFit";
 import { showWebgl } from "@/lib/terminalWebgl";
+import { startTerminalMemoryProbe, terminalMemorySnapshot } from "@/lib/terminalMemory";
 import {
   adoptPane,
   agentPaneId,
@@ -38,6 +39,7 @@ interface Field {
 }
 
 export type BenchRequest =
+  | { scenario: "memory"; stop?: boolean }
   | (Field & { scenario: "drain"; command: string; timeoutMs?: number })
   | (Field & { scenario: "echo"; command: string; producers: number; producer: string; samples: number; intervalMs: number })
   | (Field & { scenario: "interrupt"; command: string; afterMs: number })
@@ -48,7 +50,7 @@ export type BenchRequest =
   | { scenario: "ui"; action: "terminalView"; sessionId: string; tabId: string }
   | { scenario: "ui"; action: "screen" | "reload" }
   | { scenario: "covered"; projectPath: string; stream: string; seconds: number }
-  | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number } | { step: "tabs" | "switches"; count: number } | { step: "agents"; count: number; harness: string } | { step: "cleanup" }));
+  | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number; memoryDiagnostics?: boolean } | { step: "tabs" | "switches"; count: number } | { step: "agents"; count: number; harness: string } | { step: "cleanup" }));
 
 const MARK = 7777;
 const ECHO = 7778;
@@ -381,6 +383,7 @@ async function soak(request: Soak) {
   let step: { tracked: number; collected: number } | undefined;
   switch (request.step) {
     case "open": {
+      if (request.memoryDiagnostics) startTerminalMemoryProbe();
       await addProject(request.projectPath);
       soakSessions = [];
       for (let index = 0; index < request.sessions; index++) {
@@ -636,6 +639,8 @@ export async function runTerminalBench(request: BenchRequest): Promise<unknown> 
   running = true;
   try {
     switch (request.scenario) {
+      case "memory":
+        return terminalMemorySnapshot(request.stop);
       case "drain":
         return await drain(request);
       case "echo":

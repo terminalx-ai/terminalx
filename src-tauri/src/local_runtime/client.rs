@@ -22,6 +22,20 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// under a tab's lock; short enough that a wedged owner shows up as not
 /// responding instead of as a window that hangs (#661).
 pub const QUICK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Discovery and attachment: an owner that cannot answer these promptly is
+/// not one a desktop can attach to, and a retry must not wait two minutes.
+pub const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The desktop pings each stream this often, and the owner answers every ping.
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// A hung owner never closes its socket. Silence this long, not even a pong,
+/// is the only sign of it.
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Retrying cannot help until something outside this desktop changes: an
+/// owner from an incompatible build, or another desktop serving its windows.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Blocked(pub String);
 
 /// The owner took a request and did not answer it in time. It may still be
 /// working on it, so the request's effect is unknown, not refused.
@@ -64,10 +78,10 @@ pub fn unanswered(error: &anyhow::Error) -> bool {
 
 /// What the owner says about itself without waiting on any of its work:
 /// `runtime.liveness`, or `status` from an owner too old to have it.
-fn liveness(socket: &Path, token: &str) -> Result<Value> {
-    match request(socket, token, "runtime.liveness", json!({}), QUICK_TIMEOUT) {
+fn liveness(socket: &Path, token: &str, timeout: Duration) -> Result<Value> {
+    match request(socket, token, "runtime.liveness", json!({}), timeout) {
         Err(error) if error.downcast_ref::<Refused>().is_some_and(|refused| refused.code == "unsupported") => {
-            request(socket, token, "status", json!({}), QUICK_TIMEOUT)
+            request(socket, token, "status", json!({}), timeout)
         }
         answered => answered,
     }
@@ -78,6 +92,8 @@ pub struct Client {
     token: zeroize::Zeroizing<String>,
     epoch: String,
     event_socket: PathBuf,
+    ping: Duration,
+    liveness: Duration,
 }
 
 fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Duration) -> Result<Value> {
@@ -127,10 +143,10 @@ impl Client {
         file.read_to_string(&mut token)?;
         let token = zeroize::Zeroizing::new(token.trim().to_string());
         if token.is_empty() { bail!("local runtime credential is empty"); }
-        let status = liveness(&run.join("hooks.sock"), &token)?;
+        let status = liveness(&run.join("hooks.sock"), &token, LIFECYCLE_TIMEOUT)?;
         let local = &status["localRuntime"];
         if status["runtimeKind"] != "local" || local["protocol"].as_u64() != Some(super::PROTOCOL) {
-            bail!("the running owner does not support this desktop's local runtime protocol; its work was left running");
+            return Err(Blocked("the running owner does not support this desktop's local runtime protocol; its work was left running".into()).into());
         }
         let socket = PathBuf::from(status["socket"].as_str().context("runtime has no control endpoint")?);
         let event_socket = PathBuf::from(local["eventSocket"].as_str().context("runtime has no event endpoint")?);
@@ -140,10 +156,19 @@ impl Client {
         let epoch = local["epoch"].as_str().context("runtime has no epoch")?.to_string();
         // Pin discovery to this owner. A publisher change between reading the
         // token and status cannot authorize commands to the replacement.
-        let pinned = liveness(&socket, &token)?;
+        let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
-        Ok(Arc::new(Self { socket, event_socket, token, epoch }))
+        Ok(Arc::new(Self { socket, event_socket, token, epoch, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT }))
     }
+
+    /// The same owner, pinged every `ping` and given up on after `liveness`
+    /// of silence: a test hangs an owner without waiting the full deadline.
+    pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
+        Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
+            event_socket: self.event_socket.clone(), ping, liveness })
+    }
+
+    pub(crate) fn ping_interval(&self) -> Duration { self.ping }
 
     pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
         self.call_within(command, params, CALL_TIMEOUT)
@@ -163,7 +188,7 @@ impl Client {
 
     /// See [`liveness`]: answered while the owner's sessions are held up, so
     /// asking never takes a request place that stays taken.
-    pub fn liveness(&self) -> Result<Value> { liveness(&self.socket, &self.token) }
+    pub fn liveness(&self, timeout: Duration) -> Result<Value> { liveness(&self.socket, &self.token, timeout) }
 
     pub fn stop_all(&self) -> Result<()> {
         let _: Value = self.call("runtime.stopAll", json!({"epoch":self.epoch}))?;
@@ -183,7 +208,9 @@ impl Client {
         }
         let attachment: AttachmentIdentity = serde_json::from_value(hello["attachment"].clone())?;
         if attachment.lease.is_empty() || attachment.lease.len() > 128 { bail!("invalid runtime attachment lease"); }
-        read.get_ref().set_read_timeout(None)?;
+        // The bridge pings every `ping` interval, so a live owner always has
+        // something to say well within this deadline.
+        read.get_ref().set_read_timeout(Some(self.liveness))?;
         Ok(Connection { read, write: socket, attachment })
     }
 }
@@ -258,7 +285,7 @@ mod tests {
             "runtime.liveness" => refusal(request, "unsupported"),
             _ => Some(ControlResponse::success(request.id.clone(), json!({"localRuntime": {"epoch": "old"}}))),
         });
-        assert_eq!(liveness(&socket, "token").unwrap()["localRuntime"]["epoch"], "old");
+        assert_eq!(liveness(&socket, "token", QUICK_TIMEOUT).unwrap()["localRuntime"]["epoch"], "old");
         assert_eq!(*asked.lock().unwrap(), ["runtime.liveness", "status"]);
     }
 
@@ -266,7 +293,7 @@ mod tests {
     fn an_owner_that_answers_liveness_is_never_asked_for_status() {
         let dir = tempfile::tempdir().unwrap();
         let (socket, asked) = owner(dir.path(), |request| Some(ControlResponse::success(request.id.clone(), json!({"command": request.command}))));
-        assert_eq!(liveness(&socket, "token").unwrap()["command"], "runtime.liveness");
+        assert_eq!(liveness(&socket, "token", QUICK_TIMEOUT).unwrap()["command"], "runtime.liveness");
         assert_eq!(*asked.lock().unwrap(), ["runtime.liveness"]);
     }
 

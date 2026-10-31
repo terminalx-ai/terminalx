@@ -3,6 +3,7 @@ import { PairingGetEndpointsResultSchema, RelayPhoneHelloSchema, type DeviceResu
 import { MobileE2EESession } from "./e2ee-session";
 import { secureRandom } from "./random";
 import { decodeTerminalFrame } from "./terminal-stream";
+import { delivery, encodeFragments, FragmentAssembler, FRAGMENTS_VERSION, isFragment, MessageTooLargeError } from "./wire";
 
 export type RelayConnectionState = "connecting" | "handshaking" | "connected" | "disconnected";
 export type RelayEvent = { method: string; params?: unknown };
@@ -20,8 +21,18 @@ type StreamRecord = {
   subscriptionId?: string;
 };
 
+/**
+ * The socket closed, or the relay refused it, with this code. `reason` and
+ * `wasClean` are what the close event said, and are left out when there was
+ * no close event (a refused relay hello). The reason is what tells a relay
+ * close (4408) from iOS ending the stream itself (1001 "Stream end
+ * encountered", #669). React Native never sets `wasClean`, so on the phone it
+ * is always false.
+ */
 export class RelayOuterError extends Error {
-  constructor(readonly code: number) {
+  // The message is the code alone: the reason is the relay's or the OS's own
+  // text, and goes to the connection log (`closeDetail`), not a screen (#670).
+  constructor(readonly code: number, readonly reason = "", readonly wasClean?: boolean) {
     super(`relay_outer_${code}`);
   }
 }
@@ -59,18 +70,26 @@ export class RelayClient {
   private terminalStreams = new Map<number, (result: unknown) => void>();
   private terminalSnapshots = new Map<number, { meta: Record<string, unknown>; chunks: string[] }>();
   private listeners = new Set<(event: RelayEvent) => void>();
-  private stateListeners = new Set<(state: RelayConnectionState) => void>();
+  private stateListeners = new Set<(state: RelayConnectionState, cause?: Error) => void>();
   private state: RelayConnectionState = "disconnected";
   private connectPromise: Promise<void> | null = null;
   private resolveConnect: (() => void) | null = null;
   private rejectConnect: ((error: Error) => void) | null = null;
   private resumeConfirmation: DeviceResumeConfirmed | null = null;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Whether the Mac reassembles fragments; settles soon after authentication. */
+  private fragments: Promise<boolean> = Promise.resolve(false);
+  private assembler = new FragmentAssembler();
 
   constructor(private readonly options: RelayClientOptions) {}
 
   getTransport(): "direct" | "relay" {
     return this.options.transport === "direct" ? "direct" : "relay";
+  }
+
+  /** Whether the Mac reassembles fragments, as one from #669 on does; false until it has said so. */
+  reassemblesFragments(): Promise<boolean> {
+    return this.fragments;
   }
 
   connect(): Promise<void> {
@@ -81,6 +100,8 @@ export class RelayClient {
     this.handshakeReady = false;
     this.authenticated = false;
     this.resumeConfirmation = null;
+    this.fragments = Promise.resolve(false);
+    this.assembler = new FragmentAssembler();
     const direct = this.options.transport === "direct";
     this.session = MobileE2EESession.create({
       desktopPublicKeyB64: this.options.desktopPublicKeyB64,
@@ -107,8 +128,13 @@ export class RelayClient {
       }
     };
     socket.onmessage = (event) => void this.handleMessage(event.data).catch((error: unknown) => this.fail(asError(error)));
-    socket.onerror = () => this.fail(direct ? new Error("WebSocket connection failed (network unavailable or connection refused)") : new RelayOuterError(1006));
-    socket.onclose = (event) => this.fail(new RelayOuterError(event.code || 1006));
+    // React Native fires a bare "error" and then, at once, a "close" that
+    // carries the reason. Let that close speak first; the error stands in
+    // only when no close follows.
+    socket.onerror = () => queueMicrotask(() => {
+      if (this.socket === socket) this.fail(direct ? new Error("WebSocket connection failed (network unavailable or connection refused)") : new RelayOuterError(1006));
+    });
+    socket.onclose = (event) => this.fail(new RelayOuterError(event.code || 1006, typeof event.reason === "string" ? event.reason : "", event.wasClean === true));
     return this.connectPromise;
   }
 
@@ -143,7 +169,8 @@ export class RelayClient {
     return () => this.listeners.delete(listener);
   }
 
-  subscribeState(listener: (state: RelayConnectionState) => void): () => void {
+  /** `cause` comes with "disconnected": what ended the connection, the same error its pending requests fail with. */
+  subscribeState(listener: (state: RelayConnectionState, cause?: Error) => void): () => void {
     this.stateListeners.add(listener);
     listener(this.state);
     return () => this.stateListeners.delete(listener);
@@ -178,17 +205,28 @@ export class RelayClient {
       this.socket.send(this.session.sealText(JSON.stringify({ type: "e2ee_auth", v: 2, transcriptHashB64: this.session.transcriptHashB64, deviceToken: this.options.deviceToken })));
       return;
     }
-    const plaintext = typeof raw === "string" ? this.session.openText(raw) : this.session.openBinary(await bytesFromSocket(raw));
+    // An ArrayBuffer is opened at once: waiting would let a text frame sent
+    // after it be opened first, out of counter order.
+    const frame = typeof raw === "string" || raw instanceof Uint8Array ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : await bytesFromSocket(raw);
+    const plaintext = typeof frame === "string" ? this.session.openText(frame) : this.session.openBinary(frame);
     if (plaintext === null) throw new Error("Invalid or out-of-order E2EE frame");
-    if (typeof plaintext !== "string") {
+    let text: string;
+    if (typeof plaintext === "string") text = plaintext;
+    else if (this.authenticated && isFragment(plaintext)) {
+      const message = this.assembler.push(plaintext);
+      if (!message) return;
+      text = new TextDecoder().decode(message);
+    } else {
       this.handleTerminalBinary(plaintext);
       return;
     }
-    const text = plaintext;
     const value = parseJson(text);
     if (!this.authenticated) {
       if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new Error("E2EE device authentication rejected");
       this.authenticated = true;
+      // Asked first and not waited for: only a request too large for one frame waits for the answer.
+      this.fragments = this.request<{ fragments?: unknown } | null>("transport.negotiate", { fragments: FRAGMENTS_VERSION }, 10_000)
+        .then((result) => result.ok && result.value?.fragments === FRAGMENTS_VERSION, () => false);
       if (this.options.transport !== "direct" && this.options.credentialKind === "resume") {
         const reqId = `confirm-${encodeBase64Url(secureRandom.bytes(16))}`;
         const result = await this.request<unknown>("pairing.getEndpoints", { resumeConfirmReqId: reqId });
@@ -223,7 +261,7 @@ export class RelayClient {
 
   private fail(error: Error): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
-    this.setState("disconnected");
+    this.setState("disconnected", error);
     const socket = this.socket;
     this.socket = null;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
@@ -244,7 +282,34 @@ export class RelayClient {
   }
 
   private sendRequestFrame(id: string, method: string, params?: unknown): void {
-    this.socket!.send(this.session!.sealText(JSON.stringify({ id, deviceToken: this.options.deviceToken, method, ...(params === undefined ? {} : { params }) })));
+    const message = new TextEncoder().encode(JSON.stringify({ id, deviceToken: this.options.deviceToken, method, ...(params === undefined ? {} : { params }) }));
+    const socket = this.socket!;
+    const session = this.session!;
+    const transport = this.getTransport();
+    if (delivery(transport, message.length, false) === "frame") {
+      socket.send(session.sealTextBytes(message));
+      return;
+    }
+    // Too large for one frame, which would close the connection (#669): sent
+    // as fragments once the Mac has said it reassembles them, refused if not.
+    void this.fragments.then((agreed) => {
+      if (this.socket !== socket || this.session !== session || (!this.pending.has(id) && !this.streams.has(id))) return;
+      if (delivery(transport, message.length, agreed) === "fragments") {
+        for (const fragment of encodeFragments(message, transport)) socket.send(session.sealBinary(fragment));
+      } else this.refuse(id, new MessageTooLargeError(transport, message.length, agreed));
+    });
+  }
+
+  private refuse(id: string, error: Error): void {
+    const pending = this.pending.get(id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      pending.reject(error);
+      return;
+    }
+    this.streams.get(id)?.listener({ type: "error", message: error.message });
+    this.removeStream(id);
   }
 
   private handleStreamResponse(value: RpcWireResponse): void {
@@ -310,9 +375,9 @@ export class RelayClient {
     } else if (frame.opcode === 6) listener({ type: "error", streamId: frame.streamId, seq: frame.seq, message: new TextDecoder().decode(frame.payload) });
   }
 
-  private setState(state: RelayConnectionState): void {
+  private setState(state: RelayConnectionState, cause?: Error): void {
     this.state = state;
-    for (const listener of this.stateListeners) listener(state);
+    for (const listener of this.stateListeners) listener(state, cause);
   }
 }
 

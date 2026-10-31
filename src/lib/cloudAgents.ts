@@ -92,8 +92,6 @@ interface Store {
   pollKick: boolean;
   pollDelay: number;
   saves: Map<string, ReturnType<typeof setTimeout>>;
-  /** Text acknowledged by this account's cache, not merely scheduled for save. */
-  savedDrafts: Map<string, string>;
   /** Decisions being enqueued right now, by request id. */
   deciding: Set<string>;
 }
@@ -167,7 +165,6 @@ function store(scope: CloudAgentScope): Store {
       pollKick: false,
       pollDelay: POLL_FIRST_MS,
       saves: new Map(),
-      savedDrafts: new Map(),
       deciding: new Set(),
     };
     stores.set(k, s);
@@ -327,16 +324,9 @@ function scheduleSave(s: Store, tabId: string) {
   );
 }
 
-function invalidateSavedDraft(s: Store, owner: string, tabId: string) {
-  s.savedDrafts.delete(tabId);
-  const current = stores.get(cloudAgentsKey(s.scope));
-  if (current?.account === owner) current.savedDrafts.delete(tabId);
-}
-
 function queueCacheMutation(s: Store, tabId: string, mutate: (owner: string) => Promise<void>): Promise<void> {
   const owner = cacheAccount(s);
   const key = JSON.stringify([owner, s.scope.organizationId, s.scope.workspaceId, tabId]);
-  invalidateSavedDraft(s, owner, tabId);
   const previous = cacheMutations.get(key) ?? Promise.resolve();
   const writing = previous.catch(() => undefined).then(() => mutate(owner));
   cacheMutations.set(key, writing);
@@ -346,14 +336,7 @@ function queueCacheMutation(s: Store, tabId: string, mutate: (owner: string) => 
 }
 
 async function mutateCache(s: Store, owner: string, tabId: string, entry: CachedTab | null) {
-  invalidateSavedDraft(s, owner, tabId);
-  try {
-    await cloudAgentApi.cacheSave(owner, s.scope, tabId, entry);
-  } finally {
-    // Invalidate replacement-store evidence too, including uncertain failure
-    // and deletion. Only a later successful current-store upsert can affirm it.
-    invalidateSavedDraft(s, owner, tabId);
-  }
+  await cloudAgentApi.cacheSave(owner, s.scope, tabId, entry);
 }
 
 function saveNow(s: Store, tabId: string): Promise<void> {
@@ -377,14 +360,7 @@ async function persistNow(s: Store, tabId: string, owner: string) {
     draft: tab.draft || undefined,
     updatedAt: Date.now(),
   };
-  try {
-    await mutateCache(s, owner, tabId, entry);
-    if (stores.get(cloudAgentsKey(s.scope)) === s) s.savedDrafts.set(tabId, entry.draft ?? "");
-  } catch {
-    // A failed acknowledgement may hide a partial write. Even an older saved
-    // value equal to today's text is no longer proof that reload is safe.
-    s.savedDrafts.delete(tabId);
-  }
+  await mutateCache(s, owner, tabId, entry).catch(() => {});
 }
 
 /** Cloud tabs with a draft in `@/lib/drafts`, to forget with this account (a tab the runtime closed keeps its id there). */
@@ -417,27 +393,6 @@ function restoreDraft(s: Store, tab: CloudAgentTab, draft: string | undefined) {
   // Reaffirm the restored value through the serialized writer. A cache read
   // started before another write is not proof of what remains on disk now.
   scheduleSave(s, tab.tabId);
-}
-
-/** Synchronous navigation barrier: no await between this check and reload.
- * Failed/unsavable drafts remain in memory. Unlike cleanup's best-effort flush,
- * a scheduled or swallowed-error save is never evidence of persistence. */
-export function cloudDraftsReadyForRecovery(): boolean {
-  // A reload must not discard ordering ownership while detached stores still
-  // have native mutations in flight, even if this account has no drafts yet.
-  if (cacheMutations.size) return false;
-  for (const tabId of draftTabs) {
-    let owned = false;
-    for (const s of stores.values()) {
-      if (!s.tabs.has(tabId)) continue;
-      owned = true;
-      if (s.saves.has(tabId)
-        || s.savedDrafts.get(tabId) !== getDraft(tabId)) return false;
-    }
-    // Closed/unknown tabs with retained text cannot be handed off safely.
-    if (!owned && getDraft(tabId)) return false;
-  }
-  return true;
 }
 
 /** Write pending cache entries now (e.g. before leaving the page). */
@@ -642,7 +597,6 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
   if (pending) clearTimeout(pending);
   s.saves.delete(tab.tabId);
   if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
-  s.savedDrafts.delete(tab.tabId);
   if (!isDevScope(s.scope)) void queueCacheMutation(s, tab.tabId,
     (owner) => mutateCache(s, owner, tab.tabId, null)).catch(() => undefined);
 }

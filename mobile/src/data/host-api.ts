@@ -22,11 +22,13 @@ export interface ChatNote { id: string; body: string; createdAt: number; author:
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
 export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
+/** What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675). */
+export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number }
 
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
 
-  private capabilities?: Promise<{ transcript?: number; conditionalLists?: number }>;
+  private capabilities?: Promise<HostFeatures>;
   private lists = new Map<string, { version: string; value: unknown }>();
   private pendingLists = new Map<string, Promise<unknown>>();
 
@@ -37,9 +39,19 @@ export class HostApi {
     if (hostChanged) { this.lists = new Map(); this.pendingLists = new Map(); }
   }
 
-  features(): Promise<{ transcript?: number; conditionalLists?: number }> {
+  /** The path requests go over right now; null while disconnected. */
+  transport(): "direct" | "relay" | null {
+    return this.connection.transport();
+  }
+
+  /** Whether the Mac reassembles fragments, which also means it sizes transcript pages to the connection (#669). */
+  reassemblesFragments(): Promise<boolean> {
+    return this.connection.reassemblesFragments();
+  }
+
+  features(): Promise<HostFeatures> {
     if (this.capabilities) return this.capabilities;
-    const pending = this.connection.request<{ transcript?: number; conditionalLists?: number }>("sync.capabilities")
+    const pending = this.connection.request<HostFeatures>("sync.capabilities")
       .then((result) => result.ok ? result.value : {})
       .catch((cause) => { if (this.capabilities === pending) this.capabilities = undefined; throw cause; });
     this.capabilities = pending;
@@ -121,22 +133,34 @@ export class HostApi {
     return Array.isArray(messages) ? messages.flatMap(readNote).sort((left, right) => left.createdAt - right.createdAt) : [];
   }
 
-  async postNote(sessionId: string, text: string): Promise<PostNoteResult> {
-    const result = await this.connection.request<{ status?: unknown; message?: unknown }>("chat.post", { worktreeId: sessionId, body: text });
+  /**
+   * `messageId` names the draft (#675): sending it again after a lost reply
+   * gets the Mac's first reply instead of a second note or prompt. An older
+   * Mac refuses the field, so it is sent only to one that reports `sendIds`.
+   */
+  async postNote(sessionId: string, text: string, messageId?: string): Promise<PostNoteResult> {
+    const result = await this.connection.request<{ status?: unknown; message?: unknown }>("chat.post", { worktreeId: sessionId, body: text, ...await this.messageId(messageId) });
     if (!result.ok) return { sent: false, message: result.refusal.message };
     if (result.value.status === "sent" && isChatNote(result.value.message)) return { sent: true, note: result.value.message };
     return { sent: false, message: "The host did not add this note." };
   }
 
-  async sendSession(tabId: string, text: string, attachments: AttachmentInput[] = []): Promise<SendResult> {
+  /** `messageId`: as for `postNote`. */
+  async sendSession(tabId: string, text: string, attachments: AttachmentInput[] = [], messageId?: string): Promise<SendResult> {
     const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("session.send", {
       tabId,
       text,
       ...(attachments.length ? { attachments } : {}),
+      ...await this.messageId(messageId),
     });
     if (!result.ok) return { sent: false, message: result.refusal.message };
     if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
     return { sent: false, message: "The host did not send this message to the agent." };
+  }
+
+  private async messageId(messageId: string | undefined): Promise<{ clientMessageId?: string }> {
+    if (!messageId) return {};
+    return (await this.features()).sendIds === 1 ? { clientMessageId: messageId } : {};
   }
 
   async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {

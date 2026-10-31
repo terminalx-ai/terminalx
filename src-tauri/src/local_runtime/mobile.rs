@@ -129,29 +129,86 @@ struct Pending {
     display: String,
     images: Vec<crate::session::ImageInput>,
     permit: WritePermit,
+    /// The phone's id for this message (#675): sending it again finds this
+    /// copy instead of adding a second one.
+    message: Option<String>,
 }
+
+/// One phone message to one tab, by the id the phone gave it (#675).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MessageKey { session: String, tab: String, id: String }
+
+/// What a phone sending a message again finds of the copy it sent first
+/// (#675). The phone learns of a send only from the reply, which a dropped
+/// connection loses, and a queued copy outlives that reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Repeat {
+    /// The agent has it. Nothing is sent.
+    Delivered,
+    /// Still waiting for the agent's turn. A copy queued under a connection
+    /// is skipped once that connection closes, so it now waits under this
+    /// one, in the same place in line.
+    Requeued,
+    /// Being typed to the agent right now: whether it arrives is not known yet.
+    Delivering,
+}
+
+/// What a phone send came to.
+enum Sent { Outcome(crate::session::SendOutcome), Repeat(Repeat) }
+
+/// Where the first copy of a phone message is.
+enum Earlier { Delivered, Delivering, Queued(usize) }
+
+/// A phone message the agent has is remembered for a day, at most this many.
+const DELIVERED_KEEP: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const DELIVERED_COUNT: usize = 1_000;
+
 #[derive(Default)]
 struct Queue {
     items: VecDeque<Pending>,
     in_flight: usize,
     in_flight_bytes: usize,
+    /// Phone messages `drain` is delivering right now (#675).
+    delivering: HashSet<MessageKey>,
+    /// Phone messages the agent has, oldest first (#675).
+    delivered: VecDeque<(MessageKey, std::time::Instant)>,
 }
 impl Queue {
     fn accepts(&self, bytes: usize) -> bool {
         self.items.len() + self.in_flight < 64
             && self.items.iter().map(Pending::bytes).sum::<usize>() + self.in_flight_bytes + bytes <= 16 * 1024 * 1024
     }
+
+    fn earlier(&mut self, key: &MessageKey, now: std::time::Instant) -> Option<Earlier> {
+        self.delivered.retain(|(_, at)| now.duration_since(*at) < DELIVERED_KEEP);
+        if self.delivered.iter().any(|(delivered, _)| delivered == key) { return Some(Earlier::Delivered); }
+        if self.delivering.contains(key) { return Some(Earlier::Delivering); }
+        self.items.iter().position(|item| item.is(key)).map(Earlier::Queued)
+    }
+
+    fn record_delivered(&mut self, key: MessageKey, now: std::time::Instant) {
+        self.delivered.push_back((key, now));
+        while self.delivered.len() > DELIVERED_COUNT { self.delivered.pop_front(); }
+    }
 }
-struct InFlight<'a> { queue: &'a Mutex<Queue>, bytes: usize }
+struct InFlight<'a> { queue: &'a Mutex<Queue>, bytes: usize, key: Option<MessageKey> }
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         let mut queue = self.queue.lock().unwrap();
         queue.in_flight -= 1;
         queue.in_flight_bytes -= self.bytes;
+        if let Some(key) = &self.key { queue.delivering.remove(key); }
     }
 }
 impl Pending {
     fn bytes(&self) -> usize { self.agent.len() + self.display.len() + self.images.iter().map(|image| image.data.len()).sum::<usize>() }
+    fn key(&self) -> Option<MessageKey> {
+        self.message.as_ref().map(|id| MessageKey { session: self.session.clone(), tab: self.tab.clone(), id: id.clone() })
+    }
+    fn is(&self, key: &MessageKey) -> bool {
+        self.message.as_deref() == Some(key.id.as_str()) && self.session == key.session && self.tab == key.tab
+    }
     fn send(&self, manager: &crate::session::SessionManager) -> Result<crate::session::SendOutcome> {
         manager.send_mobile(&self.session, &self.tab, self.agent.clone(), self.display.clone(), self.images.clone(), self.permit.clone())
     }
@@ -306,23 +363,54 @@ impl Registry {
         !queue.items.is_empty() || queue.in_flight != 0
     }
 
-    fn send(&self, manager: &crate::session::SessionManager, pending: Pending) -> Result<crate::session::SendOutcome> {
+    fn send(&self, manager: &crate::session::SessionManager, pending: Pending) -> Result<Sent> {
         if pending.bytes() > 8 * 1024 * 1024 { bail!("The mobile prompt is too large."); }
+        let pending = match self.repeat(pending)? {
+            Ok(repeat) => return Ok(Sent::Repeat(repeat)),
+            Err(pending) => pending,
+        };
         match pending.send(manager) {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => {
+                if let Some(key) = pending.key() { self.1.lock().unwrap().record_delivered(key, std::time::Instant::now()); }
+                Ok(Sent::Outcome(outcome))
+            }
             Err(error) if error.is::<Busy>() => {
-                let mut queue = self.1.lock().unwrap();
-                if !queue.accepts(pending.bytes()) {
-                    bail!("The mobile follow-up queue is full.");
-                }
-                // A stop or revocation between the attempted write and this
-                // insertion still cannot make the permit current again.
-                if !pending.permit.valid() { bail!("The mobile grant changed before queueing."); }
-                queue.items.push_back(pending);
-                Ok(crate::session::SendOutcome { queued:true, events:Vec::new() })
+                self.enqueue(pending)?;
+                Ok(Sent::Outcome(crate::session::SendOutcome { queued:true, events:Vec::new(), in_input:false }))
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// What became of the first copy of a phone message sent again (#675),
+    /// or the message back when there is none and it is sent as new. A copy
+    /// still queued takes this send's permit: the first one's connection is
+    /// the one that dropped.
+    fn repeat(&self, pending: Pending) -> Result<std::result::Result<Repeat, Pending>> {
+        let Some(key) = pending.key() else { return Ok(Err(pending)) };
+        let mut queue = self.1.lock().unwrap();
+        match queue.earlier(&key, std::time::Instant::now()) {
+            None => Ok(Err(pending)),
+            Some(Earlier::Delivered) => Ok(Ok(Repeat::Delivered)),
+            Some(Earlier::Delivering) => Ok(Ok(Repeat::Delivering)),
+            Some(Earlier::Queued(index)) => {
+                if !pending.permit.valid() { bail!("The mobile grant changed before queueing."); }
+                queue.items[index] = pending;
+                Ok(Ok(Repeat::Requeued))
+            }
+        }
+    }
+
+    fn enqueue(&self, pending: Pending) -> Result<()> {
+        let mut queue = self.1.lock().unwrap();
+        if !queue.accepts(pending.bytes()) {
+            bail!("The mobile follow-up queue is full.");
+        }
+        // A stop or revocation between the attempted write and this
+        // insertion still cannot make the permit current again.
+        if !pending.permit.valid() { bail!("The mobile grant changed before queueing."); }
+        queue.items.push_back(pending);
+        Ok(())
     }
 
     pub(crate) fn drain(&self, manager: &crate::session::SessionManager) {
@@ -340,11 +428,15 @@ impl Registry {
                 let bytes = pending.bytes();
                 queue.in_flight += 1;
                 queue.in_flight_bytes += bytes;
-                (pending,InFlight { queue:&self.1,bytes })
+                // Marked as it leaves the queue, under the same lock: a repeat
+                // must never find it in neither place and send a second copy.
+                let key = pending.key();
+                if let Some(key) = &key { queue.delivering.insert(key.clone()); }
+                (pending,InFlight { queue:&self.1,bytes,key })
             };
             if !pending.permit.valid() || pending.permit.check_mode(&pending.session, &pending.tab).is_err() { continue; }
             match pending.send(manager) {
-                Ok(_) => {},
+                Ok(_) => if let Some(key) = pending.key() { self.1.lock().unwrap().record_delivered(key, std::time::Instant::now()); },
                 // Only this pre-effect refusal is retryable. Never resend a
                 // prompt after an uncertain transport/provider write.
                 Err(error) if error.is::<Busy>() => self.1.lock().unwrap().items.push_back(pending),
@@ -575,10 +667,19 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             _ => bail!("The mobile host identity changed."),
         };
         let envelope = serde_json::json!({"userId":user,"displayName":name,"authority":"host"});
+        let message = match params.get("clientMessageId") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => Some(id.clone()),
+            Some(_) => bail!("Invalid mobile message id."),
+        };
         let pending = Pending { session:session.into(),tab:tab.into(),
             agent:format!("[TerminalX Effective User v1] {envelope}\n{prompt}"), display,
-            images:serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| serde_json::json!([])))?,permit };
-        return Ok(serde_json::to_value(manager.mobile.send(manager,pending)?)?);
+            images:serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| serde_json::json!([])))?,permit,message };
+        return Ok(match manager.mobile.send(manager,pending)? {
+            Sent::Outcome(outcome) => serde_json::to_value(outcome)?,
+            // Shaped as an outcome: `queued` reads as it always has.
+            Sent::Repeat(repeat) => serde_json::json!({"queued":repeat != Repeat::Delivered,"events":[],"repeat":repeat}),
+        });
     }
     let _admitted = grant.enter()?;
     match method {
@@ -633,12 +734,161 @@ mod queue_tests {
     #[test]
     fn popped_delivery_keeps_its_queue_budget_until_the_writer_returns() {
         let queue = Mutex::new(Queue { in_flight:64,in_flight_bytes:16*1024*1024,..Queue::default() });
-        let delivery = InFlight { queue:&queue,bytes:8*1024*1024 };
+        let delivery = InFlight { queue:&queue,bytes:8*1024*1024,key:None };
         assert!(!queue.lock().unwrap().accepts(1));
         drop(delivery);
         assert!(queue.lock().unwrap().accepts(8*1024*1024));
         assert!(!queue.lock().unwrap().accepts(8*1024*1024+1));
         assert_eq!(queue.lock().unwrap().in_flight,63);
+    }
+
+    #[test]
+    fn a_delivered_phone_message_is_remembered_for_a_day_at_most_a_thousand() {
+        let key = |id: &str| MessageKey { session:"session".into(),tab:"tab".into(),id:id.into() };
+        let mut queue = Queue::default();
+        let now = std::time::Instant::now();
+        queue.record_delivered(key("draft-1"),now);
+        assert!(matches!(queue.earlier(&key("draft-1"),now),Some(Earlier::Delivered)));
+        // Another tab's message under the same id is another message.
+        assert!(queue.earlier(&MessageKey { tab:"other".into(),..key("draft-1") },now).is_none());
+        assert!(queue.earlier(&key("draft-1"),now + DELIVERED_KEEP).is_none());
+
+        for index in 0..=DELIVERED_COUNT { queue.record_delivered(key(&format!("id-{index}")),now); }
+        assert_eq!(queue.delivered.len(),DELIVERED_COUNT);
+        assert!(queue.earlier(&key("id-0"),now).is_none());
+        assert!(matches!(queue.earlier(&key(&format!("id-{DELIVERED_COUNT}")),now),Some(Earlier::Delivered)));
+
+        // `drain` marks a message as it takes it from the queue.
+        queue.delivering.insert(key("draft-2"));
+        assert!(matches!(queue.earlier(&key("draft-2"),now),Some(Earlier::Delivering)));
+        // Its delivery over, whichever way it went, it is no longer being delivered.
+        queue.in_flight = 1;
+        let shared = Mutex::new(queue);
+        drop(InFlight { queue:&shared,bytes:0,key:Some(key("draft-2")) });
+        assert!(shared.lock().unwrap().earlier(&key("draft-2"),now).is_none());
+    }
+
+    #[test]
+    fn a_repeat_reports_what_it_found_as_a_send_outcome() {
+        let outcome = |repeat: Repeat| serde_json::json!({"queued":repeat != Repeat::Delivered,"events":[],"repeat":repeat});
+        assert_eq!(outcome(Repeat::Requeued),serde_json::json!({"queued":true,"events":[],"repeat":"requeued"}));
+        assert_eq!(outcome(Repeat::Delivered)["repeat"],"delivered");
+        assert_eq!(outcome(Repeat::Delivering)["repeat"],"delivering");
+        // A desktop that predates `repeat` reads it as the outcome it always got.
+        let old: crate::session::SendOutcome = serde_json::from_value(outcome(Repeat::Requeued)).unwrap();
+        assert!(old.queued);
+    }
+}
+
+/// A phone message sent again after its reply was lost (#675), against real
+/// grants and real connection closes. Runs in a child process, as the other
+/// owner fixtures do, and never delivers: no provider is launched.
+#[cfg(test)]
+mod repeat_tests {
+    use super::*;
+    use crate::{harness::host::Host, pty, session::SessionManager, sink, store};
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "TERMINALX_TEST_MOBILE_REPEAT_CHILD";
+
+    #[test]
+    fn a_message_sent_again_finds_its_first_copy_instead_of_queueing_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "local_runtime::mobile::repeat_tests::repeat_child", "--nocapture"])
+            .env(CHILD, "1").env("TERMINALX_HOME", dir.path().join("store"))
+            .env("CLAUDE_CONFIG_DIR", dir.path().join("claude"))
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+            .spawn().unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if Instant::now() >= until {
+                child.kill().unwrap(); child.wait().unwrap();
+                panic!("mobile repeat fixture exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let log = std::fs::read_to_string(dir.path().join("child.log")).unwrap();
+        assert!(status.success(), "{log}");
+        assert!(log.contains("1 passed"), "the fixture did not run: {log}");
+    }
+
+    #[test]
+    fn repeat_child() {
+        if std::env::var(CHILD).is_err() { return; }
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        let entry: store::index::SessionEntry = serde_json::from_value(json!({
+            "id":"repeat","projectPath":root,"cwd":root,"title":"fixture",
+            "created":store::index::now(),"modified":store::index::now(),
+            "tabs":[{"id":"tab","harness":"claude","permissionMode":"manual","created":store::index::now()}]
+        })).unwrap();
+        store::index::save(&[entry]).unwrap();
+        store::write_json(&root.join("devices.json"), &json!({"devices":[{
+            "id":"driver","label":"Fixture","platform":"test","token":"fixture-hash",
+            "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":store::index::now()
+        }]})).unwrap();
+        let manager = SessionManager::new(Arc::new(sink::BroadcastSink::new(256)),Arc::new(sink::NoObserver),
+            Arc::new(Host::new()),Arc::new(pty::Terminals::new()),Arc::new(Default::default()),
+            Arc::new(Default::default()),crate::hooks::prepare_control().unwrap());
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let lease = lifetime.command("runtime.attach",json!({"protocol":1})).unwrap();
+        let actor: Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+        for connection in ["earlier", "dropped", "replacement"] {
+            manager.mobile.register(&lifetime,actor.clone(),connection,"driver").unwrap();
+        }
+        let registry = &manager.mobile;
+        let pending = |connection: &str, id: Option<&str>| Pending {
+            session:"repeat".into(),tab:"tab".into(),agent:"Ship it".into(),display:"Ship it".into(),images:Vec::new(),
+            permit:registry.permit(&actor,connection,"repeat","tab").unwrap(),message:id.map(str::to_owned),
+        };
+        let queued = || registry.1.lock().unwrap().items.iter()
+            .map(|item| (item.message.clone().unwrap_or_default(),item.permit.valid())).collect::<Vec<_>>();
+        let repeat = |pending: Pending| registry.repeat(pending).unwrap().ok();
+
+        // A copy queued under a connection that then closed is skipped by
+        // `drain`, and nothing records it: sent again, it goes as new.
+        registry.enqueue(pending("earlier",Some("draft-0"))).unwrap();
+        registry.close(&actor,"earlier").unwrap();
+        registry.drain(&manager);
+        assert!(queued().is_empty());
+        assert_eq!(repeat(pending("replacement",Some("draft-0"))),None);
+
+        // The agent's turn is open: the first copy waits in line, under the
+        // connection that then drops before the phone hears it was queued.
+        registry.enqueue(pending("dropped",Some("draft-1"))).unwrap();
+        registry.enqueue(pending("dropped",Some("draft-2"))).unwrap();
+        registry.close(&actor,"dropped").unwrap();
+        assert_eq!(queued(),vec![("draft-1".into(),false),("draft-2".into(),false)]);
+        // Sent again over the connection that replaced it: that same copy,
+        // now under a live permit and in the same place in line, not a second.
+        assert_eq!(repeat(pending("replacement",Some("draft-1"))),Some(Repeat::Requeued));
+        assert_eq!(queued(),vec![("draft-1".into(),true),("draft-2".into(),false)]);
+        assert_eq!(repeat(pending("replacement",Some("draft-1"))),Some(Repeat::Requeued));
+        assert_eq!(queued().len(),2);
+
+        // Without an id, or with one never sent, a message is another message.
+        assert_eq!(repeat(pending("replacement",None)),None);
+        assert_eq!(repeat(pending("replacement",Some("draft-3"))),None);
+
+        // Delivered, or being delivered: nothing is queued or sent.
+        registry.1.lock().unwrap().record_delivered(MessageKey { session:"repeat".into(),tab:"tab".into(),id:"draft-4".into() },Instant::now());
+        assert_eq!(repeat(pending("replacement",Some("draft-4"))),Some(Repeat::Delivered));
+        registry.1.lock().unwrap().delivering.insert(MessageKey { session:"repeat".into(),tab:"tab".into(),id:"draft-5".into() });
+        assert_eq!(repeat(pending("replacement",Some("draft-5"))),Some(Repeat::Delivering));
+        assert_eq!(queued().len(),2);
+
+        // A repeat whose own connection is gone cannot revive the copy.
+        let stale = pending("replacement",Some("draft-1"));
+        registry.close(&actor,"replacement").unwrap();
+        assert!(registry.repeat(stale).is_err());
+
+        registry.1.lock().unwrap().items.clear();
+        lifetime.command("runtime.detach",lease).unwrap();
+        assert!(manager.terminals().panes().is_empty(),"a repeat must not launch a provider");
     }
 }
 

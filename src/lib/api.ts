@@ -1503,6 +1503,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_repository_ref_not_found"
   | "cloud_workspace_repository_verification_unavailable"
   | "cloud_workspace_agent_credential_required"
+  | "cloud_agent_credential_reauth_required"
   | "cloud_workspace_device_auth_unavailable"
   | "cloud_workspace_operation_in_progress"
   | "cloud_workspace_active_work"
@@ -1738,11 +1739,19 @@ export interface KillResult {
   confirmation: string | null;
 }
 
+/**
+ * One window's live connection to the local runtime (`supervisor.rs`). A new
+ * `generation` is a new attachment; a new `view` is a new connection for this
+ * window's terminal output alone. Either way the window attaches again.
+ */
 export type LocalRuntimeState =
   | { state: "inProcess" }
-  | { state: "connected"; epoch: string; runningAgents: number; terminals: number }
+  | { state: "connected"; epoch: string; generation: number; view: number }
+  /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
+  | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
+  /** Retrying cannot help until something outside this window changes. */
   | { state: "unavailable"; message: string }
-  /** Attached, but not answering: reconnecting reaches the same wedged runtime. */
+  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). */
   | { state: "unresponsive"; message: string; epoch: string | null };
 
 export type QuitBehavior = "keepRunning" | "stopAll";
@@ -1751,7 +1760,7 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
-  /** Stop the runtime without asking it, with its agents and terminals, and start a fresh one. */
+  /** Stop the runtime without asking it, with its agents and terminals; the desktop attaches a fresh one. */
   restart: (epoch: string | null) => invoke<LocalRuntimeState>("local_runtime_restart", { epoch }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
@@ -1787,6 +1796,30 @@ export interface QueuedMessage {
 export interface SendOutcome {
   queued: boolean;
   events: AgentEvent[];
+  /** A continuation the agent has not taken, sitting in its input: one Enter sends it (#662). */
+  inInput?: boolean;
+}
+
+/**
+ * Where a continuation's delivery has got to, as the tab tells it (#662):
+ * typed, its Enter written, written again (nudged), held back because the
+ * agent is not reading its input (stalled), and taken (delivered).
+ */
+export type DeliveryStage = "body_written" | "submit_written" | "nudged" | "stalled" | "delivered";
+
+/**
+ * Follow the deliveries of continuations into one tab. Resolves to the
+ * function that stops listening.
+ */
+export async function onPromptDelivery(sessionId: string, tabId: string, onStage: (stage: DeliveryStage, seq: number) => void): Promise<() => void> {
+  try {
+    return await listen<{ sessionId: string; tabId: string; seq: number; stage: DeliveryStage }>("prompt_delivery", ({ payload }) => {
+      if (payload.sessionId === sessionId && payload.tabId === tabId) onStage(payload.stage, payload.seq);
+    });
+  } catch {
+    // Outside a webview there is no event stream; the send still answers.
+    return () => {};
+  }
 }
 
 export interface ModelInfo {
@@ -1830,6 +1863,8 @@ export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
+  /** Press Enter in the tab's agent for the continuation `seq` left in its input. False when it is no longer waiting there. */
+  submitWaiting: (sessionId: string, tabId: string, seq: number) => invoke<boolean>("submit_waiting_prompt", { sessionId, tabId, seq }),
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
   interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),

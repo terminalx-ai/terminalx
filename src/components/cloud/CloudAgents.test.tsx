@@ -35,7 +35,7 @@ vi.mock("@/components/chat/Composer", () => ({
 // jsdom has no canvas for the chat's idle animation.
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 
-import { CloudAgentsView, connectionLabel, provisioningLabel, signInMessage, stoppedAndStaying } from "./CloudAgents";
+import { CloudAgentsView, connectionLabel, provisioningLabel, signInAgain, signInMessage, stoppedAndStaying } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
 import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
@@ -437,6 +437,21 @@ describe("cloud agent tabs", () => {
     expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "shared-use-policy" }), false)).toContain("An owner or admin can allow it for the whole organization.");
     expect(signInMessage(info({ provider: "codex", state: "revoked" }), true)).toContain("Codex login was revoked");
     expect(signInMessage(info({ provider: "codex", state: "disconnected" }), true)).toContain("Codex login was disconnected");
+    // #667: a login the provider refused, by the server's word or the runtime's, is signed in again, by name.
+    const refused = { provider: "codex", state: "sign-in-required", reason: "provider-refused" };
+    expect(signInMessage(info(refused), true, "TerminalX")).toBe(
+      "Codex sign-in for TerminalX was revoked or expired, so it can't take prompts here. Sign in again, then start the agent or send again.",
+    );
+    expect(signInMessage(info(refused), false, "TerminalX")).toContain("Ask an owner or admin to sign it in again");
+    expect(signInMessage(info(refused), true)).toContain("Codex sign-in for this organization was revoked or expired");
+    expect(signInAgain(info(refused), true)).toBe("codex");
+    expect(signInAgain(info(refused), false)).toBeNull();
+    expect(signInAgain(info(refused), null)).toBeNull();
+    expect(signInAgain(info({ provider: "codex", state: "revoked" }), true)).toBeNull();
+    // Cursor has no sign-in to open: its key is connected again where the logins are.
+    const cursor = { harness: "cursor-agent", signIn: { provider: "cursor", state: "sign-in-required", reason: null } };
+    expect(signInAgain(cursor, true)).toBeNull();
+    expect(signInMessage(cursor, true)).toContain("Connect it again in Settings → Organizations → Agent logins");
     // A state word this app does not know is not printed.
     const unknown = signInMessage(info({ provider: "codex", state: "quarantined_v2" }), true)!;
     expect(unknown).toContain("Codex login is not available");

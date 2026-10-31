@@ -93,9 +93,9 @@ pub fn connect_or_start(source: &Path, home: &Path) -> Result<Arc<Client>> {
 /// runtime itself. Discarding it left a wedged runtime with no account (#661).
 pub fn connect_desktop(source: &Path, home: &Path, application: &str, log: Option<&Path>) -> Result<Arc<Client>> {
     let client = launch(source,home,Some(application),log)?;
-    let status = client.liveness()?;
+    let status = client.liveness(super::client::LIFECYCLE_TIMEOUT)?;
     if cfg!(target_os = "macos") && status["localRuntime"]["nativeTray"] != true {
-        bail!("The running local owner does not support the desktop tray. Its work was left running; attach with a compatible build after it finishes.");
+        return Err(super::client::Blocked("The running local owner does not support the desktop tray. Its work was left running; attach with a compatible build after it finishes.".into()).into());
     }
     Ok(client)
 }

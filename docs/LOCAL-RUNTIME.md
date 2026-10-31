@@ -724,19 +724,27 @@ below keep one such pane from taking anything else down.
   does not answer in time, refuses as `busy`, or its loop has not finished a
   pass for 120 seconds. The loop shares the sharing and tab locks with prompt
   delivery, which can hold them for about a minute at most, so 120 seconds is
-  never reached by delivery that is still working. An attach that times out or
-  meets `busy` also counts as not responding, so a window opened onto a wedged
-  runtime offers the restart without having attached.
+  never reached by delivery that is still working. Only an open attachment is
+  probed. Once it closes, the supervisor's attempts to attach again (#643) say
+  instead: one that times out or meets `busy` counts as not responding, so a
+  window opened onto a wedged runtime offers the restart without having
+  attached. A successful attach clears the finding. The status the window reads
+  shows `unresponsive` in place of connected or reconnecting, because
+  reconnecting reaches the same wedged process. A change is announced with
+  `local_runtime_state`, like the supervisor's own changes.
 - **Restart.** The notice reads "TerminalX runtime is not responding" and
   offers **Restart runtime**, never Reconnect. `local_runtime_restart` takes the
   launch lock and finds the process listening on `run/hooks.sock`. It continues
   only if that process runs `runtime/<hash>/terminalx-serve` from this home. It
   sends SIGTERM to the runtime's process group, then SIGKILL after 3 seconds,
-  and then ends the sessions of the terminals the runtime started. Finally it
-  launches and attaches a fresh runtime, and windows reload. Agents resume
-  their conversations from the provider transcripts. The restart names the
-  epoch the window saw, so a second window's late click cannot stop the
-  replacement.
+  and then ends the sessions of the terminals the runtime started. Then it
+  drops the old attachment and asks the supervisor to attach now. Discovery
+  starts a fresh runtime, and windows re-attach their terminals in place, as
+  after any reconnect, without reloading. Agents resume their conversations
+  from the provider transcripts. The restart names the epoch the window saw,
+  and it acts only while the runtime is still found not responding. A second
+  window's late click therefore stops nothing: not the replacement, and not
+  the old runtime while the replacement is still being attached.
 - **Runtime log.** A desktop-launched runtime gets `--log-file
   ~/Library/Logs/<identifier>/runtime.log`. Its stdout and stderr point there
   too, so panics are kept. At 8 MB the log moves to `runtime.log.1` and a new

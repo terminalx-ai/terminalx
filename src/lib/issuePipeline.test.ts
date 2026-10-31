@@ -295,3 +295,27 @@ describe("what the window knows of the pipelines", () => {
     expect(getIssuePipelines()[0].state).toBe("stopped");
   });
 });
+
+describe("after a gap in the live connection", () => {
+  it("takes the listed state over what it knew, keeps what was announced meanwhile, and tells of a pipeline that came to rest", async () => {
+    const store = await load();
+    list.mockResolvedValueOnce([pipeline(), pipeline({ id: "p2" }), pipeline({ id: "gone" })]);
+    await store.bootIssuePipelines();
+    expect(store.getIssuePipelines().map((value) => value.id)).toEqual(["p1", "p2", "gone"]);
+    let listed!: (pipelines: IssuePipeline[]) => void;
+    list.mockReturnValueOnce(new Promise((resolve) => (listed = resolve)));
+    listeners.get("local_runtime_reattached")!({ payload: { generation: 2 } });
+    // Announced while the list is on its way: newer than the list.
+    listeners.get("issue_pipeline")!({ payload: pipeline({ id: "p2", state: "waiting", note: "announced" }) });
+    listeners.get("issue_pipeline")!({ payload: pipeline({ id: "p3", note: "started meanwhile" }) });
+    notePipelineState.mockClear();
+    listed([pipeline({ state: "readyToMerge", note: "finished during the gap" }), pipeline({ id: "p2", note: "listed before the announcement" })]);
+    await vi.waitFor(() => expect(store.getIssuePipelines().map((value) => value.id)).toEqual(["p1", "p2", "p3"]));
+    const [p1, p2, p3] = store.getIssuePipelines();
+    expect(p1).toMatchObject({ state: "readyToMerge", note: "finished during the gap" });
+    expect(p2.note).toBe("announced");
+    expect(p3.note).toBe("started meanwhile");
+    expect(notePipelineState).toHaveBeenCalledOnce();
+    expect(notePipelineState).toHaveBeenCalledWith(expect.objectContaining({ id: "p1", state: "readyToMerge" }));
+  });
+});

@@ -2,10 +2,36 @@
 
 ## Unreleased
 
+### Background sessions
+
+- Reconnect to the background runtime automatically, with backoff and no attempt
+  limit, instead of after three tries per window. Recovery no longer reloads
+  windows: terminals re-attach in place from their retained output, and sessions,
+  history and pipelines are read again without restarting agents or resending
+  prompts. A hung runtime is now noticed, a restarted one is found again, and a
+  window whose terminal output alone dropped recovers without affecting others.
+  The notice stays quiet for short gaps and asks for action only when retrying
+  cannot help or has not helped for minutes. (#643)
+### Relay
+
+- Poll the account service for pairing grants and revocations once every 30
+  seconds while idle, over one kept-alive connection, instead of a new TLS
+  connection every two seconds. Back off on failures, honour `Retry-After`, use
+  a refreshed access token, and record failures in `relay-diagnostics.json`.
+  Report this Mac as live only while its Relay control channel is still hearing
+  from the cell, so a phone stops offering Pair for a Mac it cannot reach.
+  Accept a cell's `account-pairing-changed` hint, which polls at once and then
+  every two seconds for a minute. (#671)
+
 ### Mobile
 
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
+- Sending a message or worktree note again after the connection dropped no
+  longer gives the agent the prompt twice or adds the note twice. Each draft
+  goes under one id, and a Mac that already has it answers as it did the first
+  time, so the phone reports it sent and clears the box. Older Macs behave as
+  before. (#675)
 
 ### Organizations
 
@@ -13,13 +39,44 @@
   organizations, with exact-name confirmation and guidance for remaining resources.
   Refresh membership and clear a deleted default selection without choosing a replacement.
 
+### Terminal
+
+- Release a tab's terminal view metadata when the tab is removed, and ignore
+  late start or adoption replies from its previous lifetime. Archived tabs,
+  retained conversation history and reattachment are unchanged. (#232)
+- Cancel xterm's pending buffer compaction when a terminal is disposed,
+  including buffers replaced by a reset, so a closed terminal's scrollback is
+  not kept alive by the timer. (#232)
+- Reuse one small canvas for terminal palette conversion instead of creating
+  two surfaces per palette. (#232)
+- Add an opt-in memory diagnostic to the terminal benchmark: weak inventories of
+  xterm buffers, parsers, renderers and canvases, Tauri callback counts, and
+  WebContent footprint in exact bytes. It reports typed-array spans without
+  materializing their backing buffers. (#232)
+
 ### Chat
 
+- Deliver Continue in New Session handoffs that the new agent left in its input.
+  The Enter waits until the agent has shown the paste, and is written again up
+  to twice. A handoff still in the input is offered as **Press Enter**, not
+  reported as a failure. The dialog shows each delivery step, finishes about
+  20 s after the last Enter instead of after 90 s, and turns a late delivery
+  into success. (#662)
 - Recognize completed Codex context compaction and preserve scoped compaction
   history and status across conversation changes. Add a default-off experimental
   owned-stdio connection for explicitly created new Codex sessions, with confirmed
   compaction start/completion events and retained interruption status. Existing
   PTY sessions keep their current behavior. (#644)
+
+### Status bar
+
+- Claude usage keeps refreshing when Claude Code's keychain login is large.
+  The read no longer stalls until its deadline once the item outgrew the pipe
+  buffer, as it did as MCP sign-ins accumulated, and then reported "OAuth
+  credentials were not found". A failure now says whether the keychain read
+  timed out, failed (with its exit code), or found no login, and Refresh
+  retries a failed credential read at once instead of waiting out a backoff
+  of up to four hours. A provider's Retry-After still holds it. (#664)
 
 ### Issue work status
 
