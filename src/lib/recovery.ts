@@ -6,6 +6,7 @@ export const RECOVERY_MESSAGES: Record<RecoveryKind, string> = {
   tool: "A tool or command failed. Review its outcome before continuing.",
   timeout: "No progress was confirmed before the timeout. The process outcome is unknown.",
   delivery_unconfirmed: "Prompt delivery could not be confirmed. Check the terminal: if your message is still in the agent's input, press Enter there to send it. To resend instead, stop the session, then press Up in the composer to recall your message.",
+  unsent: "The agent never received your last prompt, so its conversation starts without it. Resend it, or send something new.",
   disconnected: "The connection was lost. The process outcome is unknown.",
   permission_expired: "The permission request expired. Check the terminal for a new request or stop the session.",
   signed_out: "The agent is signed out, or its sign-in expired. Sign in again, then retry.",

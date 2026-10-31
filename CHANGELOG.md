@@ -56,6 +56,14 @@
 
 ### Chat
 
+- Restart Claude Code tabs whose conversation the CLI never wrote (opened and
+  never prompted, or a first prompt that never reached it) under the same id
+  instead of resuming a conversation that does not exist, which exited at once.
+  Send a Continue in New Session handoff again, ahead of the next prompt, when
+  the CLI never took it. Offer any other prompt the agent never received with
+  **Resend last prompt**, images included. Say why a CLI that exits as it
+  starts went, from what it printed, with credentials and private paths cut
+  out. (#663)
 - Deliver Continue in New Session handoffs that the new agent left in its input.
   The Enter waits until the agent has shown the paste, and is written again up
   to twice. A handoff still in the input is offered as **Press Enter**, not

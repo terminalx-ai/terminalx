@@ -214,6 +214,7 @@ impl Rig {
                 mode: "default".into(),
                 pane_id: pane.clone(),
                 generation: 0,
+                launched_at: now,
                 restart_when_idle: false,
                 settings_asked_at: None,
                 launched_for: None,
@@ -2356,7 +2357,7 @@ fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     assert_eq!((terminal.status, terminal.asks, terminal.recovery), (TabStatus::Waiting, false, None));
 
     // The agent stops on an error: the tab waits, with nothing to answer.
-    rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::Error { message: "unexpected failure".into(), fatal: true }, None);
+    rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::Error { message: "unexpected failure".into(), fatal: true, detail: None }, None);
     let failed = rig.manager.wait_view(SESSION, TAB);
     assert_eq!((failed.status, failed.asks, failed.recovery), (TabStatus::Waiting, false, Some(RecoveryKind::Failed)));
     assert!(rig.manager.pending_permissions().is_empty());
