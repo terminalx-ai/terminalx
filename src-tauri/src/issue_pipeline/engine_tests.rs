@@ -2698,3 +2698,40 @@ fn checks_that_failed_for_the_reviewer_are_a_persons_to_judge_whatever_its_verdi
     assert!(run.merges().is_empty());
     assert!(run.host.world().comments[0].contains("The reviewer's checks failed: status::usage tests fail."));
 }
+
+#[test]
+fn an_author_in_a_turn_when_its_pull_request_merges_is_left_to_finish_and_never_told_to_stop() {
+    let run = Run::start(&github_issue(), false);
+    let reviewer = run.to_review().reviewer.unwrap();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    // A person is using the author's tab for a follow-up of their own when the merge lands.
+    run.host.agent(&author_tab(), true);
+    run.host.agent(&reviewer, false);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert!(run.host.prompts_to("author").is_empty(), "nothing is typed into a person's turn");
+    assert!(merged.releasing.is_empty());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+    assert_eq!(merged.events.last().unwrap().message, "Pull request #7 was merged at 1111111111, so this pipeline is finished. Stopped the reviewer's agent, which sat idle; its conversation can be resumed. Left the author's agent running: it is in a turn.");
+    // That turn ends: the conversation is the person's, and its agent is not stopped for it.
+    run.host.agent(&author_tab(), false);
+    let after = run.author("Changelog updated.");
+    assert_eq!(after.events.len(), merged.events.len());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+}
+
+#[test]
+fn an_overdue_verdict_that_cannot_be_asked_for_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    run.reviewer(&pending_review(C1, "tests running"));
+    // Its tab cannot take the request when the poller asks.
+    run.host.world().send_error = Some("the agent could not be started".into());
+    run.host.world().now += TimeDelta::minutes(30);
+    let stopped = run.poll();
+    assert_eq!((stopped.stage, stopped.state), (Stage::Review, State::NeedsYou));
+    assert_eq!(stopped.reason, Some(StopReason::Failed { step: "Asking the session again".into(), message: "the agent could not be started".into() }));
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    // From there a person asks for the review again.
+    assert_eq!(act(&run.host, &run.id, Action::Advance).unwrap().stage, Stage::Review);
+}

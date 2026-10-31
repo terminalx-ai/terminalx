@@ -8,10 +8,13 @@
 //!
 //! [`stop_in`] looks for processes of this user that work inside the
 //! workspace: their working directory is in it, or they were given a
-//! `--manifest-path` in it. One that has lost its parent (adopted by init) is
-//! stopped, with everything it started. One that still has a parent belongs
-//! to something alive, an editor or a shell a person opened there, and is
-//! only listed.
+//! `--manifest-path` in it. Only a Rust build or check that has lost its
+//! parent (adopted by init) is stopped, with what it started inside the
+//! workspace. Anything else is listed and left alone: a process with a parent
+//! belongs to something alive, an editor or a shell a person opened there, and
+//! one detached on purpose (`screen`, `tmux`, `nohup`, an `ssh -f` tunnel, a
+//! session leader of any kind) is someone's work. The report names programs,
+//! never their arguments, which can carry a token or a password.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -22,16 +25,14 @@ use serde::Serialize;
 /// How long a process is given to end after it is asked to.
 const GRACE: Duration = Duration::from_secs(3);
 
-/// The longest a command is quoted in a report.
-const COMMAND_LIMIT: usize = 240;
-
 /// A process found working in a workspace being removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stray {
     pub pid: u32,
-    pub command: String,
-    /// Stopped; otherwise it still has a parent and was left alone.
+    /// The program's name, without its path or arguments.
+    pub program: String,
+    /// Stopped; otherwise it was left running.
     pub stopped: bool,
 }
 
@@ -40,12 +41,34 @@ struct Process {
     pid: u32,
     ppid: u32,
     uid: u32,
+    /// It leads its own session (`setsid`): something detached on purpose.
+    /// True too when that cannot be read.
+    leader: bool,
     cwd: Option<PathBuf>,
     args: Vec<String>,
 }
 
+fn program(process: &Process) -> &str {
+    let first = process.args.first().map(String::as_str).unwrap_or_default();
+    first.rsplit('/').next().unwrap_or(first)
+}
+
+/// A Rust build or check, as a build tool or an editor starts one: never a
+/// program a person runs (`cargo run`), installs or keeps watching.
+fn build_tool(process: &Process) -> bool {
+    match program(process) {
+        "cargo" | "cargo-clippy" => {
+            let subcommand = process.args.iter().skip(1).find(|arg| !arg.starts_with('-') && !arg.starts_with('+'));
+            matches!(subcommand.map(String::as_str), Some("check" | "c" | "build" | "b" | "clippy" | "test" | "t" | "nextest" | "bench" | "doc" | "d" | "metadata" | "rustc" | "rustdoc" | "fetch"))
+        }
+        "rustc" | "rustdoc" | "clippy-driver" | "rust-analyzer" | "rust-analyzer-proc-macro-srv" => true,
+        name => name.starts_with("build-script-") || name.starts_with("build_script_"),
+    }
+}
+
 /// The processes of a host to judge against `dir`: what [`stop_in`] reads,
 /// apart from the listing itself, so the choice can be tested on its own.
+/// Which to stop, and which to list only.
 fn choose(dir: &Path, table: &[Process], me: u32, uid: u32) -> (Vec<u32>, Vec<u32>) {
     let canonical = std::fs::canonicalize(dir).ok();
     let under = |path: &Path| path.starts_with(dir) || canonical.as_deref().is_some_and(|canonical| path.starts_with(canonical));
@@ -57,27 +80,19 @@ fn choose(dir: &Path, table: &[Process], me: u32, uid: u32) -> (Vec<u32>, Vec<u3
                 None => false,
             })
     };
-    let ours: Vec<&Process> = table.iter().filter(|process| process.uid == uid && process.pid != me && process.pid > 1).collect();
-    // Orphans working inside, then everything they started, however deep.
-    let mut stop: BTreeSet<u32> = ours.iter().filter(|process| process.ppid == 1 && inside(process)).map(|process| process.pid).collect();
+    let ours: Vec<&Process> = table.iter().filter(|process| process.uid == uid && process.pid != me && process.pid > 1 && inside(process)).collect();
+    // Orphaned builds and checks, then what they started in the workspace:
+    // a build script, a test binary. Never a session leader, whatever started it.
+    let mut stop: BTreeSet<u32> = ours.iter().filter(|process| process.ppid == 1 && !process.leader && build_tool(process)).map(|process| process.pid).collect();
     loop {
-        let more: Vec<u32> = ours.iter().filter(|process| stop.contains(&process.ppid) && !stop.contains(&process.pid)).map(|process| process.pid).collect();
+        let more: Vec<u32> = ours.iter().filter(|process| stop.contains(&process.ppid) && !stop.contains(&process.pid) && !process.leader).map(|process| process.pid).collect();
         if more.is_empty() {
             break;
         }
         stop.extend(more);
     }
-    let left = ours.iter().filter(|process| !stop.contains(&process.pid) && inside(process)).map(|process| process.pid).collect();
+    let left = ours.iter().filter(|process| !stop.contains(&process.pid)).map(|process| process.pid).collect();
     (stop.into_iter().collect(), left)
-}
-
-fn command(process: &Process) -> String {
-    let text = process.args.join(" ");
-    let mut end = text.len().min(COMMAND_LIMIT);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end < text.len() { format!("{}…", &text[..end]) } else { text }
 }
 
 fn alive(pid: u32) -> bool {
@@ -92,16 +107,15 @@ fn signal(pid: u32, signal: libc::c_int) {
     }
 }
 
-/// Stop the processes left working in `dir` that nothing alive owns, and say
-/// which were found: the ones stopped, then the ones left because they still
-/// have a parent. Called once the workspace's sessions are stopped and before
-/// it is deleted.
+/// Stop the leftover builds and checks working in `dir`, and say what was
+/// found: the ones stopped, then the ones left running. Called once the
+/// workspace's sessions are stopped and before it is deleted.
 pub fn stop_in(dir: &Path) -> Vec<Stray> {
     let table = processes();
     // SAFETY: getuid cannot fail.
     let uid = unsafe { libc::getuid() };
     let (stop, left) = choose(dir, &table, std::process::id(), uid);
-    let described = |pid: &u32, stopped: bool| Stray { pid: *pid, command: table.iter().find(|process| process.pid == *pid).map(command).unwrap_or_default(), stopped };
+    let described = |pid: &u32, stopped: bool| Stray { pid: *pid, program: table.iter().find(|process| process.pid == *pid).map(program).unwrap_or_default().to_string(), stopped };
     let mut found: Vec<Stray> = stop.iter().map(|pid| described(pid, true)).chain(left.iter().map(|pid| described(pid, false))).collect();
     if stop.is_empty() {
         return found;
@@ -134,12 +148,14 @@ fn processes() -> Vec<Process> {
             let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
             let path = entry.path();
             let stat = std::fs::read_to_string(path.join("stat")).ok()?;
-            // `pid (comm) state ppid ...`: the name may hold spaces and parentheses.
-            let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+            // `pid (comm) state ppid pgrp session ...`: the name may hold spaces and parentheses.
+            let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+            let ppid = fields.get(1)?.parse().ok()?;
+            let leader = fields.get(3).and_then(|session| session.parse::<u32>().ok()).is_none_or(|session| session == pid);
             let uid = std::fs::metadata(&path).ok()?.uid();
             let cwd = std::fs::read_link(path.join("cwd")).ok();
             let args = std::fs::read(path.join("cmdline")).unwrap_or_default().split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
-            Some(Process { pid, ppid, uid, cwd, args })
+            Some(Process { pid, ppid, uid, leader, cwd, args })
         })
         .collect()
 }
@@ -174,6 +190,8 @@ fn processes() -> Vec<Process> {
                 }
                 (info.pbi_ppid, info.pbi_uid)
             };
+            // SAFETY: getsid only reads; an error (-1) is taken as a leader.
+            let session = unsafe { libc::getsid(pid) };
             // SAFETY: as above; the path is NUL-terminated within the struct.
             let cwd = unsafe {
                 let mut info: libc::proc_vnodepathinfo = std::mem::zeroed();
@@ -185,7 +203,7 @@ fn processes() -> Vec<Process> {
                     None
                 }
             };
-            Some(Process { pid: pid as u32, ppid, uid, cwd, args: arguments(pid) })
+            Some(Process { pid: pid as u32, ppid, uid, leader: session < 0 || session == pid, cwd, args: arguments(pid) })
         })
         .collect()
 }
@@ -220,84 +238,113 @@ mod tests {
     use super::*;
 
     fn process(pid: u32, ppid: u32, cwd: Option<&str>, args: &[&str]) -> Process {
-        Process { pid, ppid, uid: 501, cwd: cwd.map(PathBuf::from), args: args.iter().map(|arg| arg.to_string()).collect() }
+        Process { pid, ppid, uid: 501, leader: false, cwd: cwd.map(PathBuf::from), args: args.iter().map(|arg| arg.to_string()).collect() }
+    }
+
+    const DIR: &str = "/repo/.raccoon/worktrees/664-usage";
+
+    #[test]
+    fn only_orphaned_builds_in_the_workspace_are_stopped_with_what_they_started_there() {
+        let table = [
+            // rust-analyzer's check, whose parent exited, and the build script under it.
+            process(84119, 1, Some("/repo/.raccoon/worktrees/664-usage/src-tauri"), &["/Users/me/.rustup/toolchains/stable/bin/cargo", "check", "--workspace", "--message-format=json", "--manifest-path", "/repo/.raccoon/worktrees/664-usage/src-tauri/Cargo.toml"]),
+            process(84123, 84119, Some("/repo/.raccoon/worktrees/664-usage/src-tauri"), &["/repo/.raccoon/worktrees/664-usage/src-tauri/target/debug/build/raccoon-1/build-script-build"]),
+            // What that build script started elsewhere: not the workspace's to stop.
+            process(84124, 84123, Some("/tmp"), &["cc", "-c", "x.c"]),
+            // Started elsewhere for this workspace, and orphaned.
+            process(90001, 1, Some("/"), &["cargo", "+nightly", "test", "--manifest-path=/repo/.raccoon/worktrees/664-usage/Cargo.toml"]),
+            process(90002, 90001, Some("/repo/.raccoon/worktrees/664-usage"), &["/repo/.raccoon/worktrees/664-usage/target/debug/deps/usage-0123"]),
+        ];
+        let (stop, left) = choose(Path::new(DIR), &table, 42, 501);
+        assert_eq!(stop, [84119, 84123, 90001, 90002]);
+        assert!(left.is_empty());
+        assert_eq!(program(&table[0]), "cargo");
+        assert_eq!(program(&table[1]), "build-script-build");
+        assert_eq!(choose(Path::new("/elsewhere"), &table, 42, 501), (Vec::new(), Vec::new()));
     }
 
     #[test]
-    fn only_orphans_working_in_the_workspace_are_stopped_with_what_they_started() {
-        let dir = Path::new("/repo/.raccoon/worktrees/664-usage");
+    fn anything_detached_on_purpose_or_still_owned_is_listed_and_left_running() {
+        let screen = Process { leader: true, ..process(700, 1, Some(DIR), &["SCREEN", "-dmS", "work"]) };
         let table = [
-            // rust-analyzer's check, whose parent exited, and the build script under it.
-            process(84119, 1, Some("/repo/.raccoon/worktrees/664-usage/src-tauri"), &["cargo", "check", "--workspace", "--manifest-path", "/repo/.raccoon/worktrees/664-usage/src-tauri/Cargo.toml"]),
-            process(84123, 84119, Some("/repo/.raccoon/worktrees/664-usage/src-tauri"), &["build-script-build"]),
-            process(84124, 84123, Some("/tmp"), &["rustc", "-"]),
-            // Started elsewhere for this workspace, and orphaned.
-            process(90001, 1, Some("/"), &["cargo", "test", "--manifest-path=/repo/.raccoon/worktrees/664-usage/Cargo.toml"]),
-            // A person's shell there, still in its terminal: listed, not stopped.
-            process(700, 650, Some("/repo/.raccoon/worktrees/664-usage"), &["-zsh"]),
+            // A detached screen session, adopted by launchd, and the shell in its window.
+            screen,
+            process(701, 700, Some(DIR), &["-zsh"]),
+            // A tmux server, a nohup'd server, an ssh tunnel and the app itself the person runs, orphaned there.
+            Process { leader: true, ..process(710, 1, Some(DIR), &["tmux"]) },
+            process(711, 1, Some(DIR), &["python3", "-m", "http.server"]),
+            process(712, 1, Some(DIR), &["ssh", "-f", "-N", "-L", "5432:db:5432", "bastion"]),
+            process(713, 1, Some(DIR), &["cargo", "run", "--release"]),
+            process(714, 1, Some(DIR), &["cargo", "watch", "-x", "check"]),
+            // A build that leads its own session was detached on purpose too.
+            Process { leader: true, ..process(715, 1, Some(DIR), &["cargo", "build"]) },
+            // A person's shell there, and the check its editor runs: they have parents.
+            process(720, 650, Some(DIR), &["-zsh"]),
+            process(721, 600, Some(DIR), &["cargo", "check"]),
             // Another workspace whose name starts the same, another user's, this process, and launchd.
             process(800, 1, Some("/repo/.raccoon/worktrees/664-usage-2"), &["cargo", "build"]),
-            Process { uid: 0, ..process(801, 1, Some("/repo/.raccoon/worktrees/664-usage"), &["sudo-thing"]) },
-            process(42, 1, Some("/repo/.raccoon/worktrees/664-usage"), &["terminalx"]),
+            Process { uid: 0, ..process(801, 1, Some(DIR), &["cargo", "build"]) },
+            process(42, 1, Some(DIR), &["terminalx"]),
             process(1, 0, Some("/"), &["launchd"]),
             // A path mentioned in passing is not a manifest path.
             process(900, 1, Some("/"), &["less", "/repo/.raccoon/worktrees/664-usage/README.md"]),
         ];
-        let (stop, left) = choose(dir, &table, 42, 501);
-        assert_eq!(stop, [84119, 84123, 84124, 90001]);
-        assert_eq!(left, [700]);
-        assert_eq!(command(&table[3]), "cargo test --manifest-path=/repo/.raccoon/worktrees/664-usage/Cargo.toml");
-        assert!(choose(Path::new("/elsewhere"), &table, 42, 501) == (Vec::new(), Vec::new()));
+        let (stop, left) = choose(Path::new(DIR), &table, 42, 501);
+        assert!(stop.is_empty(), "{stop:?}");
+        assert_eq!(left, [700, 701, 710, 711, 712, 713, 714, 715, 720, 721]);
     }
 
-    #[test]
-    fn a_long_command_is_cut_short_on_a_character_boundary() {
-        let long = "é".repeat(COMMAND_LIMIT);
-        let quoted = command(&process(1, 1, None, &[&long]));
-        assert!(quoted.ends_with('…') && quoted.len() <= COMMAND_LIMIT + '…'.len_utf8());
-    }
-
-    /// The real listing finds a process working in a directory and its parent,
-    /// and stops it once it is orphaned.
+    /// The real listing finds a process working in a directory, with its
+    /// parent and session; it stops an orphaned build there and nothing else.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn a_process_left_working_in_a_directory_is_found_and_an_orphaned_one_stopped() {
+    fn a_leftover_build_in_a_directory_is_stopped_and_a_detached_program_is_only_listed() {
         let dir = tempfile::tempdir().unwrap();
         let ours = std::process::Command::new("sleep").arg("300").current_dir(dir.path()).spawn().unwrap();
         let found = processes();
         let child = found.iter().find(|process| process.pid == ours.id()).expect("the listing sees the child");
         assert_eq!(child.ppid, std::process::id());
+        assert!(!child.leader);
         assert!(child.cwd.as_deref().is_some_and(|cwd| std::fs::canonicalize(cwd).unwrap() == std::fs::canonicalize(dir.path()).unwrap()), "{:?}", child.cwd);
         assert_eq!(child.args, ["sleep", "300"]);
-        // Ours, it has a parent: listed and left running.
+        // Ours, it has a parent: listed and left running, named without its arguments.
         let listed = stop_in(dir.path());
-        assert!(listed.iter().any(|stray| stray.pid == ours.id() && !stray.stopped), "{listed:?}");
+        assert!(listed.iter().any(|stray| stray.pid == ours.id() && !stray.stopped && stray.program == "sleep"), "{listed:?}");
         let mut ours = ours;
         assert!(ours.try_wait().unwrap().is_none());
         ours.kill().unwrap();
         ours.wait().unwrap();
 
-        // Orphaned: its shell exits at once and leaves it to init (launchd on
-        // macOS). A duration no other sleep has tells it apart.
-        let marker = format!("3000.{}", std::process::id());
-        std::process::Command::new("sh").arg("-c").arg(format!("(sleep {marker} &) ; exit 0")).current_dir(dir.path()).status().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let orphan = loop {
-            let found = processes().into_iter().find(|process| process.args == ["sleep", marker.as_str()]);
-            match found {
-                Some(process) if process.ppid == 1 => break Some(process),
-                // A subreaper (a container's init) adopts it instead: nothing to show here.
-                Some(process) if Instant::now() >= deadline => {
-                    signal(process.pid, libc::SIGKILL);
-                    break None;
+        // Orphaned: each shell exits at once and leaves its job to init
+        // (launchd on macOS). Durations no other sleep has tell them apart;
+        // `exec -a` names one as a build script.
+        let id = std::process::id();
+        let (build, detached) = (format!("3000.{id}1"), format!("3000.{id}2"));
+        for (name, duration) in [("build-script-build", &build), ("sleep", &detached)] {
+            std::process::Command::new("bash").arg("-c").arg(format!("(exec -a {name} sleep {duration} &) ; exit 0")).current_dir(dir.path()).status().unwrap();
+        }
+        let orphan = |duration: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let found = processes().into_iter().find(|process| process.args.get(1).is_some_and(|arg| arg == duration));
+                match found {
+                    Some(process) if process.ppid == 1 => break Some(process),
+                    // A subreaper (a container's init) adopts it instead: nothing to show here.
+                    Some(process) if Instant::now() >= deadline => {
+                        signal(process.pid, libc::SIGKILL);
+                        break None;
+                    }
+                    _ if Instant::now() >= deadline => break None,
+                    _ => std::thread::sleep(Duration::from_millis(20)),
                 }
-                _ if Instant::now() >= deadline => break None,
-                _ => std::thread::sleep(Duration::from_millis(20)),
             }
         };
-        let Some(orphan) = orphan else { return };
-        let stopped = stop_in(dir.path());
-        assert!(stopped.iter().any(|stray| stray.pid == orphan.pid && stray.stopped && stray.command == format!("sleep {marker}")), "{stopped:?}");
-        assert!(!alive(orphan.pid));
+        let (Some(build), Some(detached)) = (orphan(&build), orphan(&detached)) else { return };
+        let found = stop_in(dir.path());
+        assert!(found.iter().any(|stray| stray.pid == build.pid && stray.stopped && stray.program == "build-script-build"), "{found:?}");
+        assert!(found.iter().any(|stray| stray.pid == detached.pid && !stray.stopped), "{found:?}");
+        assert!(!alive(build.pid));
+        assert!(alive(detached.pid), "a program that is not a build is never stopped");
+        signal(detached.pid, libc::SIGKILL);
     }
 }

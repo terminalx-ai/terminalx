@@ -535,14 +535,17 @@ impl Step<'_> {
     /// Nothing a conversation of an ended pipeline does is pipeline work, and
     /// a background command or a watch it left behind can wake it for as long
     /// as it runs. An idle agent is stopped, with whatever it left running:
-    /// a message would only be read once it woke. One still in a turn is told
-    /// to wind down, and stopped when that turn ends ([`Step::late_reply`]).
-    /// A stop leaves the author alone: the work goes on, only without the pipeline.
+    /// a message would only be read once it woke. A reviewer or resolver
+    /// still in a turn is told to wind down, and stopped when that turn ends
+    /// ([`Step::late_reply`]). The author's conversation is a person's own
+    /// again: it is stopped only if it sits idle, and never told anything, so
+    /// a follow-up someone is having with it is not cut short. A stop leaves
+    /// the author alone altogether: the work goes on, only without the pipeline.
     fn release(&mut self, ending: Ending) {
         let why = self.ending_why(ending);
         let author = (ending != Ending::Stopped).then(|| (Role::Author, self.p.author.clone()));
         let others = [self.p.reviewer.clone().map(|who| (Role::Reviewer, who)), self.p.resolver.clone().map(|who| (Role::Resolver, who))];
-        let (mut stopped, mut told, mut finishing, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut stopped, mut told, mut finishing, mut left, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut seen: Vec<SessionRef> = Vec::new();
         for (role, who) in author.into_iter().chain(others.into_iter().flatten()) {
             if seen.contains(&who) || self.p.releasing.contains(&who) {
@@ -553,6 +556,7 @@ impl Step<'_> {
             match self.host.stop_agent(&who, &prompts::agent_released(&why)) {
                 Ok(AgentStop::Stopped) => stopped.push(the),
                 Ok(AgentStop::NotRunning) => {}
+                Ok(AgentStop::Busy) if role == Role::Author => left.push(the),
                 Ok(AgentStop::Busy) => {
                     // A resolver part way through its merge is left to finish
                     // it: told to stop, it could leave the checkout half merged.
@@ -581,6 +585,9 @@ impl Step<'_> {
         }
         if !finishing.is_empty() {
             lines.push(format!("{} is finishing a turn; its agent is stopped when it ends.", capitalized(&list(&finishing))));
+        }
+        if !left.is_empty() {
+            lines.push(format!("Left {}'s agent running: it is in a turn.", list(&left)));
         }
         lines.extend(failed.into_iter().map(|line| format!("{}.", line.trim_end_matches('.'))));
         if !lines.is_empty() {
@@ -664,7 +671,12 @@ impl Step<'_> {
             return Ok(());
         }
         let commit = self.p.review_commit.clone().context("no review was asked for")?;
-        self.ask_for_overdue_verdict(&commit)
+        // The poller only logs a step that fails, and nothing else would look
+        // at this review again: a request that did not reach the reviewer is a person's.
+        if let Err(error) = self.ask_for_overdue_verdict(&commit) {
+            self.needs_you(StopReason::Failed { step: self.doing.to_string(), message: format!("{error:#}") });
+        }
+        Ok(())
     }
 
     fn reviewer_turn(&mut self, message: &str) -> Result<()> {

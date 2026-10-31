@@ -212,12 +212,13 @@ When a pipeline ends (its pull request is merged or closed, or it is stopped),
 its conversations are released. An idle agent is stopped, together with the
 background commands and watches it left running, which could otherwise wake it
 for as long as they run; a note in its transcript says why, and its next
-message resumes the conversation. A conversation still in a turn is told the
-pipeline ended, and its agent is stopped when that turn ends. Stop releases
-the reviewer and the conflict resolver; a merge or close releases the author
-too. A conflict resolver part way through its merge is not told to stop, so it
-cannot leave the checkout half merged. A reply that comes after the end is
-noted in the record and ignored.
+message resumes the conversation. A reviewer or conflict resolver still in a
+turn is told the pipeline ended, and its agent is stopped when that turn ends;
+one part way through its merge is not told to stop, so it cannot leave the
+checkout half merged. Stop releases the reviewer and the conflict resolver; a
+merge or close releases the author too, but only an idle one: an author in a
+turn is someone's own follow-up, and is neither told nor stopped. A reply that
+comes after the end is noted in the record and ignored.
 
 The switch can be turned off at any time. It is read again immediately before
 the merge is asked for, so turning it off stops a merge that had not yet been

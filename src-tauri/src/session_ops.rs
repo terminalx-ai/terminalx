@@ -776,7 +776,7 @@ pub(crate) struct WorkspaceRemoved {
     pub sessions: Vec<SessionEntry>,
     pub removal: git::WorktreeRemoval,
     /// Processes found still working in it once its sessions were stopped:
-    /// the orphaned ones were stopped, the others listed (`stray_processes`).
+    /// leftover builds were stopped, anything else listed (`stray_processes`).
     pub strays: Vec<crate::stray_processes::Stray>,
 }
 
@@ -874,7 +874,8 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     // What the sessions' tools let go of would run on from a deleted directory.
     let strays = if on_disk { crate::stray_processes::stop_in(&target) } else { Vec::new() };
     if !strays.is_empty() {
-        let listed: Vec<String> = strays.iter().map(|stray| format!("{} {} ({})", stray.pid, stray.command, if stray.stopped { "stopped" } else { "left running" })).collect();
+        // Programs only: an argument can carry a token or a password.
+        let listed: Vec<String> = strays.iter().map(|stray| format!("{} {} ({})", stray.pid, stray.program, if stray.stopped { "stopped" } else { "left running" })).collect();
         log::info!("removing workspace {}: processes still working in it: {}", target.display(), listed.join("; "));
     }
     let removal = if on_disk {
