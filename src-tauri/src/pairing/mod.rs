@@ -14,6 +14,7 @@ use crate::local_runtime::mobile::model;
 mod registry;
 mod relay;
 pub(crate) mod sharing;
+mod wire;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -916,10 +917,10 @@ impl PairingManager {
         };
         let hello: E2eeHello = serde_json::from_str(&hello).context("decode E2EE hello")?;
         let keypair = self.host_key(false)?;
-        let (transport, relay_host_id) = match &connection {
-            PairingConnectionContext::Direct { .. } => ("direct", None),
+        let (transport, relay_host_id, wire_transport) = match &connection {
+            PairingConnectionContext::Direct { .. } => ("direct", None, wire::Transport::Direct),
             PairingConnectionContext::Relay { relay_host_id, .. } => {
-                ("relay", Some(relay_host_id.as_str()))
+                ("relay", Some(relay_host_id.as_str()), wire::Transport::Relay)
             }
         };
         let (ready, mut session) = begin_e2ee_session(&keypair, hello, transport, relay_host_id)?;
@@ -981,8 +982,9 @@ impl PairingManager {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         let mobile_connection = Arc::new(mobile::MobileConnection::new(
             self, &device, self.mobile.clone(),
-            outbound_tx,
+            outbound_tx, wire_transport,
         )?);
+        let mut reassembly = wire::Reassembly::default();
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.connections
             .lock()
@@ -1006,43 +1008,50 @@ impl PairingManager {
                         return Ok(());
                     };
                     mobile_connection.check(self)?;
-                    send_encrypted_text(&mut socket, &mut session, &outgoing.to_string()).await?;
+                    send_message(&mut socket, &mut session, &outgoing, mobile_connection.wire()).await?;
                 }
                 incoming = socket.next() => {
                     let Some(incoming) = incoming else {
                         mobile_connection.close(self);
                         return Ok(());
                     };
-                    let incoming = incoming?;
-                    match incoming {
+                    let plaintext = match incoming? {
                         Message::Text(text) => {
                             let bytes = decode_canonical_base64(&text)?;
-                            let plaintext = session.open(&bytes, PayloadKind::Text)?;
-                            let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                            mobile_connection.check(self)?;
-                            let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
-                            // Revalidate after asynchronous work: queued replies must not
-                            // disclose session data after revocation or account replacement.
-                            // Successful self-unpairing deliberately revokes this connection;
-                            // its acknowledgement contains no session data.
-                            let forgot_self = request["method"] == "pairing.forget"
-                                && response["ok"] == true;
-                            if !forgot_self { mobile_connection.check(self)?; }
-                            send_encrypted_text(&mut socket, &mut session, &response.to_string()).await?;
+                            session.open(&bytes, PayloadKind::Text)?
                         }
                         Message::Binary(bytes) => {
-                            // Binary application streams are deliberately not attached to a
-                            // workspace in this foundation. Authentication and framing still
-                            // fail closed and the socket remains usable for RPC refusals.
-                            let _ = session.open(&bytes, PayloadKind::Binary)?;
+                            // Binary frames carry only the fragments of a request too
+                            // large for one frame (#669). Other binary application streams
+                            // are deliberately not attached to a workspace in this
+                            // foundation; authentication and framing still fail closed.
+                            let frame = session.open(&bytes, PayloadKind::Binary)?;
+                            match reassembly.push(&frame)? {
+                                Some(message) => message,
+                                None => continue,
+                            }
                         }
                         Message::Close(_) => {
                             mobile_connection.close(self);
                             return Ok(());
                         },
-                        Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                        Message::Pong(_) | Message::Frame(_) => {}
-                    }
+                        Message::Ping(bytes) => {
+                            socket.send(Message::Pong(bytes)).await?;
+                            continue;
+                        }
+                        Message::Pong(_) | Message::Frame(_) => continue,
+                    };
+                    let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
+                    mobile_connection.check(self)?;
+                    let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
+                    // Revalidate after asynchronous work: queued replies must not
+                    // disclose session data after revocation or account replacement.
+                    // Successful self-unpairing deliberately revokes this connection;
+                    // its acknowledgement contains no session data.
+                    let forgot_self = request["method"] == "pairing.forget"
+                        && response["ok"] == true;
+                    if !forgot_self { mobile_connection.check(self)?; }
+                    send_message(&mut socket, &mut session, &response, mobile_connection.wire()).await?;
                 }
             }
         }
@@ -1571,6 +1580,40 @@ where
     Ok(())
 }
 
+/// One application message to the phone: one encrypted text frame, or binary
+/// fragments when it is too large for the transport and the phone reassembles
+/// them. A message neither can carry never reaches the socket, where it would
+/// close the connection (#669): a reply becomes its request's error, and a
+/// notification, which the phone can read again, is dropped.
+async fn send_message<S>(
+    socket: &mut WebSocketStream<S>,
+    session: &mut crypto::E2eeSession,
+    message: &serde_json::Value,
+    wire: &wire::Wire,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let text = message.to_string();
+    match wire.delivery(text.len()) {
+        wire::Delivery::Frame => send_encrypted_text(socket, session, &text).await,
+        wire::Delivery::Fragments => {
+            for fragment in wire.fragments_of(text.as_bytes()) {
+                let frame = session.seal(&fragment, PayloadKind::Binary)?;
+                socket.send(Message::Binary(frame.into())).await?;
+            }
+            Ok(())
+        }
+        wire::Delivery::TooLarge => {
+            let Some(id) = message.get("id").and_then(serde_json::Value::as_str) else {
+                return Ok(());
+            };
+            let refusal = wire.too_large_response(id, text.len());
+            send_encrypted_text(socket, session, &refusal.to_string()).await
+        }
+    }
+}
+
 fn static_rpc_response(request: &serde_json::Value, scope: DeviceScope) -> serde_json::Value {
     let id = request
         .get("id")
@@ -1623,6 +1666,7 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "session.tail",
         "session.sync",
         "sync.capabilities",
+        "transport.negotiate",
         "session.subscribe",
         "session.unsubscribe",
         "session.status",

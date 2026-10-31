@@ -12,7 +12,9 @@ switching hosts.
 `session.sync({sessionId, tabId, cursor?})` returns:
 
 - `events`: a forward page of at most 500 canonical log records, additionally
-  bounded so the complete serialized RPC response fits within 6 MiB.
+  bounded so the complete serialized RPC response fits one encrypted frame of
+  the connection: 6 MiB on a direct connection, about 765 KiB over Relay,
+  whose cell accepts 1 MiB per message (#669).
 - `cursor: {offset, digest}`: record count plus a SHA-256 hash of the entire
   canonical prefix, including protocol generation and conversation identity.
 - `hasMore`: another forward page is required.
@@ -20,8 +22,13 @@ switching hosts.
 - `hasEarlier`: older history exists before this page.
 
 An absent or invalid cursor resets to the most recent 20 turns, capped at 500
-records and the response-byte budget. A single event too large to fit returns a
-visible error with a retry action; its checkpoint is never skipped. A valid
+records and the response-byte budget. A single event too large for a page is
+the whole page; its checkpoint is never skipped. If the phone reassembles
+fragments it is sent whole, up to the 6 MiB response cap. Otherwise, or
+beyond that cap, its longest strings are cut short, each ending in a note of
+how much is not shown. Its sequence, ids and kind are kept, so a tool's result
+still pairs with its call. An event with no long string becomes a status line
+instead. `session.tail` pages follow the same rules. A valid
 cursor returns only subsequent records, irrespective of turn
 boundaries. An unchanged prefix returns an empty event array. The client never
 uses a live event's sequence number as its checkpoint. It validates page shape

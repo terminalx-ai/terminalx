@@ -197,6 +197,35 @@ or injected frames fail closed. The relay can see connection metadata and
 handshake frames; it cannot see the device token, RPC, transcript, terminal,
 or pairing payloads.
 
+### Message size and fragments (#669)
+
+The relay cell accepts at most 1 MiB per WebSocket message (its
+`maxPayloadLength`) and closes both legs on a larger one; the Mac's pairing
+socket accepts 10 MiB. Each side therefore sizes what it sends to the
+connection's transport: on Relay one text frame carries about 765 KiB of
+plaintext once sealing and base64 are counted. Transcript pages
+(`session.sync`, `session.tail`) are held to one such frame.
+
+A larger message crosses as fragments: binary E2EE frames, each sealed on its
+own so the counter stays in order, carrying a 12 byte header (`0x66`, version
+1, two zero bytes, the message length and the part's offset, both u32 little
+endian) and that part of the UTF-8 JSON. One message's fragments are sent
+back to back from offset 0, up to 10 MiB in all. Both ends must agree first:
+right after authentication the phone calls
+`transport.negotiate({fragments: 1})`, and a Mac that answers
+`{fragments: 1}` reassembles requests and may fragment replies. A Mac from
+before this refuses the method, and nothing is fragmented in either direction.
+
+A message the connection cannot carry is never sent, because sending it would
+close the connection and fail every request in flight. The phone refuses that
+request with a message that names the limit. The Mac answers that request with
+`message_too_large`, and drops a notification the phone can read again. An
+event too large for a page on its own is sent alone. If even that is too large,
+its longest strings are cut short with a note saying so; see
+[mobile-incremental-sync.md](./mobile-incremental-sync.md).
+Implementation: `src-tauri/src/pairing/wire.rs` and
+`mobile/src/transport/wire.ts`.
+
 The app keeps the deployed runtime protocol range and existing capability
 names. Relevant checks include `account-bound-host-pairing.v1`,
 `remote-runtime.shared-control.v1`, `terminal.binary-stream.v1`,

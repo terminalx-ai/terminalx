@@ -63,8 +63,13 @@ export class MobileE2EESession {
   }
 
   sealText(plaintext: string): string {
+    return this.sealTextBytes(new TextEncoder().encode(plaintext));
+  }
+
+  /** A text frame for plaintext already UTF-8 encoded, for a caller that measured it. */
+  sealTextBytes(payload: Uint8Array): string {
     if (!this.schedule) throw new Error("E2EE v2 ready has not been accepted");
-    const frame = sealFrame({ payload: new TextEncoder().encode(plaintext), key: this.schedule.mobileToDesktopKey, sessionId: this.schedule.sessionId, direction: "mobile-to-desktop", payloadKind: "text", counter: this.outboundCounter });
+    const frame = sealFrame({ payload, key: this.schedule.mobileToDesktopKey, sessionId: this.schedule.sessionId, direction: "mobile-to-desktop", payloadKind: "text", counter: this.outboundCounter });
     this.outboundCounter++;
     return encodeBase64(frame);
   }
