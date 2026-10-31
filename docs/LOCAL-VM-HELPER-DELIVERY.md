@@ -20,8 +20,9 @@ These are source, fixture and local-build results only:
   P3 and the [run sheet](LOCAL-VM-HELPER-RUN-SHEET.md)) and the restricted Lume
   owner (P6) were built locally and carry only the linker's ad hoc signature.
   The guest helper's enrollment, account child, key install and host-key
-  report are implemented and fixture-tested in `native/vm-bootstrap`. They
-  have no production executable.
+  report are implemented and fixture-tested in `native/vm-bootstrap`. Its
+  executable `terminalx-vm-bootstrap` exists only as a local ad hoc candidate
+  build ([guest helper executable](#guest-helper-executable)).
 - **Nothing is distributed or adopted.** Nothing is Developer ID signed,
   notarized, catalog-approved, installed, adopted or accepted, or run in a
   real VM or guest.
@@ -59,9 +60,17 @@ port-49871 listener. The key never crosses a share or the socket.
 | 8 | Account effects | Helper child after dropping to that account | Existing restricted `authorized_keys` engine | Existing receipts |
 | 9 | Retirement | Helper | Deletes key, binary and plist | Retirement receipt |
 
-`ready` stays false throughout. Stages 5 and 7 replace the refusal in
-`acquire_authenticated()` (`src-tauri/src/local_vm/macos_guest_channel.rs:286`);
-stage 8 reuses `macos_bootstrap_helper.rs` unchanged in substance.
+`ready` stays false throughout.
+
+- **As proposed:** stages 5 and 7 were to replace the refusal in
+  `acquire_authenticated()` (`src-tauri/src/local_vm/macos_guest_channel.rs:286`),
+  and stage 8 was to reuse `macos_bootstrap_helper.rs`.
+- **As implemented (2026-10-31):** stages 5, 7 and 8 run over the enrollment
+  session between the native helper and the restricted owner, and
+  `acquire_authenticated()` still refuses
+  ([source slices](#source-slices-after-the-decision)).
+- **Order:** the helper enrolls only after stage 6
+  ([guest helper executable](#guest-helper-executable)).
 
 ## What the seed writes, and what it never writes
 
@@ -450,6 +459,80 @@ Before the pin the ledger is not `trustObserved`, so nothing resolves.
 and the account, home and target, is not wired. Transport admission
 (`require_available()`) and live runs remain closed.
 
+### Guest helper executable
+
+**2026-10-31.** `terminalx-vm-bootstrap` (`native/vm-bootstrap`, run loop
+`src/helper.rs`, entry point `src/bin/helper.rs`) composes the pieces above.
+launchd would start it as root from `com.terminalx.next.vm-bootstrap.plist`,
+which has the validation plist's key set. A test checks its label and program
+against the helper and the seeder's production profile.
+
+- **Seed.** It reads `enrollment.json` once from
+  `/private/var/db/com.terminalx.next.vm-bootstrap/`. The directory and the
+  file must be root-owned and private, and the file must be one bounded link.
+  Otherwise it refuses before waiting or connecting.
+- **Order.** It enrolls only after Setup Assistant has finished
+  (`.AppleSetupDone`) and a personal account exists, then reports the accounts
+  at once. The implemented owner reads that report within its 3 s frame bound
+  of the acceptance, and the first acceptance claims the VM's only
+  enrollment. Enrolling earlier would spend the session before there is
+  anything to report, so in practice stage 5 follows stage 6.
+- **Attempts.** Connection tries are bounded per launch (every 10 s for 15
+  minutes) and journal nothing.
+  - Each enrollment attempt is journaled before it starts, at most three per
+    seed across launches.
+  - An acceptance is journaled as `enrolled.json`. Later launches then exit
+    without connecting, because the owner admits nothing more.
+- **Conversation.** `helper::converse` reports the accounts. It then waits for
+  the relayed confirmation and answers `accountConfirmed` or
+  `accountRefused`. Next it takes the key grant, which the forking account
+  child installs. Only after `publicKeyInstalled` does it report the existing
+  public host key.
+  - Each step waits up to the owner's own 6 h.
+  - The stages reached are journaled in `session-result.json`, with no key
+    material.
+- **Exit.** It exits 0 on every path, so `KeepAlive {SuccessfulExit: false}`
+  never turns a refusal into a restart loop. `RunAtLoad` starts it again at
+  the next boot.
+- **Defect fixed.** The forking installer handed the dropped account child a
+  path under the root-only state directory. The account cannot traverse that
+  directory, so every real install would have been refused. The root parent
+  now opens the account's journal, and the child uses that descriptor. A
+  fixture installs through it with the state directory closed to every path.
+- **Tests.** In-crate fixtures play a conforming owner over socket pairs.
+  They cover:
+  - refusing a non-private state directory or seed before any connection;
+  - waiting for Setup Assistant;
+  - the one enrollment and its journal;
+  - an install refused by the real, unprivileged forking installer;
+  - the host-key report after an install;
+  - bounded failed attempts and an unreachable host.
+
+  The cross-language fixture's `confirm` mode now runs the same `converse`
+  against the real Swift owner. The built binary, run unprivileged on this
+  host, refuses at once without its state directory and exits 0.
+- **Candidate build.** `node scripts/build-vm-bootstrap.mjs` from clean
+  commit `c0b01b92` (rustc 1.97.1) produced:
+  - `terminalx-vm-bootstrap`: 723,952 bytes, SHA-256
+    `ad34558705c6af9c9b3d2c70068017d994989026b3c40ab1a0bbae43aa8082c2`, thin
+    arm64, with only the linker's ad hoc signature and no team;
+  - its plist: 477 bytes, SHA-256
+    `17b2c2130e99bc15916636f97650fb329d7b102f660ea2b39f6aefb307301eed`.
+
+  The same build also rebuilt the probe and seed tool with new digests,
+  because the crate changed. The [run sheet](LOCAL-VM-HELPER-RUN-SHEET.md)
+  keeps its reviewed `6aa26b4a` artifacts. Everything is retained under
+  `~/.raccoon/task-coordination/pro114-pro117/passes/20261031-guest-helper/artifacts/`
+  with `manifest.json`.
+- **Not done.**
+  - **Retirement (stage 9):** needs a final acknowledgement that the owner
+    does not send yet. That is independent source work on both sides; the
+    helper leaves the seeded items in place.
+  - **Distribution:** the helper is not signed, catalog-pinned or seeded
+    (held), and it has never run in a guest.
+  - **Approval:** past the account report, every step waits on the host's
+    person approval, which this build refuses.
+
 ## Person approval for person-only actions
 
 ### What the source shows (2026-10-31)
@@ -628,7 +711,9 @@ No acceptance run may count any of them as the person's consent.
 After the host acknowledges the final receipt, the helper unlinks the key,
 binary and plist by descriptor, journals the result and exits 0, so `KeepAlive`
 does not restart it. Leftovers become an inspection item and are never
-reseeded. The person can disable the item in System Settings > General > Login
+reseeded. Not implemented yet: the owner sends no final acknowledgement, so
+the helper keeps the seeded items
+([guest helper executable](#guest-helper-executable)). The person can disable the item in System Settings > General > Login
 Items at any time. Apple's `statusForLegacyURL` exists so apps "still want to
 know when a user disables its legacy daemons" in `/Library/LaunchDaemons`. A
 disabled helper is a wait state that TerminalX explains and never re-enables.
@@ -686,9 +771,21 @@ signed, installed or live-accepted artifact.
    `acquire_authenticated()`, plus the privilege-dropping account child.
    - **Account child:** implemented (`ecf5fc79`, `3c1018a6`, `76cbf4d6`),
      with the account confirmation, key grant and host-key report described
-     above.
-   - **`Channel` constructor:** not implemented. `acquire_authenticated()`
-     still refuses (`macos_guest_channel.rs:286`).
+     above. The [guest helper executable](#guest-helper-executable) runs it,
+     and its journal is now handed to the child as an open descriptor.
+   - **`Channel` constructor:** not implemented, and no longer on the
+     version-3 path. `acquire_authenticated()` keeps refusing
+     (`macos_guest_channel.rs:286`), and no consent choice changes that.
+     - Its only caller, `macos_bootstrap_helper::run`, belongs to the
+       version-1 share design. That design passes manifests and receipts
+       through mounted input and output shares, and runs a helper named
+       `terminalx-bootstrap-helper` as the account. It has no route, and
+       `mod.rs` keeps it as dead code.
+     - A constructor would need the original shares acquired as verified
+       mount descriptors. No supported interface provides that, and the
+       version-3 design no longer uses shares.
+     - Enrollment, account observation, key install and the host-key report
+       now run over the session in the native helper.
 4. Seed journal states in `macos_provision.rs` and the `run` precondition.
    Implemented: `macos_seed.rs` journals the seed beside the provisioning
    record (`db550455`), and only an exactly seeded guest launches a version-3
