@@ -116,7 +116,7 @@ fn plain_text(text: &str) -> String {
 
 /// Cut from one line what must not reach a chat: credentials, addresses, a
 /// URL's userinfo, path and query, and the account folder in a path.
-fn redact(line: &str) -> String {
+pub(crate) fn redact(line: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
     static PATTERNS: OnceLock<[(Regex, &'static str); 5]> = OnceLock::new();

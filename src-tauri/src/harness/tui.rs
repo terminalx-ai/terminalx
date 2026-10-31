@@ -311,9 +311,9 @@ impl Ready {
 
 /// How many of the last lines a CLI printed are kept as why it went.
 const LAST_WORDS_LINES: usize = 3;
-/// And how much of them, so a CLI that printed a wall does not fill the chat:
-/// no more than the chat shows of an agent's own words (#667), whose cut
-/// would otherwise take the end, where the reason is.
+/// And how much of them, the ellipsis included, so a CLI that printed a wall
+/// does not fill the chat: no more than it shows of an agent's own words
+/// anywhere else (#667).
 const LAST_WORDS_CHARS: usize = crate::recovery::DETAIL_CHARS;
 /// How far back to look: an exit message is the last thing printed.
 const LAST_WORDS_TAIL_BYTES: usize = 64 * 1024;
@@ -322,7 +322,8 @@ const LAST_WORDS_TAIL_BYTES: usize = 64 * 1024;
 /// when it went before it ever got going (#663), such as Claude Code's "No
 /// conversation found with session ID". Terminal controls are dropped, and a
 /// cursor moved right or to a column stands for the spaces a TUI draws that
-/// way. `None` when it printed nothing to read.
+/// way. Redacted for the chat (`recovery::redact`), then cut to at most
+/// `LAST_WORDS_CHARS`. `None` when it printed nothing to read.
 pub fn last_words(output: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(&output[output.len().saturating_sub(LAST_WORDS_TAIL_BYTES)..]);
     let mut lines = vec![String::new()];
@@ -364,14 +365,21 @@ pub fn last_words(output: &[u8]) -> Option<String> {
     }
     let lines: Vec<String> = lines.iter().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|line| !line.is_empty()).collect();
     let said = lines[lines.len().saturating_sub(LAST_WORDS_LINES)..].join(" ");
+    // Redacted as an agent's own words always are (#667), and whole, before
+    // any of it is cut: a credential or a path cut in two is no longer
+    // recognisable as one, and its fragment would get through.
+    let said = crate::recovery::redact(&said);
+    let said = said.trim();
     if said.is_empty() {
         return None;
     }
-    if said.chars().count() <= LAST_WORDS_CHARS {
-        return Some(said);
+    let count = said.chars().count();
+    if count <= LAST_WORDS_CHARS {
+        return Some(said.to_string());
     }
-    // The end is where the reason is; what is cut is the start.
-    let kept: String = said.chars().skip(said.chars().count() - LAST_WORDS_CHARS).collect();
+    // The end is where the reason is; what is cut is the start, and the
+    // ellipsis that says so counts toward the length.
+    let kept: String = said.chars().skip(count - (LAST_WORDS_CHARS - 1)).collect();
     Some(format!("…{}", kept.trim_start()))
 }
 
@@ -1106,7 +1114,8 @@ mod tests {
 
     #[test]
     fn a_cli_s_last_words_are_what_it_printed_less_the_terminal_s_controls() {
-        assert_eq!(last_words(NO_CONVERSATION).as_deref(), Some("No conversation found with session ID: 0d5e7c1a-1111-4222-8333-944455556666"));
+        // A whole conversation id is as opaque as a token to the redactor (#667).
+        assert_eq!(last_words(NO_CONVERSATION).as_deref(), Some("No conversation found with session ID: [redacted]"));
         // A TUI that draws its spaces as cursor moves still reads as words.
         assert_eq!(last_words(b"\x1b[2GQuick\x1b[8Gsafety\x1b[15Gcheck:").as_deref(), Some("Quick safety check:"));
         // A login shell's chatter before the CLI is not its last words.
@@ -1122,7 +1131,22 @@ mod tests {
         let long = format!("{} the reason", "x".repeat(LAST_WORDS_CHARS * 2));
         let said = last_words(long.as_bytes()).unwrap();
         assert!(said.starts_with('…') && said.ends_with("the reason"), "{said}");
-        assert_eq!(said.chars().count(), LAST_WORDS_CHARS + 1);
+        assert_eq!(said.chars().count(), LAST_WORDS_CHARS);
+    }
+
+    /// A credential where the cut falls is redacted whole: cut first, its
+    /// tail would no longer look like one, and would reach the chat.
+    #[test]
+    fn a_credential_the_cut_falls_in_is_redacted_whole() {
+        let secret = "API_KEY=sk-ant-api03-Zx9Qw8Er7Ty6Ui5Op4As3Df2";
+        let after = format!(" {} the reason", "y".repeat(LAST_WORDS_CHARS - 20));
+        // The raw text's last LAST_WORDS_CHARS - 1 characters start inside the key.
+        assert!(after.chars().count() < LAST_WORDS_CHARS - 1 && after.chars().count() + secret.len() > LAST_WORDS_CHARS - 1);
+        let said = last_words(format!("apiKeyHelper failed: {secret}{after}").as_bytes()).unwrap();
+        assert!(said.ends_with("the reason") && said.chars().count() <= LAST_WORDS_CHARS, "{said}");
+        for fragment in ["Df2", "As3", "Op4", "sk-ant"] {
+            assert!(!said.contains(fragment), "{fragment} reached the chat: {said}");
+        }
     }
 
     #[test]
