@@ -27,6 +27,7 @@ mod macos_keys;
 pub(crate) mod linux_activation;
 mod macos_endpoint;
 pub(crate) mod macos_delivery;
+mod macos_first_connection;
 pub(crate) mod macos_provision;
 #[allow(dead_code)] // For the privileged seeder (slice 5) and the version-3 launch; neither is routed yet.
 mod macos_seed;

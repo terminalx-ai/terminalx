@@ -6,6 +6,12 @@
 /// The largest authorized_keys file either side reads or writes.
 pub const KEYS_LIMIT: u64 = 64 * 1024;
 
+/// The one restricted key line, without its newline, that `append` adds for
+/// this bootstrap: what the first strict SSH connection later looks for.
+pub fn line(public_key: &str, bootstrap_id: &str) -> String {
+    format!("restrict {public_key} terminalx-bootstrap:{bootstrap_id}")
+}
+
 /// Appends one restricted key line marked with this bootstrap id. Existing
 /// lines are never rewritten. Refuses non-text input, an existing bootstrap
 /// marker, a duplicate key, or a result over the bound.
@@ -26,7 +32,8 @@ pub fn append(
     if !after.is_empty() && after.last() != Some(&b'\n') {
         after.push(b'\n');
     }
-    after.extend(format!("restrict {public_key} terminalx-bootstrap:{bootstrap_id}\n").as_bytes());
+    after.extend(line(public_key, bootstrap_id).as_bytes());
+    after.push(b'\n');
     if after.len() as u64 > KEYS_LIMIT {
         return Err("Authorized keys would exceed bound");
     }

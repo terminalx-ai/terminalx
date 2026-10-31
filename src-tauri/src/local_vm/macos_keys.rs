@@ -177,15 +177,33 @@ fn derive(program: &Path, private: &Path, budget: Duration) -> Result<String> {
     super::macos_personalization::public_key(&public)?;
     Ok(public)
 }
+/// The verified private identity alone; the transport uses
+/// `resolve_with_public`.
+#[cfg(test)]
 pub(super) fn resolve(
     root: &Path,
     binding: &Binding,
     verifier: &Path,
     budget: Duration,
 ) -> Result<std::fs::File> {
+    Ok(resolve_with_public(root, binding, verifier, budget)?.0)
+}
+/// As `resolve`, also returning the retained public key the private file was
+/// just verified to match.
+pub(super) fn resolve_with_public(
+    root: &Path,
+    binding: &Binding,
+    verifier: &Path,
+    budget: Duration,
+) -> Result<(std::fs::File, String)> {
     binding.check_retained(root)?;
     let bound = transport_bound(root, binding)?;
-    Ok(resolve_in(root, &binding.key_reference, &bound, verifier, budget)?.0)
+    let (guard, record) = resolve_in(root, &binding.key_reference, &bound, verifier, budget)?;
+    let public = record["receipt"]["publicKey"]
+        .as_str()
+        .context("Retained public key missing")?
+        .to_owned();
+    Ok((guard, public))
 }
 /// The binding this reference's record must hold for the transport: the
 /// transport binding itself, or the version-3 key produced for exactly this

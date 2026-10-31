@@ -162,6 +162,18 @@ pub(super) fn command_using(
     remote: &str,
     budget: Duration,
 ) -> Result<(std::process::Command, std::fs::File)> {
+    command_for(root, env, endpoint, programs, |_| Ok(remote.into()), budget)
+}
+/// As `command_using`, with the remote command built from the retained public
+/// key that the private identity was just verified to match.
+pub(super) fn command_for(
+    root: &Path,
+    env: &Environment,
+    endpoint: &Endpoint,
+    programs: &Programs<'_>,
+    remote: impl FnOnce(&str) -> Result<String>,
+    budget: Duration,
+) -> Result<(std::process::Command, std::fs::File)> {
     let pinned = binding(env)?;
     pinned.check_retained(root)?;
     if endpoint.target != pinned.target
@@ -181,7 +193,7 @@ pub(super) fn command_using(
         "bootstrap",
         json!({}),
     )?;
-    let _keys = super::macos_keys::resolve(root, pinned, programs.keygen, budget)?;
+    let (_keys, public) = super::macos_keys::resolve_with_public(root, pinned, programs.keygen, budget)?;
     let directory = root
         .join("macos-personalization")
         .join(&pinned.bootstrap_id);
@@ -194,7 +206,7 @@ pub(super) fn command_using(
     } else {
         super::macos_keys::write_new(&known, plan.known_hosts.as_bytes())?;
     }
-    *plan.args.last_mut().context("SSH remote command missing")? = remote.into();
+    *plan.args.last_mut().context("SSH remote command missing")? = remote(&public)?;
     let mut command = isolated(programs.ssh, &directory);
     command.args(&plan.args);
     Ok((command, _keys))

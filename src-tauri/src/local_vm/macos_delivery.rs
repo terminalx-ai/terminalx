@@ -96,7 +96,7 @@ impl Artifact {
         Ok(result)
     }
 }
-fn shell_quote(text: &str) -> String {
+pub(super) fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 fn remote(intent: &Intent, action: &str) -> Result<String> {
@@ -229,7 +229,13 @@ fn change_using(
     mut call: impl FnMut(&str) -> Result<Value>,
 ) -> Result<Value> {
     intent.validate()?;
-    macos_transport::binding(&intent.environment)?.check_retained(root)?;
+    let pinned = macos_transport::binding(&intent.environment)?;
+    pinned.check_retained(root)?;
+    if action == "upload" {
+        // Nothing is uploaded before the first strict connection proved this
+        // exact account, home, installed key and host key.
+        super::macos_first_connection::verified(root, pinned)?;
+    }
     if Artifact::verify(artifact.bytes.clone(), &intent.plan.runtime_sha256)?
         .bytes
         .len() as u64
@@ -367,6 +373,7 @@ pub(super) fn deliver(env: &Environment, runtime: &Path, action: &str) -> Result
     if key["state"] != "ready" {
         bail!("Reconcile original per-guest key producer first")
     }
+    super::macos_first_connection::verify(env)?;
     let artifact = Artifact::load(
         runtime,
         &pinned.runtime_sha256,

@@ -27,6 +27,9 @@ impl Delivery {
             })
             .unwrap();
         f.prepare();
+        let first = super::super::macos_first_connection::tests::First::with(f);
+        first.run(Duration::from_secs(10)).unwrap();
+        let f = first.f;
         let intent = Intent {
             version: 1,
             request_id: f.pinned().bootstrap_id.clone(),
@@ -86,6 +89,33 @@ impl Delivery {
         )
     }
 }
+#[test]
+fn the_first_upload_waits_for_the_recorded_first_strict_connection() {
+    let d = Delivery::new();
+    let receipt = d
+        .f
+        .root
+        .path()
+        .join("macos-personalization")
+        .join(&d.f.pinned().bootstrap_id)
+        .join("first-connection.json");
+    let bytes = std::fs::read(&receipt).unwrap();
+    std::fs::remove_file(&receipt).unwrap();
+    let error = d
+        .change("upload", |_| panic!("uploaded before the first strict connection"))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("first strict SSH connection"), "{error:#}");
+    assert!(!record_path(d.f.root.path(), &d.intent.request_id).exists(), "no delivery record");
+    macos_keys::write_new(&receipt, &bytes).unwrap();
+    let uploaded = d
+        .change("upload", |_| {
+            d.uploaded();
+            bail!("lost upload reply")
+        })
+        .unwrap();
+    assert_eq!(uploaded["status"], "loaderOutcomeUnknown");
+}
+
 #[test]
 fn upload_and_installer_lost_replies_reconcile_original_receipts_without_replay() {
     let d = Delivery::new();
