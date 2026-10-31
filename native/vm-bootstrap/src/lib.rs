@@ -16,6 +16,7 @@ pub mod helper;
 pub mod hostkey;
 pub mod keys;
 pub mod probe;
+pub mod retire;
 pub mod seed;
 pub mod wire;
 

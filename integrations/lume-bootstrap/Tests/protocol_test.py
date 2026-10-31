@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import struct
 import subprocess
@@ -560,9 +561,72 @@ class EnrollmentListenerTests(unittest.TestCase):
         self.assertEqual(json.loads((f.op/'account-confirmation-relay.json').read_bytes())['confirmationSha256'], digest(chosen))
         texts = [p.read_bytes() for p in f.op.rglob('*') if p.is_file() and p.name != 'enrollment.key'] + [out, err]
         self.assertFalse(any(self.key.hex().encode() in t or b64(self.key).encode() in t for t in texts))
+    def seeded_root(self, b):
+        """A disposable guest root seeded like the production profile, owned by
+        this user, with a neighbour beside each item and a public host key."""
+        root = Path(tempfile.mkdtemp(prefix='txr', dir='/private/tmp')).resolve(); self.addCleanup(shutil.rmtree, root, True)
+        state = root/'private/var/db/com.terminalx.next.vm-bootstrap'
+        seed = wire({'bootstrapId': b['bootstrapId'], 'key': b64(self.key), 'seedId': b['seedId'], 'version': 1})
+        items = {'plist': (root/'Library/LaunchDaemons', 'com.terminalx.next.vm-bootstrap.plist', 0o644, b'<plist/>'),
+                 'program': (root/'Library/Application Support/TerminalX/VMBootstrap', 'terminalx-vm-bootstrap', 0o755, b'program'),
+                 'key': (state, 'enrollment.json', 0o600, seed)}
+        for directory, name, mode, data in items.values():
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory/name).write_bytes(data); os.chmod(directory/name, mode)
+            (directory/'neighbour').write_bytes(b'not seeded')
+        ssh = root/'private/etc/ssh'; ssh.mkdir(parents=True)
+        (ssh/'ssh_host_ed25519_key.pub').write_text(self.HOST_KEY + ' root@guest\n'); os.chmod(ssh/'ssh_host_ed25519_key.pub', 0o644)
+        (root/'private/var/db/.AppleSetupDone').write_bytes(b'')
+        for directory in [p for p in root.rglob('*') if p.is_dir()]: os.chmod(directory, 0o755)
+        os.chmod(state, 0o700)
+        return root, {k: v[0]/v[1] for k, v in items.items()}
+    def test_the_real_helper_retires_only_its_seeded_items_after_the_owners_acknowledgement(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        g = self.owner_with_guest(f, b)
+        root, items = self.seeded_root(b)
+        seed = f.root/'seed.json'
+        private(seed, wire({'bootstrapId': b['bootstrapId'], 'key': b64(self.key), 'seedId': b['seedId'], 'version': 1}))
+        helper = subprocess.Popen([str(HELPER), str(g.fileno()), str(seed), 'retire', str(root)], pass_fds=[g.fileno()],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        g.close()
+        observed_bytes = self.poll(f, 'accountObservation')
+        mine = next(a for a in json.loads(observed_bytes)['accounts'] if a['uid'] == os.getuid())
+        chosen = wire({'version': 1, 'bindingDigest': f.bd, 'ownerEpoch': b['ownerEpoch'], 'observationSha256': digest(observed_bytes),
+            'account': mine, 'parentSession': uid(), 'parentTab': uid(), 'parentConversation': 'original', 'confirmationId': uid()})
+        self.host(f, 'confirmAccount', chosen)
+        answer = self.poll(f, 'accountAnswer')
+        public = 'ssh-ed25519 ' + b64(struct.pack('!I', 11) + b'ssh-ed25519' + struct.pack('!I', 32) + bytes([7]) * 32)
+        reference = uid()
+        grant = wire({'version': 1, 'bindingDigest': f.bd, 'ownerEpoch': b['ownerEpoch'], 'confirmationSha256': digest(chosen),
+            'answerSha256': digest(answer), 'account': {'name': mine['name'], 'uid': mine['uid']}, 'keyReference': reference,
+            'publicKey': public, 'parentSession': uid(), 'parentTab': uid(), 'parentConversation': 'original'})
+        self.host(f, 'grantKey', grant)
+        out, err = helper.communicate(timeout=60)
+        self.outputs += [out, err]
+        result = json.loads(out)
+        self.assertEqual((result['reached']['keyStage'], result['reached']['hostKey']), ('publicKeyInstalled', self.HOST_KEY), err.decode())
+        retirement = result['retirement']
+        self.assertEqual((retirement['stage'], retirement['removed'], retirement['reported']), ('retired', ['key', 'plist', 'program'], True))
+        for name, path in items.items():
+            self.assertFalse(path.exists(), name)
+            self.assertTrue((path.parent/'neighbour').exists(), f'beside {name}')
+        self.assertTrue((root/'private/etc/ssh/ssh_host_ed25519_key.pub').exists(), 'the host key is never touched')
+        state = items['key'].parent
+        for name in ['enrolled.json', 'session-result.json', 'retirement-intent.json', 'retirement.json']:
+            self.assertTrue((state/name).exists(), name)
+        ack = json.loads((f.op/'retirement-acknowledgement.json').read_bytes())
+        self.assertEqual(ack['acknowledgementSha256'], retirement['acknowledgementSha256'])
+        self.assertEqual(ack['challengeSha256'], json.loads((f.op/'enrollment.json').read_bytes())['challengeSha256'])
+        self.assertEqual(ack['observationSha256'], digest((f.op/'host-key-observation.json').read_bytes()))
+        self.assertEqual(ack['hostKeySha256'], digest(wire({'hostKey': {'keyReference': reference, 'publicKey': self.HOST_KEY}})))
+        report = json.loads((f.op/'retirement-report.json').read_bytes())
+        self.assertEqual((report['stage'], report['helperReported'], report['verified']), ('retired', True, False))
+        texts = [p.read_bytes() for p in list(f.op.rglob('*')) + list(root.rglob('*')) if p.is_file() and p.name != 'enrollment.key']
+        self.assertFalse(any(self.key.hex().encode() in t or b64(self.key).encode() in t for t in texts + self.outputs))
     def reference_helper(self, b, g, account, after_grant):
         """Enrolls with the seeded key, reports `account`, acknowledges the
-        relayed confirmation, then lets `after_grant(tx, grant)` answer."""
+        relayed confirmation, then lets `after_grant(tx, grant, session)`
+        answer, where `session` holds `rx` and the challenge digest."""
         g.settimeout(15)
         hello = {'bootstrapId': b['bootstrapId'], 'clientNonce': os.urandom(32).hex(), 'seedId': b['seedId'], 'version': 2}
         send(g, hello); challenge_bytes = eread(g); sha = digest(challenge_bytes)
@@ -578,7 +642,7 @@ class EnrollmentListenerTests(unittest.TestCase):
         rx()
         tx({'accounts': [account]})
         tx({'accountConfirmed': {'confirmationSha256': rx()['accountConfirmation']['confirmationSha256']}})
-        after_grant(tx, rx()['keyGrant'])
+        after_grant(tx, rx()['keyGrant'], {'rx': rx, 'challenge': sha})
     def host_key_run(self, after_grant):
         """The real owner with a reference helper, driven by the host through
         confirmation and grant. Returns the fixture, key answer and grant bytes."""
@@ -604,12 +668,17 @@ class EnrollmentListenerTests(unittest.TestCase):
         result = self.poll(f, 'keyAnswer')
         thread.join(30); self.assertEqual(failures, [])
         return f, result, grant
+    HOST_KEY = 'ssh-ed25519 ' + b64(struct.pack('!I', 11) + b'ssh-ed25519' + struct.pack('!I', 32) + bytes([9]) * 32)
     def test_the_host_key_is_journaled_only_after_the_helpers_own_install_and_is_never_trust(self):
-        host_key = 'ssh-ed25519 ' + b64(struct.pack('!I', 11) + b'ssh-ed25519' + struct.pack('!I', 32) + bytes([9]) * 32)
-        def installed(tx, grant):
+        host_key = self.HOST_KEY
+        acknowledged = []
+        def installed(tx, grant, session):
             tx({'keyResult': {'keyReference': grant['keyReference'], 'stage': 'publicKeyInstalled'}})
             for _ in range(2): tx({'hostKeyPending': {'keyReference': grant['keyReference']}}); time.sleep(0.3)
-            tx({'hostKey': {'keyReference': grant['keyReference'], 'publicKey': host_key}})
+            report = {'hostKey': {'keyReference': grant['keyReference'], 'publicKey': host_key}}
+            tx(report)
+            acknowledged.append((session['challenge'], report, session['rx']()))
+            tx({'retirement': {'acknowledgementSha256': digest(wire(acknowledged[0][2])), 'stage': 'retired'}})
         f, result, grant = self.host_key_run(installed)
         observed = self.poll(f, 'hostKeyObservation')
         record = json.loads(observed)
@@ -617,21 +686,55 @@ class EnrollmentListenerTests(unittest.TestCase):
             'keyResultSha256': digest(result), 'keyReference': json.loads(grant)['keyReference'], 'hostKey': host_key,
             'observed': True, 'trustAccepted': False, 'ready': False})
         self.assertEqual(self.host(f, 'hostKeyObservation'), observed, 'a lost-reply retry reads the same record')
+        # Stage 9: one acknowledgement, journaled before it was sent, bound to
+        # this session, the exact report and the committed observation.
+        challenge, report, ack = acknowledged[0]
+        self.assertEqual(ack, {'retire': {'challengeSha256': challenge, 'hostKeySha256': digest(wire(report)),
+            'observationSha256': digest(observed)}})
+        self.assertEqual(challenge, json.loads((f.op/'enrollment.json').read_bytes())['challengeSha256'])
+        self.assertEqual(json.loads((f.op/'retirement-acknowledgement.json').read_bytes()), {'version': 1, 'bindingDigest': f.bd,
+            'ownerEpoch': f.binding['ownerEpoch'], 'challengeSha256': challenge, 'hostKeySha256': digest(wire(report)),
+            'observationSha256': digest(observed), 'acknowledgementSha256': digest(wire(ack)), 'trustAccepted': False, 'ready': False})
+        deadline = time.monotonic() + 6
+        while not (f.op/'retirement-report.json').exists() and time.monotonic() < deadline: time.sleep(0.1)
+        self.assertEqual(json.loads((f.op/'retirement-report.json').read_bytes()), {'version': 1, 'bindingDigest': f.bd,
+            'ownerEpoch': f.binding['ownerEpoch'], 'acknowledgementSha256': digest(wire(ack)), 'stage': 'retired',
+            'helperReported': True, 'verified': False, 'trustAccepted': False, 'ready': False})
+    def test_a_retirement_report_for_another_acknowledgement_or_stage_or_none_is_never_journaled(self):
+        def reporting(change):
+            def after(tx, grant, session):
+                tx({'keyResult': {'keyReference': grant['keyReference'], 'stage': 'publicKeyInstalled'}})
+                tx({'hostKey': {'keyReference': grant['keyReference'], 'publicKey': self.HOST_KEY}})
+                ack = session['rx']()
+                report = {'retirement': {'acknowledgementSha256': digest(wire(ack)), 'stage': 'retired'}}
+                if change is not None: change(report); tx(report)
+            return after
+        def other_ack(r): r['retirement']['acknowledgementSha256'] = '0' * 64
+        def unknown_stage(r): r['retirement']['stage'] = 'done'
+        def extra(r): r['retirement']['removed'] = ['key']
+        for name, change in [('another acknowledgement', other_ack), ('unknown stage', unknown_stage), ('extra field', extra), ('none', None)]:
+            f, _, _ = self.host_key_run(reporting(change))
+            deadline = time.monotonic() + 6
+            while not (f.op/'retirement-acknowledgement.json').exists() and time.monotonic() < deadline: time.sleep(0.1)
+            self.assertTrue((f.op/'retirement-acknowledgement.json').exists(), name)
+            time.sleep(3.5)  # past the owner's frame bound for the report
+            self.assertFalse((f.op/'retirement-report.json').exists(), name)
     def test_a_host_key_after_a_refusal_or_for_another_reference_or_type_is_never_journaled(self):
         rsa = 'ssh-rsa ' + b64(struct.pack('!I', 7) + b'ssh-rsa' + bytes(40))
-        def refused(tx, grant):
+        def refused(tx, grant, session):
             tx({'keyResult': {'keyReference': grant['keyReference'], 'stage': 'refused'}})
             tx({'hostKey': {'keyReference': grant['keyReference'], 'publicKey': rsa}})
-        def other_reference(tx, grant):
+        def other_reference(tx, grant, session):
             tx({'keyResult': {'keyReference': grant['keyReference'], 'stage': 'publicKeyInstalled'}})
             tx({'hostKeyPending': {'keyReference': uid()}})
-        def other_type(tx, grant):
+        def other_type(tx, grant, session):
             tx({'keyResult': {'keyReference': grant['keyReference'], 'stage': 'publicKeyInstalled'}})
             tx({'hostKey': {'keyReference': grant['keyReference'], 'publicKey': rsa}})
         for after_grant in [refused, other_reference, other_type]:
             f, _, _ = self.host_key_run(after_grant)
             time.sleep(0.5)
             self.assertFalse((f.op/'host-key-observation.json').exists(), after_grant.__name__)
+            self.assertFalse((f.op/'retirement-acknowledgement.json').exists(), 'no acknowledgement without the final report')
             with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, 'hostKeyObservation')
     def test_version_2_owner_serves_no_account_relay(self):
         f = Fixture(); self.addCleanup(f.finish); b = f.binding; b['version'] = 2

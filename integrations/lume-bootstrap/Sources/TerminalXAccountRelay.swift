@@ -155,6 +155,50 @@ enum TXAccountRelay {
         "stage", "installed", "trustAccepted", "ready"]
     static let hostKeyKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "grantSha256", "keyResultSha256",
         "keyReference", "hostKey", "observed", "trustAccepted", "ready"]
+    static let acknowledgementKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "challengeSha256",
+        "hostKeySha256", "observationSha256", "acknowledgementSha256", "trustAccepted", "ready"]
+
+    /// Design stage 9: after the host-key observation is journaled, the owner's
+    /// one acknowledgement of the helper's final report, bound to this session's
+    /// challenge, the exact report frame and the committed observation. It is
+    /// journaled before it is sent; only it lets the helper retire.
+    static func acknowledgeRetirement(_ observation: Data, challengeSha256: String,
+                                      launch: TerminalXBootstrapLaunch) throws -> Data {
+        let o = try txObject(observation, keys: hostKeyKeys)
+        let report = try txJSON(["hostKey": ["keyReference": try txString(o, "keyReference"),
+            "publicKey": try txString(o, "hostKey")]])
+        let body = try txJSON(retirementBody(challengeSha256: challengeSha256, hostKeySha256: txDigest(report),
+            observationSha256: txDigest(observation)))
+        let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
+            "challengeSha256": challengeSha256, "hostKeySha256": txDigest(report), "observationSha256": txDigest(observation),
+            "acknowledgementSha256": txDigest(body), "trustAccepted": false, "ready": false])
+        try launch.pins["operation"]!.writeNew("retirement-acknowledgement.json", record)
+        return record
+    }
+    static func retirementBody(challengeSha256: String, hostKeySha256: String, observationSha256: String) -> [String: Any] {
+        ["retire": ["challengeSha256": challengeSha256, "hostKeySha256": hostKeySha256, "observationSha256": observationSha256]]
+    }
+    static func retirementFrame(_ acknowledgement: Data) throws -> [String: Any] {
+        let a = try txObject(acknowledgement, keys: acknowledgementKeys)
+        return retirementBody(challengeSha256: try txString(a, "challengeSha256"), hostKeySha256: try txString(a, "hostKeySha256"),
+            observationSha256: try txString(a, "observationSha256"))
+    }
+
+    /// Journals the helper's report of its retirement for exactly this
+    /// acknowledgement. It is the helper's claim only: the owner cannot see the
+    /// guest's files, so `verified` stays false.
+    static func retirementReport(_ body: [String: Any], acknowledgement: Data, launch: TerminalXBootstrapLaunch) throws -> Data {
+        let a = try txObject(acknowledgement, keys: acknowledgementKeys)
+        guard body.count == 1, let report = body["retirement"] as? [String: Any],
+              Swift.Set(report.keys) == ["acknowledgementSha256", "stage"], let stage = report["stage"] as? String,
+              ["retired", "refused", "outcomeUnknown"].contains(stage) else { throw TXBootstrapError.refused }
+        try txRequire(txString(report, "acknowledgementSha256") == txString(a, "acknowledgementSha256"))
+        let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
+            "acknowledgementSha256": try txString(a, "acknowledgementSha256"), "stage": stage, "helperReported": true,
+            "verified": false, "trustAccepted": false, "ready": false])
+        try launch.pins["operation"]!.writeNew("retirement-report.json", record)
+        return record
+    }
 
     /// One `ssh-ed25519 <blob>` public key with its exact 51-byte wire encoding.
     static func ed25519(_ key: String) -> Bool {

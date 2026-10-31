@@ -14,14 +14,20 @@
 //! repeated claims. It never chooses or consents to an account, generates a
 //! key or changes sshd, and it exits 0 on every path so `KeepAlive
 //! {SuccessfulExit: false}` cannot turn a refusal into a restart loop.
-//! Retirement (design stage 9) needs a final acknowledgement the owner does
-//! not send yet, so the seeded items stay in place.
+//!
+//! After the host-key report, only the owner's acknowledgement under the same
+//! session, bound to this session's challenge and that exact report, starts
+//! retirement (design stage 9, `retire`): the three seeded items as this
+//! launch recorded them are removed and the outcome is reported back. Without
+//! it, or after a refused, partial or interrupted retirement, the remaining
+//! items stay for inspection and no later launch connects again.
 use crate::{
     account,
     child::{self, Installer},
     enroll::{self, Seed, Session},
     fsx::Dir,
     hostkey,
+    retire::{self, Acknowledgement, Seeded},
     wire::{self, Failure, Stream},
 };
 use serde_json::{json, Value};
@@ -136,11 +142,18 @@ impl Guest for System {
 
 #[derive(Debug)]
 pub enum Outcome {
-    /// The state directory or seed failed its checks; nothing was attempted.
+    /// The state directory, seed or seeded items failed their checks;
+    /// nothing was attempted.
     Refused(String),
     /// An earlier launch was accepted. The owner admits nothing more, and
     /// enrollment is never repeated.
     EnrolledEarlier,
+    /// An earlier launch journaled its retirement outcome; nothing more is
+    /// done.
+    RetirementRecorded,
+    /// An earlier retirement started and never journaled its outcome. What
+    /// remains is an inspection item; it is never resumed or repeated.
+    RetirementInterrupted,
     /// Every journaled attempt ended without an acceptance.
     AttemptsSpent(Option<String>),
     /// No connection in this launch's window; no attempt was journaled.
@@ -157,13 +170,18 @@ fn record(value: &Value) -> Vec<u8> {
     serde_json::to_vec(value).expect("JSON values always serialize")
 }
 
-/// The state directory, private to `owner` (root in production), and the
-/// seeded record in it: one link, private to `owner`, bounded, read once.
-fn open(layout: &Layout, owner: u32) -> io::Result<(Dir, Seed)> {
+/// The state directory, private to `owner` (root in production).
+fn open_state(layout: &Layout, owner: u32) -> io::Result<Dir> {
     let state = Dir::open_root(&layout.state())?;
     if state.stat.st_uid != owner || state.stat.st_mode & 0o077 != 0 {
         return Err(refused("the helper state directory is not private to root"));
     }
+    Ok(state)
+}
+
+/// The seeded record in `state`: one link, private to `owner`, bounded, read
+/// once.
+fn read_seed(state: &Dir, owner: u32) -> io::Result<Seed> {
     let (file, stat) = state.open_regular(KEY)?;
     if stat.st_uid != owner || stat.st_mode & 0o077 != 0 || stat.st_nlink != 1 {
         return Err(refused("the enrollment record is not private to root"));
@@ -175,7 +193,21 @@ fn open(layout: &Layout, owner: u32) -> io::Result<(Dir, Seed)> {
     if bytes.len() > 4096 {
         return Err(refused("the enrollment record exceeds its bound"));
     }
-    Ok((state, Seed::parse(&bytes)?))
+    Seed::parse(&bytes)
+}
+
+/// What an earlier launch's journals already settle, before anything is read
+/// or tried.
+fn settled(state: &Dir) -> io::Result<Option<Outcome>> {
+    Ok(if state.stat_at(retire::RESULT)?.is_some() {
+        Some(Outcome::RetirementRecorded)
+    } else if state.stat_at(retire::INTENT)?.is_some() {
+        Some(Outcome::RetirementInterrupted)
+    } else if state.stat_at(ENROLLED)?.is_some() {
+        Some(Outcome::EnrolledEarlier)
+    } else {
+        None
+    })
 }
 
 fn attempt_name(attempt: u32) -> String {
@@ -213,22 +245,33 @@ fn claims() -> Value {
     json!({"euid": unsafe { libc::geteuid() }, "label": LABEL})
 }
 
+/// How far a session got.
+pub struct Reached {
+    /// The confirmed account, key stage and host key.
+    pub summary: Value,
+    /// The owner's acknowledgement of the final report, when it came.
+    pub acknowledgement: Option<Acknowledgement>,
+}
+
 /// After the owner's acceptance: reports `accounts`, then follows the owner,
 /// each step waiting up to `wait`: the person's confirmation, the key grant
 /// installed by `installer` as the confirmed account, and, only after that
 /// install, the existing public host key in `ssh_dir` (which, like the key,
-/// must belong to `ssh_owner`). The session ends at the first refusal.
+/// must belong to `ssh_owner`), followed by the owner's acknowledgement of
+/// that report under this session (`challenge_sha256`). The session ends at
+/// the first refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn converse(
     session: &mut Session,
     stream: &mut impl Stream,
+    challenge_sha256: &str,
     bootstrap_id: &str,
     accounts: &[Value],
     installer: &mut impl Installer,
     ssh_dir: &Path,
     ssh_owner: u32,
     wait: Duration,
-) -> io::Result<Value> {
+) -> io::Result<Reached> {
     session.report_accounts(stream, accounts)?;
     let account = session.await_confirmation(stream, accounts, wait)?;
     let (stage, key_reference) =
@@ -238,14 +281,45 @@ pub fn converse(
     } else {
         None
     };
-    Ok(
-        json!({"confirmed": account.name, "confirmationSha256": account.confirmation_sha256,
-        "keyStage": stage, "hostKey": host_key}),
-    )
+    let acknowledgement = match &host_key {
+        Some(key) => {
+            let report = json!({"hostKey": {"keyReference": key_reference, "publicKey": key}});
+            session.set_wait(wait);
+            Some(session.receive_acknowledgement(stream, challenge_sha256, &report)?)
+        }
+        None => None,
+    };
+    Ok(Reached {
+        summary: json!({"confirmed": account.name, "confirmationSha256": account.confirmation_sha256,
+            "keyStage": stage, "hostKey": host_key}),
+        acknowledgement,
+    })
+}
+
+/// Retires after `acknowledgement` and tells the owner the stage reached. A
+/// retirement that cannot journal its outcome is reported as unknown, never as
+/// retired.
+fn retire_and_report(
+    state: &Dir,
+    seeded: &Seeded,
+    acknowledgement: &Acknowledgement,
+    session: &mut Session,
+    stream: &mut impl Stream,
+) -> Value {
+    let mut outcome = retire::retire(state, seeded, acknowledgement, |_| Ok(()))
+        .unwrap_or_else(|error| json!({"stage": "outcomeUnknown", "error": error.to_string()}));
+    let stage = outcome["stage"]
+        .as_str()
+        .unwrap_or("outcomeUnknown")
+        .to_owned();
+    let report =
+        json!({"retirement": {"acknowledgementSha256": acknowledgement.sha256, "stage": stage}});
+    outcome["reported"] = json!(session.send(stream, report).is_ok());
+    outcome
 }
 
 /// One launch. `owner` is the uid that must own the state directory, the
-/// seeded record and the SSH directory: root in production.
+/// seeded items and the SSH directory: root in production.
 pub fn run(
     layout: &Layout,
     owner: u32,
@@ -253,15 +327,26 @@ pub fn run(
     guest: &mut impl Guest,
     installer: &mut impl Installer,
 ) -> Outcome {
-    let (state, seed) = match open(layout, owner) {
-        Ok(opened) => opened,
+    let state = match open_state(layout, owner) {
+        Ok(state) => state,
+        Err(error) => return Outcome::Refused(error.to_string()),
+    };
+    match settled(&state) {
+        Ok(None) => {}
+        Ok(Some(outcome)) => return outcome,
+        Err(error) => return Outcome::Refused(error.to_string()),
+    }
+    let (seed, seeded) = match read_seed(&state, owner)
+        .and_then(|seed| Ok((seed, retire::seeded(&layout.root, owner)?)))
+    {
+        Ok(found) => found,
         Err(error) => return Outcome::Refused(error.to_string()),
     };
     let mut last_error = None;
     loop {
-        match state.stat_at(ENROLLED) {
+        match settled(&state) {
             Ok(None) => {}
-            Ok(Some(_)) => return Outcome::EnrolledEarlier,
+            Ok(Some(outcome)) => return outcome,
             Err(error) => return Outcome::Refused(error.to_string()),
         }
         let attempt = match next_attempt(&state, schedule.attempts) {
@@ -296,18 +381,30 @@ pub fn run(
             return Outcome::Refused(error.to_string());
         }
         let accounts = guest.accounts();
-        let reached = converse(
+        let (reached, retirement) = match converse(
             &mut session,
             &mut stream,
+            &challenge,
             &seed.bootstrap_id,
             &accounts,
             installer,
             &layout.ssh(),
             owner,
             schedule.person,
-        )
-        .unwrap_or_else(|error| json!({"error": error.to_string()}));
-        let result = json!({"challengeSha256": challenge, "reached": reached, "version": 1});
+        ) {
+            Ok(Reached {
+                summary,
+                acknowledgement: Some(acknowledgement),
+            }) => {
+                let retirement =
+                    retire_and_report(&state, &seeded, &acknowledgement, &mut session, &mut stream);
+                (summary, retirement)
+            }
+            Ok(Reached { summary, .. }) => (summary, Value::Null),
+            Err(error) => (json!({"error": error.to_string()}), Value::Null),
+        };
+        let result = json!({"challengeSha256": challenge, "reached": reached,
+            "retirement": retirement, "version": 1});
         return match state.publish_new(RESULT, &record(&result)) {
             Ok(()) => Outcome::Finished(result),
             Err(error) => Outcome::Refused(error.to_string()),
@@ -365,9 +462,46 @@ mod tests {
             "seedId": "00112233445566778899aabbccddeeff", "version": 1});
         std::fs::write(layout.state().join(KEY), record(&seed)).unwrap();
         private(&layout.state().join(KEY), 0o600);
+        for item in &crate::seed::PRODUCTION.items[..2] {
+            let dir = layout.path(item.dirs);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(item.name), item.key).unwrap();
+            private(&dir.join(item.name), item.mode.into());
+        }
+        std::fs::write(
+            layout.path(&["Library", "LaunchDaemons", "neighbour.plist"]),
+            b"not seeded",
+        )
+        .unwrap();
         std::fs::create_dir_all(layout.ssh()).unwrap();
-        private(&layout.ssh(), 0o755);
+        for dir in walk_dirs(temp.path()) {
+            if dir != layout.state() {
+                private(&dir, 0o755);
+            }
+        }
         temp
+    }
+
+    /// Every directory under `root`, so fixtures can give them the seeded modes.
+    fn walk_dirs(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                found.extend(walk_dirs(&path));
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// Which of the seeded plist, program and key are still present.
+    fn seeded_present(layout: &Layout) -> Vec<bool> {
+        crate::seed::PRODUCTION
+            .items
+            .iter()
+            .map(|item| std::fs::symlink_metadata(layout.path(item.dirs).join(item.name)).is_ok())
+            .collect()
     }
 
     fn layout(temp: &tempfile::TempDir) -> Layout {
@@ -482,14 +616,37 @@ mod tests {
     /// A conforming owner for one session: accepts the enrollment, relays the
     /// person's confirmation of `account` and a key grant, and returns every
     /// helper frame until the helper closes.
-    fn owner(mut end: UnixStream, key: [u8; 32], account: Value) -> io::Result<Vec<Value>> {
+    fn owner(
+        mut end: UnixStream,
+        key: [u8; 32],
+        account: Value,
+        ack: Ack,
+    ) -> io::Result<Vec<Value>> {
         let deadline = || Instant::now() + Duration::from_secs(3);
-        let (_, session) = enroll::accept_fixture(&mut end, key, |_| {})?;
+        let (proof, session) = enroll::accept_fixture(&mut end, key, |_| {})?;
         let mut frames = vec![Session::helper_body(
             &session,
             0,
             &read_frame(&mut end, deadline())?,
         )?];
+        let acknowledgement = |final_report: &Value| {
+            json!({"retire": {"challengeSha256": proof["challengeSha256"],
+                "hostKeySha256": crate::sha256(&record(final_report)), "observationSha256": "b".repeat(64)}})
+        };
+        if let Ack::Premature = ack {
+            let early = acknowledgement(
+                &json!({"hostKey": {"keyReference": REFERENCE, "publicKey": host_key(4)}}),
+            );
+            write_frame(
+                &mut end,
+                &Session::owner_frame(&session, 1, &early),
+                deadline(),
+            )?;
+            while let Ok(frame) = read_frame(&mut end, deadline()) {
+                frames.push(Session::helper_body(&session, frames.len() as u64, &frame)?);
+            }
+            return Ok(frames);
+        }
         let mut confirmation = account.clone();
         confirmation["confirmed"] = json!(true);
         confirmation["confirmationSha256"] = json!("c".repeat(64));
@@ -512,10 +669,44 @@ mod tests {
         )?;
         let mut seq = 2;
         while let Ok(frame) = read_frame(&mut end, deadline()) {
-            frames.push(Session::helper_body(&session, seq, &frame)?);
+            let body = Session::helper_body(&session, seq, &frame)?;
             seq += 1;
+            frames.push(body.clone());
+            if body.get("hostKey").is_none() {
+                continue;
+            }
+            let mut sent = acknowledgement(&body);
+            let signer = match ack {
+                Ack::Never => break,
+                Ack::Changed(change) => {
+                    change(&mut sent);
+                    session
+                }
+                Ack::Untagged => [0x02; 32],
+                _ => session,
+            };
+            write_frame(
+                &mut end,
+                &Session::owner_frame(&signer, 3, &sent),
+                deadline(),
+            )?;
         }
         Ok(frames)
+    }
+
+    /// How the fixture owner answers the helper's host-key report.
+    #[derive(Clone, Copy)]
+    enum Ack {
+        /// Closes the session without acknowledging.
+        Never,
+        /// Acknowledges exactly, as the real owner does.
+        Exact,
+        /// Acknowledges with `change` applied to the body.
+        Changed(fn(&mut Value)),
+        /// Tags the acknowledgement under another session key.
+        Untagged,
+        /// Sends an acknowledgement in place of the person's confirmation.
+        Premature,
     }
 
     fn host_key(fill: u8) -> String {
@@ -558,8 +749,15 @@ mod tests {
 
     #[test]
     fn a_state_or_seed_that_is_not_private_and_exact_refuses_before_any_connection() {
-        let cases: [(&str, Change); 6] = [
+        let cases: [(&str, Change); 7] = [
             ("no state", |l| std::fs::remove_dir_all(l.state()).unwrap()),
+            ("unseeded program", |l| {
+                std::fs::remove_file(
+                    l.path(crate::seed::PRODUCTION.items[1].dirs)
+                        .join("terminalx-vm-bootstrap"),
+                )
+                .unwrap()
+            }),
             ("readable state", |l| private(&l.state(), 0o750)),
             ("readable seed", |l| private(&l.state().join(KEY), 0o640)),
             ("linked seed", |l| {
@@ -617,7 +815,7 @@ mod tests {
         let temp = guest_root();
         let layout = layout(&temp);
         let (helper_end, owner_end) = UnixStream::pair().unwrap();
-        let owner = thread::spawn(move || owner(owner_end, SEEDED, mine()));
+        let owner = thread::spawn(move || owner(owner_end, SEEDED, mine(), Ack::Never));
         let mut guest = Fake::new(vec![helper_end], vec![mine()]);
         guest.setup_after = Some((3, layout.path(&SETUP_DONE)));
         // The real installer: unprivileged, it refuses before any fork or write.
@@ -677,28 +875,37 @@ mod tests {
         assert_eq!(again.connects, 0);
     }
 
-    #[test]
-    fn after_its_own_install_it_reports_only_the_existing_public_host_key() {
-        let temp = guest_root();
-        let layout = layout(&temp);
-        finish_setup(&layout);
+    fn with_host_key(layout: &Layout) {
+        finish_setup(layout);
         std::fs::write(
             layout.ssh().join(hostkey::HOST_KEY),
             format!("{} root@guest\n", host_key(4)),
         )
         .unwrap();
         private(&layout.ssh().join(hostkey::HOST_KEY), 0o644);
+    }
+
+    /// One launch against the fixture owner answering with `ack`.
+    fn session(layout: &Layout, ack: Ack, installer: &mut impl Installer) -> (Outcome, Vec<Value>) {
         let (helper_end, owner_end) = UnixStream::pair().unwrap();
-        let owner = thread::spawn(move || owner(owner_end, SEEDED, mine()));
-        let mut installer = Stage("publicKeyInstalled", vec![]);
+        let owner = thread::spawn(move || owner(owner_end, SEEDED, mine(), ack));
         let outcome = run(
-            &layout,
+            layout,
             euid(),
             &SCHEDULE,
             &mut Fake::new(vec![helper_end], vec![mine()]),
-            &mut installer,
+            installer,
         );
-        let frames = owner.join().unwrap().unwrap();
+        (outcome, owner.join().unwrap().unwrap())
+    }
+
+    #[test]
+    fn after_its_host_key_report_the_owners_acknowledgement_retires_exactly_the_seeded_items() {
+        let temp = guest_root();
+        let layout = layout(&temp);
+        with_host_key(&layout);
+        let mut installer = Stage("publicKeyInstalled", vec![]);
+        let (outcome, frames) = session(&layout, Ack::Exact, &mut installer);
         let Outcome::Finished(result) = outcome else {
             panic!("{outcome:?}")
         };
@@ -708,13 +915,166 @@ mod tests {
         );
         assert_eq!(result["reached"]["keyStage"], "publicKeyInstalled");
         assert_eq!(result["reached"]["hostKey"], host_key(4));
+        let retirement = &result["retirement"];
+        assert_eq!(
+            (
+                retirement["stage"].as_str(),
+                retirement["reported"].as_bool()
+            ),
+            (Some("retired"), Some(true))
+        );
+        assert_eq!(retirement["removed"], json!(["key", "plist", "program"]));
+        let host_key_report =
+            json!({"hostKey": {"keyReference": REFERENCE, "publicKey": host_key(4)}});
         assert_eq!(
             frames[2..],
             [
                 json!({"keyResult": {"keyReference": REFERENCE, "stage": "publicKeyInstalled"}}),
-                json!({"hostKey": {"keyReference": REFERENCE, "publicKey": host_key(4)}}),
+                host_key_report.clone(),
+                json!({"retirement": {"acknowledgementSha256": retirement["acknowledgementSha256"], "stage": "retired"}}),
             ]
         );
+        assert_eq!(seeded_present(&layout), [false, false, false]);
+        assert!(layout
+            .path(&["Library", "LaunchDaemons", "neighbour.plist"])
+            .exists());
+        assert!(
+            layout.ssh().join(hostkey::HOST_KEY).exists(),
+            "the host key is never touched"
+        );
+        let names = state_names(&layout);
+        for name in [ENROLLED, RESULT, retire::INTENT, retire::RESULT] {
+            assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+        }
+        let mut later = Fake::new(vec![], vec![mine()]);
+        let again = run(
+            &layout,
+            euid(),
+            &SCHEDULE,
+            &mut later,
+            &mut Stage("publicKeyInstalled", vec![]),
+        );
+        assert!(matches!(again, Outcome::RetirementRecorded), "{again:?}");
+        assert_eq!(later.connects, 0);
+    }
+
+    #[test]
+    fn a_missing_changed_untagged_or_premature_acknowledgement_removes_nothing() {
+        let cases: [(&str, Ack); 6] = [
+            ("never", Ack::Never),
+            (
+                "another session",
+                Ack::Changed(|b| b["retire"]["challengeSha256"] = json!("c".repeat(64))),
+            ),
+            (
+                "another report",
+                Ack::Changed(|b| b["retire"]["hostKeySha256"] = json!("d".repeat(64))),
+            ),
+            (
+                "extra field",
+                Ack::Changed(|b| b["retire"]["also"] = json!(true)),
+            ),
+            ("untagged", Ack::Untagged),
+            ("premature", Ack::Premature),
+        ];
+        for (name, ack) in cases {
+            let temp = guest_root();
+            let layout = layout(&temp);
+            with_host_key(&layout);
+            let (outcome, frames) = session(&layout, ack, &mut Stage("publicKeyInstalled", vec![]));
+            let Outcome::Finished(result) = outcome else {
+                panic!("{name}: {outcome:?}")
+            };
+            assert!(result["reached"]["error"].is_string(), "{name}: {result}");
+            assert_eq!(result["retirement"], Value::Null, "{name}");
+            assert_eq!(seeded_present(&layout), [true, true, true], "{name}");
+            assert!(
+                !state_names(&layout).iter().any(|n| n == retire::INTENT),
+                "{name}"
+            );
+            assert!(
+                !frames.iter().any(|f| f.get("retirement").is_some()),
+                "{name}"
+            );
+            let mut later = Fake::new(vec![], vec![mine()]);
+            let again = run(
+                &layout,
+                euid(),
+                &SCHEDULE,
+                &mut later,
+                &mut Stage("publicKeyInstalled", vec![]),
+            );
+            assert!(
+                matches!(again, Outcome::EnrolledEarlier),
+                "{name}: {again:?}"
+            );
+            assert_eq!(later.connects, 0, "{name}");
+        }
+    }
+
+    /// Replaces the seeded program during the session, then reports an install.
+    struct Substitutes(PathBuf);
+
+    impl Installer for Substitutes {
+        fn install(&mut self, _: &ConfirmedAccount, _: &KeyGrant) -> String {
+            std::fs::remove_file(&self.0).unwrap();
+            std::fs::write(&self.0, b"another program").unwrap();
+            private(&self.0, 0o755);
+            "publicKeyInstalled".into()
+        }
+    }
+
+    #[test]
+    fn a_seeded_item_changed_after_launch_or_an_interrupted_retirement_is_left_for_inspection() {
+        {
+            let temp = guest_root();
+            let layout = layout(&temp);
+            with_host_key(&layout);
+            let program = layout
+                .path(crate::seed::PRODUCTION.items[1].dirs)
+                .join("terminalx-vm-bootstrap");
+            let (outcome, frames) = session(&layout, Ack::Exact, &mut Substitutes(program));
+            let Outcome::Finished(result) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(result["retirement"]["stage"], "refused");
+            assert_eq!(result["retirement"]["removed"], json!([]));
+            assert_eq!(seeded_present(&layout), [true, true, true]);
+            assert_eq!(frames.last().unwrap()["retirement"]["stage"], "refused");
+            let mut later = Fake::new(vec![], vec![mine()]);
+            let again = run(
+                &layout,
+                euid(),
+                &SCHEDULE,
+                &mut later,
+                &mut Stage("publicKeyInstalled", vec![]),
+            );
+            assert!(matches!(again, Outcome::RetirementRecorded), "{again:?}");
+        }
+
+        {
+            // An intent without an outcome, as a crash leaves it: never resumed.
+            let temp = guest_root();
+            let layout = layout(&temp);
+            finish_setup(&layout);
+            std::fs::write(layout.state().join(retire::INTENT), b"{}").unwrap();
+            let mut later = Fake::new(vec![], vec![mine()]);
+            let outcome = run(
+                &layout,
+                euid(),
+                &SCHEDULE,
+                &mut later,
+                &mut Stage("publicKeyInstalled", vec![]),
+            );
+            assert!(
+                matches!(outcome, Outcome::RetirementInterrupted),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                (later.connects, seeded_present(&layout)),
+                (0, vec![true, true, true])
+            );
+        }
     }
 
     #[test]
@@ -741,7 +1101,9 @@ mod tests {
         for _ in 0..3 {
             let (helper_end, owner_end) = UnixStream::pair().unwrap();
             ends.push(helper_end);
-            owners.push(thread::spawn(move || owner(owner_end, [0x01; 32], mine())));
+            owners.push(thread::spawn(move || {
+                owner(owner_end, [0x01; 32], mine(), Ack::Never)
+            }));
         }
         let mut guest = Fake::new(ends, vec![mine()]);
         let outcome = run(

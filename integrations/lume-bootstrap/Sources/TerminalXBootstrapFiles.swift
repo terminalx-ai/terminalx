@@ -88,7 +88,8 @@ final class TXPinnedPath: @unchecked Sendable {
     func writeNew(_ name: String, _ bytes: Data) throws {
         try txRequire(directory && (["owner-started.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json",
             "enrollment.json", "stop-requested.json", "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json",
-            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json"].contains(name)
+            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json",
+            "retirement-acknowledgement.json", "retirement-report.json"].contains(name)
             || TXEnrollmentService.attemptNames.contains(name)) && bytes.count <= 64 * 1024)
         try check()
         // Exclusive and atomic for readers: written and synced under a unique
