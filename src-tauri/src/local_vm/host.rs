@@ -1977,6 +1977,35 @@ mod tests {
         );
         assert_eq!(fs::read(temp.path().join("selected")).unwrap(), b"after\n");
     }
+    /// A guest writes the patch bytes. Importing them into the chosen checkout
+    /// never writes outside its work tree, into its Git metadata, or through a
+    /// symlink the checkout holds.
+    #[test]
+    fn real_guest_patch_cannot_leave_the_checkout_reach_git_metadata_or_follow_a_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let checkout = parent.path().join("checkout");
+        let outside = parent.path().join("outside");
+        fs::create_dir(&checkout).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&checkout).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "--quiet"]);
+        std::os::unix::fs::symlink(&outside, checkout.join("link")).unwrap();
+        git(&["add", "link"]);
+        let added = |path: &str, mode: &str| {
+            format!("diff --git a/{path} b/{path}\nnew file mode {mode}\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+#!/bin/sh\n")
+        };
+        for (path, mode) in [("../outside/escaped", "100644"), (".git/hooks/post-checkout", "100755"),
+            (".GIT/hooks/post-checkout", "100755"), ("link/escaped", "100644")]
+        {
+            let result = apply_patch_bytes(&checkout, added(path, mode).as_bytes()).unwrap();
+            assert_eq!(result["applied"], false, "{path}");
+        }
+        assert!(fs::read_dir(&outside).unwrap().next().is_none(), "nothing written outside the checkout");
+        assert!(!checkout.join(".git/hooks/post-checkout").exists());
+    }
     #[test]
     fn real_files_require_approved_bytes_and_reject_symlink_escape() {
         let temp = tempfile::tempdir().unwrap();

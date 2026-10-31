@@ -28,9 +28,20 @@ pub fn command(program: &str) -> Result<Command> {
         }
         command.env_remove("LUME_API");
     }
+    if matches!(program, "cua" | "lume") {
+        without_host_agent(&mut command);
+    }
     command.env("PATH", std::env::join_paths(path)?);
     remove_control_credentials(&mut command);
     Ok(command)
+}
+
+/// Cua's `sb exec` reaches a macOS guest through `lume ssh`, which falls back
+/// to `/usr/bin/ssh` with this environment and the user's own ssh config. With
+/// no agent socket in that session, a config that forwards the agent cannot
+/// hand the host's keys to the guest. Lume signs in with the guest password.
+fn without_host_agent(command: &mut Command) {
+    command.env_remove("SSH_AUTH_SOCK");
 }
 
 pub(super) fn remove_control_credentials(command: &mut Command) {
@@ -166,6 +177,20 @@ mod tests {
         ] {
             assert_eq!(env.get(std::ffi::OsStr::new(key)), Some(&None), "{key}");
         }
+    }
+
+    #[test]
+    fn guest_session_tools_never_inherit_the_host_ssh_agent() {
+        let mut command = Command::new("/usr/bin/env");
+        command.env("SSH_AUTH_SOCK", "/private/tmp/host-agent.sock");
+        without_host_agent(&mut command);
+        let output = String::from_utf8(run(&mut command, b"", Duration::from_secs(10)).unwrap()).unwrap();
+        assert!(!output.lines().any(|line| line.starts_with("SSH_AUTH_SOCK=")), "{output}");
+        // Every other host tool keeps the caller's agent.
+        let mut other = Command::new("/usr/bin/env");
+        other.env("SSH_AUTH_SOCK", "/private/tmp/host-agent.sock");
+        let output = String::from_utf8(run(&mut other, b"", Duration::from_secs(10)).unwrap()).unwrap();
+        assert!(output.lines().any(|line| line == "SSH_AUTH_SOCK=/private/tmp/host-agent.sock"));
     }
 
     #[test]
