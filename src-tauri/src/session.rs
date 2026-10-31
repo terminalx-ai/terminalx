@@ -42,6 +42,8 @@ use crate::{git, pty, store};
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_unsent.rs"]
+mod unsent;
 
 #[derive(Clone)]
 pub struct PendingAsk {
@@ -124,6 +126,9 @@ struct CliLaunch {
     transcript_root: PathBuf,
     /// Claude: the conversation's own file, which may be in another folder.
     conversation: Option<crate::hooks::ConversationFile>,
+    /// What starting afresh cost, when the conversation had no file to
+    /// resume (#663).
+    restart: Option<unsent::Restart>,
 }
 
 /// How the wait for a pane's CLI to listen ended.
@@ -482,6 +487,10 @@ pub struct CliTab {
     /// Which start this is. A pane restarted in place keeps its id, so the
     /// generation is what tells the previous tailer that it is finished.
     pub generation: u64,
+    /// When this CLI was started. One that is gone again within moments,
+    /// before it ever said it was up, never got going, and what it printed
+    /// is why (#663).
+    launched_at: Instant,
     /// A setting the CLI only reads at startup, changed mid-turn. The restart
     /// waits for the turn to end.
     pub restart_when_idle: bool,
@@ -567,6 +576,20 @@ pub struct CliTab {
     /// app's hooks, so everything a hook would say is read from elsewhere,
     /// and it is never restarted by the app.
     pub by_hand: Option<Box<follow::ByHand>>,
+}
+
+/// How soon after it was started a CLI that goes again never got going.
+const STARTUP_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl CliTab {
+    /// Whether this CLI went before it ever got going: within moments of the
+    /// app starting it, and before it said it was up. What it printed then
+    /// is why it went, unlike the last screen of a CLI the reader quit
+    /// (#663). One started by hand shares its terminal with the reader's own
+    /// shell, which says so there.
+    fn never_got_going(&self) -> bool {
+        self.by_hand.is_none() && !self.ready.arrived() && self.launched_at.elapsed() < STARTUP_EXIT
+    }
 }
 
 // One runtime per tab, so the CLI variant's size costs nothing worth a box.
@@ -744,9 +767,9 @@ pub struct SessionManager {
     status: Arc<crate::status::StatusState>,
     control: crate::hooks::ControlEndpoint,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
-    /// One lock per pane, so two prompts sent in quick succession cannot
-    /// interleave their paste and their Enter.
-    writers: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// One writer per pane, so two prompts sent in quick succession cannot
+    /// interleave their paste and their Enter, nor overtake one another.
+    writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
     starts: Arc<std::sync::atomic::AtomicU64>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
     stop_pids: Arc<Mutex<Vec<u32>>>,
@@ -849,6 +872,84 @@ pub struct ImageInput {
 
 /// Archived image refs for the log, and (media type, base64) pairs for the wire.
 type ArchivedImages = (Vec<ImageRef>, Vec<(String, String)>);
+
+/// Who types into a pane: one prompt at a time, and in the order they were
+/// sent. Each prompt is typed from a thread of its own, and threads do not
+/// get going in the order they were made, so the order is a ticket each one
+/// is handed while its sender still has the tab (#663): a continuation sent
+/// again at launch reaches the CLI ahead of the prompt that launched it.
+#[derive(Default)]
+struct PaneWriter {
+    typing: Mutex<()>,
+    turns: Mutex<Turns>,
+    turn: std::sync::Condvar,
+}
+
+/// The tickets handed out, the oldest still being typed, and those done out
+/// of order (a thread that never started gives its ticket back early).
+#[derive(Default)]
+struct Turns {
+    next: u64,
+    serving: u64,
+    done: std::collections::BTreeSet<u64>,
+}
+
+impl PaneWriter {
+    /// The pane to oneself, whichever turn it is: a test standing in for a
+    /// prompt still being typed.
+    #[cfg(test)]
+    fn lock(&self) -> std::sync::LockResult<MutexGuard<'_, ()>> {
+        self.typing.lock()
+    }
+
+    /// The pane, unless a prompt is being typed into it right now. Never
+    /// waits, whatever turn it is: an Enter written again (#662) is held back
+    /// for a prompt being typed, whose own Enter is coming, and its caller
+    /// has the tab, which whoever is typing takes while holding the pane.
+    fn try_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, ()>> {
+        self.typing.try_lock()
+    }
+
+    /// A place in the line, behind every prompt sent before it. Never blocks.
+    fn ticket(self: &Arc<Self>) -> Ticket {
+        let mut turns = self.turns.lock().unwrap_or_else(|e| e.into_inner());
+        let number = turns.next;
+        turns.next += 1;
+        Ticket { writer: self.clone(), number }
+    }
+}
+
+/// A prompt's place in its pane's line; giving it up (dropping it) lets the
+/// next one go, whether it was typed, failed, or never got going.
+struct Ticket {
+    writer: Arc<PaneWriter>,
+    number: u64,
+}
+
+impl Ticket {
+    /// Wait for every prompt sent before this one, then take the pane.
+    fn take(&self) -> MutexGuard<'_, ()> {
+        let mut turns = self.writer.turns.lock().unwrap_or_else(|e| e.into_inner());
+        while turns.serving < self.number {
+            turns = self.writer.turn.wait(turns).unwrap_or_else(|e| e.into_inner());
+        }
+        drop(turns);
+        self.writer.typing.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        let mut guard = self.writer.turns.lock().unwrap_or_else(|e| e.into_inner());
+        let turns = &mut *guard;
+        turns.done.insert(self.number);
+        while turns.done.remove(&turns.serving) {
+            turns.serving += 1;
+        }
+        drop(guard);
+        self.writer.turn.notify_all();
+    }
+}
 
 /// How long a restart waits for the outgoing CLI to let go of its conversation.
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
@@ -3089,7 +3190,7 @@ impl SessionManager {
             return Ok(());
         }
         let mut rt = rt_arc.lock().unwrap();
-        match self.start_cli(&mut rt, &rt_arc, &entry, &tab) {
+        match self.start_cli(&mut rt, &rt_arc, &entry, &tab, false) {
             Ok(false) => self.announce_pane(&rt),
             Ok(true) => {},
             Err(error) => {
@@ -3154,8 +3255,9 @@ impl SessionManager {
     }
 
     /// Returns whether this call is what started it, so a prompt sent in the
-    /// same breath knows to wait for the TUI to finish drawing.
-    fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<bool> {
+    /// same breath knows to wait for the TUI to finish drawing. `prompting`
+    /// is whether the caller is about to send one.
+    fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
@@ -3228,7 +3330,7 @@ impl SessionManager {
             self.publish(rt, Payload::Status { text }, None);
         }
         let launch = match kind {
-            CliKind::Claude => self.claude_launch(entry, tab, &exe, grant.route.as_ref())?,
+            CliKind::Claude => self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref())?,
             CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env, &grant)?,
         };
         // The reader has been told about a substitution already.
@@ -3263,6 +3365,7 @@ impl SessionManager {
             mode: tab.permission_mode.clone(),
             pane_id: pane.clone(),
             generation,
+            launched_at: Instant::now(),
             restart_when_idle: false,
             settings_asked_at: None,
             launched_for,
@@ -3300,21 +3403,46 @@ impl SessionManager {
                 t.provider_session_id = Some(id.clone());
                 // `fork_from` stays: the CLI has only just started, and until
                 // it has written the fork's own transcript the parent's is
-                // the only copy of the conversation. A tab with an id of its
-                // own resumes that id, so the field no longer drives launch.
+                // the only copy of the conversation, and the one a launch
+                // before then makes the fork from again.
                 Ok(())
             })?;
         }
         self.follow_transcript(rt_arc, tail, pane, generation);
+        if let Some(restart) = launch.restart {
+            self.restarted(rt, rt_arc, restart, prompting);
+        }
         Ok(true)
     }
 
     /// Claude Code: the app mints the conversation id, so the transcript's
     /// path is known before the CLI has written a byte.
-    fn claude_launch(&self, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>) -> Result<CliLaunch> {
+    ///
+    /// The CLI writes that file only once it takes a prompt. `--resume` of a
+    /// conversation with no file is refused ("No conversation found") and
+    /// the CLI exits on the spot, so one that never started — or whose file
+    /// has gone — is started again under the same id (#663).
+    fn claude_launch(&self, rt: &TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>) -> Result<CliLaunch> {
+        let projects = crate::agent_data::claude_projects_root().ok_or_else(|| anyhow!("no home directory"))?;
         let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let resume = tab.provider_session_id.is_some();
-        let fork_from = if resume { None } else { tab.fork_from.clone() };
+        // Where the conversation's file is, not where a conversation started
+        // in this folder would be: a resumed one is still written where it
+        // began, which a renamed workspace no longer derives (#250).
+        let path = claude::transcript::locate_in(&projects, &entry.cwd, &provider_id);
+        let resume = tab.provider_session_id.is_some() && path.is_file();
+        // A fork is made from its parent until it has a file of its own, and
+        // only while the parent has one to make it from.
+        let fork_from = if resume { None } else { tab.fork_from.clone().filter(|parent| claude::transcript::locate_in(&projects, &entry.cwd, parent).is_file()) };
+        let restart = match (&tab.provider_session_id, &tab.fork_from) {
+            _ if resume => None,
+            // Never launched, so nothing was sent to it. A fork loses only
+            // the parent it was to be made from.
+            (None, Some(_)) if fork_from.is_none() => Some(unsent::Restart::Lost),
+            (None, _) => None,
+            // What its agent answered is gone with the file, unless the
+            // parent it is made from again still has it.
+            (Some(_), _) => unsent::restart(unsent::said_in(&rt.log_path, tab.follow.conversation.as_deref()), tab.continuation, fork_from.is_none()),
+        };
         let mut settings = claude::pty::settings_json(exe);
         // A user-managed route's credential helper, for this session only:
         // `--settings` sits above the user's and the checkout's files.
@@ -3347,12 +3475,7 @@ impl SessionManager {
         if let Err(e) = claude::trust::prepare(&entry.cwd) {
             log::warn!("prepare the Claude Code config for {}: {e:#}", entry.cwd);
         }
-        // Where the conversation's file is, not where a conversation started
-        // in this folder would be: a resumed one is still written where it
-        // began, which a renamed workspace no longer derives (#250).
-        let projects = claude::transcript::projects_root().ok_or_else(|| anyhow!("no home directory"))?;
         let derived = claude::transcript::transcript_in(&projects, &entry.cwd, &provider_id);
-        let path = claude::transcript::locate_in(&projects, &entry.cwd, &provider_id);
         // The folder derived from the checkout is where the CLI files what
         // it starts here, and a file it reports has to be in it — or be this
         // conversation's own, in the folder it was found in. Both stay
@@ -3372,9 +3495,10 @@ impl SessionManager {
             command,
             model: route_model.filter(|model| *model != tab.model),
             tail: tui::Tail::opening(path, claude::transcript::decode_line, carried).marking(claude::transcript::decode_marked),
-            minted: (!resume).then_some(provider_id),
+            minted: tab.provider_session_id.is_none().then_some(provider_id),
             transcript_root,
             conversation: Some(conversation),
+            restart,
         })
     }
 
@@ -3435,10 +3559,12 @@ impl SessionManager {
             }
         }
         let rollout = resume.as_deref().and_then(|id| codex::home::find_rollout(&home, id));
-        if resume.is_some() && rollout.is_none() {
-            // Resuming an id Codex cannot find fails the launch outright, so
-            // the tab starts a new conversation and says so.
-            self.publish(rt, Payload::Status { text: "The previous Codex conversation is no longer on this machine; starting a new one.".into() }, None);
+        // Resuming an id Codex cannot find fails the launch outright, so the
+        // tab starts a new conversation, and says what that cost. A tab with
+        // no id yet never had a rollout of its own: a prompt it sent that
+        // Codex never took is all it can have lost (#663).
+        let restart = rollout.is_none().then(|| unsent::restart(unsent::said_in(&rt.log_path, tab.follow.conversation.as_deref()), tab.continuation, resume.is_some())).flatten();
+        if rollout.is_none() {
             resume = None;
         }
         let command = launcher.command(codex::pty::LaunchOptions {
@@ -3461,6 +3587,7 @@ impl SessionManager {
             // Raccoon built for it.
             transcript_root: home.join("sessions"),
             conversation: None,
+            restart,
         })
     }
 
@@ -3544,7 +3671,7 @@ impl SessionManager {
         let Some(mut rt) = self.claim_restart_completion(rt_arc, &work, exited)? else { return Ok(()) };
         let entry = index::get(&rt.session_id)?;
         let tab = entry.tab(&rt.tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
-        self.start_cli(&mut rt, rt_arc, &entry, &tab)?;
+        self.start_cli(&mut rt, rt_arc, &entry, &tab, false)?;
         let now = index::get(&rt.session_id).ok().and_then(|entry| entry.tab(&rt.tab_id).map(Settings::of));
         if let (Engine::Cli(p), Some(now)) = (&mut rt.engine, now) {
             if p.harness == CliKind::Codex && p.launched_for.is_none() { p.launched_for = Some(now); }
@@ -3985,7 +4112,7 @@ impl SessionManager {
         receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
         let tab = entry.tab(&rt.tab_id).ok_or_else(|| anyhow!("tab not found"))?;
-        self.start_cli(rt, rt_arc, entry, tab)?;
+        self.start_cli(rt, rt_arc, entry, tab, true)?;
         let (pane, ready) = match &rt.engine {
             Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone()),
             _ => bail!("the agent is not running"),
@@ -3993,6 +4120,16 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let agent = prompt.agent.clone();
         let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
+        // Only a continuation waits on a receipt. It is the tab's whole
+        // brief: a launch that finds the CLI never took it sends it again.
+        if receipt.is_some() {
+            if let Err(error) = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                t.continuation = Some(ev.seq);
+                Ok(())
+            }) {
+                log::warn!("record the continuation prompt of {}: {error:#}", rt.key());
+            }
+        }
         self.type_prompt(rt_arc, &pane, agent, paths, PromptDelivery {
             ready: Some(ready),
             seq: Some(ev.seq),
@@ -4014,18 +4151,26 @@ impl SessionManager {
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(cwd)).ok() };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
         let ev = self.publish(rt, message, None);
+        echo.continuation = receipt.is_some();
+        echo.receipt = receipt;
+        echo.seq = ev.seq;
+        self.await_composer_echo(rt, echo, &prompt.agent);
+        (ev, queued)
+    }
+
+    /// A composer prompt the chat has published, from there on: its echo is
+    /// awaited, and it opens a turn unless one is running.
+    fn await_composer_echo(&self, rt: &mut TabRuntime, echo: ComposerEcho, agent_text: &str) {
+        let (queued, seq) = (echo.queued, echo.seq);
         if let Engine::Cli(p) = &mut rt.engine {
-            echo.continuation = receipt.is_some();
-            echo.receipt = receipt;
-            echo.seq = ev.seq;
             expire_composer_echoes(&mut p.echoed, queued, Instant::now());
             p.echoed.push_back(echo);
             if queued {
                 forget_taken(p);
-                p.held.push(ev.seq);
+                p.held.push(seq);
             } else {
                 p.turn_tail.opened();
-                p.awaiting_delivery = Some(ev.seq);
+                p.awaiting_delivery = Some(seq);
                 p.delivery_sent_at = Some(Instant::now());
                 p.accept_by = None;
                 p.nudge_by = None;
@@ -4034,10 +4179,9 @@ impl SessionManager {
             }
         }
         if !queued {
-            rt.prompt_taken(&prompt.agent, "composer");
+            rt.prompt_taken(agent_text, "composer");
             self.set_status(rt, TabStatus::InProgress);
         }
-        (ev, queued)
     }
 
     /// Write into a pane on its own thread, under that pane's write lock. The
@@ -4059,7 +4203,9 @@ impl SessionManager {
         // prompt, and only reports through its own receipt (#662).
         let watched = ready.is_some() && !queued && !tui::is_slash_command(&text);
         let continuation = receipt.is_some();
-        let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
+        // Taken here, while the sender still has the tab, so it is the order
+        // the prompts were sent in.
+        let ticket = self.writers.lock().unwrap().entry(pane.to_string()).or_default().ticket();
         let terminals = self.terminals.clone();
         let manager = self.clone();
         let rt_arc = rt_arc.clone();
@@ -4081,7 +4227,7 @@ impl SessionManager {
                     }
                 }
             };
-            let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _held = ticket.take();
             // A CLI the reader started by hand shares its pane with the shell
             // it was started from (#437). Once it has exited or been
             // suspended, anything typed here is typed at that shell, and the
@@ -5078,6 +5224,10 @@ mod mobile_admission_tests;
 #[cfg(test)]
 #[path = "session_follow_tests.rs"]
 mod follow_tests;
+
+#[cfg(test)]
+#[path = "session_unsent_tests.rs"]
+mod unsent_tests;
 
 #[cfg(test)]
 mod tests {

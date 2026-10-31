@@ -1863,6 +1863,8 @@ export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
+  /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
+  resendUnsent: (sessionId: string, tabId: string) => invoke<SendOutcome>("resend_unsent", { sessionId, tabId }),
   /** Press Enter in the tab's agent for the continuation `seq` left in its input. False when it is no longer waiting there. */
   submitWaiting: (sessionId: string, tabId: string, seq: number) => invoke<boolean>("submit_waiting_prompt", { sessionId, tabId, seq }),
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */

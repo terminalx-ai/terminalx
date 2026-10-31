@@ -179,6 +179,10 @@ impl Sessions {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
     }
 
+    pub fn resend_unsent(&self, session: &str, tab: &str) -> Result<SendOutcome> {
+        self.tab("resendUnsent", session, tab, json!({}))
+    }
+
     pub fn submit_waiting(&self, session: &str, tab: &str, seq: u64) -> Result<bool> {
         self.tab("submitWaiting", session, tab, json!({"seq":seq}))
     }
