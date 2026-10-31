@@ -1633,12 +1633,23 @@ pub async fn pairing_revoke(
     state.pairing.revoke_device(&device_id).await.map_err(err)
 }
 
+/// This Mac's name as the user's other devices show it (#686).
 #[tauri::command]
-pub async fn pairing_set_host_name(
-    display_name: String,
+pub async fn machine_name(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::MachineName> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.machine_name()).await.map_err(err)
+}
+
+/// Name this Mac, or with no name let it follow the computer's own again.
+/// Work status sent from here carries the new name straight away.
+#[tauri::command]
+pub async fn set_machine_name(
+    name: Option<String>,
     state: tauri::State<'_, crate::AppState>,
-) -> CmdResult<crate::pairing::PairingStatus> {
-    state.pairing.set_host_name(&display_name).await.map_err(err)
+) -> CmdResult<crate::pairing::MachineName> {
+    let named = state.pairing.set_host_name(name.as_deref()).await.map_err(err)?;
+    state.work_claims.nudge();
+    Ok(named)
 }
 
 // ------------------------------------------------------------------ projects
