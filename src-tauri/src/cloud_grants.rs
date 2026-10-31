@@ -68,6 +68,22 @@
 //!   `apiKeyHelper` in settings outranks `CLAUDE_CODE_OAUTH_TOKEN`, so a
 //!   helper configured on the VM wins over an OAuth grant.
 //!
+//! **A grant the provider refuses** (#667). An agent launched on a grant can
+//! exit during startup, or end a turn, saying its provider refused its
+//! sign-in (a revoked login answers 401 long before its access token
+//! expires). The session manager then calls [`reject_launch`]: the grant it
+//! started with is marked refused, the provider's agents are said to need a
+//! sign-in ([`SIGN_IN_REQUIRED`], reason `provider-refused`), and the server
+//! is told once (`POST .../agent-grant-rejected` with the credential id,
+//! grant id, version and epoch, terminalx-saas #241), which refreshes the
+//! login or marks it sign-in required. A sync follows at once and, while the
+//! login stands refused by either word, every [`REFUSED_RECHECK`] after, so
+//! a login signed in again reaches the same tab without a restart; a launch
+//! of that agent first waits briefly for a fresh one.
+//! The mark goes when a grant of another version or epoch arrives, when the
+//! credential stops being connected (the server's own state then speaks), or
+//! when the provider answers an agent started on that grant after all.
+//!
 //! A credential that is revoked, disconnected or unavailable, or that the
 //! server stops sending a grant for, stops being injected into new sessions
 //! and its Codex file is removed; running sessions are never killed. A rotated
@@ -127,6 +143,14 @@ const CODEX_AUTH_FILE: &str = "auth.json";
 const ENROLL_PATH: &str = "/v1/cloud-workspace-bootstrap/agent-grant-key";
 const FETCH_PATH: &str = "/v1/cloud-workspace-bootstrap/agent-grants";
 const ROUTE_CHECK_PATH: &str = "/v1/cloud-workspace-bootstrap/agent-route-check";
+const REJECTED_PATH: &str = "/v1/cloud-workspace-bootstrap/agent-grant-rejected";
+/// The credential state for a login the provider no longer accepts: the
+/// server's (terminalx-saas #241), and this runtime's for a grant an agent
+/// was refused with until the server has its say.
+pub const SIGN_IN_REQUIRED: &str = "sign-in-required";
+/// While a grant stands refused, fetch at least this often: a login
+/// connected again then reaches running tabs within it.
+const REFUSED_RECHECK: Duration = Duration::from_secs(30);
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 /// Said on every fetch: this runtime applies personal routes (PRO-18).
 pub const ROUTES_CAPABILITY: &str = "agent-routes-v1";
@@ -325,6 +349,8 @@ pub enum GrantCallError {
     /// 409 `cloud_agent_route_stale`: the route a check was of has changed
     /// or gone since (PRO-18); the check is not worth sending again.
     RouteStale,
+    /// 404: the server has no such route (one from before it).
+    NotOffered,
     Transient(anyhow::Error),
 }
 
@@ -335,6 +361,7 @@ impl std::fmt::Display for GrantCallError {
             Self::KeyConflict => f.write_str("another grant key is enrolled for this runtime generation"),
             Self::KeyRequired => f.write_str("the server has no grant key enrolled for this runtime"),
             Self::RouteStale => f.write_str("the route changed since it was checked"),
+            Self::NotOffered => f.write_str("the server does not offer this call"),
             Self::Transient(error) => write!(f, "{error:#}"),
         }
     }
@@ -348,6 +375,11 @@ pub trait GrantApi {
     /// Report a route check (PRO-18): codes and model ids only. A server
     /// without the route sends nothing to check.
     fn report_route_check(&self, _report: &Value) -> Result<(), GrantCallError> {
+        Ok(())
+    }
+    /// Report a grant an agent's provider refused (#667): ids, version and
+    /// epoch only.
+    fn report_rejected(&self, _report: &Value) -> Result<(), GrantCallError> {
         Ok(())
     }
 }
@@ -388,6 +420,7 @@ impl HttpGrantApi {
         match request.send_json(body) {
             Ok(response) => response.into_json::<T>().map_err(|error| GrantCallError::Transient(anyhow!("{path}: unreadable response: {error}"))),
             Err(ureq::Error::Status(401, _)) => Err(GrantCallError::Rejected),
+            Err(ureq::Error::Status(404, _)) => Err(GrantCallError::NotOffered),
             Err(ureq::Error::Status(409, response)) => match response.into_json::<ErrorBody>().map(|body| body.error) {
                 Ok(code) if code == KEY_CONFLICT => Err(GrantCallError::KeyConflict),
                 Ok(code) if code == KEY_REQUIRED => Err(GrantCallError::KeyRequired),
@@ -411,6 +444,10 @@ impl GrantApi for HttpGrantApi {
 
     fn report_route_check(&self, report: &Value) -> Result<(), GrantCallError> {
         self.post::<Value>(ROUTE_CHECK_PATH, report.clone()).map(|_| ())
+    }
+
+    fn report_rejected(&self, report: &Value) -> Result<(), GrantCallError> {
+        self.post::<Value>(REJECTED_PATH, report.clone()).map(|_| ())
     }
 }
 
@@ -1025,11 +1062,39 @@ struct State {
     /// The highest epoch accepted per credential id: a lower one is a rollback.
     highest_epoch: HashMap<String, u64>,
     /// Running sessions and the credential each was launched with.
-    launches: HashMap<String, (Provider, (String, u64, u64))>,
+    launches: HashMap<String, Launched>,
+    /// Grants an agent's provider refused, by provider (#667).
+    refused: HashMap<Provider, Refusal>,
     /// The newest check of each personal route, by route id (PRO-18).
     route_checks: HashMap<String, RouteCheck>,
     last_sync: Option<u64>,
     last_error: Option<String>,
+}
+
+/// The grant a session started with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Launched {
+    provider: Provider,
+    identity: (String, u64, u64),
+    grant_id: String,
+}
+
+/// A grant an agent's provider refused (#667), until the server has been
+/// told and has its say.
+struct Refusal {
+    identity: (String, u64, u64),
+    grant_id: String,
+    reported: bool,
+    reporting: bool,
+}
+
+/// What the sync loop is asked for, and how far it has got: woken early for
+/// a refused grant, and waited on by a launch that wants a fresh answer.
+#[derive(Default)]
+struct SyncSignal {
+    wanted: bool,
+    running: bool,
+    done: u64,
 }
 
 /// A route version's newest check from this workspace; `checked` is None
@@ -1055,6 +1120,8 @@ pub struct GrantStore {
     /// waits a moment for it ([`launch_grant`]).
     first_sync: Mutex<bool>,
     first_sync_done: Condvar,
+    signal: Mutex<SyncSignal>,
+    signalled: Condvar,
 }
 
 pub fn now_ms() -> u64 {
@@ -1082,7 +1149,16 @@ impl GrantStore {
     }
 
     fn new(workspace_id: String, key: GrantKey, root: Option<PathBuf>) -> Self {
-        Self { workspace_id, key, root, state: Mutex::new(State::default()), first_sync: Mutex::new(false), first_sync_done: Condvar::new() }
+        Self {
+            workspace_id,
+            key,
+            root,
+            state: Mutex::new(State::default()),
+            first_sync: Mutex::new(false),
+            first_sync_done: Condvar::new(),
+            signal: Mutex::new(SyncSignal::default()),
+            signalled: Condvar::new(),
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -1328,7 +1404,7 @@ impl GrantStore {
             match next.get(provider) {
                 None => log::info!("cloud {} credential no longer injected into new sessions; running sessions keep what they started with", provider.as_str()),
                 Some(new) if new.identity() != old.identity() => {
-                    let running = state.launches.values().filter(|(p, identity)| p == provider && *identity != new.identity()).count();
+                    let running = state.launches.values().filter(|launched| launched.provider == *provider && launched.identity != new.identity()).count();
                     log::info!(
                         "cloud {} credential rotated to version {} (epoch {}); new sessions use it, {running} running session(s) need a restart to pick it up",
                         provider.as_str(),
@@ -1346,6 +1422,18 @@ impl GrantStore {
             let seen = state.highest_epoch.entry(grant.credential_id.clone()).or_insert(0);
             *seen = (*seen).max(grant.epoch);
         }
+
+        // A refused grant stands until a grant of another version or epoch
+        // replaces it, or the server says the credential is not connected.
+        state.refused.retain(|provider, refusal| {
+            let connected = credentials.get(provider).is_some_and(|entry| entry.state == CONNECTED && entry.credential_id == refusal.identity.0);
+            let replaced = next.get(provider).is_some_and(|grant| grant.identity() != refusal.identity);
+            let keep = connected && !replaced;
+            if !keep {
+                log::info!("cloud {} credential: the grant its provider refused is no longer current", provider.as_str());
+            }
+            keep
+        });
 
         self.materialize(&mut next);
         state.active = next;
@@ -1452,7 +1540,7 @@ impl GrantStore {
         let grant = state.active.get(&provider).filter(|grant| grant.usable(now));
         let env = grant.map(|grant| env_for(provider, grant)).unwrap_or_default();
         LaunchGrant {
-            identity: grant.filter(|_| !env.is_empty()).map(|grant| (provider, grant.identity())),
+            launched: grant.filter(|_| !env.is_empty()).map(|grant| Launched { provider, identity: grant.identity(), grant_id: grant.grant_id.clone() }),
             route: route_launch_in(&state, provider, cwd, now),
             codex_auth: (provider == Provider::Codex).then(|| grant.and_then(|grant| grant.codex_file.clone())),
             env,
@@ -1462,9 +1550,9 @@ impl GrantStore {
     /// Remember which credential the session under `launch` started with.
     pub fn record_launch(&self, launch: &str, grant: &LaunchGrant) {
         let mut state = self.state();
-        match &grant.identity {
-            Some(identity) => {
-                state.launches.insert(launch.to_string(), identity.clone());
+        match &grant.launched {
+            Some(launched) => {
+                state.launches.insert(launch.to_string(), launched.clone());
             }
             None => {
                 state.launches.remove(launch);
@@ -1474,6 +1562,124 @@ impl GrantStore {
 
     pub fn forget_launch(&self, launch: &str) {
         self.state().launches.remove(launch);
+    }
+
+    /// The agent under `launch` said its provider refused its sign-in
+    /// (#667): mark the grant it started with refused, to be reported. True
+    /// when that is news: the session started with a grant, and that grant
+    /// was not already marked.
+    pub fn reject_launch(&self, launch: &str) -> bool {
+        let mut state = self.state();
+        let Some(launched) = state.launches.get(launch).cloned() else { return false };
+        if state.refused.get(&launched.provider).is_some_and(|refusal| refusal.identity == launched.identity) {
+            return false;
+        }
+        log::warn!(
+            "cloud {} credential refused by its provider (version {}, epoch {}); reporting it and asking for a sign-in",
+            launched.provider.as_str(),
+            launched.identity.1,
+            launched.identity.2
+        );
+        state.refused.insert(launched.provider, Refusal { identity: launched.identity, grant_id: launched.grant_id, reported: false, reporting: false });
+        true
+    }
+
+    /// The provider answered the agent under `launch` (a turn that worked,
+    /// or Codex past its account check): it accepts the grant that agent
+    /// started with, whatever was said of that grant before. True when that
+    /// takes back a refusal.
+    pub fn launch_worked(&self, launch: &str) -> bool {
+        let mut state = self.state();
+        let Some(launched) = state.launches.get(launch).cloned() else { return false };
+        if !state.refused.get(&launched.provider).is_some_and(|refusal| refusal.identity == launched.identity) {
+            return false;
+        }
+        log::info!("cloud {} credential worked after all; no longer said to need a sign-in", launched.provider.as_str());
+        state.refused.remove(&launched.provider);
+        true
+    }
+
+    /// Whether `provider`'s login is one its provider refused, by this
+    /// runtime's word or the server's (`sign-in-required`): one signed in
+    /// again is worth fetching for early. `None` asks of every provider.
+    fn awaits_sign_in(&self, provider: Option<Provider>) -> bool {
+        let state = self.state();
+        let refused = |provider: &Provider| {
+            state.refused.contains_key(provider) || state.credentials.get(provider).is_some_and(|entry| entry.state == SIGN_IN_REQUIRED)
+        };
+        match provider {
+            Some(provider) => refused(&provider),
+            None => [Provider::Claude, Provider::Codex, Provider::Cursor].iter().any(refused),
+        }
+    }
+
+    /// Refusals the server has not been told of, each marked as on its way.
+    fn due_refusal_reports(&self) -> Vec<RefusalReport> {
+        let mut state = self.state();
+        let mut reports = Vec::new();
+        for (provider, refusal) in state.refused.iter_mut().filter(|(_, refusal)| !refusal.reported && !refusal.reporting) {
+            refusal.reporting = true;
+            let (credential_id, version, epoch) = &refusal.identity;
+            reports.push(RefusalReport {
+                provider: *provider,
+                identity: refusal.identity.clone(),
+                body: json!({
+                    "v": 1,
+                    "provider": provider.as_str(),
+                    "credentialId": credential_id,
+                    "grantId": refusal.grant_id,
+                    "version": version,
+                    "epoch": epoch,
+                    "reason": "provider-refused",
+                }),
+            });
+        }
+        reports
+    }
+
+    /// What became of a report: the server has it, or has no such route
+    /// (nothing to send again); anything else goes again on a later turn.
+    fn refusal_report_sent(&self, report: &RefusalReport, result: &Result<(), GrantCallError>) {
+        let mut state = self.state();
+        if let Some(refusal) = state.refused.get_mut(&report.provider).filter(|refusal| refusal.identity == report.identity) {
+            refusal.reporting = false;
+            refusal.reported = matches!(result, Ok(()) | Err(GrantCallError::NotOffered));
+        }
+    }
+
+    /// Wake the sync loop for a sync now.
+    pub fn request_sync(&self) {
+        let mut signal = self.signal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        signal.wanted = true;
+        self.signalled.notify_all();
+    }
+
+    /// Ask for a sync and wait up to `timeout` for one that began after the
+    /// asking to finish. True once it has.
+    pub fn sync_now(&self, timeout: Duration) -> bool {
+        let mut signal = self.signal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // One already running may have fetched before whatever changed.
+        let target = signal.done + 1 + u64::from(signal.running);
+        signal.wanted = true;
+        self.signalled.notify_all();
+        let (signal, _) = self.signalled.wait_timeout_while(signal, timeout, |signal| signal.done < target).unwrap_or_else(|poisoned| poisoned.into_inner());
+        signal.done >= target
+    }
+
+    /// The loop's sleep: `wait`, or less when a sync is asked for.
+    fn sleep(&self, wait: Duration) {
+        let signal = self.signal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (mut signal, _) = self.signalled.wait_timeout_while(signal, wait, |signal| !signal.wanted).unwrap_or_else(|poisoned| poisoned.into_inner());
+        signal.wanted = false;
+        signal.running = true;
+    }
+
+    /// The loop finished a sync.
+    fn synced(&self) {
+        let mut signal = self.signal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        signal.running = false;
+        signal.done += 1;
+        self.signalled.notify_all();
     }
 
     /// The Codex auth file new sessions should see, if there is a usable one.
@@ -1489,6 +1695,13 @@ impl GrantStore {
     /// after a failed one, or while a connected login's grant is on its way.
     pub fn sign_in_required(&self, provider: Provider, configured: &[String], now: Instant) -> Option<SignInRequired> {
         let state = self.state();
+        // What an agent here was told by its provider is certain, synced or not.
+        if let Some(refusal) = state.refused.get(&provider) {
+            let current = state.active.get(&provider).filter(|grant| grant.usable(now)).map(ActiveGrant::identity);
+            if current.is_none_or(|current| current == refusal.identity) {
+                return Some(SignInRequired { provider: provider.as_str(), state: SIGN_IN_REQUIRED.into(), reason: Some("provider-refused".into()) });
+            }
+        }
         if state.last_sync.is_none() || state.last_error.is_some() {
             return None;
         }
@@ -1536,7 +1749,7 @@ impl GrantStore {
                 let entry = state.credentials.get(&provider);
                 let grant = state.active.get(&provider);
                 let current = grant.map(ActiveGrant::identity);
-                let stale = state.launches.values().filter(|(p, identity)| *p == provider && current.as_ref().is_some_and(|current| current != identity)).count();
+                let stale = state.launches.values().filter(|launched| launched.provider == provider && current.as_ref().is_some_and(|current| *current != launched.identity)).count();
                 json!({
                     "provider": provider.as_str(),
                     "credentialId": entry.map(|entry| entry.credential_id.clone()),
@@ -1559,6 +1772,7 @@ impl GrantStore {
                     "injecting": grant.is_some_and(|grant| grant.usable(now)),
                     "restartRequired": stale > 0,
                     "restartRequiredSessions": stale,
+                    "providerRefused": state.refused.contains_key(&provider),
                 })
             })
             .collect();
@@ -1667,7 +1881,7 @@ pub struct LaunchGrant {
     /// Codex in a cloud workspace: the auth file the managed home links, or
     /// `Some(None)` for none at all. `None` elsewhere: the reader's own.
     pub codex_auth: Option<Option<PathBuf>>,
-    identity: Option<(Provider, (String, u64, u64))>,
+    launched: Option<Launched>,
 }
 
 fn shell_quote(text: &str) -> String {
@@ -1968,6 +2182,26 @@ impl GrantStore {
     }
 }
 
+/// A refused grant, as the server is told it: ids, version and epoch only.
+struct RefusalReport {
+    provider: Provider,
+    identity: (String, u64, u64),
+    body: Value,
+}
+
+/// Tell the server of every refused grant it has not heard of (#667).
+fn send_refusal_reports(store: &GrantStore, api: &dyn GrantApi) {
+    for report in store.due_refusal_reports() {
+        let result = api.report_rejected(&report.body);
+        match &result {
+            Ok(()) => log::info!("reported the refused cloud {} credential", report.provider.as_str()),
+            Err(GrantCallError::NotOffered) => log::info!("this server takes no reports of refused grants; the next launch will be refused the same way"),
+            Err(error) => log::warn!("report the refused cloud {} credential: {error}; sending it again later", report.provider.as_str()),
+        }
+        store.refusal_report_sent(&report, &result);
+    }
+}
+
 /// A finished check, as the server is told it: codes and model ids only.
 pub struct RouteReport {
     route_id: String,
@@ -2049,15 +2283,21 @@ pub fn spawn_sync_loop(store: Arc<GrantStore>, api: Arc<dyn GrantApi + Send + Sy
     let spawned = std::thread::Builder::new().name("cloud-agent-grants".into()).spawn(move || {
         let mut backoff = BACKOFF_START;
         loop {
+            // Before the fetch: the server refreshes a refused login first.
+            send_refusal_reports(&store, api.as_ref());
             let before = store.sign_in_answers(Instant::now());
-            let wait = step(&store, api.as_ref(), rejected(), &mut backoff);
+            let mut wait = step(&store, api.as_ref(), rejected(), &mut backoff);
+            store.synced();
             if store.sign_in_answers(Instant::now()) != before {
                 sign_in_may_have_changed();
             }
             spawn_route_checks(store.clone(), api.clone(), None, ROUTE_RECHECK_AFTER);
             // Checks whose report did not get through.
             send_route_reports(&store, api.as_ref());
-            std::thread::sleep(wait);
+            if store.awaits_sign_in(None) {
+                wait = wait.min(REFUSED_RECHECK);
+            }
+            store.sleep(wait);
         }
     });
     if let Err(error) = spawned {
@@ -2119,6 +2359,11 @@ pub fn launch_grant(harness: &str, cwd: &Path) -> LaunchGrant {
     if !store.wait_first_sync(FIRST_SYNC_WAIT) {
         log::warn!("the first agent grant sync has not finished; starting {} without a cloud credential", provider.label());
     }
+    // A refused login may have been refreshed, or signed in again, since:
+    // this launch is the one that would find out the hard way.
+    if store.awaits_sign_in(Some(provider)) && !store.sync_now(FIRST_SYNC_WAIT) {
+        log::warn!("no fresh answer about the refused {} login yet; starting with what this runtime has", provider.label());
+    }
     let grant = store.launch_grant(provider, cwd, Instant::now());
     if grant.route.is_some() {
         if let Some(api) = CHECK_API.get() {
@@ -2175,6 +2420,26 @@ pub fn sign_in_required_for_launch(harness: &str, launch: &str) -> Option<SignIn
 pub fn sign_in_required_at_launch(harness: &str) -> Option<SignInRequired> {
     installed()?.wait_first_sync(FIRST_SYNC_WAIT);
     sign_in_required(harness)
+}
+
+/// The agent under `launch` said its provider refused its sign-in (#667):
+/// the grant it started with is reported and said to need a sign-in, and a
+/// sync is asked for. Nothing outside a cloud workspace, or for a session
+/// that started without a grant.
+pub fn reject_launch(launch: &str) {
+    let Some(store) = installed() else { return };
+    if store.reject_launch(launch) {
+        sign_in_may_have_changed();
+        store.request_sync();
+    }
+}
+
+/// The provider answered the agent under `launch`: a refusal said of the
+/// grant it started with is taken back.
+pub fn launch_worked(launch: &str) {
+    if installed().is_some_and(|store| store.launch_worked(launch)) {
+        sign_in_may_have_changed();
+    }
 }
 
 /// A session launched under `launch` has ended.
@@ -2380,6 +2645,9 @@ mod tests {
         reject: RefCell<bool>,
         refresh_after: RefCell<Option<u64>>,
         seq: RefCell<u8>,
+        /// Refused grants reported, and how the next report is answered.
+        refusals: RefCell<Vec<Value>>,
+        refusal_answer: RefCell<Option<GrantCallError>>,
     }
 
     impl FakeServer {
@@ -2481,6 +2749,11 @@ mod tests {
                 grants,
                 credentials,
             })
+        }
+
+        fn report_rejected(&self, report: &Value) -> Result<(), GrantCallError> {
+            self.refusals.borrow_mut().push(report.clone());
+            self.refusal_answer.borrow_mut().take().map_or(Ok(()), Err)
         }
     }
 
@@ -2982,6 +3255,110 @@ mod tests {
         // cannot tell, so it never claims a Cursor agent needs sign-in.
         assert_eq!(signed_in_by_hand(Provider::Codex, Some(home.path())), Some(false));
         assert_eq!(signed_in_by_hand(Provider::Cursor, Some(home.path())), None);
+    }
+
+    /// #667: a launch whose provider refused its grant says the agent needs a
+    /// sign-in at once, tells the server once, and stops saying so when the
+    /// server sends a grant of another epoch.
+    #[test]
+    fn a_refused_grant_needs_a_sign_in_is_reported_once_and_ends_with_a_new_epoch() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_c", "connected", 1, 1);
+        server.grant("claude", "cred_c", 1, claude_oauth("fake-oauth-1", 1));
+        let store = store(None);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        assert!(!store.agent_env_for_launch(Provider::Claude, "pane-1", t0).is_empty());
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), None);
+        // A session that started without a grant has nothing to report.
+        assert!(!store.reject_launch("pane-unknown"));
+
+        assert!(store.reject_launch("pane-1"));
+        assert!(!store.reject_launch("pane-1"), "the same grant is refused once");
+        let refused = SignInRequired { provider: "claude", state: SIGN_IN_REQUIRED.into(), reason: Some("provider-refused".into()) };
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), Some(refused.clone()));
+        assert_eq!(store.status(t0)["credentials"][0]["providerRefused"], true);
+
+        // Unreported until the server has it; a transient failure goes again.
+        *server.refusal_answer.borrow_mut() = Some(GrantCallError::Transient(anyhow!("HTTP 503")));
+        send_refusal_reports(&store, &server);
+        send_refusal_reports(&store, &server);
+        send_refusal_reports(&store, &server);
+        let reports = server.refusals.borrow().clone();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[1], json!({ "v": 1, "provider": "claude", "credentialId": "cred_c", "grantId": "grant_1", "version": 1, "epoch": 1, "reason": "provider-refused" }));
+        assert!(!reports[1].to_string().contains("fake-oauth"), "a report carries no credential");
+
+        // The same grant again (a server that kept it) is still refused.
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), Some(refused));
+        assert!(store.awaits_sign_in(Some(Provider::Claude)) && store.awaits_sign_in(None));
+        assert!(!store.awaits_sign_in(Some(Provider::Codex)));
+        // The server refreshed the login: a new epoch is a grant to try.
+        server.credential("claude", "cred_c", "connected", 2, 1);
+        server.grant("claude", "cred_c", 2, claude_oauth("fake-oauth-2", 1));
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), None);
+        assert_eq!(store.status(t0)["credentials"][0]["providerRefused"], false);
+        assert!(!store.awaits_sign_in(None));
+    }
+
+    #[test]
+    fn the_servers_sign_in_required_takes_over_from_a_refusal_and_a_working_launch_takes_it_back() {
+        let server = FakeServer::new();
+        server.credential("claude", "cred_c", "connected", 1, 1);
+        server.grant("claude", "cred_c", 1, claude_oauth("fake-oauth-1", 1));
+        let store = store(None);
+        let t0 = Instant::now();
+        store.sync(&server, t0, NOW).unwrap();
+        store.agent_env_for_launch(Provider::Claude, "pane-1", t0);
+        store.agent_env_for_launch(Provider::Claude, "pane-2", t0);
+
+        // An agent on the grant got going after all: the refusal was not the last word.
+        assert!(store.reject_launch("pane-1"));
+        assert!(store.launch_worked("pane-2"));
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), None);
+        assert!(!store.launch_worked("pane-2"));
+
+        // A server from before the report route: nothing is sent again.
+        assert!(store.reject_launch("pane-1"));
+        *server.refusal_answer.borrow_mut() = Some(GrantCallError::NotOffered);
+        send_refusal_reports(&store, &server);
+        send_refusal_reports(&store, &server);
+        assert_eq!(server.refusals.borrow().len(), 1);
+
+        // The server marked the login: its state, with its own reason, is the answer now.
+        server.grants.borrow_mut().clear();
+        server.credential("claude", "cred_c", SIGN_IN_REQUIRED, 1, 1);
+        server.credentials.borrow_mut()[0].reason = Some("provider-revoked".into());
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(
+            store.sign_in_required(Provider::Claude, &[], t0),
+            Some(SignInRequired { provider: "claude", state: SIGN_IN_REQUIRED.into(), reason: Some("provider-revoked".into()) })
+        );
+        assert_eq!(store.status(t0)["credentials"][0]["providerRefused"], false);
+        // Its own mark gone, the server's word still has a login signed in again fetched for early.
+        assert!(store.awaits_sign_in(Some(Provider::Claude)));
+    }
+
+    #[test]
+    fn a_launch_can_ask_the_loop_for_a_sync_and_wait_for_it() {
+        let store = Arc::new(store(None));
+        // Nobody syncing: the wait runs out.
+        assert!(!store.sync_now(Duration::from_millis(20)));
+        let looping = store.clone();
+        let syncs = std::thread::spawn(move || {
+            // The loop's own turns: a long sleep, cut short by the ask.
+            for _ in 0..2 {
+                looping.sleep(Duration::from_secs(60));
+                looping.synced();
+            }
+        });
+        let asked = Instant::now();
+        assert!(store.sync_now(Duration::from_secs(30)));
+        assert!(asked.elapsed() < Duration::from_secs(30));
+        store.request_sync();
+        syncs.join().unwrap();
     }
 
     #[test]

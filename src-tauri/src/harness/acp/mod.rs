@@ -274,6 +274,7 @@ impl Acp {
             duration_ms: None,
             head: None,
             auth_failed,
+            detail: None,
         }));
         out
     }
@@ -309,7 +310,7 @@ impl Acp {
                     out.extend(self.model_is(agent_model.as_deref()));
                     out
                 }
-                Pending::Other => vec![Action::Emit(Payload::Error { message, fatal: false })],
+                Pending::Other => vec![Action::Emit(Payload::Error { message, fatal: false, detail: None })],
             };
         }
         let result = &v["result"];
@@ -357,7 +358,7 @@ impl Acp {
                     _ => TurnStatus::Ok,
                 };
                 let duration_ms = self.turn_started_at.take().map(|t| t.elapsed().as_millis() as u64);
-                out.push(Action::Emit(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms, head: None, auth_failed: false }));
+                out.push(Action::Emit(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms, head: None, auth_failed: false, detail: None }));
                 out
             }
             Pending::SetMode => {
