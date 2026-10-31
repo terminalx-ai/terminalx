@@ -84,6 +84,11 @@
   capabilities, and republish actual linked sessions after support returns.
   Explain when the account service has not reported support; shared activity
   still requires a supported backend. (#642)
+- Name each Mac by its computer name (System Settings → General → About), so
+  work on another of your Macs reads "You · on Studio" instead of
+  "You · on This Mac". Macs that saved "This Mac" get their real name without
+  renaming, and a name chosen earlier is kept. Settings → Account shows this
+  Mac's name with a Rename button, with or without Relay. (#686)
 
 ### Cloud workspaces
 
