@@ -33,7 +33,7 @@ impl Sessions {
     pub fn local_vm(&self, method: &str, params: Value) -> Result<Value> {
         self.0.require_local_vm()?;
         if method=="environment.create" || method.starts_with("environment.setup")
-            || matches!(method,"environment.guestAccounts"|"environment.guestAccountConfirmations"|"environment.confirmGuestAccount"|"environment.grantGuestKey"|"environment.confirmGuestHostKey") {self.0.require_vm_onboarding()?;}
+            || matches!(method,"environment.guestAccounts"|"environment.guestAccountConfirmations"|"environment.confirmGuestAccount"|"environment.grantGuestKey"|"environment.confirmGuestHostKey"|"environment.bindPersonalizedTransport") {self.0.require_vm_onboarding()?;}
         if matches!(method,"environment.reconcileProvision"|"environment.delete")
             || method == "environment.inspect" && matches!(params["purpose"].as_str(),Some("provisionRecovery"|"deletion")) {
             self.0.require_vm_reconciliation()?;

@@ -316,6 +316,15 @@ pub(super) fn verify_retained_pin(root: &Path, key: &str, target: &Target) -> Re
     }
     Ok(())
 }
+/// Read-only: the sandbox the original restore recorded with this VM's pin,
+/// after the same checks as `verify_retained_pin`.
+pub(super) fn pinned_sandbox(root: &Path, key: &str, target: &Target) -> Result<String> {
+    verify_retained_pin(root, key, target)?;
+    let path = root.join("macos-endpoints").join(format!("{key}.json"));
+    let pin: Pin = serde_json::from_slice(&read(&path, 96 * 1024)?)?;
+    journal::validate_sandbox(&pin.sandbox)?;
+    Ok(pin.sandbox)
+}
 pub(super) fn observe(root: &Path, env: &Environment) -> Result<Endpoint> {
     let binding = macos_transport::binding(env)?;
     binding.check_retained(root)?;

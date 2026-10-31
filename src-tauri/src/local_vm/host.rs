@@ -177,6 +177,10 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         "environment.confirmGuestHostKey" => {
             confirm(&params)?;super::macos_owner_channel::confirm_guest_host_key(&params)
         }
+        // After the pin: the VM's environment, bound only to verified records.
+        "environment.bindPersonalizedTransport" => {
+            confirm(&params)?;super::macos_environment::bind(&params)
+        }
         "environment.reconcileProvision" => super::provisioning::reconcile(&journal, params),
         "environment.bootstrapDeliveryStatus" => {
             let env=environment(&journal,&params)?;

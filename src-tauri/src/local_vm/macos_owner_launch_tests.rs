@@ -953,6 +953,136 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     assert_eq!(crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap().trust.host_key, host_key);
 }
 
+/// Through the person's pin of the owner-observed host key, with the real
+/// version-3 key, grant and confirmation records. Returns the pinned host key.
+fn pinned(f: &Fixture) -> String {
+    let (reference, result) = installed(f, 0);
+    let (observation, host_key) = host_key_observation(f, &reference, &result, 9);
+    let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
+    pin(&reference, &f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap();
+    host_key
+}
+fn environments(journal: &crate::local_vm::journal::Journal) -> Vec<crate::local_vm::journal::Environment> {
+    journal.read().unwrap().environments.into_values().collect()
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_a_pinned_bootstrap_becomes_one_environment_bound_only_to_its_verified_records() {
+    use crate::local_vm::{journal::Journal, macos_environment::{bind_using, ApprovedRuntime}, transport::Transport};
+    let f = Fixture::new();
+    let journal = Journal::open(&f.root).unwrap();
+    let runtime = ApprovedRuntime::fixture(&"c".repeat(64));
+    // Before the pin there is no trust to bind and nothing is recorded.
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    assert!(bind_using(&f.root, &journal, &f.key, "Personal Mac", &runtime).is_err());
+    assert!(environments(&journal).is_empty());
+    drop(f);
+
+    let f = Fixture::new();
+    let journal = Journal::open(&f.root).unwrap();
+    let host_key = pinned(&f);
+    let env = bind_using(&f.root, &journal, &f.key, "Personal Mac", &runtime).unwrap();
+    let record: Value = serde_json::from_slice(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap()).unwrap();
+    let target: crate::local_vm::macos_personalization::Target = serde_json::from_value(record["intent"]["target"].clone()).unwrap();
+    let retained = crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap();
+    let expected = crate::local_vm::macos_transport::Binding {
+        bootstrap_id: f.key.clone(), target: target.clone(), account: retained.account.account.clone(),
+        runtime_sha256: "c".repeat(64), trust_digest: journal::digest(&serde_json::to_vec(&retained.trust).unwrap()),
+        key_reference: record["intent"]["account"]["sshKeyReference"].as_str().unwrap().into(),
+    };
+    assert_eq!(env.transport, Transport::MacosPersonalized { binding: Box::new(expected) });
+    assert_eq!((env.id.as_str(), env.generation.as_str(), env.sandbox.clone()),
+        (target.environment_id.as_str(), target.generation.as_str(), format!("local:terminalx-{}", f.key)));
+    assert_eq!(retained.trust.host_key, host_key);
+    assert!(env.owned && !env.manual_control && env.setup.is_none() && env.provision.is_none() && env.deleted_at.is_none());
+    crate::local_vm::macos_transport::binding(&env).unwrap().check_retained(&f.root).unwrap();
+    assert_eq!(environments(&journal).len(), 1);
+
+    // An identical retry returns the original record; a conflicting one is refused.
+    assert_eq!(bind_using(&f.root, &journal, &f.key, "Personal Mac", &runtime).unwrap().created_at, env.created_at);
+    for (name, runtime) in [("Another name", "c".repeat(64)), ("Personal Mac", "d".repeat(64))] {
+        assert!(bind_using(&f.root, &journal, &f.key, name, &ApprovedRuntime::fixture(&runtime)).is_err(), "{name} {runtime}");
+    }
+    assert!(bind_using(&f.root, &journal, &f.key, "Personal Mac", &ApprovedRuntime::fixture("not a digest")).is_err());
+    assert_eq!(environments(&journal), vec![env.clone()], "never replaced");
+
+    // A deleted record is never recreated.
+    journal.transaction(|s| { s.environments.get_mut(&env.id).unwrap().deleted_at = Some(journal::now()); Ok(()) }).unwrap();
+    assert!(bind_using(&f.root, &journal, &f.key, "Personal Mac", &runtime).is_err());
+    assert_eq!(environments(&journal).len(), 1);
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_changed_stale_or_colliding_evidence_never_becomes_an_environment() {
+    use crate::local_vm::{journal::Journal, macos_environment::{bind_using, ApprovedRuntime}};
+    let f = Fixture::new();
+    let journal = Journal::open(&f.root).unwrap();
+    let runtime = ApprovedRuntime::fixture(&"c".repeat(64));
+    pinned(&f);
+    let refused = |name: &str| {
+        assert!(bind_using(&f.root, &journal, &f.key, "Personal Mac", &runtime).is_err(), "{name}");
+        assert!(environments(&journal).is_empty(), "{name}: nothing recorded");
+    };
+    let swap = |path: &Path, change: &dyn Fn(&mut Value)| -> Vec<u8> {
+        let original = std::fs::read(path).unwrap();
+        let mut value: Value = serde_json::from_slice(&original).unwrap();
+        change(&mut value);
+        replace(path, &canonical(&value).unwrap());
+        original
+    };
+    // The trusted key must be the person's pin, for this key and account.
+    let confirmation = f.op().join("host-key-confirmation.json");
+    /// Alters one field of the pin record.
+    type Change = dyn Fn(&mut Value);
+    let changes: [(&str, &Change); 4] = [
+        ("another pinned key", &|v| v["hostKey"] = json!("ssh-ed25519 AAAA")),
+        ("another observation", &|v| v["observationSha256"] = json!("0".repeat(64))),
+        ("another key reference", &|v| v["keyReference"] = json!(journal::new_id())),
+        ("another account", &|v| v["account"]["uid"] = json!(502)),
+    ];
+    for (name, change) in changes {
+        let original = swap(&confirmation, change);
+        refused(name);
+        replace(&confirmation, &original);
+    }
+    let original = std::fs::read(&confirmation).unwrap();
+    std::fs::remove_file(&confirmation).unwrap();
+    refused("no pin record");
+    replace(&confirmation, &original);
+    // The produced key must be the original for exactly this binding.
+    let key_record = f.root.join("macos-personalization-keys")
+        .join(serde_json::from_slice::<Value>(&original).unwrap()["keyReference"].as_str().unwrap()).join("record.json");
+    let key_bytes = std::fs::read(&key_record).unwrap();
+    let mut forged: Value = serde_json::from_slice(&key_bytes).unwrap();
+    forged["binding"]["answerSha256"] = json!("e".repeat(64));
+    forged["inputDigest"] = json!(journal::digest(&serde_json::to_vec(&forged["binding"]).unwrap()));
+    journal::atomic_private_write(&key_record, &serde_json::to_vec(&forged).unwrap()).unwrap();
+    refused("another key binding");
+    journal::atomic_private_write(&key_record, &key_bytes).unwrap();
+    // Another environment already holding this VM's sandbox.
+    let other = journal.enroll("Another", &format!("local:terminalx-{}", f.key)).unwrap();
+    refused_with_other(&f, &journal, &runtime, &other);
+    // With everything restored, exactly one environment is recorded.
+    let env = bind_using(&f.root, &journal, &f.key, "Personal Mac", &runtime).unwrap();
+    assert_eq!(environments(&journal), vec![env.clone()]);
+    // The VM must still be the original restore's: once its files change, even
+    // an identical retry is refused and the recorded environment is kept as is.
+    let config = f.root.join("macos-vms").join(&f.key).join(format!("terminalx-{}", f.key)).join("config.json");
+    replace(&config, b"{\"os\":\"macOS\",\"cpuCount\":8}");
+    assert!(bind_using(&f.root, &journal, &f.key, "Personal Mac", &runtime).is_err(), "changed VM");
+    assert_eq!(environments(&journal), vec![env]);
+}
+/// Refuses while `other` holds the sandbox, then removes `other`.
+fn refused_with_other(f: &Fixture, journal: &crate::local_vm::journal::Journal,
+    runtime: &crate::local_vm::macos_environment::ApprovedRuntime, other: &crate::local_vm::journal::Environment) {
+    assert!(crate::local_vm::macos_environment::bind_using(&f.root, journal, &f.key, "Personal Mac", runtime).is_err());
+    assert_eq!(environments(journal).len(), 1, "only the other environment");
+    journal.transaction(|s| { s.environments.remove(&other.id); Ok(()) }).unwrap();
+}
+
 /// The owner's stage-9 records as it journals them for `observation`, under an
 /// enrollment whose challenge is `challenge`.
 fn retirement_records(reference: &Reference, observation: &[u8], challenge: &str, stage: &str) -> (Vec<u8>, Vec<u8>) {
