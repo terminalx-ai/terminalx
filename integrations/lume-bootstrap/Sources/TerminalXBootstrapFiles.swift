@@ -127,8 +127,9 @@ struct TXBinding: Codable {
     let parentSession: String
     let parentTab: String
     let parentConversation: String
-    let inputShareId: String
-    let outputShareId: String
+    // Versions 1 and 2 only. Version 3 shares no directory with the guest.
+    let inputShareId: String?
+    let outputShareId: String?
     let configSha256: String
     let paths: [String: TXPathPin]
     // Version 3 only: the offline seed this VM was enrolled from.
@@ -136,25 +137,29 @@ struct TXBinding: Codable {
     let seedReceiptSha256: String?
     static let roles: Swift.Set<String> = ["operation", "storage", "vm", "config", "disk", "nvram", "input", "output"]
     static let keys: Swift.Set<String> = ["version", "macosMajor", "bootstrapId", "ownerEpoch", "nonce", "environmentId", "generation", "vmFingerprint", "restoreSha256", "runtimeSha256", "helperManifestSha256", "executableSha256", "parentSession", "parentTab", "parentConversation", "inputShareId", "outputShareId", "configSha256", "paths"]
-    static let enrollmentKeys = keys.union(["seedId", "seedReceiptSha256"])
+    static let unsharedRoles = roles.subtracting(["input", "output"])
+    static let enrollmentKeys = keys.subtracting(["inputShareId", "outputShareId"]).union(["seedId", "seedReceiptSha256"])
     static func decode(_ bytes: Data) throws -> Self {
-        // Version 3 adds exactly the seed binding; versions 1 and 2 keep their exact form.
+        // Version 3 adds exactly the seed binding and has no shares; versions 1
+        // and 2 keep their exact form. A version-3 binding naming a share is refused.
         let object = try (try? txObject(bytes, keys: enrollmentKeys)) ?? txObject(bytes, keys: keys)
         guard let paths = object["paths"] as? [String: [String: Any]] else { throw TXBootstrapError.refused }
-        try txRequire(Swift.Set(paths.keys) == roles)
         for pin in paths.values { try txRequire(Swift.Set(pin.keys) == ["path", "device", "inode"]) }
         let binding = try JSONDecoder().decode(Self.self, from: bytes)
         let enrolled = binding.seedId != nil
+        let expectedRoles = enrolled ? unsharedRoles : roles
+        try txRequire(Swift.Set(paths.keys) == expectedRoles)
         try txRequire((enrolled ? binding.version == 3 : [1, 2].contains(binding.version)) && binding.macosMajor == 26 && !binding.parentConversation.isEmpty && binding.parentConversation.utf8.count <= 256
             && binding.parentConversation.utf8.allSatisfy { $0 >= 32 && $0 < 127 })
+        let shares = enrolled ? [] : [binding.inputShareId ?? "", binding.outputShareId ?? ""]
         for id in [binding.bootstrapId, binding.ownerEpoch, binding.environmentId, binding.generation,
-                   binding.parentSession, binding.parentTab, binding.inputShareId, binding.outputShareId] {
+                   binding.parentSession, binding.parentTab] + shares {
             try txRequire(UUID(uuidString: id) != nil)
         }
         for hash in [binding.nonce, binding.vmFingerprint, binding.restoreSha256, binding.runtimeSha256,
                      binding.helperManifestSha256, binding.executableSha256, binding.configSha256] { _ = try txHex(hash) }
-        try txRequire(binding.inputShareId != binding.outputShareId
-            && Swift.Set(binding.paths.values.map { "\($0.device):\($0.inode)" }).count == roles.count)
+        try txRequire((enrolled || binding.inputShareId != binding.outputShareId)
+            && Swift.Set(binding.paths.values.map { "\($0.device):\($0.inode)" }).count == expectedRoles.count)
         if enrolled {
             _ = try txHex(binding.seedId!, bytes: 16)
             _ = try txHex(binding.seedReceiptSha256 ?? "")
@@ -165,9 +170,11 @@ struct TXBinding: Codable {
             try txRequire(binding.paths[role]!.path == vm + "/" + name)
         }
         let operation = binding.paths["operation"]!.path
-        try txRequire(binding.paths["input"]!.path == operation + "/input"
-            && binding.paths["output"]!.path == operation + "/receipt"
-            && !vm.hasPrefix(operation + "/") && !operation.hasPrefix(vm + "/"))
+        try txRequire(!vm.hasPrefix(operation + "/") && !operation.hasPrefix(vm + "/"))
+        if !enrolled {
+            try txRequire(binding.paths["input"]!.path == operation + "/input"
+                && binding.paths["output"]!.path == operation + "/receipt")
+        }
         return binding
     }
 }

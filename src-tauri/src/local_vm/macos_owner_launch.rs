@@ -200,7 +200,17 @@ fn prepare(
     let op = parent.child(key, true)?;
     let op_path = root.join("bo").join(key);
     let _lock = op.lock("launch.lock", true)?;
-    for name in ["input", "receipt", "home", "tmp"] {
+    // Version 3 only for an exactly seeded guest; an unresolved or fenced seed
+    // never launches, and an unseeded VM keeps the original version-2 binding.
+    let seed = match super::super::macos_seed::state(root, key)?["seed"].as_str() {
+        Some("notSeeded") => None,
+        Some("seeded") => Some(super::super::macos_seed::seeded(root, key)?),
+        _ => bail!("The guest seed is unresolved or fenced; no bootstrap launch until it is inspected"),
+    };
+    // Version 3 shares no directory with the guest: no input or receipt share.
+    let shared = seed.is_none();
+    let directories: &[&str] = if shared { &["input", "receipt", "home", "tmp"] } else { &["home", "tmp"] };
+    for name in directories {
         op.child(name, true)?;
     }
     let storage = source["intent"]["storage"]
@@ -210,6 +220,7 @@ fn prepare(
         .as_str()
         .context("Original VM name missing")?;
     let vm = Path::new(storage).join(name);
+    let shares = [("input", op_path.join("input"), true), ("output", op_path.join("receipt"), true)];
     let paths: BTreeMap<_, _> = [
         ("operation", op_path.clone(), true),
         ("storage", PathBuf::from(storage), true),
@@ -217,27 +228,26 @@ fn prepare(
         ("config", vm.join("config.json"), false),
         ("disk", vm.join("disk.img"), false),
         ("nvram", vm.join("nvram.bin"), false),
-        ("input", op_path.join("input"), true),
-        ("output", op_path.join("receipt"), true),
     ]
     .into_iter()
+    .chain(shares.into_iter().filter(|_| shared))
     .map(|(role, path, dir)| Ok((role.to_string(), pin(&path, dir)?)))
     .collect::<Result<_>>()?;
-    let mut manifest = plan.clone();
-    for (role, share) in [("input", "input"), ("output", "output")] {
-        manifest["binding"][share]["host"] =
-            json!({"device":paths[role].device,"inode":paths[role].inode});
-    }
-    super::plan::validate(&manifest)?;
+    let manifest = if shared {
+        let mut manifest = plan.clone();
+        for (role, share) in [("input", "input"), ("output", "output")] {
+            manifest["binding"][share]["host"] =
+                json!({"device":paths[role].device,"inode":paths[role].inode});
+        }
+        super::plan::validate(&manifest)?;
+        manifest
+    } else {
+        let manifest = super::plan::unshared(plan);
+        super::plan::validate_unshared(&manifest)?;
+        manifest
+    };
     let helper_bytes = canonical(&manifest)?;
     let h = &manifest["binding"];
-    // Version 3 only for an exactly seeded guest; an unresolved or fenced seed
-    // never launches, and an unseeded VM keeps the original version-2 binding.
-    let seed = match super::super::macos_seed::state(root, key)?["seed"].as_str() {
-        Some("notSeeded") => None,
-        Some("seeded") => Some(super::super::macos_seed::seeded(root, key)?),
-        _ => bail!("The guest seed is unresolved or fenced; no bootstrap launch until it is inspected"),
-    };
     let text = |v: &Value| -> Result<String> {
         Ok(v.as_str().context("Original typed field missing")?.into())
     };
@@ -257,8 +267,8 @@ fn prepare(
         parent_session: text(&h["parentSession"])?,
         parent_tab: text(&h["parentTab"])?,
         parent_conversation: text(&h["parentConversation"])?,
-        input_share_id: text(&h["input"]["id"])?,
-        output_share_id: text(&h["output"]["id"])?,
+        input_share_id: shared.then(|| text(&h["input"]["id"])).transpose()?,
+        output_share_id: shared.then(|| text(&h["output"]["id"])).transpose()?,
         config_sha256: journal::digest(&open(&vm)?.read("config.json", 64 * 1024, false)?),
         paths,
         seed_id: seed.as_ref().map(|(receipt, _)| text(&receipt["seedId"])).transpose()?,
@@ -267,8 +277,9 @@ fn prepare(
     let raw = canonical(&json!(binding))?;
     op.write_new("owner-intent.json", &raw)?;
     op.write_new("expected-helper.json", &helper_bytes)?;
-    op.child("input", false)?
-        .write_new("host-plan.json", &helper_bytes)?;
+    if shared {
+        op.child("input", false)?.write_new("host-plan.json", &helper_bytes)?;
+    }
     let secret = entropy();
     op.write_new("control.capability", &secret)?;
     if seed.is_some() {
@@ -299,11 +310,16 @@ fn command(root: &Path, artifact: &Artifact, reference: &Reference, fd: i32) -> 
         .arg("run")
         .arg(name)
         .args(["--display", "none", "--vnc", "disabled", "--storage"])
-        .arg(&b.paths["storage"].path)
-        .arg("--shared-dir")
-        .arg(format!("{}:ro", b.paths["input"].path.display()))
-        .arg("--shared-dir")
-        .arg(format!("{}:rw", b.paths["output"].path.display()))
+        .arg(&b.paths["storage"].path);
+    // Version 3 shares no directory with the guest.
+    if b.version != 3 {
+        command
+            .arg("--shared-dir")
+            .arg(format!("{}:ro", b.paths["input"].path.display()))
+            .arg("--shared-dir")
+            .arg(format!("{}:rw", b.paths["output"].path.display()));
+    }
+    command
         .arg("--terminalx-bootstrap-fd")
         .arg(fd.to_string());
     // SAFETY: the child retains exactly the private socket across exec; fcntl

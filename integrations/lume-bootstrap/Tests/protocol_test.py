@@ -355,6 +355,10 @@ class EnrollmentListenerTests(unittest.TestCase):
     """The real version-3 TXEnrollmentService after a genuine launch hand-off."""
     def binding(self, f, key=True):
         b = f.binding; b['version'] = 3; b['seedId'] = os.urandom(16).hex(); b['seedReceiptSha256'] = digest(b'seed receipt')
+        # Version 3 shares nothing with the guest.
+        for k in ['inputShareId', 'outputShareId']: del b[k]
+        for role in ['input', 'output']: del b['paths'][role]
+        f.view['shares'] = []; f.store_view()
         self.key = os.urandom(32)
         if key: private(f.op/'enrollment.key', self.key.hex().encode())
         private(f.op/'owner-intent.json', wire(b)); f.bd = digest(wire(b))
@@ -439,11 +443,15 @@ class EnrollmentListenerTests(unittest.TestCase):
         f = Fixture(); self.addCleanup(f.finish); b = self.binding(f, key=False)
         (s,) = self.launch(f, b, 1); s.close()
         f.process.communicate(timeout=30); self.assertNotEqual(f.process.returncode, 0, 'no key, no listener')
-        for change in [{'seedReceiptSha256': None}, {'seedId': 'short'}, {'version': 2}]:
+        receipt = lambda g: {'path': str(g.op/'receipt'), 'device': (g.op/'receipt').stat().st_dev, 'inode': (g.op/'receipt').stat().st_ino}
+        for change in [{'seedReceiptSha256': None}, {'seedId': 'short'}, {'version': 2},
+                       {'inputShareId': uid(), 'outputShareId': uid()}, 'former writable share']:
             g = Fixture(); self.addCleanup(g.finish); b = self.binding(g)
-            for k, v in change.items():
-                if v is None: del b[k]
-                else: b[k] = v
+            if change == 'former writable share': b['paths']['output'] = receipt(g)
+            else:
+                for k, v in change.items():
+                    if v is None: del b[k]
+                    else: b[k] = v
             private(g.op/'owner-intent.json', wire(b))
             (s,) = self.launch(g, b, 1); s.close()
             g.process.communicate(timeout=30); self.assertNotEqual(g.process.returncode, 0, change)

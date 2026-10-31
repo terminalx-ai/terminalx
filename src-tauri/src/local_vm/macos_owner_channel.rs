@@ -49,8 +49,11 @@ struct Binding {
     parent_session: String,
     parent_tab: String,
     parent_conversation: String,
-    input_share_id: String,
-    output_share_id: String,
+    // Versions 1 and 2 only: a version-3 VM shares no directory with the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_share_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_share_id: Option<String>,
     config_sha256: String,
     paths: BTreeMap<String, Pin>,
     // Version 3 only: the offline seed this VM was enrolled from.
@@ -534,16 +537,6 @@ impl Reference {
             bail!("Original private channel reference changed")
         }
         let b = &self.binding;
-        let roles = [
-            "config",
-            "disk",
-            "input",
-            "nvram",
-            "operation",
-            "output",
-            "storage",
-            "vm",
-        ];
         // Version 3 exactly when the seed binding is present, as the owner decodes it.
         let seeded = match (&b.seed_id, &b.seed_receipt_sha256) {
             (None, None) => false,
@@ -552,6 +545,18 @@ impl Reference {
                     && super::transport::validate_runtime_sha(receipt).is_ok()
             }
             _ => bail!("Original owner seed binding is partial"),
+        };
+        // Version 3 shares nothing; a version-3 binding that still names a
+        // share is kept as it is and never launched, relayed or migrated.
+        let shares = match (&b.input_share_id, &b.output_share_id) {
+            (Some(input), Some(output)) if !seeded => vec![input, output],
+            (None, None) if seeded => vec![],
+            _ => bail!("This bootstrap's shared-directory binding does not match its version; it is kept unchanged and not used"),
+        };
+        let roles: &[&str] = if seeded {
+            &["config", "disk", "nvram", "operation", "storage", "vm"]
+        } else {
+            &["config", "disk", "input", "nvram", "operation", "output", "storage", "vm"]
         };
         if !(if seeded { b.version == 3 } else { [1, 2].contains(&b.version) })
             || (b.seed_id.is_some() && !seeded)
@@ -573,9 +578,10 @@ impl Reference {
             &b.generation,
             &b.parent_session,
             &b.parent_tab,
-            &b.input_share_id,
-            &b.output_share_id,
-        ] {
+        ]
+        .into_iter()
+        .chain(shares.iter().copied())
+        {
             journal::validate_id(id)?;
         }
         for digest in [
@@ -598,8 +604,10 @@ impl Reference {
         {
             bail!("Invalid parent conversation")
         }
-        if b.version == 2 {
-            plan::validate(&self.manifest)?;
+        match b.version {
+            2 => plan::validate(&self.manifest)?,
+            3 => plan::validate_unshared(&self.manifest)?,
+            _ => {}
         }
         let h = &self.manifest["binding"];
         if h["bootstrapId"] != b.bootstrap_id
@@ -617,13 +625,10 @@ impl Reference {
         {
             bail!("Helper manifest belongs to another owner/VM/parent")
         }
-        for (role, name, id, readonly) in [
-            ("input", "input", &b.input_share_id, true),
-            ("output", "output", &b.output_share_id, false),
-        ] {
-            if h[name]["id"] != *id
-                || h[name]["readOnly"] != readonly
-                || h[name]["host"]
+        for ((role, readonly), id) in [("input", true), ("output", false)].into_iter().zip(shares) {
+            if h[role]["id"] != *id
+                || h[role]["readOnly"] != readonly
+                || h[role]["host"]
                     != json!({"device":b.paths[role].device,"inode":b.paths[role].inode})
             {
                 bail!("Original helper share binding differs")

@@ -532,7 +532,7 @@ person's real SSH agent, keys or tokens.
 | # | Check | Evidence | Pass |
 | --- | --- | --- | --- |
 | B1 | Network reach | The host's listening sockets (`lsof -nP -iTCP -sTCP:LISTEN`) before the run, then connection attempts from the guest to the NAT gateway | Loopback-only host services are unreachable from the guest. Every reachable host port maps to a listener on all interfaces, and each is recorded. |
-| B2 | Shares | `mount` in the guest, plus the VM configuration on the host | A personalized guest sees no host share after the bootstrap launch. During it, only `bo/<key>/input` (read-only) and `bo/<key>/receipt` are shared. A legacy VM has none, or each one is recorded. |
+| B2 | Shares | `mount` in the guest, plus the VM configuration on the host | A version-3 guest sees no host share at any time, and its VM configuration has no directory-sharing device. A legacy VM has none, or each one is recorded. |
 | B3 | Credentials | The guest session's environment and listening sockets during a legacy `cua sb exec` and a personalized RPC, with a synthetic host agent and a host config that forwards it | No `SSH_AUTH_SOCK`, forwarded agent, TerminalX token or provider key appears in either guest session, including Lume's `/usr/bin/ssh` fallback. |
 | B4 | Desktop endpoints | The guest worker's tool list and its MCP configuration | Only guest Driver and browser tools, and only `local-vm-computer --stdio --task <bound target>`. No host desktop or host socket. |
 | B5 | Owner listener | Connection attempts from a second disposable VM | Only this VM's device reaches its owner; the other is refused within the refusal budget (extends G5). |

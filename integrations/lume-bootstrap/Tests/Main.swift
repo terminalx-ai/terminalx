@@ -67,19 +67,26 @@ import Darwin
             print(String(decoding: try txJSON(["written": count]), as: UTF8.self))
             return
         }
-        if CommandLine.arguments.count == 15, CommandLine.arguments[1] == "run" {
+        // run <name> ... [--shared-dir input:ro --shared-dir receipt:rw] --terminalx-bootstrap-fd <fd>:
+        // version 3 passes no share; versions 1 and 2 pass exactly these two.
+        if [11, 15].contains(CommandLine.arguments.count), CommandLine.arguments[1] == "run" {
             let a = CommandLine.arguments
             try txRequire(a[3] == "--display" && a[4] == "none" && a[5] == "--vnc" && a[6] == "disabled"
-                && a[7] == "--storage" && a[9] == "--shared-dir" && a[11] == "--shared-dir" && a[13] == "--terminalx-bootstrap-fd")
+                && a[7] == "--storage" && a[a.count - 2] == "--terminalx-bootstrap-fd")
             let cwd = FileManager.default.currentDirectoryPath
             let control = try txObject(Data(contentsOf: URL(fileURLWithPath: cwd + "/fixture-control.json")), keys: ["requests", "fault"])
-            try txRequire(a[10] == cwd + "/input:ro" && a[12] == cwd + "/receipt:rw")
+            var shares: [(String, Bool)] = []
+            if a.count == 15 {
+                try txRequire(a[9] == "--shared-dir" && a[11] == "--shared-dir"
+                    && a[10] == cwd + "/input:ro" && a[12] == cwd + "/receipt:rw")
+                shares = [(cwd + "/input", true), (cwd + "/receipt", false)]
+            }
             try txRequire(Set(ProcessInfo.processInfo.environment.keys).isSubset(of: ["PATH", "HOME", "TMPDIR", "LC_ALL", "__CF_USER_TEXT_ENCODING"]))
             let observed = try txJSON(["argv": Array(a.dropFirst()), "environment": ProcessInfo.processInfo.environment])
             try observed.write(to: URL(fileURLWithPath: cwd + "/fixture-exec.json"), options: .withoutOverwriting)
-            guard let fd = Int32(a[14]), let count = control["requests"] as? Int else { throw TXBootstrapError.refused }
+            guard let fd = Int32(a[a.count - 1]), let count = control["requests"] as? Int else { throw TXBootstrapError.refused }
             if try txString(control, "fault") == "beforeReceive" { return }
-            try serve(fd, count, afterReceive: try txString(control, "fault") == "afterReceive")
+            try serve(fd, count, afterReceive: try txString(control, "fault") == "afterReceive", shares: shares)
             return
         }
         if CommandLine.arguments.count == 3, CommandLine.arguments[2] == "wire-backpressure",
@@ -153,9 +160,12 @@ import Darwin
               requests > 0 && requests < 100 else { throw TXBootstrapError.refused }
         try serve(fd, requests, afterReceive: false)
     }
-    static func serve(_ fd: Int32, _ requests: Int, afterReceive: Bool, guest: (Int32, Double)? = nil) throws {
+    static func serve(_ fd: Int32, _ requests: Int, afterReceive: Bool, guest: (Int32, Double)? = nil,
+                      shares: [(String, Bool)]? = nil) throws {
         let launch = try TerminalXBootstrapLaunch.receive(fd)
         if afterReceive { return }
+        // As the patched `run` checks its --shared-dir list before starting the VM.
+        if let shares { try launch.validateShares(shares) }
         try launch.validateVM(configPath: launch.binding.paths["config"]!.path,
             diskPath: launch.binding.paths["disk"]!.path, nvramPath: launch.binding.paths["nvram"]!.path,
             loadedConfig: launch.pins["config"]!.bytes(limit: 64 * 1024))

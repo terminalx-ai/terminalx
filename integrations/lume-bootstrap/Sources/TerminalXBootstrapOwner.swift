@@ -67,16 +67,19 @@ final class TerminalXBootstrapLaunch: @unchecked Sendable {
         let loaded = try JSONSerialization.jsonObject(with: loadedConfig) as? NSDictionary
         try txRequire(retained != nil && loaded != nil && retained!.isEqual(loaded!))
     }
+    // Version 3 shares no directory with the guest; versions 1 and 2 share
+    // exactly their input (read-only) and receipt directories.
     func validateShares(_ actual: [(String, Bool)]) throws {
         try check()
-        try txRequire(actual.count == 2)
-        let expected = [(binding.paths["input"]!.path, true), (binding.paths["output"]!.path, false)]
+        let expected = binding.version == 3 ? [] : [(binding.paths["input"]!.path, true), (binding.paths["output"]!.path, false)]
+        try txRequire(actual.count == expected.count)
         try txRequire(Swift.Set(actual.map { "\($0.0):\($0.1)" }) == Swift.Set(expected.map { "\($0.0):\($0.1)" }))
     }
     func validateMountedShares(_ actual: [(String, String, Bool)]) throws {
         try check()
-        try txRequire(actual.count == 2)
-        for (name, role, readOnly) in [("input", "input", true), ("receipt", "output", false)] {
+        let expected = binding.version == 3 ? [] : [("input", "input", true), ("receipt", "output", false)]
+        try txRequire(actual.count == expected.count)
+        for (name, role, readOnly) in expected {
             let matching = actual.filter { $0.0 == name && $0.1 == binding.paths[role]!.path && $0.2 == readOnly }
             try txRequire(matching.count == 1)
         }
@@ -311,6 +314,7 @@ extension TerminalXBootstrapOwner {
             try handle.queue.sync {
                 try txRequire(handle.machine.state == .running)
                 let devices = handle.machine.directorySharingDevices
+                if devices.isEmpty { return try launch.validateMountedShares([]) }
                 try txRequire(devices.count == 1)
                 guard let fs = devices.first as? VZVirtioFileSystemDevice,
                       fs.tag == VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag,

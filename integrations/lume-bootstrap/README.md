@@ -97,7 +97,9 @@ only refuse a connection; they never release a VM, task, desktop or unknown owne
 The fixed operations are `observe`, `accountReceipt`, `keyReceipt` and
 `guestObservation`. Version-2 account/key admission refuses until genuine helper
 authentication is available. Receipt
-names are fixed inside the original writable share. No request can choose a
+names are fixed inside the original writable share of versions 1 and 2. A
+version-3 binding has no share: its run passes no `--shared-dir`, and the owner
+refuses one, a mounted share, or a binding that names a share. No request can choose a
 filename, host endpoint, VM, share, account, input action or termination target.
 
 ## Original host launch lifecycle

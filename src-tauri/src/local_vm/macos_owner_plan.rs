@@ -67,7 +67,27 @@ pub(super) fn create(
             "output":{"id":journal::new_id(),"readOnly":false}}}))
 }
 
+/// The version-3 manifest: the original plan without its shared directories,
+/// since a version-3 VM shares nothing with the host.
+pub(super) fn unshared(plan: &Value) -> Value {
+    let mut manifest = plan.clone();
+    if let Some(binding) = manifest["binding"].as_object_mut() {
+        binding.remove("input");
+        binding.remove("output");
+    }
+    manifest
+}
+
+/// A versions 1 and 2 manifest, with its input and receipt shares.
 pub(in crate::local_vm) fn validate(value: &Value) -> Result<()> {
+    check(value, true)
+}
+/// A version-3 manifest, which names no share.
+pub(in crate::local_vm) fn validate_unshared(value: &Value) -> Result<()> {
+    check(value, false)
+}
+
+fn check(value: &Value, shared: bool) -> Result<()> {
     // Exact typed shape excludes caller-supplied mounted/UID/OS-build/proof data.
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -98,8 +118,10 @@ pub(in crate::local_vm) fn validate(value: &Value) -> Result<()> {
         parent_session: String,
         parent_tab: String,
         parent_conversation: String,
-        input: Share,
-        output: Share,
+        #[serde(default)]
+        input: Option<Share>,
+        #[serde(default)]
+        output: Option<Share>,
     }
     let p: Plan = serde_json::from_value(value.clone())?;
     super::super::macos_account::validate_name(&p.account_name)?;
@@ -112,27 +134,27 @@ pub(in crate::local_vm) fn validate(value: &Value) -> Result<()> {
         runtime_sha256: p.runtime_sha256,
     }
     .validate()?;
-    for id in [
-        &p.binding.bootstrap_id,
-        &p.binding.owner_epoch,
-        &p.binding.input.id,
-        &p.binding.output.id,
-    ] {
+    for id in [&p.binding.bootstrap_id, &p.binding.owner_epoch] {
         journal::validate_id(id)?;
     }
     for sha in [&p.binding.nonce, &p.account_intent_digest] {
         super::super::transport::validate_runtime_sha(sha)?;
     }
-    if p.version != 2
-        || p.macos_major != 26
-        || p.account_home != format!("/Users/{}", p.account_name)
-        || !p.binding.input.read_only
-        || p.binding.output.read_only
-        || p.binding.input.id == p.binding.output.id
-        || p.binding.input.host == p.binding.output.host
-        || p.binding.input.host.inode == 0
-        || p.binding.output.host.inode == 0
-    {
+    let shares = match (&p.binding.input, &p.binding.output) {
+        (Some(input), Some(output)) if shared => {
+            journal::validate_id(&input.id)?;
+            journal::validate_id(&output.id)?;
+            input.read_only
+                && !output.read_only
+                && input.id != output.id
+                && input.host != output.host
+                && input.host.inode != 0
+                && output.host.inode != 0
+        }
+        (None, None) => !shared,
+        _ => false,
+    };
+    if p.version != 2 || p.macos_major != 26 || p.account_home != format!("/Users/{}", p.account_name) || !shares {
         bail!("Invalid host-only bootstrap plan")
     }
     Ok(())
@@ -191,5 +213,16 @@ mod tests {
         assert!(
             super::super::super::macos_bootstrap_helper::validate_manifest_content(&plan).is_err()
         );
+        // Version 3 names no share; a manifest with either share, or one
+        // missing only one, is never accepted as the other form.
+        let unshared_plan = unshared(&plan);
+        validate_unshared(&unshared_plan).unwrap();
+        assert!(validate(&unshared_plan).is_err());
+        assert!(validate_unshared(&plan).is_err());
+        for share in ["input", "output"] {
+            let mut partial = plan.clone();
+            partial["binding"].as_object_mut().unwrap().remove(share);
+            assert!(validate(&partial).is_err() && validate_unshared(&partial).is_err(), "{share}");
+        }
     }
 }

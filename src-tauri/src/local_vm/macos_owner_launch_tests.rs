@@ -123,7 +123,14 @@ impl Fixture {
             &op.join("fixture-control.json"),
             &canonical(&json!({"requests":512,"fault":fault})).unwrap(),
         );
-        private(&op.join("fixture-view.json"),&canonical(&json!({"running":true,"shares":[{"name":"input","path":op.join("input"),"readOnly":true},{"name":"receipt","path":op.join("receipt"),"readOnly":false}]})).unwrap());
+        // What the VM has mounted: nothing for version 3.
+        let intent: Value = serde_json::from_slice(&std::fs::read(op.join("owner-intent.json")).unwrap()).unwrap();
+        let shares = if intent.get("seedId").is_some() {
+            json!([])
+        } else {
+            json!([{"name":"input","path":op.join("input"),"readOnly":true},{"name":"receipt","path":op.join("receipt"),"readOnly":false}])
+        };
+        private(&op.join("fixture-view.json"), &canonical(&json!({"running":true,"shares":shares})).unwrap());
     }
     fn run(&self) -> Result<Value> {
         execute(
@@ -533,6 +540,15 @@ fn native_seeded_launch_binds_version_3_and_accepts_only_exact_helper_enrollment
     assert!(!observed.contains(std::str::from_utf8(&handed).unwrap()), "the key never reaches argv or environment");
     let raw = std::fs::read(f.op().join("owner-intent.json")).unwrap();
     assert!(!String::from_utf8_lossy(&raw).contains(std::str::from_utf8(&handed).unwrap()), "nor the binding");
+    // Version 3 shares no directory with the guest: none bound, created or passed to Lume.
+    let b = &reference.binding;
+    assert_eq!((b.input_share_id.as_ref(), b.output_share_id.as_ref()), (None, None));
+    assert_eq!(b.paths.keys().map(String::as_str).collect::<Vec<_>>(), ["config", "disk", "nvram", "operation", "storage", "vm"]);
+    assert!(!f.op().join("input").exists() && !f.op().join("receipt").exists());
+    let manifest: Value = serde_json::from_slice(&std::fs::read(f.op().join("expected-helper.json")).unwrap()).unwrap();
+    assert!(manifest["binding"].get("input").is_none() && manifest["binding"].get("output").is_none());
+    let argv: Value = serde_json::from_str(&observed).unwrap();
+    assert!(!argv["argv"].as_array().unwrap().iter().any(|a| a == "--shared-dir"), "{argv}");
 
     let enrollment = json!({"version":2,"bindingDigest":journal::digest(&reference.raw),"ownerEpoch":reference.binding.owner_epoch,
         "bootstrapId":f.key,"seedId":receipt["seedId"],"seedReceiptSha256":receipt_digest,"attempt":0,
@@ -551,6 +567,36 @@ fn native_seeded_launch_binds_version_3_and_accepts_only_exact_helper_enrollment
         private(&f.op().join("enrollment.json"), &canonical(&forged).unwrap());
         assert!(reference.enrollment().is_err(), "{field}");
     }
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_a_version_3_owner_refuses_a_mounted_share_and_a_binding_that_still_names_one() {
+    let f = Fixture::new();
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    // The owner checks what the VM has mounted on every request: a share is refused.
+    let digest = journal::digest(&reference.raw);
+    private(&f.op().join("enrollment.json"), &canonical(&json!({"version":2,"bindingDigest":digest,"ownerEpoch":reference.binding.owner_epoch,
+        "bootstrapId":f.key,"seedId":reference.binding.seed_id,"seedReceiptSha256":reference.binding.seed_receipt_sha256,"attempt":0,
+        "challengeSha256":"c".repeat(64),"claimsSha256":"d".repeat(64),"helperAuthenticated":true,"accountAuthenticated":false,
+        "trustAccepted":false,"ready":false})).unwrap());
+    assert!(reference.enrollment().is_ok());
+    std::fs::remove_file(f.op().join("fixture-view.json")).unwrap();
+    private(&f.op().join("fixture-view.json"), &canonical(&json!({"running":true,
+        "shares":[{"name":"receipt","path":f.op().join("home"),"readOnly":false}]})).unwrap());
+    assert!(reference.enrollment().is_err(), "a mounted share is refused");
+    // A version-3 binding that still names the former shares is kept as it is and never used.
+    let original = std::fs::read(f.op().join("owner-intent.json")).unwrap();
+    let mut former: Value = serde_json::from_slice(&original).unwrap();
+    former["inputShareId"] = json!(journal::new_id());
+    former["outputShareId"] = json!(journal::new_id());
+    std::fs::remove_file(f.op().join("owner-intent.json")).unwrap();
+    private(&f.op().join("owner-intent.json"), &canonical(&former).unwrap());
+    let error = Reference::reopen(&f.op()).err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(error.contains("does not match its version; it is kept unchanged"), "{error}");
+    assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(f.op().join("owner-intent.json")).unwrap()).unwrap(), former);
 }
 
 #[test]

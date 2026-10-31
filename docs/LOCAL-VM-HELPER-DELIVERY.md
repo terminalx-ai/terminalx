@@ -848,7 +848,7 @@ What a process in the guest, including guest root, can reach on the host.
 | SSH, personalized path | Answer as the pinned host key | Use any forwarding: `-F none`, `IdentityAgent=none`, `ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes`, `ProxyCommand=none`, `ControlMaster=no`, `PermitLocalCommand=no`, `StrictHostKeyChecking=yes` against one pinned line | `ssh_plan_pins_guest_host_key_account_and_target_without_inherited_authentication` | Admission is closed; never run live |
 | SSH, legacy path (`cua sb exec`) | Run as the guest account that Lume signs in to | Since this checkpoint, reach the host SSH agent through `SSH_AUTH_SOCK` (`process::without_host_agent`) | `guest_session_tools_never_inherit_the_host_ssh_agent` (new) | Pinned Cua 0.7.0 calls `lume ssh` (`cua-vmm` `lume/mod.rs`). Lume tries its built-in client first, then falls back to `/usr/bin/ssh` with the user's `~/.ssh/config`, `StrictHostKeyChecking=no` and the inherited environment. In that fallback, a user config that names an agent with `IdentityAgent` and enables `ForwardAgent`, or sets `RemoteForward` or `SendEnv`, for the VM's address would still apply. Not verified live. |
 | Computer and MCP endpoints | Serve its own Driver tools to the host's attachment adapter, which carries back data | Reach the host desktop: the guest worker gets only guest native and browser tools (`desktop.rs`); provider MCP names only `local-vm-computer --stdio --task <bound target>`; no host Unix socket is forwarded or shared | `provider_mcp_configs_only_name_the_bound_guest_proxy` | — |
-| Shares | During the version-3 bootstrap launch only: read `bo/<key>/input` (the helper manifest, no secret) and write `bo/<key>/receipt` | Read the enrollment key or `control.capability`, which are never in a share. No production host code reads the writable share (`acquire_authenticated()` refuses). Personalized Create passes no share. | The restore fixture asserts no `--shared-dir`; owner launch tests | The writable share is a leftover of the version-2 design; a later binding change can drop it. VirtioFS confinement is Apple's and untested here. What `cua sb create` shares on the legacy path is not verified. |
+| Shares | Nothing on a version-3 VM, which has no host share since the share-free checkpoint. Versions 1 and 2, which have no production route, keep `bo/<key>/input` (read-only) and `bo/<key>/receipt` | Have a share at all on version 3: no input or receipt directory is created, bound or passed to Lume, and the owner refuses a version-3 run or VM with any share, or a binding that still names one. Read the enrollment key or `control.capability` (never in a share). Personalized Create passes no share. | Native: `native_seeded_launch_binds_version_3_and_accepts_only_exact_helper_enrollment`, `native_a_version_3_owner_refuses_a_mounted_share_and_a_binding_that_still_names_one`; Swift protocol suite; plan tests | VirtioFS confinement for versions 1 and 2 is Apple's and untested here. What `cua sb create` shares on the legacy path is not verified. |
 | Network | Use NAT egress, and reach host services listening on all interfaces, as a LAN peer would: TerminalX's nearby pairing listener on `0.0.0.0:6768` (`pairing/direct.rs`) and anything else the user runs that way | Reach host loopback services: TerminalX's local listeners bind `127.0.0.1`, as does Lume's API at the pinned commit (`127.0.0.1:7777`) | — | Live vmnet reachability and the user's other listeners are not verified |
 | Restricted Lume owner | Reach its vsock listener for this exact VM and, with the seeded key, deliver only the allowlisted records (enrollment, account observation, key result, host-key observation, retirement), each MAC'd | Promote trust: every record keeps `trustAccepted` and `ready` false and the host revalidates it. No display, VNC or clipboard is enabled. | Swift protocol suite; native owner tests | Never run against a real VM (G5) |
 | Seed daemon (planned, held) | — | Reach it: it writes three items to an unbooted guest volume before first boot, and accepts requests only from the signed TerminalX app (H4) | Seeder-core fixtures on disposable images | Not implemented (slice 5) |
@@ -862,15 +862,13 @@ source review, within its own channels the guest cannot do any of these:
 - obtain host tokens or, since this checkpoint, the host SSH agent through the
   environment;
 - reach the host desktop or loopback services;
-- write outside two host-private directories: its task's artifact store, and
-  the bootstrap's writable share;
+- write anywhere on the host except its task's bounded artifact store;
 - change a host checkout without a host request.
 
 Three limits remain:
 
-- **Disk use.** Artifact import is bounded per task (128 artifacts, 256 MiB).
-  Each new task adds its own budget, and the bootstrap's writable share is
-  unbounded.
+- **Disk use.** Artifact import is bounded per task (128 artifacts, 256 MiB),
+  and each new task adds its own budget.
 - **Network.** It can reach host services listening on all interfaces, as any
   LAN peer can.
 - **Guest-written content.** Patches and text it writes reach the host as
@@ -1122,7 +1120,8 @@ signed, installed or live-accepted artifact.
        `mod.rs` keeps it as dead code.
      - A constructor would need the original shares acquired as verified
        mount descriptors. No supported interface provides that, and the
-       version-3 design no longer uses shares.
+       version-3 design no longer uses shares: since the share-free checkpoint
+       its launch binds, creates and mounts none.
      - Enrollment, account observation, key install and the host-key report
        now run over the session in the native helper.
 4. Seed journal states in `macos_provision.rs` and the `run` precondition.
