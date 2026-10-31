@@ -1462,6 +1462,21 @@ fn endpoint(path: &str) -> String {
     format!("{}{path}", api_base_url())
 }
 
+/// The one HTTP client for the account service and the relay director.
+/// ureq keeps idle connections in a pool per agent, so an agent built per
+/// request paid for DNS, TCP and a TLS handshake every time (#671).
+pub(crate) fn cloud_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build())
+}
+
+/// Read and drop a body no one needs. A connection returns to the pool only
+/// once its body has been read to the end; one dropped unread is closed.
+pub(crate) fn discard_body(response: ureq::Response) {
+    const LIMIT: u64 = 64 * 1024;
+    let _ = std::io::copy(&mut std::io::Read::take(response.into_reader(), LIMIT), &mut std::io::sink());
+}
+
 fn exchange_code(pending: &PendingAuth, code: &str, links: DesktopLinks) -> Result<DesktopSession, CloudError> {
     post_json(
         SESSION_PATH,
@@ -1511,11 +1526,7 @@ fn post_json<T: DeserializeOwned>(
     body: serde_json::Value,
     access_token: Option<&str>,
 ) -> Result<T, CloudError> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(REQUEST_TIMEOUT)
-        .redirects(0)
-        .build();
-    let mut request = agent
+    let mut request = cloud_agent()
         .post(&endpoint(path))
         .set("content-type", "application/json");
     if let Some(token) = access_token {
@@ -1523,7 +1534,10 @@ fn post_json<T: DeserializeOwned>(
     }
     let response = match request.send_json(body) {
         Ok(response) => response,
-        Err(ureq::Error::Status(status, _)) => return Err(CloudError::Http(status)),
+        Err(ureq::Error::Status(status, response)) => {
+            discard_body(response);
+            return Err(CloudError::Http(status));
+        }
         Err(ureq::Error::Transport(_)) => return Err(CloudError::Transport),
     };
     let value = response
@@ -1538,11 +1552,7 @@ fn post_authenticated<T: DeserializeOwned>(
     access_token: Option<&str>,
     idempotency_key: Option<&str>,
 ) -> Result<T, anyhow::Error> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(REQUEST_TIMEOUT)
-        .redirects(0)
-        .build();
-    let mut request = agent
+    let mut request = cloud_agent()
         .post(&endpoint(path))
         .set("content-type", "application/json");
     if let Some(token) = access_token {
