@@ -198,7 +198,12 @@ function HostKeyReview({ item, session, tab, conversation, readOnly, reload, che
         {checkButton}
       </div>
     </> : null}
-    {hostKey.stage === "confirmed" ? <p role="status">Host key pinned: {fingerprint}. TerminalX has not connected over SSH yet; the first connection checks this exact key and stops on any mismatch.</p> : null}
+    {hostKey.stage === "confirmed" && hostKey.firstConnection?.stage === "verified" && hostKey.sshVerified
+      ? <p role="status">Host key pinned: {fingerprint}. TerminalX&apos;s first SSH connection used exactly this key and found the confirmed account, home and installed key. The VM is not ready yet.</p> : null}
+    {hostKey.stage === "confirmed" && hostKey.firstConnection?.stage === "invalid"
+      ? <p role="alert" className="text-destructive">Host key pinned: {fingerprint}. The recorded first SSH connection no longer matches this VM, its pinned key or its key, so TerminalX does not use it. Inspect the VM.</p> : null}
+    {hostKey.stage === "confirmed" && !(hostKey.firstConnection?.stage === "verified" && hostKey.sshVerified) && hostKey.firstConnection?.stage !== "invalid"
+      ? <p role="status">Host key pinned: {fingerprint}. TerminalX has not connected over SSH yet; the first connection checks this exact key and stops on any mismatch.{hostKey.firstConnection?.stage === "admissionClosed" ? " SSH to this VM is not enabled in this build." : ""}</p> : null}
     {hostKey.stage === "changed" ? <p role="alert" className="text-destructive">This VM now reports a different SSH host key than the pinned one ({fingerprint}). TerminalX refuses to connect and never replaces the pinned key. Inspect the VM.</p> : null}
     {error ? <p role="alert" className="text-destructive">{error}</p> : null}
   </div>;

@@ -188,6 +188,22 @@ pub(super) fn resolve(
 ) -> Result<std::fs::File> {
     Ok(resolve_with_public(root, binding, verifier, budget)?.0)
 }
+/// Read-only: the public key retained for `binding`'s ready reference, from
+/// its record alone. The private file is not opened, and nothing is locked,
+/// run or written.
+pub(super) fn retained_public(root: &Path, binding: &Binding) -> Result<String> {
+    check_directory(root)?;
+    check_directory(&root.join("macos-personalization-keys"))?;
+    let bound = transport_bound(root, binding)?;
+    let record = read_bound(&directory(root, binding)?, &bound)?;
+    if record["state"] != "ready" {
+        bail!("Guest key reference is not ready");
+    }
+    Ok(record["receipt"]["publicKey"]
+        .as_str()
+        .context("Retained public key missing")?
+        .to_owned())
+}
 /// As `resolve`, also returning the retained public key the private file was
 /// just verified to match.
 pub(super) fn resolve_with_public(

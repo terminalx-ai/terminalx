@@ -160,6 +160,76 @@ pub(super) fn verify_using(
     Ok(receipt)
 }
 
+/// What the read-only status found for a bootstrap's first connection.
+enum Evidence {
+    /// No current environment carries this bootstrap's transport binding.
+    NoTransport,
+    /// The binding is current, and nothing has been recorded for it.
+    NotRecorded,
+    /// The canonical receipt for exactly this binding, pin and key.
+    Recorded,
+}
+
+/// The receipt for the one current environment bound to `bootstrap_id`,
+/// checked exactly as delivery checks it, plus two links status needs: the
+/// transport's trusted host key must be the one the person pinned, and the
+/// receipt's key must be the reference's retained public key.
+fn evidence(root: &Path, bootstrap_id: &str, pinned: &str) -> Result<Evidence> {
+    let state = journal::Journal::snapshot(root)?;
+    let mut bound = state.environments.values().filter(|env| {
+        env.deleted_at.is_none()
+            && matches!(&env.transport, super::transport::Transport::MacosPersonalized { binding }
+                if binding.bootstrap_id == bootstrap_id)
+    });
+    let Some(env) = bound.next() else {
+        return Ok(Evidence::NoTransport);
+    };
+    if bound.next().is_some() {
+        bail!("More than one environment claims this bootstrap's transport")
+    }
+    let binding = macos_transport::binding(env)?;
+    binding.check_retained(root)?;
+    let trust = macos_personalization::retained(root, bootstrap_id, &binding.target)?.trust;
+    if trust.host_key != pinned {
+        bail!("The transport's trusted host key is not the one the person pinned")
+    }
+    let Some(receipt) = recorded(root, binding)? else {
+        return Ok(Evidence::NotRecorded);
+    };
+    let public = macos_keys::retained_public(root, binding)?;
+    if receipt["publicKeySha256"] != journal::digest(public.as_bytes()).as_str() {
+        bail!("The recorded first connection used another key")
+    }
+    Ok(Evidence::Recorded)
+}
+
+/// Read-only status of the first strict connection to `bootstrap_id`, whose
+/// host key the person pinned as `pinned`. While transport admission is closed
+/// it says only that, before reading anything. Otherwise it reports the
+/// canonical evidence. It never runs SSH, opens a private key, writes,
+/// fences or repairs anything, and never claims readiness.
+pub(super) fn status(root: &Path, bootstrap_id: &str, pinned: &str) -> Value {
+    status_using(root, bootstrap_id, pinned, macos_transport::require_available)
+}
+
+fn status_using(root: &Path, bootstrap_id: &str, pinned: &str, admission: impl Fn() -> Result<()>) -> Value {
+    let (stage, verified, detail) = if admission().is_err() {
+        ("admissionClosed", false, None)
+    } else {
+        match evidence(root, bootstrap_id, pinned) {
+            Ok(Evidence::NoTransport) => ("awaitingTransport", false, None),
+            Ok(Evidence::NotRecorded) => ("notVerified", false, None),
+            Ok(Evidence::Recorded) => ("verified", true, None),
+            Err(error) => ("invalid", false, Some(format!("{error:#}"))),
+        }
+    };
+    let mut value = json!({"stage": stage, "sshVerified": verified, "ready": false});
+    if let Some(detail) = detail {
+        value["detail"] = json!(detail);
+    }
+    value
+}
+
 /// Production entry. Admission refuses first, before any process, key access
 /// or network effect.
 pub(super) fn verify(env: &Environment) -> Result<Value> {

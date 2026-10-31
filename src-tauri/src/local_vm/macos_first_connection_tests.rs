@@ -214,3 +214,108 @@ fn changed_target_pin_or_receipt_is_refused_and_never_replaced() {
     assert_eq!(first.runs(), 1, "no connection over a changed pin");
     assert_eq!(std::fs::read(first.known_hosts()).unwrap(), b"another pin\n");
 }
+
+/// Every regular file under `root` with its bytes.
+fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if meta.is_dir() {
+            found.extend(snapshot(&path));
+        } else if meta.is_file() {
+            found.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn status_while_admission_is_closed_reads_nothing_and_never_verifies() {
+    let first = First::new();
+    first.run(Duration::from_secs(10)).unwrap();
+    let (root, id) = (first.f.root.path(), first.f.pinned().bootstrap_id.clone());
+    let closed = json!({"stage": "admissionClosed", "sshVerified": false, "ready": false});
+    assert_eq!(status(root, &id, &first.f.public), closed, "a fixture receipt is never production evidence");
+    // Not even a broken receipt is read while admission is closed.
+    std::fs::remove_file(first.receipt()).unwrap();
+    macos_keys::write_new(&first.receipt(), b"{").unwrap();
+    let before = snapshot(root);
+    assert_eq!(status(root, &id, &first.f.public), closed);
+    assert_eq!(status(root, &id, "ssh-ed25519 another"), closed);
+    assert_eq!(snapshot(root), before, "status writes nothing");
+    assert_eq!(first.runs(), 1, "status starts no connection");
+}
+
+#[test]
+fn only_exact_current_evidence_maps_to_ssh_verified_and_reading_it_changes_nothing() {
+    let open = || Ok(());
+    let first = First::new();
+    let (root, id) = (first.f.root.path(), first.f.pinned().bootstrap_id.clone());
+    let pinned = first.f.public.clone();
+    let stage = |pin: &str| status_using(root, &id, pin, open)["stage"].clone();
+    assert_eq!(stage(&pinned), "notVerified");
+    first.run(Duration::from_secs(10)).unwrap();
+    assert_eq!(status_using(root, &id, &pinned, open), json!({"stage": "verified", "sshVerified": true, "ready": false}));
+
+    // Reading needs no private key, verifier, process or write.
+    let private = root
+        .join("macos-personalization-keys")
+        .join(&first.f.pinned().key_reference)
+        .join("private_key");
+    let before = snapshot(root);
+    for path in [&private, &first.f.keygen, &first.ssh] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    assert_eq!(stage(&pinned), "verified");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(&first.f.keygen, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&first.ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(snapshot(root), before);
+    assert_eq!(first.runs(), 1);
+
+    // Anything not exactly this binding, pin and key is invalid, never verified.
+    let invalid = |name: &str, pin: &str| {
+        let value = status_using(root, &id, pin, open);
+        assert_eq!((&value["stage"], &value["sshVerified"], &value["ready"]), (&json!("invalid"), &json!(false), &json!(false)), "{name}: {value}");
+    };
+    invalid("another pinned host key", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(first.receipt()).unwrap()).unwrap();
+    let original = std::fs::read(first.receipt()).unwrap();
+    for (name, bytes) in [
+        ("another trust", serde_json::to_vec(&{ let mut r = receipt.clone(); r["trustDigest"] = json!("0".repeat(64)); r }).unwrap()),
+        ("another key", serde_json::to_vec(&{ let mut r = receipt.clone(); r["publicKeySha256"] = json!("1".repeat(64)); r }).unwrap()),
+        ("claimed readiness", serde_json::to_vec(&{ let mut r = receipt.clone(); r["ready"] = json!(true); r }).unwrap()),
+        ("malformed", b"{".to_vec()),
+    ] {
+        std::fs::remove_file(first.receipt()).unwrap();
+        macos_keys::write_new(&first.receipt(), &bytes).unwrap();
+        invalid(name, &pinned);
+    }
+    std::fs::remove_file(first.receipt()).unwrap();
+    macos_keys::write_new(&first.receipt(), &original).unwrap();
+    let pin = std::fs::read(first.known_hosts()).unwrap();
+    std::fs::remove_file(first.known_hosts()).unwrap();
+    macos_keys::write_new(&first.known_hosts(), b"another pin\n").unwrap();
+    invalid("changed known_hosts", &pinned);
+    std::fs::remove_file(first.known_hosts()).unwrap();
+    macos_keys::write_new(&first.known_hosts(), &pin).unwrap();
+    assert_eq!(stage(&pinned), "verified");
+
+    // The environment must be the current one carrying this exact binding.
+    let env = first.f.env.clone();
+    let set = |change: &dyn Fn(&mut journal::State)| first.f.journal.transaction(|s| { change(s); Ok(()) }).unwrap();
+    set(&|s| s.environments.get_mut(&env.id).unwrap().generation = journal::new_id());
+    invalid("another generation", &pinned);
+    set(&|s| { s.environments.insert(env.id.clone(), env.clone()); });
+    let mut twin = env.clone();
+    twin.id = journal::new_id();
+    set(&|s| { s.environments.insert(twin.id.clone(), twin.clone()); });
+    invalid("two environments claim the bootstrap", &pinned);
+    set(&|s| { s.environments.remove(&twin.id); });
+    set(&|s| s.environments.get_mut(&env.id).unwrap().deleted_at = Some(journal::now()));
+    assert_eq!(stage(&pinned), "awaitingTransport");
+    set(&|s| { s.environments.insert(env.id.clone(), env.clone()); });
+    assert_eq!(stage(&pinned), "verified");
+}

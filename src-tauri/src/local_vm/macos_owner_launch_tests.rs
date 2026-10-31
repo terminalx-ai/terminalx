@@ -903,6 +903,15 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     assert_eq!(pin(&reference, &f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap()["confirmation"],
         confirmed["confirmation"], "a retry returns the same confirmation");
     assert_eq!(status()["stage"], "confirmed");
+    // The pin is not SSH verification. With transport admission closed the
+    // first connection is reported closed without reading any evidence, even
+    // a receipt planted in the data root.
+    let closed = json!({"stage": "admissionClosed", "sshVerified": false, "ready": false});
+    assert_eq!((&status()["firstConnection"], &status()["sshVerified"], &status()["ready"]), (&closed, &json!(false), &json!(false)));
+    private(&f.root.join("macos-personalization").join(&f.key).join("first-connection.json"), b"{\"evidence\":\"planted\"}");
+    assert_eq!(status()["firstConnection"], closed);
+    assert_eq!(status()["sshVerified"], false);
+    std::fs::remove_file(f.root.join("macos-personalization").join(&f.key).join("first-connection.json")).unwrap();
 
     // The existing strict plan pins exactly this key; no accept-new, no other source.
     let record = ledger(&f);

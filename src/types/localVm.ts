@@ -290,14 +290,26 @@ export interface LocalVmGuestAccount {
 
 export type LocalVmGuestKeyStage = "notGranted" | "keyPending" | "grantPending" | "publicKeyInstalled" | "outcomeUnknown" | "refused";
 
+/** The first strict SSH connection to this VM, kept apart from the pin and from
+ *  readiness. `verified` only for exact evidence recorded through the gated
+ *  transport; `admissionClosed` while this build does not allow SSH at all. */
+export interface LocalVmFirstConnectionStatus {
+  stage: "admissionClosed" | "awaitingTransport" | "notVerified" | "verified" | "invalid";
+  sshVerified: boolean;
+  detail?: string;
+  ready: false;
+}
+
 /** The guest's existing SSH host key, as the owner observed it after the helper's
- *  own install, and where the person's review stands. Never SSH verification. */
+ *  own install, and where the person's review stands. A pin is not SSH
+ *  verification: only `firstConnection` evidence sets `sshVerified`. */
 export interface LocalVmGuestHostKeyStatus {
   stage: "awaitingHostKey" | "awaitingReview" | "confirmed" | "changed";
   observationSha256?: string;
   hostKey?: string;
   fingerprint?: string;
-  sshVerified: false;
+  firstConnection?: LocalVmFirstConnectionStatus;
+  sshVerified: boolean;
   ready: false;
 }
 

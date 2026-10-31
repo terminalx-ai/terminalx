@@ -143,6 +143,30 @@ describe("guest account confirmation", () => {
     expect(screen.queryByRole("button", { name: "Pin host key" })).toBeNull();
   });
 
+  it("keeps a pinned host key, first-connection evidence and readiness apart", async () => {
+    const installed = { chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed" as const, accountAuthenticated: true, account: personal },
+      key: { stage: "publicKeyInstalled" as const, installed: true } };
+    const fingerprint = "SHA256:pinned";
+    const pinned = (firstConnection: NonNullable<LocalVmGuestAccountStatus["hostKey"]>["firstConnection"], sshVerified = false) =>
+      status({ ...installed, hostKey: { stage: "confirmed", fingerprint, firstConnection, sshVerified, ready: false } });
+    const cases: [LocalVmGuestAccountStatus, RegExp, string][] = [
+      [pinned({ stage: "admissionClosed", sshVerified: false, ready: false }), /has not connected over SSH yet.*SSH to this VM is not enabled in this build/, "status"],
+      [pinned({ stage: "notVerified", sshVerified: false, ready: false }), /has not connected over SSH yet; the first connection checks this exact key/, "status"],
+      [pinned({ stage: "awaitingTransport", sshVerified: false, ready: false }), /has not connected over SSH yet/, "status"],
+      [pinned({ stage: "verified", sshVerified: true, ready: false }, true), /first SSH connection used exactly this key.*The VM is not ready yet/, "status"],
+      [pinned({ stage: "invalid", sshVerified: false, detail: "changed", ready: false }), /recorded first SSH connection no longer matches.*does not use it/, "alert"],
+      // A verified stage without the host's sshVerified is never shown as verified.
+      [pinned({ stage: "verified", sshVerified: true, ready: false }, false), /has not connected over SSH yet/, "status"],
+    ];
+    for (const [item, text, role] of cases) {
+      listing = [item];
+      mount();
+      expect((await screen.findByText(text)).getAttribute("role")).toBe(role);
+      expect(screen.queryByText(/is ready|ready to use/i)).toBeNull();
+      cleanup();
+    }
+  });
+
   it("shows the setup helper's retirement only as the owner's record or the helper's unverified claim", async () => {
     const installed = { chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed" as const, accountAuthenticated: true, account: personal },
       key: { stage: "publicKeyInstalled" as const, installed: true }, hostKey: { stage: "awaitingReview" as const, observationSha256: "c".repeat(64), fingerprint: "SHA256:abc", sshVerified: false as const, ready: false as const } };

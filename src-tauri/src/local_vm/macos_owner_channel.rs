@@ -101,7 +101,7 @@ fn operation(params: &Value) -> Result<Reference> {
 /// Read-only: the accounts the enrolled helper reported, for the person to
 /// choose from, and any answer to an earlier confirmation.
 pub(super) fn guest_accounts(params: &Value) -> Result<Value> {
-    account_status(&operation(params)?)
+    account_status(&super::host::root()?, &operation(params)?)
 }
 /// Read-only: this conversation's version-3 bootstraps and where each account
 /// confirmation stands. Only bootstraps whose original parent is exactly this
@@ -125,7 +125,8 @@ fn confirmations_in(root: &Path, params: &Value) -> Result<Value> {
             if b.version != 3 || b.parent_session != session || b.parent_tab != tab || b.parent_conversation != conversation {
                 continue;
             }
-            let mut status = account_status(&reference).unwrap_or_else(|error| {
+            let data = root.parent().context("Local VM data root missing")?;
+            let mut status = account_status(data, &reference).unwrap_or_else(|error| {
                 json!({"observationSha256": null, "accounts": [], "detail": format!("{error:#}"), "accountAuthenticated": false,
                     "trustAccepted": false, "ready": false})
             });
@@ -136,7 +137,9 @@ fn confirmations_in(root: &Path, params: &Value) -> Result<Value> {
     bootstraps.sort_by(|a, b| a["idempotencyKey"].as_str().cmp(&b["idempotencyKey"].as_str()));
     Ok(json!({"bootstraps": bootstraps, "personApproval": super::person_approval::availability()}))
 }
-fn account_status(reference: &Reference) -> Result<Value> {
+/// `data` is the Local VM data root, where the transport's journal, ledger
+/// and first-connection evidence live.
+fn account_status(data: &Path, reference: &Reference) -> Result<Value> {
     let (bytes, observation) = reference.account_observation()?;
     let answer = reference.account_answer().ok();
     let authenticated = answer.as_ref().is_some_and(|a| a["accountAuthenticated"] == true);
@@ -151,7 +154,7 @@ fn account_status(reference: &Reference) -> Result<Value> {
     };
     let (host_key, retirement) = match key["stage"].as_str() {
         Some("publicKeyInstalled") => (
-            reference.host_key_status()?,
+            reference.host_key_status(data)?,
             // The helper retires only after the owner observed its host key.
             match reference.host_key_observation() {
                 Ok((observed, observation)) => reference.retirement_status(&observed, &observation),
@@ -1175,7 +1178,10 @@ impl Reference {
     }
     /// Read-only: where the host-key review stands. A recorded confirmation
     /// whose observation no longer matches is `changed` and is never re-pinned.
-    fn host_key_status(&self) -> Result<Value> {
+    /// For a pinned key, `firstConnection` is the separate, read-only status of
+    /// the first strict SSH connection (see `macos_first_connection::status`),
+    /// and only its verified evidence sets `sshVerified`. A pin alone never does.
+    fn host_key_status(&self, data: &Path) -> Result<Value> {
         let observed = self.host_key_observation().ok();
         if !self.root.exists("host-key-confirmation.json")? {
             return Ok(match observed {
@@ -1187,8 +1193,14 @@ impl Reference {
         }
         let retained: Value = serde_json::from_slice(&self.root.read("host-key-confirmation.json", 32 * 1024, true)?)?;
         let changed = observed.is_some_and(|(bytes, _)| retained["observationSha256"] != journal::digest(&bytes).as_str());
-        Ok(json!({"stage": if changed { "changed" } else { "confirmed" }, "hostKey": retained["hostKey"],
-            "fingerprint": retained["fingerprint"], "sshVerified": false, "ready": false}))
+        if changed {
+            return Ok(json!({"stage": "changed", "hostKey": retained["hostKey"], "fingerprint": retained["fingerprint"],
+                "sshVerified": false, "ready": false}));
+        }
+        let first = super::macos_first_connection::status(data, &self.binding.bootstrap_id,
+            retained["hostKey"].as_str().unwrap_or_default());
+        Ok(json!({"stage": "confirmed", "hostKey": retained["hostKey"], "fingerprint": retained["fingerprint"],
+            "sshVerified": first["sshVerified"] == true, "firstConnection": first, "ready": false}))
     }
     /// The person's confirmation of the exact fingerprint shown from the
     /// owner's observation, from the original parent. Recorded once; a different

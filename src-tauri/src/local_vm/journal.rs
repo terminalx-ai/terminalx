@@ -194,6 +194,14 @@ impl Journal {
         self.transaction(|state| Ok(state.clone()))
     }
 
+    /// The last complete state, for status that must not write: no lock file,
+    /// directory repair or normalizing rewrite. Writers rename whole files, so
+    /// this sees one complete version.
+    pub fn snapshot(dir: &Path) -> Result<State> {
+        serde_json::from_slice(&fs::read(dir.join("journal.json"))?)
+            .context("read local VM journal snapshot")
+    }
+
     pub fn transaction<T>(&self, f: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
         let _lock = Lock::acquire(&self.dir.join("journal.lock"))?;
         let path = self.dir.join("journal.json");
