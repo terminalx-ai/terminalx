@@ -226,7 +226,7 @@ fn decode_event(p: &Value, out: &mut Vec<Payload>) {
             // a failure only once the attempts are spent.
             match p["type"].as_str().filter(|kind| *kind == "stream_error").and_then(|_| retry_count(message)) {
                 Some((attempt, max_retries)) => out.push(Payload::ApiRetry { attempt, max_retries, reason: Some(message.to_string()) }),
-                None => out.push(Payload::Error { message: message.to_string(), fatal: false }),
+                None => out.push(Payload::Error { message: message.to_string(), fatal: false, detail: None }),
             }
         }
         "item_completed" => decode_item(&p["item"], out),
@@ -324,7 +324,7 @@ fn decode_item(item: &Value, out: &mut Vec<Payload>) {
             });
             out.push(Payload::ToolCallCompleted { call_id: id, result: ToolResult::default() });
         }
-        "Error" => out.push(Payload::Error { message: item["message"].as_str().unwrap_or("Codex reported an error").to_string(), fatal: false }),
+        "Error" => out.push(Payload::Error { message: item["message"].as_str().unwrap_or("Codex reported an error").to_string(), fatal: false, detail: None }),
         _ => {}
     }
 }

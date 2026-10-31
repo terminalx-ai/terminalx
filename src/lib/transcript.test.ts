@@ -26,6 +26,22 @@ function toolDone(callId: string): AgentEvent {
 }
 
 describe("buildTranscript", () => {
+  // #667: what the agent (or its launch) last said rides under the error, and only under a failure.
+  it("keeps the agent's own last line under a failed turn and under a launch error", () => {
+    const said = "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "fix the build", queued: false }),
+      ev({ type: "error", message: "The agent encountered an error. Review the conversation before continuing.", fatal: false, detail: "TerminalX requires Codex's --no-daemon option" }),
+      ev({ type: "turn_completed", status: "error", finalText: "The agent is signed out, or its sign-in expired. Sign in again, then retry.", authFailed: true, detail: said }),
+      ev({ type: "user_message", text: "again", queued: false }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false, detail: "never shown for a turn that worked" }),
+    ], false);
+    expect(t.turns[0].detail).toBe(said);
+    expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "error", detail: "TerminalX requires Codex's --no-daemon option" }));
+    expect(t.turns[1].detail).toBeUndefined();
+    expect(t.authFailed).toBe(true);
+  });
+
   it("ignores harness prompts without splitting the current turn or abandoning its tools (#388)", () => {
     const t = buildTranscript([
       ev({ type: "user_message", text: "Run the task", queued: false }),

@@ -5,6 +5,7 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { pty, type PaneAgent, type ShellPane } from "@/lib/api";
 import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
+import { recordTerminalMemory } from "@/lib/terminalMemory";
 
 /**
  * Terminal panes per session, and the live xterm of each one that has been
@@ -134,6 +135,7 @@ export function getInstance(id: string, create: () => TerminalInstance, host?: H
   let inst = instances.get(id);
   if (!inst) {
     inst = create();
+    recordTerminalMemory(inst.term);
     const size = sizes.get(id);
     // Replay must use the grid the PTY printed into, before a view refits it.
     if (size) inst.term.resize(size.cols, size.rows);
@@ -223,6 +225,7 @@ export function disposeInstance(id: string) {
   const paneExists = state.panes.some((pane) => pane.id === id);
   if (!paneExists) sizes.delete(id);
   if (inst) {
+    recordTerminalMemory(inst.term, true);
     if (inst.restorable && paneExists) sizes.set(id, { cols: inst.term.cols, rows: inst.term.rows });
     inst.release?.();
     inst.term.dispose();
@@ -598,8 +601,9 @@ export function clearSelectedBrowser(sessionId: string, id: string) {
  * already have produced output before this window heard about it; the view
  * gets that from the backend's scrollback when it attaches.
  */
-export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">) {
+export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">, isCurrent: () => boolean = () => true) {
   await subscribeTerminals();
+  if (!isCurrent()) return;
   const live = { ...pane, created: new Date().toISOString(), exited: false, exitCode: null };
   // The same pane can be adopted twice: a tab whose CLI is replaced in place
   // keeps its pane, so the exit the old process reported is stale news.

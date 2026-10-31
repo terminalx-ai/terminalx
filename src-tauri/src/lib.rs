@@ -552,6 +552,7 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
             commands::tab_handoff,

@@ -7,6 +7,8 @@ import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTermi
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { terminalInput } from "@/lib/terminalInput";
 import { fitTerminal } from "@/lib/terminalFit";
+import { TerminalBufferCleanup } from "@/lib/terminalBufferCleanup";
+import { terminalColorHex } from "@/lib/terminalColor";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { onAppResume } from "@/lib/appResume";
 import { useTheme } from "@/lib/theme";
@@ -22,31 +24,12 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-/**
- * Tokens are oklch, which xterm cannot parse and which OSC 10/11 replies
- * must not carry, so a colour is pushed through a canvas to get sRGB hex.
- */
-function toHex(css: string, fallback: string): string {
-  try {
-    const c = document.createElement("canvas");
-    c.width = c.height = 1;
-    const ctx = c.getContext("2d");
-    if (!ctx) return fallback;
-    ctx.fillStyle = css;
-    ctx.fillRect(0, 0, 1, 1);
-    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-    return "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
-  } catch {
-    return fallback;
-  }
-}
-
 /** The terminal's palette follows the app's mode; ANSI colours are tuned per mode. */
 export function themeFor(mode: "dark" | "light") {
-  const fg = toHex(cssVar("--foreground"), mode === "dark" ? "#e6e6e6" : "#222222");
+  const fg = terminalColorHex(cssVar("--foreground"), mode === "dark" ? "#e6e6e6" : "#222222");
   // The page surface, opaque: programs that query the background (OSC 11)
   // then learn the real mode instead of a transparent black.
-  const bg = toHex(cssVar("--surface-page"), mode === "dark" ? "#1c1c1f" : "#f7f7f5");
+  const bg = terminalColorHex(cssVar("--surface-page"), mode === "dark" ? "#1c1c1f" : "#f7f7f5");
   return mode === "dark"
     ? {
         background: bg,
@@ -114,6 +97,7 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
     macOptionIsMeta: true,
   });
   const fit = new FitAddon();
+  term.loadAddon(new TerminalBufferCleanup());
   term.loadAddon(fit);
   term.open(el);
   return { el, term, fit };

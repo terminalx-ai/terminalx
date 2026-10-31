@@ -206,3 +206,37 @@ fn every_terminal_turn_expires_visible_approval_cards() {
         assert!(client.asks.is_empty());
     }
 }
+
+/// #667: a failed turn whose model request Codex was refused for ends as a
+/// refused sign-in; any other failure does not.
+#[test]
+fn a_turn_refused_for_its_sign_in_ends_with_auth_failed() {
+    let ended = |error: Value| {
+        let (mut client, _) = ready("hello");
+        turn(&mut client);
+        let actions = client.handle(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"failed","error":error}}}).to_string()).unwrap();
+        actions.into_iter().find_map(|action| match action { Action::Emit(Payload::TurnCompleted { auth_failed, final_text, .. }) => Some((auth_failed, final_text)), _ => None }).unwrap()
+    };
+    for refused in [
+        json!({"message": "unexpected status 401 Unauthorized", "codexErrorInfo": "unauthorized"}),
+        json!({"message": "request failed", "codexErrorInfo": {"responseStreamConnectionFailed": {"httpStatusCode": 401}}}),
+        json!({"message": "account/read failed: workspace routing discovery unauthorized (401)"}),
+        json!({"message": "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again."}),
+    ] {
+        assert!(ended(refused.clone()).0, "{refused}");
+    }
+    for other in [
+        json!({"message": "stream disconnected before completion", "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": null}}}),
+        json!({"message": "error sending request: connection refused", "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 503}}}),
+        json!({"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"}),
+    ] {
+        let (auth_failed, final_text) = ended(other.clone());
+        assert!(!auth_failed, "{other}");
+        assert_eq!(final_text.as_deref(), other["message"].as_str());
+    }
+    // A turn that ended well is never a refusal, whatever it says.
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    let actions = client.handle(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed","error":{"codexErrorInfo":"unauthorized"}}}}"#).unwrap();
+    assert!(actions.iter().any(|action| matches!(action, Action::Emit(Payload::TurnCompleted { auth_failed: false, .. }))));
+}

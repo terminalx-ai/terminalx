@@ -235,6 +235,66 @@ idle suspend, and the desktop shows it as "Needs sign-in", not "Working". A
 first prompt for such an agent fails with the launch category
 `agent-sign-in-required` instead of being typed into a sign-in screen.
 
+`state` is also `sign-in-required` (#667) when the provider refused the
+login: the server's state for a login it found revoked (terminalx-saas
+#241), or, until the server has its say, the runtime's own for a grant an
+agent here was refused with (`reason: provider-refused`). That one is known
+for certain and is said whether or not the last sync went well; it goes when
+a grant of another version or epoch arrives, when the server stops calling the
+credential connected, or when the provider answers an agent started on that
+grant after all (a turn that works, or Codex past its account check). The desktop then shows "<Agent> sign-in for <organization>
+was revoked or expired" over the tab, with **Sign in again** for an owner or
+admin (see "When the provider refuses a login" below).
+
+### When the provider refuses a login (#667)
+
+A login revoked at the provider (an owner deleting its sessions in their
+ChatGPT account, say) keeps answering 401 long before its access token
+expires. Codex then exits about two seconds into every start, with its
+reason only in the terminal:
+
+```
+account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)
+```
+
+- **Recognised.** A CLI the app launched that exits before it ever got
+  going (no `SessionStart` hook, no transcript record of this launch) is a
+  failure to start, followed or not: the tab stays the agent's and is not
+  turned into a terminal. Its last lines (`recovery::EarlyExit`) say whether
+  the provider refused its sign-in: a 401 status, "unauthorized", "sign in
+  again", a token that could not be refreshed, or Claude Code's own words
+  ("Please run /login", "OAuth token has expired"). A refresh that failed for
+  want of a network, a 429 or a 5xx is not a refusal. Experimental Codex
+  stdio reads the same from a handshake error or its startup stderr, and a
+  failed turn from `codexErrorInfo: "unauthorized"` or a 401 status. The
+  turn then ends `error` with `authFailed: true` and the tab's recovery is
+  `signed_out`. Claude Code's refusal mid-turn (a record classified signed
+  out, then its `Stop` hook) also ends the turn with `authFailed: true`.
+- **Said.** The turn's end (and a launch error, such as a Codex too old for
+  `--no-daemon`) carries `detail`: the last line, plain text, with tokens,
+  `key=value` secrets, addresses, URL paths and queries and home folders cut
+  out, at most 240 characters (`recovery::detail`, applied again by
+  `sanitize`). The chat shows it under the allowlisted message. Mid-turn
+  provider text never becomes a `detail`.
+- **Reported.** A turn that ends with `authFailed` on a session launched with
+  an organization grant calls `cloud_grants::reject_launch`, which marks the
+  grant refused and wakes the grant loop. The loop sends, before its next
+  fetch, `POST /v1/cloud-workspace-bootstrap/agent-grant-rejected` with the
+  runtime credential:
+
+  ```json
+  { "v": 1, "provider": "codex", "credentialId": "…", "grantId": "…", "version": 3, "epoch": 7, "reason": "provider-refused" }
+  ```
+
+  The server forces a refresh and either issues a grant of a new version or
+  epoch, or marks the credential `sign-in-required` and stops issuing grants
+  for it. A transient failure is sent again on a later turn; a 404 (a server
+  from before) is not. While the login stands refused, by the runtime's mark
+  or the server's `sign-in-required`, the loop fetches at least every 30 s,
+  and a launch for that agent first asks the loop for a sync and waits up to
+  5 s for it, so a login signed in again reaches the same tab without a new
+  session or a workspace restart.
+
 A grant or configuration sync that changes this answer for any provider (the
 first sync after a start or resume, a login removed or connected again, a key
 set or removed) broadcasts `session.tabs` again, so a desktop that read the

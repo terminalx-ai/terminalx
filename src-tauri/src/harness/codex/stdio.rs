@@ -263,7 +263,14 @@ impl Stdio {
                         Some("interrupted") => TurnStatus::Aborted,
                         _ => bail!("Unknown Codex terminal turn status"),
                     };
-                    out.push(Action::Emit(Payload::TurnCompleted { status, final_text: p["turn"]["error"]["message"].as_str().map(str::to_owned), usage: None, duration_ms: None, head: None, auth_failed: false }));
+                    let error = &p["turn"]["error"];
+                    // A turn's error is about its model request, so a 401
+                    // there is Codex's own sign-in being refused (#667).
+                    let auth_failed = status == TurnStatus::Error
+                        && (error["codexErrorInfo"] == "unauthorized"
+                            || error["codexErrorInfo"].as_object().is_some_and(|info| info.values().any(|detail| detail["httpStatusCode"] == 401))
+                            || error["message"].as_str().is_some_and(crate::recovery::sign_in_refused));
+                    out.push(Action::Emit(Payload::TurnCompleted { status, final_text: error["message"].as_str().map(str::to_owned), usage: None, duration_ms: None, head: None, auth_failed, detail: None }));
                 }
             }
             "item/agentMessage/delta" => {
@@ -300,7 +307,7 @@ impl Stdio {
                 if self.asks.remove(&key).is_some() { out.push(Action::Emit(Payload::PermissionDecided { request_id: key, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true })); }
             }
             "error" if p["willRetry"].as_bool() == Some(true) => out.push(Action::Emit(Payload::Status { text: "Codex is retrying its request".into() })),
-            "error" => out.push(Action::Emit(Payload::Error { message: p["error"]["message"].as_str().unwrap_or("Codex reported an error").to_owned(), fatal: false })),
+            "error" => out.push(Action::Emit(Payload::Error { message: p["error"]["message"].as_str().unwrap_or("Codex reported an error").to_owned(), fatal: false, detail: None })),
             _ => {},
         }
         Ok(out)
@@ -319,7 +326,7 @@ impl Stdio {
         if !matches!(method.as_str(), "item/commandExecution/requestApproval" | "item/fileChange/requestApproval") {
             // Fail closed for protocol extensions; never synthesize consent.
             self.answers.insert(key.clone(), Ask { id: id.clone(), turn, method: method.clone() });
-            return Ok(vec![Action::Write(Outbound { line: json!({"id":id,"error":{"code":-32601,"message":"This request is not supported by TerminalX experimental stdio"}}).to_string(), validity: WriteValidity::Reply(key) }), Action::Emit(Payload::Error { message: format!("Experimental Codex stdio cannot handle {method}. No approval was granted."), fatal: false })]);
+            return Ok(vec![Action::Write(Outbound { line: json!({"id":id,"error":{"code":-32601,"message":"This request is not supported by TerminalX experimental stdio"}}).to_string(), validity: WriteValidity::Reply(key) }), Action::Emit(Payload::Error { message: format!("Experimental Codex stdio cannot handle {method}. No approval was granted."), fatal: false, detail: None })]);
         }
         if let Some(decisions) = p.get("availableDecisions").and_then(Value::as_array) {
             ensure!(decisions.iter().any(|d| d == "accept") && decisions.iter().any(|d| d == "decline"), "Codex offers approval choices this experimental client cannot represent");

@@ -2361,6 +2361,15 @@ pub async fn send_message(
         .map_err(err)?
 }
 
+/// Press Enter in a new session for the handoff left in its input (#662).
+#[tauri::command]
+pub async fn submit_waiting_prompt(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64) -> CmdResult<bool> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.submit_waiting(&session_id, &tab_id, seq).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 #[tauri::command]
 pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
     state.sessions().map_err(err)?.interrupt(&session_id, &tab_id).map_err(err)

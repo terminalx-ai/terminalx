@@ -127,7 +127,10 @@ export type Payload =
       usage?: Usage;
       durationMs?: number;
       head?: string;
+      /** The agent's provider refused its sign-in (#667). */
       authFailed: boolean;
+      /** A failed turn's last line from the agent itself, when it exited before it ever worked: bounded and redacted by the runtime. */
+      detail?: string;
     }
   | { type: "settings_changed"; model?: string; effort?: string; permissionMode?: string }
   | {
@@ -197,7 +200,8 @@ export type Payload =
    * the conversation the tab began with.
    */
   | { type: "conversation"; id?: string; harness: string; resumed?: boolean }
-  | { type: "error"; message: string; fatal: boolean }
+  /** `detail`: what a launch that was refused said (Codex too old, not installed), bounded and redacted by the runtime (#667). */
+  | { type: "error"; message: string; fatal: boolean; detail?: string }
   | { type: "unknown"; kind: string };
 
 export type PayloadType = Payload["type"];
