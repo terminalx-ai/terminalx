@@ -265,6 +265,28 @@ note (one entry per tab, `seq` being the `UserMessage` it became), and the
 phone leaves the note out of that tab's conversation. Phones before #541
 posted and then promoted every message without that record; the phone hides
 such a note when a prompt with the same text follows it within 30 seconds.
+
+The phone learns that a send arrived only from the host's reply, and a
+connection that drops first loses it even when the host has the message
+(#675). So the phone gives each draft a `clientMessageId` (a UUID) the first
+time it is sent, and sends the same draft again under the same id; any change
+to where it goes, its text or its attachments makes it another message under a
+new id, and a send that succeeds retires the id. The id is saved with the
+draft, so a retry after the app was closed still carries it. A host that
+reports `sendIds: 1` in `sync.capabilities` accepts the field on `session.send`
+and `chat.post`; the phone sends it to no other host, since every params type
+refuses fields it does not know.
+
+- `session.send`: the host keeps its reply (`{ status, queued }`) for each
+  tab and id in `mobile-sends.json`, for 24 hours and at most 1,000 replies. A
+  repeat returns that reply and sends nothing. One that arrives while the
+  first is still being sent waits up to 20 seconds for its reply (the phone
+  gives up after 30) and is otherwise refused with a message to try again in a
+  moment. A send that failed is not kept; sending it again tries it in full.
+- `chat.post`: the note records the id, and the same draft posted again
+  returns that note, promotions included, without adding another.
+- The same id with other text or attachments is refused, never answered with
+  the reply to a different message.
 Presence aggregates multiple surfaces belonging to the same verified person.
 The host must still have `multiplayer.use`, and the session must have passed the
 Bypass-mode share gate.

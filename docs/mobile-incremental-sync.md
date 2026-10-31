@@ -1,8 +1,10 @@
 # Mobile incremental conversation sync (#347)
 
 The phone renders its existing AsyncStorage transcript before waiting for the
-connection. `sync.capabilities` advertises `transcript: 1` and
-`conditionalLists: 1`; a refusal means the original bounded-tail protocol. No
+connection. `sync.capabilities` advertises `transcript: 1`,
+`conditionalLists: 1` and `sendIds: 1` (a draft's `clientMessageId` on
+`session.send` and `chat.post`, #675, see [MOBILE.md](MOBILE.md)); a refusal
+means the original bounded-tail protocol. No
 new parameters are sent to an older host. Capabilities are shared by concurrent
 callers and renegotiated on a new connection; list versions are cleared when
 switching hosts.

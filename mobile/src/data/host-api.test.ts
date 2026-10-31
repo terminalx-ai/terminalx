@@ -86,6 +86,50 @@ describe("mobile chat sends", () => {
   });
 });
 
+describe("a draft's id (#675)", () => {
+  const note = { id: "note-1", body: "hello", createdAt: 1, author: { userId: "user-1" } };
+  // A Mac answering `sync.capabilities` with `capabilities`, and every send and note as sent.
+  const mac = (capabilities: unknown) => vi.fn(async (method: string) => method === "sync.capabilities"
+    ? capabilities
+    : { ok: true, value: method === "chat.post" ? { status: "sent", message: note } : { status: "sent", queued: false } });
+  // Older Macs refuse fields they do not know: one predating the id, and one predating capabilities.
+  const older = [{ ok: true, value: { transcript: 1, conditionalLists: 1 } }, { ok: false, refusal: { code: "forbidden", message: "unsupported" } }];
+
+  it("goes with a message for the agent only to a Mac that understands it", async () => {
+    const current = mac({ ok: true, value: { transcript: 1, conditionalLists: 1, sendIds: 1 } });
+    await expect(hostApi(current).sendSession("tab-1", "hello", [], "draft-1")).resolves.toEqual({ sent: true, queued: false });
+    expect(current).toHaveBeenLastCalledWith("session.send", { tabId: "tab-1", text: "hello", clientMessageId: "draft-1" });
+    for (const capabilities of older) {
+      const request = mac(capabilities);
+      await expect(hostApi(request).sendSession("tab-1", "hello", [], "draft-1")).resolves.toEqual({ sent: true, queued: false });
+      expect(request).toHaveBeenLastCalledWith("session.send", { tabId: "tab-1", text: "hello" });
+    }
+  });
+
+  it("goes with a worktree note only to a Mac that understands it", async () => {
+    const current = mac({ ok: true, value: { sendIds: 1 } });
+    await expect(hostApi(current).postNote("worktree", "hello", "draft-1")).resolves.toEqual({ sent: true, note });
+    expect(current).toHaveBeenLastCalledWith("chat.post", { worktreeId: "worktree", body: "hello", clientMessageId: "draft-1" });
+    for (const capabilities of older) {
+      const request = mac(capabilities);
+      await expect(hostApi(request).postNote("worktree", "hello", "draft-1")).resolves.toEqual({ sent: true, note });
+      expect(request).toHaveBeenLastCalledWith("chat.post", { worktreeId: "worktree", body: "hello" });
+    }
+  });
+
+  it("asks what the Mac understands once per connection", async () => {
+    const request = mac({ ok: true, value: { sendIds: 1 } });
+    const api = hostApi(request);
+    await api.sendSession("tab-1", "one", [], "draft-1");
+    await api.postNote("worktree", "two", "draft-2");
+    expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(1);
+    // A Mac updated while the phone was away is asked again after the reconnect.
+    api.resetConnection();
+    await api.sendSession("tab-1", "three", [], "draft-3");
+    expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(2);
+  });
+});
+
 // PRO-87
 describe("the computer's name and unpairing", () => {
   it("asks the computer what it is called, and takes no answer from an older desktop", async () => {

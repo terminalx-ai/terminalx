@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::model::{AccountMirror, DeviceProvenance};
+use super::send_ids::{SendIds, SendKey, ID_REUSED};
 use super::wire::{megabytes, ReplyLimits, Transport, Wire};
 use super::{DeviceEntry, DeviceScope, PairingManager};
 use crate::events::{AgentEvent, Payload};
@@ -62,6 +63,9 @@ pub(super) struct MobileRuntime {
     notification_epoch: String,
     notification_seq: std::sync::atomic::AtomicU64,
     notes: Mutex<()>,
+    /// Shared by every connection: the retry of a send whose reply was lost
+    /// comes over the connection that replaced the one that dropped (#675).
+    send_ids: SendIds,
 }
 
 impl MobileRuntime {
@@ -73,6 +77,7 @@ impl MobileRuntime {
             notification_epoch: Uuid::new_v4().to_string(),
             notification_seq: std::sync::atomic::AtomicU64::new(0),
             notes: Mutex::new(()),
+            send_ids: SendIds::new(),
         }
     }
 
@@ -317,7 +322,7 @@ pub(super) async fn dispatch(
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let sink = manager.sink.get().cloned();
     let result = match method {
-        "sync.capabilities" => no_params(&params).map(|_| json!({ "transcript": 1, "conditionalLists": 1 })),
+        "sync.capabilities" => no_params(&params).map(|_| capabilities()),
         "transport.negotiate" => parse_params(params).map(|params| negotiate(connection, params)),
         "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
@@ -330,7 +335,7 @@ pub(super) async fn dispatch(
             parse_params(params).and_then(|params: UnsubscribeParams| Ok(json!({ "removed": connection.unsubscribe(&params.subscription_id)? })))
         }
         "session.send" => {
-            require_driver(device).and_then(|_| parse_params(params).and_then(|params| send_session(connection, params)))
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| send_session(manager, connection, params)))
         }
         "permission.respond" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_permission(connection, params)))
@@ -354,6 +359,14 @@ pub(super) async fn dispatch(
         _ => return None,
     };
     Some(result)
+}
+
+/// What this Mac understands beyond the first phone protocol. A phone sends
+/// a field only to a Mac that names it here: every params type refuses
+/// fields it does not know.
+fn capabilities() -> Value {
+    // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
+    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1 })
 }
 
 fn request_id(request: &Value) -> &str {
@@ -814,12 +827,46 @@ struct SessionSendParams {
     text: String,
     #[serde(default)]
     attachments: Vec<RemoteAttachmentInput>,
+    /// The phone's id for this draft; sent only to a Mac with `sendIds` (#675).
+    #[serde(default)]
+    client_message_id: Option<String>,
 }
 
-fn send_session(connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
-    let (session, _) = find_tab(&params.tab_id)?;
-    let outcome = send_attributed(connection, &session.id, &params.tab_id, &params.text, params.attachments)?;
+fn send_session(manager: &PairingManager, connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
+    let SessionSendParams { tab_id, text, attachments, client_message_id } = params;
+    let Some(id) = checked_message_id(client_message_id)? else {
+        return deliver(connection, &tab_id, &text, attachments);
+    };
+    let digest = send_digest(&text, &attachments);
+    let key = SendKey { tab_id: tab_id.clone(), client_message_id: id };
+    manager.mobile.send_ids.once(key, digest, || deliver(connection, &tab_id, &text, attachments))
+}
+
+fn deliver(connection: &MobileConnection, tab_id: &str, text: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<Value> {
+    let (session, _) = find_tab(tab_id)?;
+    let outcome = send_attributed(connection, &session.id, tab_id, text, attachments)?;
     Ok(json!({ "status": "sent", "queued": outcome.queued }))
+}
+
+/// The id a phone gave a message (#675): a UUID, held to what fits a key.
+fn checked_message_id(id: Option<String>) -> Result<Option<String>> {
+    match id {
+        Some(id) if !(8..=128).contains(&id.len()) || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') => {
+            bail!("invalid client message id")
+        }
+        id => Ok(id),
+    }
+}
+
+/// What a send carries, as the agent gets it: trimmed text and every
+/// attachment whole. Equal for a repeat, different for any edit.
+fn send_digest(text: &str, attachments: &[RemoteAttachmentInput]) -> String {
+    let attachments: Vec<_> = attachments
+        .iter()
+        .map(|attachment| json!([attachment.media_type, attachment.name, attachment.data]))
+        .collect();
+    let canonical = serde_json::to_vec(&json!([text.trim(), attachments])).expect("a JSON value serializes");
+    format!("{:x}", Sha256::digest(canonical))
 }
 
 #[derive(Deserialize)]
@@ -848,6 +895,10 @@ struct ChatNote {
     /// leaves the note out of that tab's conversation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     promoted_to: Vec<NotePromotion>,
+    /// The phone's id for the draft this note was posted from (#675). The
+    /// same draft posted again finds this note instead of adding another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -900,11 +951,15 @@ fn list_notes(manager: &PairingManager, params: ChatListParams) -> Result<Value>
 struct ChatPostParams {
     worktree_id: String,
     body: String,
+    /// The phone's id for this draft; sent only to a Mac with `sendIds` (#675).
+    #[serde(default)]
+    client_message_id: Option<String>,
 }
 
 fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostParams) -> Result<Value> {
     index::get(&params.worktree_id)?;
     let body = validate_note(&params.body)?;
+    let client_message_id = checked_message_id(params.client_message_id)?;
     let author = effective_user(device)?;
     let note = ChatNote {
         id: Uuid::now_v7().to_string(),
@@ -912,11 +967,17 @@ fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostPar
         created_at: Utc::now().timestamp_millis(),
         author,
         promoted_to: Vec::new(),
+        client_message_id,
     };
     {
         let _guard = manager.mobile.notes.lock().unwrap();
         let mut file = load_notes()?;
         let notes = file.sessions.entry(params.worktree_id.clone()).or_default();
+        // Found under the same lock that adds notes: two tries of one draft
+        // cannot both miss each other.
+        if let Some(earlier) = posted_before(notes, &note)? {
+            return Ok(json!({ "status": "sent", "message": earlier }));
+        }
         notes.push(note.clone());
         if notes.len() > NOTES_LIMIT {
             notes.drain(..notes.len() - NOTES_LIMIT);
@@ -928,6 +989,20 @@ fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostPar
         "params": { "worktreeId": params.worktree_id },
     }));
     Ok(json!({ "status": "sent", "message": note }))
+}
+
+/// The note this draft was already posted as, if it was (#675): returned as
+/// it is now, promotions included, as if the first reply had arrived. The id
+/// with other text is refused rather than answered with the wrong note.
+fn posted_before<'a>(notes: &'a [ChatNote], note: &ChatNote) -> Result<Option<&'a ChatNote>> {
+    let Some(id) = &note.client_message_id else { return Ok(None) };
+    let Some(earlier) = notes.iter().find(|earlier| earlier.client_message_id.as_ref() == Some(id)) else {
+        return Ok(None);
+    };
+    if earlier.body != note.body {
+        bail!(ID_REUSED);
+    }
+    Ok(Some(earlier))
 }
 
 #[derive(Deserialize)]
@@ -1875,6 +1950,79 @@ mod tests {
     }
 
     #[test]
+    fn sends_and_notes_take_a_message_id_only_this_mac_reports_it_understands() {
+        // A phone sends the id only after `sync.capabilities` names it (#675).
+        assert_eq!(capabilities()["sendIds"], 1);
+        let id = "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11";
+        let send: SessionSendParams = serde_json::from_value(json!({ "tabId": "tab", "text": "hello", "clientMessageId": id })).unwrap();
+        assert_eq!(send.client_message_id.as_deref(), Some(id));
+        let post: ChatPostParams = serde_json::from_value(json!({ "worktreeId": "worktree", "body": "hello", "clientMessageId": id })).unwrap();
+        assert_eq!(post.client_message_id.as_deref(), Some(id));
+        // Older phones send neither; other unknown fields are still refused.
+        let old: ChatPostParams = serde_json::from_value(json!({ "worktreeId": "worktree", "body": "hello" })).unwrap();
+        assert_eq!(old.client_message_id, None);
+        assert!(serde_json::from_value::<SessionSendParams>(json!({ "tabId": "tab", "text": "hello", "messageId": id })).is_err());
+
+        assert_eq!(checked_message_id(Some(id.into())).unwrap().as_deref(), Some(id));
+        assert_eq!(checked_message_id(None).unwrap(), None);
+        for bad in ["short", &"x".repeat(129), "has space in it", "../../etc/passwd"] {
+            assert!(checked_message_id(Some(bad.into())).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_send_digest_matches_a_repeat_and_changes_with_any_edit() {
+        let attachment = |name: &str, data: &[u8]| RemoteAttachmentInput {
+            media_type: "image/png".into(),
+            data: general_purpose::STANDARD.encode(data),
+            name: Some(name.into()),
+        };
+        let first = send_digest("Run the tests", &[attachment("a.png", &[1])]);
+        // The agent gets trimmed text: surrounding space is the same message.
+        assert_eq!(first, send_digest("  Run the tests\n", &[attachment("a.png", &[1])]));
+        for edited in [
+            send_digest("Run the tests again", &[attachment("a.png", &[1])]),
+            send_digest("Run the tests", &[]),
+            send_digest("Run the tests", &[attachment("a.png", &[2])]),
+            send_digest("Run the tests", &[attachment("b.png", &[1])]),
+            send_digest("Run the tests", &[attachment("a.png", &[1]), attachment("a.png", &[1])]),
+        ] {
+            assert_ne!(first, edited);
+        }
+    }
+
+    #[test]
+    fn a_note_posted_again_is_found_with_its_promotions_and_not_added_twice() {
+        let note = |id: &str, body: &str, client: Option<&str>| ChatNote {
+            id: id.into(),
+            body: body.into(),
+            created_at: 1,
+            author: NoteAuthor { user_id: "user-1".into(), display_name: "Paresh".into() },
+            promoted_to: Vec::new(),
+            client_message_id: client.map(str::to_owned),
+        };
+        let mut first = note("note-1", "Deploying at 5", Some("draft-1"));
+        first.promoted_to.push(NotePromotion { tab_id: "claude".into(), seq: 4 });
+        let notes = vec![note("note-0", "Deploying at 5", None), first];
+
+        let repeat = note("note-2", "Deploying at 5", Some("draft-1"));
+        let found = posted_before(&notes, &repeat).unwrap().expect("the note posted first");
+        assert_eq!(found.id, "note-1");
+        assert_eq!(found.promoted_to, vec![NotePromotion { tab_id: "claude".into(), seq: 4 }]);
+
+        // A new draft, or a phone that sends no id, adds a note as before.
+        assert!(posted_before(&notes, &note("note-3", "Deploying at 5", Some("draft-2"))).unwrap().is_none());
+        assert!(posted_before(&notes, &note("note-4", "Deploying at 5", None)).unwrap().is_none());
+        // The same id with other text is refused, not answered with this note.
+        let error = posted_before(&notes, &note("note-5", "Deploying at 6", Some("draft-1"))).unwrap_err();
+        assert_eq!(error.to_string(), ID_REUSED);
+
+        // Older phones list notes too; one posted without an id carries no new key.
+        assert_eq!(serde_json::to_value(&notes[0]).unwrap().get("clientMessageId"), None);
+        assert_eq!(serde_json::to_value(&notes[1]).unwrap()["clientMessageId"], "draft-1");
+    }
+
+    #[test]
     fn notes_saved_before_promotions_were_recorded_still_load_and_list_unchanged() {
         let saved: NotesFile = serde_json::from_value(json!({ "sessions": { "worktree": [{
             "id": "note-1",
@@ -1897,6 +2045,7 @@ mod tests {
             created_at: 1,
             author: NoteAuthor { user_id: "user-1".into(), display_name: "Paresh".into() },
             promoted_to: Vec::new(),
+            client_message_id: None,
         };
         let mut notes = vec![note("a"), note("b"), note("c")];
         let (a, c, gone) = ("a".to_string(), "c".to_string(), "gone".to_string());
