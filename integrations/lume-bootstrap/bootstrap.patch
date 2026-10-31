@@ -576,7 +576,7 @@
 +}
 --- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXBootstrapFiles.swift
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,173 @@
 +import Foundation
 +import Darwin
 +
@@ -649,7 +649,8 @@
 +        try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json",
 +            "enrollment.key", "enrollment.json", "stop-requested.json",
 +            "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json",
-+            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json"].contains(name))
++            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json",
++            "retirement-acknowledgement.json", "retirement-report.json"].contains(name))
 +        try check()
 +        let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
 +        try txRequire(child >= 0)
@@ -751,7 +752,7 @@
 +}
 --- /dev/null
 +++ b/libs/lume/src/TerminalXBootstrap/TerminalXBootstrapOwner.swift
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,337 @@
 +import Foundation
 +import Darwin
 +
@@ -948,7 +949,8 @@
 +        let clientNonce = try txString(request, "clientNonce")
 +        _ = try txHex(clientNonce)
 +        try txRequire(UUID(uuidString: requestId) != nil && ["observe", "accountReceipt", "keyReceipt", "guestObservation", "enrollment", "stop",
-+            "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer", "hostKeyObservation"].contains(action)
++            "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer", "hostKeyObservation",
++            "retirementAcknowledgement", "retirementReport"].contains(action)
 +            && txString(request, "bindingDigest") == launch.bindingDigest)
 +        let nonce = txNonce()
 +        let parts = [launch.bindingDigest, launch.binding.ownerEpoch, action, requestId, clientNonce, nonce]
@@ -964,7 +966,7 @@
 +        // Version 3 has no share trust path: only enrollment and an owner-mediated
 +        // stop are served, and neither is served for earlier versions.
 +        let enrolledOnly = ["enrollment", "stop", "accountObservation", "confirmAccount", "accountAnswer", "grantKey", "keyAnswer",
-+            "hostKeyObservation"]
++            "hostKeyObservation", "retirementAcknowledgement", "retirementReport"]
 +        try txRequire(launch.binding.version == 3
 +            ? (["observe"] + enrolledOnly).contains(action) : !enrolledOnly.contains(action))
 +        switch action {
@@ -983,6 +985,8 @@
 +            wake?()
 +        case "keyAnswer": receipt = try launch.pins["operation"]!.receipt("key-install-result.json")
 +        case "hostKeyObservation": receipt = try launch.pins["operation"]!.receipt("host-key-observation.json")
++        case "retirementAcknowledgement": receipt = try launch.pins["operation"]!.receipt("retirement-acknowledgement.json")
++        case "retirementReport": receipt = try launch.pins["operation"]!.receipt("retirement-report.json")
 +        case "accountReceipt": receipt = try launch.pins["output"]!.receipt("account-receipt.json")
 +        case "keyReceipt": receipt = try launch.pins["output"]!.receipt("public-key-receipt.json")
 +        default: receipt = Data()

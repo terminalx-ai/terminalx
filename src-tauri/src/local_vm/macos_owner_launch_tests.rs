@@ -121,7 +121,7 @@ impl Fixture {
         let op = self.op();
         private(
             &op.join("fixture-control.json"),
-            &canonical(&json!({"requests":128,"fault":fault})).unwrap(),
+            &canonical(&json!({"requests":512,"fault":fault})).unwrap(),
         );
         private(&op.join("fixture-view.json"),&canonical(&json!({"running":true,"shares":[{"name":"input","path":op.join("input"),"readOnly":true},{"name":"receipt","path":op.join("receipt"),"readOnly":false}]})).unwrap());
     }
@@ -942,6 +942,131 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     assert!(format!("{error:#}").contains("never replaced"), "{error:#}");
     assert_eq!(ledger(&f)["trustReceipt"], record["trustReceipt"]);
     assert_eq!(crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap().trust.host_key, host_key);
+}
+
+/// The owner's stage-9 records as it journals them for `observation`, under an
+/// enrollment whose challenge is `challenge`.
+fn retirement_records(reference: &Reference, observation: &[u8], challenge: &str, stage: &str) -> (Vec<u8>, Vec<u8>) {
+    let observed: Value = serde_json::from_slice(observation).unwrap();
+    let report = canonical(&json!({"hostKey": {"keyReference": observed["keyReference"], "publicKey": observed["hostKey"]}})).unwrap();
+    let body = json!({"retire": {"challengeSha256": challenge, "hostKeySha256": journal::digest(&report),
+        "observationSha256": journal::digest(observation)}});
+    let digest = journal::digest(&canonical(&body).unwrap());
+    let binding = journal::digest(&reference.raw);
+    let acknowledgement = canonical(&json!({"version": 1, "bindingDigest": binding, "ownerEpoch": reference.binding.owner_epoch,
+        "challengeSha256": challenge, "hostKeySha256": body["retire"]["hostKeySha256"],
+        "observationSha256": body["retire"]["observationSha256"], "acknowledgementSha256": digest,
+        "trustAccepted": false, "ready": false})).unwrap();
+    let reported = canonical(&json!({"version": 1, "bindingDigest": binding, "ownerEpoch": reference.binding.owner_epoch,
+        "acknowledgementSha256": digest, "stage": stage, "helperReported": true, "verified": false,
+        "trustAccepted": false, "ready": false})).unwrap();
+    (acknowledgement, reported)
+}
+/// Every regular file under `root` with its bytes, to show reads change nothing.
+fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if meta.is_dir() {
+            found.extend(snapshot(&path));
+        } else if meta.is_file() {
+            found.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_retirement_shows_only_the_helpers_unverified_report_for_this_session_and_observation() {
+    let f = Fixture::new();
+    let (reference, result) = installed(&f, 0);
+    let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
+        "parentConversation": reference.binding.parent_conversation});
+    let bootstrap = || super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap()["bootstraps"][0].clone();
+    let unverified = |mut value: Value| {
+        for k in ["verified", "trustAccepted", "ready"] {
+            value[k] = json!(false);
+        }
+        value
+    };
+    assert_eq!(bootstrap()["retirement"], Value::Null, "nothing before the owner observed a host key");
+    let (observation, _) = host_key_observation(&f, &reference, &result, 9);
+    assert_eq!(bootstrap()["retirement"], unverified(json!({"stage": "awaitingAcknowledgement"})));
+
+    // Records that are not exactly this session's, report's and observation's never count.
+    let challenge = "c".repeat(64);
+    let (acknowledgement, _) = retirement_records(&reference, &observation, &challenge, "retired");
+    let digest = serde_json::from_slice::<Value>(&acknowledgement).unwrap()["acknowledgementSha256"].clone();
+    let (older, _) = host_key_observation(&f, &reference, &result, 10);
+    let (stale, _) = retirement_records(&reference, &older, &challenge, "retired");
+    replace(&f.op().join("host-key-observation.json"), &observation);
+    let changed = |change: fn(&mut Value)| {
+        let mut value: Value = serde_json::from_slice(&acknowledgement).unwrap();
+        change(&mut value);
+        canonical(&value).unwrap()
+    };
+    let invalid = [
+        ("another session", retirement_records(&reference, &observation, &"e".repeat(64), "retired").0),
+        ("an earlier observation", stale),
+        ("another report", changed(|v| v["hostKeySha256"] = json!("f".repeat(64)))),
+        ("another digest", changed(|v| v["acknowledgementSha256"] = json!("0".repeat(64)))),
+        ("another binding", changed(|v| v["bindingDigest"] = json!("1".repeat(64)))),
+        ("claimed trust", changed(|v| v["trustAccepted"] = json!(true))),
+        ("extra field", changed(|v| v["verified"] = json!(true))),
+        ("not JSON", b"{".to_vec()),
+    ];
+    for (name, bytes) in invalid {
+        replace(&f.op().join("retirement-acknowledgement.json"), &bytes);
+        let retirement = bootstrap()["retirement"].clone();
+        assert_eq!(retirement["stage"], "invalidAcknowledgement", "{name}: {retirement}");
+        assert_eq!((&retirement["verified"], &retirement["trustAccepted"], &retirement["ready"]), (&json!(false), &json!(false), &json!(false)));
+        assert!(retirement.get("reportedOutcome").is_none(), "{name}");
+    }
+    replace(&f.op().join("retirement-acknowledgement.json"), &acknowledgement);
+    assert_eq!(bootstrap()["retirement"], unverified(json!({"stage": "acknowledged", "acknowledgementSha256": digest})));
+
+    // Each reported outcome is shown as the helper's own unverified claim.
+    for stage in ["retired", "refused", "outcomeUnknown"] {
+        let (_, reported) = retirement_records(&reference, &observation, &challenge, stage);
+        replace(&f.op().join("retirement-report.json"), &reported);
+        let before = snapshot(&f.root);
+        let status = bootstrap();
+        assert_eq!(status["retirement"], unverified(json!({"stage": "helperReported", "acknowledgementSha256": digest,
+            "reportedOutcome": stage, "helperReported": true})), "{stage}");
+        assert_eq!((&status["hostKey"]["stage"], &status["hostKey"]["sshVerified"]), (&json!("awaitingReview"), &json!(false)));
+        assert_eq!((&status["trustAccepted"], &status["ready"]), (&json!(false), &json!(false)));
+        assert_eq!(snapshot(&f.root), before, "{stage}: reading status writes nothing");
+    }
+    let (_, reported) = retirement_records(&reference, &observation, &challenge, "retired");
+    let changed = |change: fn(&mut Value)| {
+        let mut value: Value = serde_json::from_slice(&reported).unwrap();
+        change(&mut value);
+        canonical(&value).unwrap()
+    };
+    let invalid = [
+        ("another acknowledgement", changed(|v| v["acknowledgementSha256"] = json!("0".repeat(64)))),
+        ("unknown stage", changed(|v| v["stage"] = json!("removed"))),
+        ("claimed verification", changed(|v| v["verified"] = json!(true))),
+        ("not the helper's", changed(|v| v["helperReported"] = json!(false))),
+        ("claimed readiness", changed(|v| v["ready"] = json!(true))),
+        ("extra field", changed(|v| v["removed"] = json!(["key"]))),
+    ];
+    for (name, bytes) in invalid {
+        replace(&f.op().join("retirement-report.json"), &bytes);
+        let retirement = bootstrap()["retirement"].clone();
+        assert_eq!(retirement["stage"], "invalidReport", "{name}: {retirement}");
+        assert!(retirement.get("reportedOutcome").is_none(), "{name}");
+        assert_eq!(retirement["verified"], false, "{name}");
+    }
+    // The personalization ledger stays short of `trustObserved`: no account or
+    // trust receipt was written by any of these reads.
+    let record: Value = serde_json::from_slice(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap()).unwrap();
+    let target: crate::local_vm::macos_personalization::Target = serde_json::from_value(record["intent"]["target"].clone()).unwrap();
+    assert_ne!(record["status"], "trustObserved");
+    assert!(crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).is_err(), "a reported retirement is never trust");
 }
 
 #[test]

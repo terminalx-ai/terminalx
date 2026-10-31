@@ -143,6 +143,39 @@ describe("guest account confirmation", () => {
     expect(screen.queryByRole("button", { name: "Pin host key" })).toBeNull();
   });
 
+  it("shows the setup helper's retirement only as the owner's record or the helper's unverified claim", async () => {
+    const installed = { chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed" as const, accountAuthenticated: true, account: personal },
+      key: { stage: "publicKeyInstalled" as const, installed: true }, hostKey: { stage: "awaitingReview" as const, observationSha256: "c".repeat(64), fingerprint: "SHA256:abc", sshVerified: false as const, ready: false as const } };
+    const unverified = { verified: false as const, trustAccepted: false as const, ready: false as const };
+    const cases: [LocalVmGuestAccountStatus["retirement"], RegExp][] = [
+      [{ stage: "awaitingAcknowledgement", ...unverified }, /Waiting for the VM owner to acknowledge the setup helper's final report/],
+      [{ stage: "acknowledged", acknowledgementSha256: "d".repeat(64), ...unverified }, /acknowledged the setup helper's final report. The helper has not reported its cleanup yet/],
+      [{ stage: "helperReported", reportedOutcome: "retired", helperReported: true, ...unverified }, /reports it removed its key, launch item and program from this VM. TerminalX cannot verify this inside the VM/],
+      [{ stage: "helperReported", reportedOutcome: "refused", helperReported: true, ...unverified }, /removed nothing because one of its files had changed.*cannot verify/],
+      [{ stage: "helperReported", reportedOutcome: "outcomeUnknown", helperReported: true, ...unverified }, /cleanup did not finish.*may remain.*cannot verify/],
+    ];
+    for (const [retirement, text] of cases) {
+      listing = [status({ ...installed, retirement })];
+      mount();
+      expect((await screen.findByText(text)).getAttribute("role")).toBe("status");
+      // The helper's section never claims verification, trust, SSH or readiness.
+      expect(screen.getByText("Setup helper").parentElement?.textContent).not.toMatch(/verified|trust|SSH|ready/i);
+      cleanup();
+    }
+    for (const stage of ["invalidAcknowledgement", "invalidReport"] as const) {
+      listing = [status({ ...installed, retirement: { stage, detail: "changed", ...unverified } })];
+      mount();
+      expect((await screen.findByText(/cleanup record does not match this VM's session and is ignored/)).getAttribute("role")).toBe("alert");
+      expect(screen.queryByText(/reports it removed/)).toBeNull();
+      cleanup();
+    }
+    listing = [status({ ...installed, retirement: null })];
+    mount();
+    await screen.findByText("SHA256:abc");
+    expect(screen.queryByText("Setup helper")).toBeNull();
+    expect(mocks.invoke.mock.calls.every(([, args]) => args.method === "environment.guestAccountConfirmations")).toBe(true);
+  });
+
   it("reports a refused account or key install without treating it as success", async () => {
     listing = [status({ chosen: personal, answer: { outcome: "refused", accountAuthenticated: false, account: personal } })];
     const { unmount } = mount();

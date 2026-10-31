@@ -655,7 +655,8 @@ class EnrollmentListenerTests(unittest.TestCase):
             except Exception as error: failures.append(error)
         thread = threading.Thread(target=run); thread.start(); self.addCleanup(thread.join, 30)
         observed = self.poll(f, 'accountObservation')
-        with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, 'hostKeyObservation')
+        for action in ['hostKeyObservation', 'retirementAcknowledgement', 'retirementReport']:
+            with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, action)
         chosen = wire({'version': 1, 'bindingDigest': f.bd, 'ownerEpoch': b['ownerEpoch'], 'observationSha256': digest(observed),
             'account': account, 'parentSession': uid(), 'parentTab': uid(), 'parentConversation': 'original', 'confirmationId': uid()})
         self.host(f, 'confirmAccount', chosen)
@@ -700,6 +701,12 @@ class EnrollmentListenerTests(unittest.TestCase):
         self.assertEqual(json.loads((f.op/'retirement-report.json').read_bytes()), {'version': 1, 'bindingDigest': f.bd,
             'ownerEpoch': f.binding['ownerEpoch'], 'acknowledgementSha256': digest(wire(ack)), 'stage': 'retired',
             'helperReported': True, 'verified': False, 'trustAccepted': False, 'ready': False})
+        # The host reads exactly these records, read-only; a lost-reply retry reads the same bytes.
+        for action, name in [('retirementAcknowledgement', 'retirement-acknowledgement.json'), ('retirementReport', 'retirement-report.json')]:
+            recorded = (f.op/name).read_bytes()
+            self.assertEqual(self.host(f, action), recorded, action)
+            self.assertEqual(self.host(f, action), recorded, action)
+            self.assertEqual((f.op/name).read_bytes(), recorded, action)
     def test_a_retirement_report_for_another_acknowledgement_or_stage_or_none_is_never_journaled(self):
         def reporting(change):
             def after(tx, grant, session):
@@ -719,6 +726,8 @@ class EnrollmentListenerTests(unittest.TestCase):
             self.assertTrue((f.op/'retirement-acknowledgement.json').exists(), name)
             time.sleep(3.5)  # past the owner's frame bound for the report
             self.assertFalse((f.op/'retirement-report.json').exists(), name)
+            self.assertEqual(self.host(f, 'retirementAcknowledgement'), (f.op/'retirement-acknowledgement.json').read_bytes(), name)
+            with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, 'retirementReport')
     def test_a_host_key_after_a_refusal_or_for_another_reference_or_type_is_never_journaled(self):
         rsa = 'ssh-rsa ' + b64(struct.pack('!I', 7) + b'ssh-rsa' + bytes(40))
         def refused(tx, grant, session):
@@ -738,8 +747,9 @@ class EnrollmentListenerTests(unittest.TestCase):
             with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, 'hostKeyObservation')
     def test_version_2_owner_serves_no_account_relay(self):
         f = Fixture(); self.addCleanup(f.finish); b = f.binding; b['version'] = 2
-        f.start(n=3, binding=b)
-        for action, payload in [('accountObservation', None), ('confirmAccount', b'{}'), ('accountAnswer', None)]:
+        f.start(n=5, binding=b)
+        for action, payload in [('accountObservation', None), ('confirmAccount', b'{}'), ('accountAnswer', None),
+                                ('retirementAcknowledgement', None), ('retirementReport', None)]:
             with self.assertRaises((EOFError, ConnectionResetError, AssertionError, socket.timeout)): self.host(f, action, payload)
     def test_version_2_owner_never_serves_an_enrollment_receipt(self):
         f = Fixture(); self.addCleanup(f.finish); b = f.binding; b['version'] = 2

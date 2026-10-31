@@ -301,6 +301,21 @@ export interface LocalVmGuestHostKeyStatus {
   ready: false;
 }
 
+/** The setup helper's retirement after the owner observed its host-key report:
+ *  the owner's acknowledgement, then the helper's own report of what it
+ *  removed. A report is the helper's claim, never verified cleanup, trust or
+ *  readiness; `invalid…` records did not match this VM's session and never count. */
+export interface LocalVmGuestRetirementStatus {
+  stage: "awaitingAcknowledgement" | "acknowledged" | "helperReported" | "invalidAcknowledgement" | "invalidReport";
+  acknowledgementSha256?: string;
+  reportedOutcome?: "retired" | "refused" | "outcomeUnknown";
+  helperReported?: true;
+  detail?: string;
+  verified: false;
+  trustAccepted: false;
+  ready: false;
+}
+
 /** Whether this build can verify a person's approval of a person-only action.
  *  Without it the backend refuses those actions, whoever asks. */
 export interface LocalVmPersonApproval {
@@ -318,6 +333,7 @@ export interface LocalVmGuestAccountStatus {
   answer?: { outcome: "confirmed" | "refused"; accountAuthenticated: boolean; account: LocalVmGuestAccount } | null;
   key?: { stage: LocalVmGuestKeyStage; installed?: boolean } | null;
   hostKey?: LocalVmGuestHostKeyStatus | null;
+  retirement?: LocalVmGuestRetirementStatus | null;
   accountAuthenticated: boolean;
   trustAccepted: false;
   ready: false;

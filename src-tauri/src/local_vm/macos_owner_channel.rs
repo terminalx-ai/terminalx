@@ -149,9 +149,16 @@ fn account_status(reference: &Reference) -> Result<Value> {
         Err(_) if authenticated => json!({"stage": "notGranted"}),
         Err(_) => Value::Null,
     };
-    let host_key = match key["stage"].as_str() {
-        Some("publicKeyInstalled") => reference.host_key_status()?,
-        _ => Value::Null,
+    let (host_key, retirement) = match key["stage"].as_str() {
+        Some("publicKeyInstalled") => (
+            reference.host_key_status()?,
+            // The helper retires only after the owner observed its host key.
+            match reference.host_key_observation() {
+                Ok((observed, observation)) => reference.retirement_status(&observed, &observation),
+                Err(_) => Value::Null,
+            },
+        ),
+        _ => (Value::Null, Value::Null),
     };
     let chosen = match reference.root.exists("account-confirmation.json")? {
         true => serde_json::from_slice::<Value>(&reference.root.read("account-confirmation.json", 32 * 1024, true)?)?["account"].clone(),
@@ -159,7 +166,8 @@ fn account_status(reference: &Reference) -> Result<Value> {
     };
     Ok(json!({"observationSha256": journal::digest(&bytes), "accounts": observation["accounts"], "helperAuthenticated": true,
         "accountAuthenticated": authenticated, "chosen": chosen, "answer": answer, "key": key, "hostKey": host_key,
-        "personApproval": super::person_approval::availability(), "trustAccepted": false, "ready": false}))
+        "retirement": retirement, "personApproval": super::person_approval::availability(), "trustAccepted": false,
+        "ready": false}))
 }
 /// The approval the request carries, verified first. This build has no
 /// approver, so every person-only action is refused here, before any lookup
@@ -722,6 +730,8 @@ impl Reference {
             "accountAnswer",
             "keyAnswer",
             "hostKeyObservation",
+            "retirementAcknowledgement",
+            "retirementReport",
         ]
         .contains(&action)
         {
@@ -1096,6 +1106,72 @@ impl Reference {
             bail!("Owner host-key observation changed or claimed trust")
         }
         Ok((receipt.bytes, value))
+    }
+    /// Version 3: the owner's acknowledgement of the helper's final report, as
+    /// journaled before it was sent. It must name this enrollment's challenge,
+    /// the digest of the exact `{hostKey: …}` report behind `observation` and
+    /// the digest of `observed` itself. Returns the acknowledgement's digest.
+    fn retirement_acknowledgement(&self, bytes: &[u8], observed: &[u8], observation: &Value) -> Result<String> {
+        let enrolled = self.enrollment()?;
+        let report = canonical(&json!({"hostKey": {"keyReference": observation["keyReference"],
+            "publicKey": observation["hostKey"]}}))?;
+        let body = json!({"retire": {"challengeSha256": enrolled.challenge_sha256,
+            "hostKeySha256": journal::digest(&report), "observationSha256": journal::digest(observed)}});
+        let digest = journal::digest(&canonical(&body)?);
+        let value: Value = serde_json::from_slice(bytes)?;
+        if value != json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+            "challengeSha256": body["retire"]["challengeSha256"], "hostKeySha256": body["retire"]["hostKeySha256"],
+            "observationSha256": body["retire"]["observationSha256"], "acknowledgementSha256": digest,
+            "trustAccepted": false, "ready": false})
+        {
+            bail!("The owner's retirement acknowledgement is not for this session, report and observation")
+        }
+        Ok(digest)
+    }
+    /// Version 3: the helper's report of its retirement for exactly the
+    /// acknowledgement with digest `acknowledgement`. Returns the stage it
+    /// reported. It stays the helper's claim: the owner journals it unverified.
+    fn retirement_report(&self, bytes: &[u8], acknowledgement: &str) -> Result<String> {
+        let value: Value = serde_json::from_slice(bytes)?;
+        let stage = value["stage"].as_str().unwrap_or_default();
+        if !["retired", "refused", "outcomeUnknown"].contains(&stage)
+            || value != json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": self.binding.owner_epoch,
+                "acknowledgementSha256": acknowledgement, "stage": stage, "helperReported": true, "verified": false,
+                "trustAccepted": false, "ready": false})
+        {
+            bail!("The helper's retirement report is not for this acknowledgement or claims more than its own report")
+        }
+        Ok(stage.into())
+    }
+    /// Read-only: where retirement (design stage 9) stands after the owner
+    /// observed the host key in `observed`. Reading records nothing. A record
+    /// the owner cannot serve is still awaited; one that does not match this
+    /// session is `invalid…` and never counts. A report is the helper's claim,
+    /// so `verified` stays false, and none of this is cleanup evidence, trust
+    /// or readiness.
+    fn retirement_status(&self, observed: &[u8], observation: &Value) -> Value {
+        let status = |mut value: Value| {
+            value["verified"] = json!(false);
+            value["trustAccepted"] = json!(false);
+            value["ready"] = json!(false);
+            value
+        };
+        let Ok(acknowledgement) = self.observe("retirementAcknowledgement", &journal::new_id()) else {
+            return status(json!({"stage": "awaitingAcknowledgement"}));
+        };
+        let digest = match self.retirement_acknowledgement(&acknowledgement.bytes, observed, observation) {
+            Ok(digest) => digest,
+            Err(error) => return status(json!({"stage": "invalidAcknowledgement", "detail": format!("{error:#}")})),
+        };
+        let Ok(report) = self.observe("retirementReport", &journal::new_id()) else {
+            return status(json!({"stage": "acknowledged", "acknowledgementSha256": digest}));
+        };
+        match self.retirement_report(&report.bytes, &digest) {
+            Ok(stage) => status(json!({"stage": "helperReported", "acknowledgementSha256": digest,
+                "reportedOutcome": stage, "helperReported": true})),
+            Err(error) => status(json!({"stage": "invalidReport", "acknowledgementSha256": digest,
+                "detail": format!("{error:#}")})),
+        }
     }
     /// Read-only: where the host-key review stands. A recorded confirmation
     /// whose observation no longer matches is `changed` and is never re-pinned.

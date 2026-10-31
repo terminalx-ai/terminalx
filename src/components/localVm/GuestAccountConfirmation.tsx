@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { localVmRequest } from "@/lib/localVm";
-import type { LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmGuestKeyStage, LocalVmPersonApproval } from "@/types/localVm";
+import type { LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmGuestKeyStage, LocalVmGuestRetirementStatus, LocalVmPersonApproval } from "@/types/localVm";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 const accountId = (account: LocalVmGuestAccount) => `${account.uid}:${account.name}`;
@@ -99,6 +99,7 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
       </div> : null}
       {outcome === "confirmed" && !item.key ? checkButton : null}
       {outcome === "confirmed" && item.hostKey ? <HostKeyReview item={item} session={session} tab={tab} conversation={conversation} readOnly={readOnly} reload={reload} checkButton={checkButton} /> : null}
+      {outcome === "confirmed" && item.retirement ? <HelperRetirement retirement={item.retirement} /> : null}
     </>;
   } else if (item.chosen) {
     body = <>
@@ -131,6 +132,27 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
     <p className="font-medium">Choose the guest account for this VM</p>
     {body}
     {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+  </div>;
+}
+
+const reportedOutcomes: Record<NonNullable<LocalVmGuestRetirementStatus["reportedOutcome"]>, string> = {
+  retired: "The setup helper reports it removed its key, launch item and program from this VM.",
+  refused: "The setup helper reports it removed nothing because one of its files had changed. They stay in the VM for inspection.",
+  outcomeUnknown: "The setup helper reports its cleanup did not finish. Some of its files may remain in the VM for inspection.",
+};
+
+/** The setup helper's retirement as the owner recorded it. A report is the
+ *  helper's own claim: TerminalX cannot check the VM's files, so nothing here
+ *  is shown as verified. */
+function HelperRetirement({ retirement }: { retirement: LocalVmGuestRetirementStatus }) {
+  const unverified = "TerminalX cannot verify this inside the VM.";
+  return <div className="space-y-1 border-t border-border pt-2">
+    <p className="font-medium">Setup helper</p>
+    {retirement.stage === "awaitingAcknowledgement" ? <p role="status">Waiting for the VM owner to acknowledge the setup helper&apos;s final report before the helper removes itself.</p> : null}
+    {retirement.stage === "acknowledged" ? <p role="status">The VM owner acknowledged the setup helper&apos;s final report. The helper has not reported its cleanup yet.</p> : null}
+    {retirement.stage === "helperReported" && retirement.reportedOutcome ? <p role="status">{reportedOutcomes[retirement.reportedOutcome]} {unverified}</p> : null}
+    {retirement.stage === "invalidAcknowledgement" || retirement.stage === "invalidReport"
+      ? <p role="alert" className="text-destructive">The setup helper&apos;s cleanup record does not match this VM&apos;s session and is ignored. Inspect the VM.</p> : null}
   </div>;
 }
 

@@ -70,7 +70,8 @@ final class TXPinnedPath: @unchecked Sendable {
         try txRequire(directory && ["account-receipt.json", "public-key-receipt.json", "owner-intent.json", "owner-started.json", "expected-helper.json", "guest-observation-intent.json", "guest-observation.json", "guest-probe.json", "guest-mount-echo.json",
             "enrollment.key", "enrollment.json", "stop-requested.json",
             "account-observation.json", "account-confirmation-relay.json", "account-confirmation-answer.json",
-            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json"].contains(name))
+            "key-grant-relay.json", "key-install-result.json", "host-key-observation.json",
+            "retirement-acknowledgement.json", "retirement-report.json"].contains(name))
         try check()
         let child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         try txRequire(child >= 0)
