@@ -26,6 +26,12 @@
 
 ### Chat
 
+- Deliver Continue in New Session handoffs that the new agent left in its input.
+  The Enter waits until the agent has shown the paste, and is written again up
+  to twice. A handoff still in the input is offered as **Press Enter**, not
+  reported as a failure. The dialog shows each delivery step, finishes about
+  20 s after the last Enter instead of after 90 s, and turns a late delivery
+  into success. (#662)
 - Recognize completed Codex context compaction and preserve scoped compaction
   history and status across conversation changes. Add a default-off experimental
   owned-stdio connection for explicitly created new Codex sessions, with confirmed

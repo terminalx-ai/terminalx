@@ -126,14 +126,40 @@ impl Rig {
     }
 
     fn with_live_pane() -> Self {
+        Self::running("sh -c 'read line'")
+    }
+
+    /// A tab whose pane runs `command`, in place of the CLI.
+    fn running(command: &str) -> Self {
         let rig = Self::new();
         let sink = Arc::new(crate::sink::BroadcastSink::new(256));
         let spec = pty::PaneSpec {
             cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
-            command: Some("sh -c 'read line'"), env: &[],
+            command: Some(command), env: &[],
         };
         rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
         rig
+    }
+
+    /// Wait until the pane's program has read everything written into it.
+    fn pane_has_read_it_all(&self) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while self.manager.terminals.unread_input(&self.pane) != Some(0) {
+            assert!(Instant::now() < deadline, "the pane never read its input");
+            std::thread::sleep(MOMENT);
+        }
+    }
+
+    /// From now on, each stage the tab tells a continuation's dialog.
+    fn hear_deliveries(&self) -> Arc<Mutex<Vec<String>>> {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let into = heard.clone();
+        self.manager.sink.listen("prompt_delivery", Box::new(move |payload| {
+            let told: serde_json::Value = serde_json::from_str(payload).unwrap();
+            assert_eq!((told["sessionId"].as_str(), told["tabId"].as_str()), (Some(SESSION), Some(TAB)));
+            into.lock().unwrap().push(format!("{}:{}", told["seq"], told["stage"].as_str().unwrap()));
+        }));
+        heard
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -200,6 +226,8 @@ impl Rig {
                 delivery_sent_at: None,
                 accept_by: None,
                 nudge_by: None,
+                nudges_left: 0,
+                entered_at: None,
                 held: Vec::new(),
                 resend_after_abort: None,
                 codex_interrupt_hooks_owed: 0,
@@ -1946,7 +1974,8 @@ fn a_shared_session_is_restarted_out_of_a_mode_it_may_not_be_in() {
 }
 
 /// The composer's prompt went into the pane and its Enter was written; the
-/// CLI has not acknowledged it.
+/// CLI has not acknowledged it. What `submit_composer_prompt` arms, by the
+/// rig's clock.
 fn enter_written_unacknowledged(rig: &Rig, seq: u64) {
     let mut rt = rig.rt.lock().unwrap();
     if let Engine::Cli(p) = &mut rt.engine {
@@ -1954,7 +1983,22 @@ fn enter_written_unacknowledged(rig: &Rig, seq: u64) {
         p.delivery_sent_at = Some(rig.now.get());
         p.accept_by = Some(rig.now.get() + tui::ACCEPT_TIMEOUT);
         p.nudge_by = Some(rig.now.get() + tui::NUDGE_AFTER);
+        p.nudges_left = tui::NUDGES;
+        p.entered_at = Some(rig.now.get());
     }
+}
+
+/// The same for a continuation: its echo carries a receipt, and the tab
+/// sets it no deadline of its own.
+fn continuation_entered_unacknowledged(rig: &Rig, seq: u64) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
+    enter_written_unacknowledged(rig, seq);
+    let (receipt, heard) = std::sync::mpsc::channel();
+    let mut rt = rig.rt.lock().unwrap();
+    if let Engine::Cli(p) = &mut rt.engine {
+        p.accept_by = None;
+        p.echoed.push_back(ComposerEcho { seq, submitted: true, continuation: true, receipt: Some(receipt), ..ComposerEcho::new("continue the work".into(), 0) });
+    }
+    heard
 }
 
 fn delivery_stages(rig: &Rig) -> Vec<String> {
@@ -1963,8 +2007,8 @@ fn delivery_stages(rig: &Rig) -> Vec<String> {
 }
 
 #[test]
-fn an_enter_the_cli_let_go_by_is_written_once_more_before_the_reader_is_told() {
-    let rig = Rig::with_live_pane();
+fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
+    let rig = Rig::running("cat >/dev/null");
     enter_written_unacknowledged(&rig, 7);
     rig.tick();
     assert!(delivery_stages(&rig).is_empty(), "not at once: the CLI gets its moment");
@@ -1972,14 +2016,100 @@ fn an_enter_the_cli_let_go_by_is_written_once_more_before_the_reader_is_told() {
     rig.tick();
     assert_eq!(delivery_stages(&rig), ["nudged"]);
     assert_eq!(rig.recovery(), None, "a nudge is not a warning");
+    rig.pane_has_read_it_all();
     rig.advance(Duration::from_secs(1));
     rig.tick();
-    assert_eq!(delivery_stages(&rig), ["nudged"], "once only");
+    assert_eq!(delivery_stages(&rig), ["nudged"], "not again until it has had as long again");
+    // A CLI that only just started can let the second go by too (#662).
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"]);
+    rig.pane_has_read_it_all();
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"], "twice only");
     // Still nothing: now the reader is told, as before.
     rig.advance(tui::ACCEPT_TIMEOUT);
     rig.tick();
     assert_eq!(rig.recovery(), Some(RecoveryKind::DeliveryUnconfirmed));
-    assert_eq!(delivery_stages(&rig), ["nudged", "unconfirmed"]);
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged", "unconfirmed"]);
+}
+
+/// The handoff whose Enter was lost: nothing ever wrote it again, because a
+/// continuation was kept out of the nudge along with the banner (#662). It
+/// is nudged like any prompt, and the dialog that sent it hears each one;
+/// the tab still raises no warning of its own, the dialog being the one to
+/// say what became of it.
+#[test]
+fn a_continuation_left_in_the_input_is_nudged_without_raising_the_banner() {
+    let rig = Rig::running("cat >/dev/null");
+    let heard = rig.hear_deliveries();
+    let receipt = continuation_entered_unacknowledged(&rig, 4);
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    rig.pane_has_read_it_all();
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"]);
+    assert_eq!(*heard.lock().unwrap(), ["4:nudged", "4:nudged"]);
+    rig.advance(tui::ACCEPT_TIMEOUT);
+    rig.tick();
+    assert_eq!(rig.recovery(), None);
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"], "no deadline of the tab's own");
+    // The CLI takes it at last: its record is the dialog's word, whether or
+    // not anyone is still waiting on the receipt.
+    drop(receipt);
+    rig.append(&format!("{}\n", serde_json::json!({
+        "parentUuid": null, "isSidechain": false, "type": "user", "uuid": "u-handoff", "userType": "external",
+        "cwd": "/w", "sessionId": "s", "message": { "role": "user", "content": "continue the work" },
+    })));
+    assert_eq!(*heard.lock().unwrap(), ["4:nudged", "4:nudged", "4:delivered"]);
+    assert!(delivery_stages(&rig).ends_with(&["accepted".to_string()]));
+}
+
+/// A CLI that has not read what it was given is not taking input at all. An
+/// Enter written after it says nothing new, and once its input queue is full
+/// the write never returns, holding the tab (#661). The nudge stands back
+/// and says why.
+#[test]
+fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
+    let rig = Rig::running("sleep 600");
+    let heard = rig.hear_deliveries();
+    let _receipt = continuation_entered_unacknowledged(&rig, 5);
+    // The handoff's Enter, still in the queue: the CLI has stopped reading.
+    rig.manager.terminals.write(&rig.pane, tui::SUBMIT).unwrap();
+    let unread = rig.manager.terminals.unread_input(&rig.pane);
+    assert!(unread.is_some_and(|n| n > 0), "the platform reports unread input");
+    for _ in 0..tui::NUDGES {
+        rig.advance(tui::NUDGE_AFTER);
+        rig.tick();
+    }
+    assert_eq!(delivery_stages(&rig), ["stalled", "stalled"]);
+    assert_eq!(*heard.lock().unwrap(), ["5:stalled", "5:stalled"]);
+    assert_eq!(rig.manager.terminals.unread_input(&rig.pane), unread, "nothing was added to it");
+}
+
+/// The reader's own Enter, from the dialog: held to what a nudge is held to,
+/// and only for the prompt still awaited.
+#[test]
+fn the_readers_enter_goes_only_where_a_nudge_would() {
+    let rig = Rig::running("cat >/dev/null");
+    let _receipt = continuation_entered_unacknowledged(&rig, 6);
+    assert!(!rig.manager.submit_waiting(SESSION, TAB, 5).unwrap(), "not the prompt awaited");
+    assert!(rig.manager.submit_waiting(SESSION, TAB, 6).unwrap());
+    assert_eq!(delivery_stages(&rig), ["nudged"]);
+    rig.pane_has_read_it_all();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            cwd: None,
+            request_id: "r1".into(), tool_use_id: "call-9".into(), tool_name: "Bash".into(),
+            input: json!({ "command": "rm -rf build" }), title: None, description: None, options: vec![],
+        }, None);
+    }
+    let asking = rig.manager.submit_waiting(SESSION, TAB, 6).unwrap_err().to_string();
+    assert!(asking.contains("asking something"), "{asking}");
+    assert_eq!(delivery_stages(&rig), ["nudged"]);
 }
 
 #[test]
