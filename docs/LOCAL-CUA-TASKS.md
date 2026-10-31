@@ -200,6 +200,12 @@ automatic expiration (`expiresAt: null`); their retained copies remain until
 the user explicitly removes that local history. Export them using the task
 card before removing any history directory.
 
+Every legacy Cua command runs `--embedded`, so no running cua daemon of
+another build takes it. Commands that reach the guest (`sb exec -i`, `sb cp`,
+`sb create`) run only with TerminalX's prepared, verified Cua and Lume, and
+are held to the routes on which pinned Cua never starts `lume ssh`
+(`legacy_route.rs`). Anything else is refused before Cua runs.
+
 Returned patches require explicit selection of a host repository root.
 `git apply --check --index` must pass before application; dirty or divergent
 host files are preserved when the check fails. Successful import updates both

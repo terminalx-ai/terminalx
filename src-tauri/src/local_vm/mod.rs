@@ -18,6 +18,7 @@ pub mod transport;
 pub(crate) mod admission;
 pub(crate) mod attachment;
 mod artifact_import;
+mod legacy_route;
 pub mod linux_profile;
 pub(crate) mod linux_install;
 pub mod macos_personalization;

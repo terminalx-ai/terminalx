@@ -458,7 +458,10 @@ pub fn bound_environment(journal: &Journal, target: &TaskTarget) -> Result<(Task
     })
 }
 
+/// Every legacy Cua command, held to the route that never reaches Lume's SSH
+/// (`legacy_route`). A refused command runs nothing.
 pub fn cua(args: &[&str], input: &[u8], budget: Duration) -> Result<Vec<u8>> {
+    let args = super::legacy_route::check(&super::legacy_route::Route::current()?, args)?;
     process::run(process::command("cua")?.args(args), input, budget)
 }
 pub fn inspect_sandbox(sandbox: &str) -> Result<Value> {

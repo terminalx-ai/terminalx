@@ -446,9 +446,10 @@ fn provision_vm(journal: &Journal, env: &Environment, stopped: &AtomicBool) -> R
     }
     let outcome = (|| -> Result<&str> {
         ensure_running(stopped)?;
-        let mut command = process::command("cua")?;
-        command
-            .args([
+        // Held to the legacy route that never reaches Lume's SSH (`legacy_route`).
+        let args = super::legacy_route::check(
+            &super::legacy_route::Route::current()?,
+            &[
                 "sb",
                 "create",
                 host::IMAGE,
@@ -466,7 +467,11 @@ fn provision_vm(journal: &Journal, env: &Environment, stopped: &AtomicBool) -> R
                 "8GB",
                 "--keep-on-failure",
                 "--json",
-            ])
+            ],
+        )?;
+        let mut command = process::command("cua")?;
+        command
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
