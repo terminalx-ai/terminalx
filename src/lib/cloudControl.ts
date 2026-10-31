@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
-import { getTabLog } from "@/lib/agentEvents";
-import { WORKSPACE_STOPPED } from "@/lib/cloudAgentApi";
+import { getTabLog, lastSeq } from "@/lib/agentEvents";
+import { WORKSPACE_STOPPED, type AgentTabInfo, type OutboxEntry } from "@/lib/cloudAgentApi";
 import { getCloudAgents, loadCloudAgents, refreshFromCheckpoint, relistCloudCheckpoints, syncLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
 import {
   applyCloudSnapshot,
@@ -31,7 +31,9 @@ import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
 import { DEFAULT_PERMISSION_MODE, pickerMode } from "@/lib/models";
+import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
+import type { AgentEvent, RecoveryKind } from "@/types/events";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
 import type { RuntimeIssueRef, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
@@ -548,6 +550,14 @@ function assertReadable(you: WorkspaceYou | null) {
 const sent = new Map<string, Promise<unknown>>();
 const SENT_KEYS = 500;
 
+/**
+ * The last message `send` put in for each tab (by workspace key and tab), and
+ * how far this desktop knew the tab before it: a status `wait` reads that was
+ * reported up to that seq is from before the message (#668).
+ */
+const lastSends = new Map<string, { commandId: string; seq: number }>();
+const sendKey = (workspaceKey: string, tabId: string) => `${workspaceKey}\0${tabId}`;
+
 function send(params: Params): Promise<unknown> {
   const key = text(params, "idempotencyKey");
   if (!key) return sendOnce(params);
@@ -621,6 +631,8 @@ async function sendOnce(params: Params) {
   const gate = tabGate(you, lease, Date.now(), tab.info.status === "in_progress" || tab.info.status === "waiting", personName);
   if (gate.blocked) throw forbidden(gate.blocked);
   const before = new Set(getCloudAgents(scope).outbox.map((entry) => entry.clientCommandId));
+  const known = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
+  const knew = Math.max(known.info.lastSeq, lastSeq(target.sessionId, tab.tabId));
   // The message resumes a stopped workspace, which starts billing its compute.
   const confirmResume = () => authorizeRoutineCompute(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
   if (getAccount().status.agentCommandWake === true) {
@@ -641,6 +653,12 @@ async function sendOnce(params: Params) {
     await backend.send(tab.tabId, message, []);
   }
   const entry = getCloudAgents(scope).outbox.find((candidate) => !before.has(candidate.clientCommandId) && candidate.tabId === tab.tabId);
+  if (entry) {
+    const key = sendKey(target.workspaceKey, tab.tabId);
+    lastSends.delete(key);
+    lastSends.set(key, { commandId: entry.clientCommandId, seq: knew });
+    if (lastSends.size > SENT_KEYS) lastSends.delete(lastSends.keys().next().value!);
+  }
   return {
     session: target.key,
     tabId: tab.tabId,
@@ -679,16 +697,71 @@ const WAIT_CHECKPOINT_MS = 5_000;
  */
 export const WAIT_CHUNK_SECONDS = 30;
 
-function settledReason(tab: CloudAgentTab, pending: boolean): "permission" | "stop" | "stopped" | null {
-  if (tab.info.status === "waiting" || tab.info.pendingPermissions.length > 0) return "permission";
-  // A message still on its way is work to wait for.
-  if (pending) return null;
-  if (tab.info.status === "completed") return "stop";
-  if (tab.info.status === "idle") return "stopped";
+/**
+ * Why a wait ends: someone can answer the agent, it stopped on an error, it
+ * asks in its own terminal, its turn ended, or nothing runs.
+ */
+export type WaitSettled = { reason: "permission" } | { reason: "recovery"; recovery: RecoveryKind } | { reason: "terminal" } | { reason: "stop" } | { reason: "stopped" };
+
+/** The newest committed event of a transcript, as `lastSeq` finds its seq. */
+function lastCommitted(events: AgentEvent[]): AgentEvent | undefined {
+  for (let i = events.length - 1; i >= 0; i--) if (events[i].payload.type !== "delta") return events[i];
+  return undefined;
+}
+
+/** A prompt typed in, an error taken back, or a request decided: the turn has moved on from any wait before it. */
+function movesOn(event: AgentEvent | undefined): boolean {
+  const p = event?.payload;
+  return (p?.type === "user_message" && !p.queued) || (p?.type === "recovery" && !p.kind) || p?.type === "permission_decided";
+}
+
+/**
+ * Why a wait ends now (#668), or null while the tab works or a message to it
+ * is on its way.
+ *
+ * - "permission" only for what someone can answer: a request the runtime
+ *   holds. It holds an agent's questions as it holds its permission requests.
+ * - A waiting tab is judged only on a transcript that has reached its status:
+ *   one behind may tell of an earlier stop. An error the agent stopped on is
+ *   "recovery", with its kind (the window's "Needs attention"); no error and
+ *   nothing to answer is a prompt only the agent's own terminal shows.
+ * - A status the transcript has moved past (a tab that streams here hears of
+ *   an event before the status that follows it) ends nothing.
+ */
+export function settledReason(info: Pick<AgentTabInfo, "status" | "pendingPermissions" | "followUps" | "lastSeq">, events: AgentEvent[], onItsWay: boolean): WaitSettled | null {
+  if (info.pendingPermissions.length > 0) return { reason: "permission" };
+  // A message still on its way is work to wait for: what the tab says now is from before it.
+  if (onItsWay) return null;
+  const last = lastCommitted(events);
+  const seen = last?.seq ?? 0;
+  if (info.status === "waiting") {
+    if (seen < info.lastSeq) return null;
+    const recovery = recoveryFromEvents(events);
+    if (recovery) return { reason: "recovery", recovery };
+    return seen === info.lastSeq && !movesOn(last) ? { reason: "terminal" } : null;
+  }
+  // A follow-up the runtime holds starts as soon as the turn ends, and a prompt after the status starts a turn of its own.
+  if (info.followUps.length > 0 || (last?.payload.type === "user_message" && !last.payload.queued)) return null;
+  if (info.status === "completed") return { reason: "stop" };
+  if (info.status === "idle") return { reason: "stopped" };
   return null;
 }
 
 const OUTBOX_PENDING = new Set(["unsent", "queued", "leased"]);
+
+/**
+ * Whether a message to the tab has not reached its agent yet, as this desktop
+ * sees it: still in the mailbox, or typed by the runtime after the status held
+ * here was reported. One the runtime holds as a follow-up is not: it goes when
+ * the turn allows, and the tab's own state says why it waits.
+ */
+function messageOnItsWay(tab: CloudAgentTab, outbox: OutboxEntry[], sent: { commandId: string; seq: number } | undefined): boolean {
+  if (outbox.some((entry) => entry.tabId === tab.tabId && OUTBOX_PENDING.has(entry.state))) return true;
+  if (!sent) return false;
+  const typed = outbox.some((entry) => entry.clientCommandId === sent.commandId && entry.state === "applied")
+    && !tab.info.followUps.some((followUp) => followUp.clientCommandId === sent.commandId);
+  return typed && tab.info.lastSeq <= sent.seq;
+}
 
 /** Until the tab needs someone or its turn ends. It follows the runtime while it runs and never wakes a stopped one. */
 async function wait(params: Params, sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now: () => number = Date.now) {
@@ -706,15 +779,19 @@ async function wait(params: Params, sleep: (ms: number) => Promise<void> = (ms) 
   try {
     for (;;) {
       const live = !!connectedCloudClient(target.workspaceKey);
-      // Connected, the runtime feeds the tab; only otherwise is the checkpoint read.
-      if (!live) await refreshFromCheckpoint(scope, tab.tabId).catch(() => undefined);
+      const known = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
+      // Connected, the runtime feeds the tab's status, and its transcript only while it streams here. The checkpoint is
+      // read when not connected, or for a waiting tab whose transcript is behind its status: why it waits is told there.
+      const behind = !known.live && known.info.status === "waiting" && known.info.lastSeq > lastSeq(target.sessionId, tab.tabId);
+      const checkpoint = !live || behind;
+      if (checkpoint) await refreshFromCheckpoint(scope, tab.tabId).catch(() => undefined);
       const snapshot = getCloudAgents(scope);
       const current = snapshot.tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
-      const pending = snapshot.outbox.some((entry) => entry.tabId === tab.tabId && OUTBOX_PENDING.has(entry.state));
-      const reason = settledReason(current, pending);
-      if (reason) return { session: target.key, tabId: tab.tabId, reason, status: current.info.status };
+      const onItsWay = messageOnItsWay(current, snapshot.outbox, lastSends.get(sendKey(target.workspaceKey, tab.tabId)));
+      const settled = settledReason(current.info, getTabLog(target.sessionId, tab.tabId).events, onItsWay);
+      if (settled) return { session: target.key, tabId: tab.tabId, ...settled, status: current.info.status };
       if (now() >= deadline) return { session: target.key, tabId: tab.tabId, reason: "timeout", status: current.info.status };
-      await sleep(Math.min(live ? WAIT_LIVE_MS : WAIT_CHECKPOINT_MS, Math.max(0, deadline - now())));
+      await sleep(Math.min(checkpoint ? WAIT_CHECKPOINT_MS : WAIT_LIVE_MS, Math.max(0, deadline - now())));
     }
   } finally {
     lease?.release();

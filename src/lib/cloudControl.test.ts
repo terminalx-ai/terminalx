@@ -59,14 +59,17 @@ vi.mock("@/lib/cloudConnections", async (importOriginal) => {
   return {
     ...original,
     wakeCloudConnection: vi.fn(async () => ({ release: vi.fn() })),
-    retainCloudConnection: vi.fn(async () => {
+    retainCloudConnection: vi.fn(async (at?: { orgId: string; workspaceId: string }) => {
       const client = {
         get connection() {
           return { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage", you: mocks.runtime.you };
         },
         listAgentTabs: mocks.runtime.listAgentTabs,
       };
-      return { release: vi.fn(), client, current: () => ({ client }), state: () => client.connection, ended: () => false };
+      // The connection closes with its lease: what it listed is last known from then on, as `cloudSessions` marks it.
+      const { markCloudAgentsOffline } = await import("@/lib/cloudAgents");
+      const release = vi.fn(() => at && markCloudAgentsOffline({ organizationId: at.orgId, workspaceId: at.workspaceId }));
+      return { release, client, current: () => ({ client }), state: () => client.connection, ended: () => false };
     }),
     connectedCloudClient: vi.fn(() => null),
   };
@@ -90,6 +93,7 @@ const {
   LOOKUP_WITHIN_MS,
   SEND_LOOKUP_WITHIN_MS,
   WAIT_CHUNK_SECONDS,
+  settledReason,
 } = await import("./cloudControl");
 // The lifecycle refusal is the app's own sentence, whatever it currently says (PRO-73 rewords it).
 const { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON } = await import("@/lib/cloudCollab");
@@ -97,7 +101,8 @@ const catalog = await import("@/lib/cloudCatalog");
 const connections = await import("@/lib/cloudConnections");
 const newSession = await import("@/lib/cloudNewSession");
 const sessions = await import("@/lib/sessions");
-const { resetCloudAgents } = await import("@/lib/cloudAgents");
+const { applyLiveTabs, resetCloudAgents } = await import("@/lib/cloudAgents");
+const { mergeTabEvents } = await import("@/lib/agentEvents");
 const { resetCloudSessions } = await import("@/lib/cloudSessions");
 const { resetCloudDashboard } = await import("@/lib/cloudDashboard");
 const { resetCollab } = await import("@/lib/cloudCollab");
@@ -462,16 +467,176 @@ describe("wait", () => {
     expect(reads).toBeGreaterThanOrEqual(6);
   });
 
-  it("says a tab waits for a permission", async () => {
-    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: tabInfo("s1", "waiting") };
+  /** An event of the s1 tab's transcript. */
+  const said = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "s1-tab", seq, ts: seq, payload });
+  const ask = { requestId: "r1", toolName: "Bash", input: { command: "rm -rf build" }, options: ["allow", "deny"] };
+
+  it("says a tab waits for a permission only when there is one to answer", async () => {
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), pendingPermissions: [ask] } };
     resetCloudAgents();
     expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toMatchObject({ reason: "permission", status: "waiting" });
+
+    // Waiting with nothing to answer and no error behind it (#668): the agent asks in its own terminal.
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: tabInfo("s1", "waiting") };
+    resetCloudAgents();
+    expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toEqual({ session: `cloud:${ORG}:ws-1:s1`, tabId: "s1-tab", reason: "terminal", status: "waiting" });
+  });
+
+  it("waits for a transcript behind a waiting tab's status before saying why it waits", async () => {
+    // The status is from after the failure this desktop holds: the agent tried again and stopped once more.
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), lastSeq: 5 }, events: [...events, said(3, { type: "recovery", kind: "failed" })] };
+    resetCloudAgents();
+    let checkpoints = 0;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_checkpoint") return base(command, args);
+      // Its upload is behind at first, then catches up.
+      if (++checkpoints < 3) return null;
+      const projection = { v: 1, sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status: "waiting", process: "exited", truncated: false, followUps: [], updatedAt: 5 };
+      const later = [said(4, { type: "user_message", text: "try again" }), said(5, { type: "recovery", kind: "signed_out" })];
+      return { epoch: 1, version: 1, projection: { ...projection, events: [...events, said(3, { type: "recovery", kind: "failed" }), ...later] } };
+    });
+    const { now, sleep } = fakeSleep();
+    expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 30 }, sleep, now)).toMatchObject({ reason: "recovery", recovery: "signed_out" });
+    expect(checkpoints).toBe(3);
+  });
+
+  it("says a tab whose agent failed to start stopped on an error, and which one", async () => {
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), lastSeq: 3 }, events: [...events, said(3, { type: "recovery", kind: "failed" })] };
+    resetCloudAgents();
+    expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toEqual({
+      session: `cloud:${ORG}:ws-1:s1`,
+      tabId: "s1-tab",
+      reason: "recovery",
+      recovery: "failed",
+      status: "waiting",
+    });
+  });
+
+  it("reads why a connected tab waits from its checkpoint when its transcript is behind its status", async () => {
+    // Connected: the runtime's list says waiting, at an event this desktop has not been streamed.
+    vi.mocked(connections.connectedCloudClient).mockReturnValue({ connection: { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage" } } as never);
+    const scope = { organizationId: ORG, workspaceId: "ws-1" };
+    await handleCloudControl("read", { target: `cloud:${ORG}:ws-1:s1` });
+    applyLiveTabs(scope, [{ ...tabInfo("s1", "waiting"), lastSeq: 3 } as never]);
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_checkpoint") return base(command, args);
+      const projection = { v: 1, sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status: "waiting", process: "exited", truncated: false, followUps: [], updatedAt: 5 };
+      return { epoch: 1, version: 1, projection: { ...projection, events: [...events, said(3, { type: "recovery", kind: "usage_limit" })] } };
+    });
+    try {
+      const { now, sleep } = fakeSleep();
+      expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 30 }, sleep, now)).toMatchObject({ reason: "recovery", recovery: "usage_limit", status: "waiting" });
+    } finally {
+      vi.mocked(connections.connectedCloudClient).mockReturnValue(null);
+    }
+  });
+
+  it.each([
+    ["whose agent failed to start", "waiting", said(3, { type: "recovery", kind: "failed" })],
+    ["whose last turn has ended", "completed", said(3, { type: "turn_completed", status: "ok" })],
+  ])("waits right after a send to a tab %s for the new turn, and says when that ends", async (_, before, last) => {
+    const target = `cloud:${ORG}:ws-1:s1`;
+    const scope = { organizationId: ORG, workspaceId: "ws-1" };
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", before), lastSeq: 3 }, events: [...events, last] };
+    resetCloudAgents();
+    // The mailbox's receipts: none until the runtime has taken the message.
+    let taken = false;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_outbox_sync") return base(command, args);
+      return taken ? enqueued.map((_, index) => ({ clientCommandId: `cmd-${index + 1}`, tabId: "s1-tab", kind: "send", state: "applied", receipt: { queued: false }, createdAt: 1, updatedAt: 2 })) : [];
+    });
+    vi.useFakeTimers();
+    try {
+      await handleCloudControl("send", { target, text: "try again" });
+      // What the runtime does while the wait pauses, a step per pause.
+      const steps = [
+        // It takes the message. The receipt comes in; nothing newer of the tab has yet.
+        () => void (taken = true),
+        // Its new turn, and the status it reports with it.
+        () => {
+          mergeTabEvents("s1", "s1-tab", [said(4, { type: "user_message", text: "try again" }), said(5, { type: "recovery", kind: null })] as never);
+          applyLiveTabs(scope, [{ ...tabInfo("s1", "in_progress"), lastSeq: 5 } as never]);
+        },
+        () => {
+          mergeTabEvents("s1", "s1-tab", [said(6, { type: "assistant_message", text: "it starts now" }), said(7, { type: "turn_completed", status: "ok" })] as never);
+          applyLiveTabs(scope, [{ ...tabInfo("s1", "completed"), lastSeq: 7 } as never]);
+        },
+      ];
+      const sleep = async (ms: number) => {
+        steps.shift()?.();
+        await vi.advanceTimersByTimeAsync(ms);
+      };
+      expect(await waitForCloudTab({ target, timeoutSeconds: 30 }, sleep, () => Date.now())).toMatchObject({ reason: "stop", status: "completed" });
+      expect(steps).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("is refused to someone the workspace is not shared with", async () => {
     await list(OTHER, [item("ws-b", OTHER, { authority: "participate", you: { role: "none", canApprove: false, canManageShares: false } })]);
     expect(await refusal("wait", { target: `cloud:${OTHER}:ws-b:sb`, timeoutSeconds: 1 })).toMatchObject({ code: "forbidden" });
     expect(connections.retainCloudConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("why a wait ends (#668)", () => {
+  /** The runtime's word on the tab, reported when its transcript reached `lastSeq`. */
+  const info = (status: string, lastSeq: number, fields: Record<string, unknown> = {}) => ({ status, lastSeq, pendingPermissions: [], followUps: [], ...fields }) as never;
+  const said = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "s1-tab", seq, ts: seq, payload }) as never;
+  const ask = { requestId: "r1", toolName: "Bash", input: {}, options: ["allow", "deny"] };
+  const followUp = { clientCommandId: "cmd-9", text: "then the docs" };
+  const prompt = said(1, { type: "user_message", text: "fix the login" });
+  const replied = [prompt, said(2, { type: "assistant_message", text: "Looking at it." })];
+  const failed = [prompt, said(2, { type: "recovery", kind: "failed" })];
+  const retried = [...failed, said(3, { type: "user_message", text: "try again" }), said(4, { type: "recovery", kind: null })];
+
+  it("says permission only for a request the runtime holds", () => {
+    expect(settledReason(info("waiting", 2, { pendingPermissions: [ask] }), replied, false)).toEqual({ reason: "permission" });
+    // A message on its way waits behind the request; the request is still someone's to answer.
+    expect(settledReason(info("waiting", 2, { pendingPermissions: [ask] }), failed, true)).toEqual({ reason: "permission" });
+    // A question this desktop's copy shows open, answered elsewhere since: the runtime holds no request.
+    const asked = [...replied, said(3, { type: "questions_asked", requestId: "q1", toolUseId: "", questions: [] })];
+    expect(settledReason(info("in_progress", 5), asked, false)).toBeNull();
+    expect(settledReason(info("completed", 5), asked, false)).toEqual({ reason: "stop" });
+  });
+
+  it("names the error a waiting tab stopped on, from a transcript that has reached its status", () => {
+    expect(settledReason(info("waiting", 2), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting", 2), [prompt, said(2, { type: "recovery", kind: "signed_out" })], false)).toEqual({ reason: "recovery", recovery: "signed_out" });
+    // A follow-up held by the runtime goes nowhere until the error is dealt with.
+    expect(settledReason(info("waiting", 2, { followUps: [followUp] }), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting", 2), failed, true)).toBeNull();
+    // The status is from later than the transcript held here: what stopped the agent then is not known yet.
+    expect(settledReason(info("waiting", 6), retried, false)).toBeNull();
+    expect(settledReason(info("waiting", 6), failed, false)).toBeNull();
+  });
+
+  it("says the agent asks in its own terminal when it waits with nothing to answer and no error", () => {
+    expect(settledReason(info("waiting", 2), replied, false)).toEqual({ reason: "terminal" });
+    // Before anything was said: a CLI asking on its first screen.
+    expect(settledReason(info("waiting", 0), [], false)).toEqual({ reason: "terminal" });
+    // Not on a transcript behind the status, nor ahead of it.
+    expect(settledReason(info("waiting", 3), replied, false)).toBeNull();
+    expect(settledReason(info("waiting", 2), retried, false)).toBeNull();
+    // A tab that streams here hears of the event before the status that follows it: a prompt taken,
+    // an error taken back or a request decided leaves a status that still says waiting from before.
+    expect(settledReason(info("waiting", 4), retried, false)).toBeNull();
+    expect(settledReason(info("waiting", 3), [...replied, said(3, { type: "permission_decided", requestId: "r1", allowed: true, label: "Allow" })], false)).toBeNull();
+  });
+
+  it("ends on a finished turn or a stopped tab only when nothing is queued or started behind it", () => {
+    expect(settledReason(info("completed", 2), replied, false)).toEqual({ reason: "stop" });
+    expect(settledReason(info("idle", 2), replied, false)).toEqual({ reason: "stopped" });
+    expect(settledReason(info("in_progress", 2), replied, false)).toBeNull();
+    expect(settledReason(info("completed", 2), replied, true)).toBeNull();
+    expect(settledReason(info("completed", 2, { followUps: [followUp] }), replied, false)).toBeNull();
+    expect(settledReason(info("idle", 2, { followUps: [followUp] }), replied, false)).toBeNull();
+    // The transcript's newest event is a prompt the status has not caught up with.
+    expect(settledReason(info("completed", 3), [...replied, said(3, { type: "user_message", text: "and the docs" })], false)).toBeNull();
   });
 });
 

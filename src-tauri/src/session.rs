@@ -699,6 +699,22 @@ pub struct SendOutcome {
     pub events: Vec<AgentEvent>,
 }
 
+/// A tab as `terminalx wait` judges it (#668), read under the tab's lock so
+/// its parts agree with each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitView {
+    pub status: TabStatus,
+    /// Permission requests and questions someone can answer: what
+    /// `permissions list` shows of the tab.
+    pub asks: bool,
+    /// The error the agent stopped on, while the tab waits on someone for it.
+    pub recovery: Option<RecoveryKind>,
+    /// A prompt the agent has yet to take: queued by the app, or held behind
+    /// the turn in the CLI's input.
+    pub queued: bool,
+    pub running: bool,
+}
+
 struct PromptText {
     mobile: Option<crate::local_runtime::mobile::WritePermit>,
     shared_connection: Option<crate::local_sharing::WritePermit>,
@@ -1301,6 +1317,27 @@ impl SessionManager {
 
     pub fn status_of(&self, session_id: &str, tab_id: &str) -> TabStatus {
         self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
+    }
+
+    /// What `terminalx wait` goes by. A tab with no runtime has nothing
+    /// running and nothing to answer.
+    pub fn wait_view(&self, session_id: &str, tab_id: &str) -> WaitView {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        let Some(runtime) = runtime else {
+            return WaitView { status: TabStatus::Idle, asks: false, recovery: None, queued: false, running: false };
+        };
+        let rt = runtime.lock().unwrap();
+        let (pane_running, held) = match &rt.engine {
+            Engine::Cli(cli) => (self.terminals.is_running(&cli.pane_id), !cli.held.is_empty() || cli.resend_after_abort.is_some()),
+            _ => (false, false),
+        };
+        WaitView {
+            status: rt.status,
+            asks: !rt.pending.is_empty(),
+            recovery: rt.recovery,
+            queued: held || !rt.queued.is_empty(),
+            running: rt.child.is_some() || pane_running,
+        }
     }
 
     fn running_agents(&self) -> std::collections::HashSet<String> {
