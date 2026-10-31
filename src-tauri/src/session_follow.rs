@@ -440,6 +440,7 @@ impl SessionManager {
             status_names_model: false,
             settings_command_is_ours: false,
             ready,
+            recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
             awaiting_delivery: None,
@@ -647,7 +648,7 @@ impl SessionManager {
     /// The tab's lock is taken a batch at a time, so a long conversation
     /// does not keep the tab from answering anything else until it is in.
     fn import(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &tui::Tail, records: Vec<tui::Record>, whole: bool, busy: bool) {
-        let ended = |status| Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false };
+        let ended = |status| Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
         let mut open = false;
         let mut records = records.into_iter().peekable();
         while records.peek().is_some() {
@@ -853,6 +854,12 @@ impl SessionManager {
     /// place in the same pane. A pane the app closed (Stop, a restart, the
     /// tab or the app going) is the app's own doing and changes nothing
     /// here, and neither does anything on a runtime that does not follow.
+    ///
+    /// The app's own CLI that exits before it ever got going (#667) did not
+    /// go by itself: it could not start. Followed or not, the turn it was
+    /// launched for fails with the last line it printed, the tab stays the
+    /// agent's and asks to be recovered, as a refused sign-in when that line
+    /// says so (which in a cloud workspace reports the grant it was given).
     pub(super) fn cli_gone(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, code: Option<i32>, legacy_turn_status: TurnStatus) {
         let tail = match &rt_arc.lock().unwrap().engine {
             Engine::Cli(p) => p.tail.clone(),
@@ -872,7 +879,18 @@ impl SessionManager {
         let by_hand = p.by_hand.is_some();
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         let turn_was_open = rt.turn_open;
-        if !follows {
+        let early = (!by_hand && !closing && !p.ready.marked() && !p.recorded)
+            .then(|| recovery::EarlyExit::read(&self.terminals.read_output(pane).unwrap_or_default()))
+            .filter(|exit| turn_was_open || exit.sign_in_refused);
+        let failed_to_start = early.is_some();
+        if let Some(exit) = early {
+            self.fail_open_turn(&mut rt, &exit);
+            if !turn_was_open {
+                self.sign_in_refused(&rt);
+            }
+            self.release_cli(&mut rt);
+            self.needs_recovery(&mut rt, exit.recovery());
+        } else if !follows {
             if by_hand {
                 // Followed, and closed by the app with its pane. If the tab
                 // outlives that (its session was moved, say), it is a
@@ -904,7 +922,7 @@ impl SessionManager {
         // The app's own CLI was the pane's process, so the pane went with it:
         // the tab needs a shell to be the terminal it now is. A CLI started
         // by hand leaves the shell it was started from.
-        if follows && !by_hand {
+        if follows && !by_hand && !failed_to_start {
             if let Err(error) = self.shell_for(&session, &tab) {
                 log::warn!("open a shell in {pane} after its agent exited: {error:#}");
             }
