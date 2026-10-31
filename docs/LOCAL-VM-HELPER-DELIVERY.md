@@ -510,7 +510,29 @@ connected to anything.
   - the production entries refusing.
 - **Not done.** No real `ssh` ran, not even to localhost. A recorded check
   here comes from fixtures and is not live acceptance, trust or readiness.
-  `sshVerified` in the host-key status stays false.
+- **Status (later the same day).** A pinned host key in
+  `environment.guestAccounts` (and the per-conversation list) now carries
+  `firstConnection`, separate from the pin and from readiness.
+  - **Closed admission.** While transport admission is closed, as in this
+    build, the stage is `admissionClosed` and nothing past that check is
+    read. A planted receipt changes nothing.
+  - **Open admission (test seam only).** Status reads a snapshot of the
+    journal (no lock, repair or rewrite) for the one current environment
+    bound to this bootstrap. It then requires all of:
+    - the existing binding and retained-ledger checks;
+    - the transport's trusted host key equal to the person's pin;
+    - the canonical `recorded` receipt;
+    - the receipt's key digest equal to the reference's retained public key,
+      read from its record without opening the private key.
+  - **Stages.** The result is one of `awaitingTransport`, `notVerified`,
+    `verified` or `invalid` (with detail).
+  - **`sshVerified`.** Only `verified` sets `hostKey.sshVerified`; a pin
+    alone never does. `ready` stays false everywhere.
+  - **No effects.** Status never runs SSH or the key verifier, opens a
+    private key, writes, fences or starts anything.
+  - **Panel.** It keeps the pin, the first connection and readiness apart.
+    With admission closed it says SSH to this VM is not enabled in this
+    build.
 
 ### Guest helper executable
 
