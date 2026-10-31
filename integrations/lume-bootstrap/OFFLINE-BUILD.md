@@ -39,7 +39,11 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   grant (patch `88198099…`), SHA-256
   `6fe3cf29f6d5c35150cdf51b17760e0d9ec10a92d04b78f4ac61d8d1ab3ade61`; with the
   host-key observation (patch `85d79fd0…`), SHA-256
-  `4023c44590199f8b404baa1f3332e1fb14ceb9868ebbf78cc7e43fe816e3b5be`.
+  `4023c44590199f8b404baa1f3332e1fb14ceb9868ebbf78cc7e43fe816e3b5be`; with the
+  retirement acknowledgement and report (patch `257f8022…`, commit `f19d0cb5`),
+  22,129,816 bytes, SHA-256
+  `69933c32aec3b8e22d0e18a2e1793a3c592fb7c2262aac3cca7835918d9f009d`, with no
+  compiler warnings or errors in TerminalX sources.
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those

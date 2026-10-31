@@ -58,7 +58,7 @@ port-49871 listener. The key never crosses a share or the socket.
 | 6 | Setup Assistant | Person, in the owned console | Creates the account and makes any security choices | Human-only; unchanged from the console proposal |
 | 7 | Account confirmation | Helper reports; person confirms in TerminalX | Authenticated account observation matched to stage-1 intent | `accountAuthenticated` for that one account, once a verified person approval exists. This build refuses the confirmation ([person approval](#person-approval-for-person-only-actions)) |
 | 8 | Account effects | Helper child after dropping to that account | Existing restricted `authorized_keys` engine | Existing receipts |
-| 9 | Retirement | Helper | Deletes key, binary and plist | Retirement receipt |
+| 9 | Retirement | Helper, after the owner's acknowledgement | Deletes key, binary and plist | Retirement receipt (the helper's own claim to the owner) |
 
 `ready` stays false throughout.
 
@@ -487,7 +487,8 @@ against the helper and the seeder's production profile.
   the relayed confirmation and answers `accountConfirmed` or
   `accountRefused`. Next it takes the key grant, which the forking account
   child installs. Only after `publicKeyInstalled` does it report the existing
-  public host key.
+  public host key, and then it waits for the owner's acknowledgement
+  ([helper retirement](#helper-retirement)).
   - Each step waits up to the owner's own 6 h.
   - The stages reached are journaled in `session-result.json`, with no key
     material.
@@ -525,13 +526,92 @@ against the helper and the seeder's production profile.
   `~/.raccoon/task-coordination/pro114-pro117/passes/20261031-guest-helper/artifacts/`
   with `manifest.json`.
 - **Not done.**
-  - **Retirement (stage 9):** needs a final acknowledgement that the owner
-    does not send yet. That is independent source work on both sides; the
-    helper leaves the seeded items in place.
   - **Distribution:** the helper is not signed, catalog-pinned or seeded
     (held), and it has never run in a guest.
   - **Approval:** past the account report, every step waits on the host's
     person approval, which this build refuses.
+  - **Retirement:** added later the same day, see the next section.
+
+### Helper retirement
+
+**2026-10-31** (`f19d0cb5`). This is design stage 9, on both sides.
+
+- **Owner acknowledgement.**
+  - After journaling `host-key-observation.json`, the owner journals
+    `retirement-acknowledgement.json` and sends one frame under the
+    enrollment session:
+    `{retire: {challengeSha256, hostKeySha256, observationSha256}}`.
+  - That frame names the session's challenge, the digest of the helper's
+    exact `{hostKey: …}` report and the digest of the committed observation.
+  - Nothing is acknowledged without that final report: no acknowledgement
+    follows a refused or unknown install, or a host key for another
+    reference or of another type.
+- **What the helper accepts.** An acknowledgement exists for the helper only
+  from a frame tagged under its own verified session, at the next sequence
+  number, naming its challenge and the digest of the report it sent. A
+  missing, changed, extended, untagged or premature acknowledgement ends the
+  session and removes nothing. Later launches then exit as already enrolled.
+- **Recorded items.** Before connecting, the helper records the seed
+  profile's plist, program and key.
+  - Each parent is opened one component at a time without following links,
+    and must be owned by root and writable by no one else. The key's parent
+    must also be private.
+  - Each item must be a single-link regular file owned by root, with its
+    seeded mode.
+  - Otherwise the helper refuses before any connection.
+- **Removal.**
+  - The helper journals `retirement-intent.json` exclusively, with the
+    acknowledgement and the recorded identities.
+  - It then requires every item and its parent to keep the recorded device,
+    inode, mode, owner, size, mtime and ctime.
+  - It removes the key, then the plist, then the program, each through its
+    parent's descriptor with `unlinkat`. Each item is rechecked just before
+    its removal, and confirmed absent after a directory `fsync`.
+  - It journals `retirement.json` last, as one of:
+    - `retired`: only when all three are confirmed gone;
+    - `refused`: something changed, and nothing was removed;
+    - `outcomeUnknown`: a removal failed; the record names what was removed.
+- **Report.** The helper sends `{retirement: {acknowledgementSha256,
+  stage}}`. The owner journals it as `retirement-report.json` with
+  `helperReported: true` and `verified: false`, because the owner cannot see
+  the guest's files. It refuses a report for any other acknowledgement or
+  stage, or with any other shape.
+- **Never repeated.** A later launch that finds `retirement.json` or a bare
+  `retirement-intent.json` exits 0 without connecting. An interrupted
+  retirement stays an inspection item: it is never resumed or repeated, and
+  nothing is reseeded.
+- **Nothing else is removed.** Only those three names are ever removed: not
+  the state directory or its journals, the account journals, a neighbouring
+  file or the host key.
+- **Tests.**
+  - **Rust fixtures:**
+    - an exact acknowledgement leads to retirement and its report;
+    - six missing, changed, untagged or premature acknowledgements;
+    - six changed items: substituted, symlinked, hard-linked, rewritten,
+      re-moded, or with a substituted directory;
+    - a program replaced during the session;
+    - interrupted and failed removals;
+    - later launches.
+  - **Real Swift owner with the reference helper:** the bound
+    acknowledgement; none without the final report; refused reports.
+  - **Real Swift owner with the real Rust helper:** the fixture's `retire`
+    mode runs the production run loop over a disposable root owned by the
+    caller. Only the three items go.
+  - No item was removed from any real guest.
+- **Candidate builds from clean commit `f19d0cb5`.**
+  - The helper `terminalx-vm-bootstrap`: 765,616 bytes, SHA-256
+    `4ed2448731f8f8798295c1f5676319f231269ad479828c796d240e02adf9901d`. It is
+    thin arm64 with only the linker's ad hoc signature and no team. Its plist
+    is unchanged (`17b2c213…`).
+  - The restricted owner: built offline as `69933c32…` (patch `257f8022…`;
+    [offline build](../integrations/lume-bootstrap/OFFLINE-BUILD.md)).
+  - Retained under
+    `~/.raccoon/task-coordination/pro114-pro117/passes/20261031-retirement/`.
+- **Still open.**
+  - The host does not read the two new owner records yet.
+  - A reported retirement is the helper's claim, not host-verified evidence.
+  - Removing the seeded files in a real guest needs the held seeding,
+    signing and live steps.
 
 ## Person approval for person-only actions
 
@@ -711,10 +791,9 @@ No acceptance run may count any of them as the person's consent.
 After the host acknowledges the final receipt, the helper unlinks the key,
 binary and plist by descriptor, journals the result and exits 0, so `KeepAlive`
 does not restart it. Leftovers become an inspection item and are never
-reseeded. Not implemented yet: the owner sends no final acknowledgement, so
-the helper keeps the seeded items
-([guest helper executable](#guest-helper-executable)). The person can disable the item in System Settings > General > Login
-Items at any time. Apple's `statusForLegacyURL` exists so apps "still want to
+reseeded. Implemented in source on 2026-10-31; the acknowledgement contract
+and the checks are under [helper retirement](#helper-retirement). The person
+can disable the item in System Settings > General > Login Items at any time. Apple's `statusForLegacyURL` exists so apps "still want to
 know when a user disables its legacy daemons" in `/Library/LaunchDaemons`. A
 disabled helper is a wait state that TerminalX explains and never re-enables.
 
