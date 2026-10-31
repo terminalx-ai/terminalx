@@ -17,12 +17,32 @@
 
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
+- Sending a message or worktree note again after the connection dropped no
+  longer gives the agent the prompt twice or adds the note twice. Each draft
+  goes under one id, and a Mac that already has it answers as it did the first
+  time, so the phone reports it sent and clears the box. Older Macs behave as
+  before. (#675)
 
 ### Organizations
 
 - Let organization owners delete non-personal organizations, including test
   organizations, with exact-name confirmation and guidance for remaining resources.
   Refresh membership and clear a deleted default selection without choosing a replacement.
+
+### Terminal
+
+- Release a tab's terminal view metadata when the tab is removed, and ignore
+  late start or adoption replies from its previous lifetime. Archived tabs,
+  retained conversation history and reattachment are unchanged. (#232)
+- Cancel xterm's pending buffer compaction when a terminal is disposed,
+  including buffers replaced by a reset, so a closed terminal's scrollback is
+  not kept alive by the timer. (#232)
+- Reuse one small canvas for terminal palette conversion instead of creating
+  two surfaces per palette. (#232)
+- Add an opt-in memory diagnostic to the terminal benchmark: weak inventories of
+  xterm buffers, parsers, renderers and canvases, Tauri callback counts, and
+  WebContent footprint in exact bytes. It reports typed-array spans without
+  materializing their backing buffers. (#232)
 
 ### Chat
 

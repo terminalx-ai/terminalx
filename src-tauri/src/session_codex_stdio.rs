@@ -43,7 +43,7 @@ impl SessionManager {
         rt.turn_started_at = Some(Instant::now());
         self.set_status(rt, TabStatus::InProgress);
         if let Err(error) = self.apply_codex_actions(rt, actions) {
-            self.codex_stdio_failed(rt, &error);
+            self.codex_stdio_failed(rt, &error, None);
             return Err(error);
         }
         Ok(SendOutcome { queued: false, events, in_input: false })
@@ -73,7 +73,7 @@ impl SessionManager {
                 rt.stdio_starting = false;
                 if let Err(error) = result {
                     rt.stdio_writer = None;
-                    manager.codex_stdio_failed(&mut rt, &error);
+                    manager.codex_stdio_failed(&mut rt, &error, None);
                     return;
                 }
             }
@@ -85,7 +85,7 @@ impl SessionManager {
                     if let Some(rt_arc) = runtime.upgrade() {
                         let mut rt = rt_arc.lock().unwrap();
                         if same_launch(&rt, &launch) && !rt.stopping {
-                            manager.codex_stdio_failed(&mut rt, &error);
+                            manager.codex_stdio_failed(&mut rt, &error, None);
                         }
                     }
                     return;
@@ -120,7 +120,7 @@ impl SessionManager {
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
         ];
-        let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) });
+        let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
         let args = vec!["app-server".into(), "--listen".into(), "stdio://".into()];
         let child = self.host.spawn(&key_of(session, tab), SpawnSpec { program: &program, args: &args, cwd: Path::new(cwd), env: &env }, sink)?;
         let cancelled = {
@@ -231,13 +231,34 @@ impl SessionManager {
         Ok(())
     }
 
-    fn codex_stdio_failed(&self, rt: &mut TabRuntime, error: &anyhow::Error) {
+    /// `stderr`: what Codex wrote there before its thread was ready, which
+    /// says why better than a closed pipe does.
+    fn codex_stdio_failed(&self, rt: &mut TabRuntime, error: &anyhow::Error, stderr: Option<&str>) {
+        // Before its thread is ready nothing has worked yet: what Codex said
+        // is shown, and a refused sign-in is said as one (#667).
+        let starting = matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.ready);
+        let said = format!("{error:#}");
+        let exit = starting.then(|| recovery::EarlyExit::said(&match stderr {
+            Some(stderr) if !stderr.trim().is_empty() => format!("{said}\n{stderr}"),
+            _ => said.clone(),
+        }));
         rt.stdio_writer = None;
         if let Engine::CodexStdio(engine) = &mut rt.engine { engine.fail(); }
         self.cancel_asks(rt);
         self.codex_stdio_loss(rt, CompactionLoss::Disconnected);
-        self.apply(rt, Payload::Error { message: format!("Experimental Codex connection failed: {error:#}. Stop this session before starting a new one; input will not be replayed."), fatal: false }, None);
-        self.needs_recovery(rt, RecoveryKind::Disconnected);
+        match exit {
+            Some(exit) if exit.sign_in_refused && rt.turn_open => self.fail_open_turn(rt, &exit),
+            Some(exit) if exit.sign_in_refused => {
+                self.apply(rt, Payload::Error { message: RecoveryKind::SignedOut.message().into(), fatal: false, detail: exit.detail }, None);
+                self.sign_in_refused(rt);
+                self.needs_recovery(rt, RecoveryKind::SignedOut);
+            }
+            exit => {
+                let message = format!("Experimental Codex connection failed: {said}. Stop this session before starting a new one; input will not be replayed.");
+                self.apply(rt, Payload::Error { message, fatal: false, detail: exit.and_then(|exit| exit.detail) }, None);
+                self.needs_recovery(rt, RecoveryKind::Disconnected);
+            }
+        }
     }
 
     fn codex_stdio_loss(&self, rt: &mut TabRuntime, reason: CompactionLoss) {
@@ -306,9 +327,12 @@ fn ensure_local(prompt: &PromptText) -> Result<()> {
     Ok(())
 }
 
-struct StdioSink { manager: SessionManager, rt: Arc<Mutex<TabRuntime>>, launch: Arc<()>, startup_stderr_bytes: Mutex<usize> }
+/// `startup_stderr` holds, in memory only, the same bounded startup stderr
+/// the diagnostics keep: why a Codex that never got ready exited (#667).
+struct StdioSink { manager: SessionManager, rt: Arc<Mutex<TabRuntime>>, launch: Arc<()>, startup_stderr_bytes: Mutex<usize>, startup_stderr: Mutex<String> }
 impl StdioSink {
     fn current(&self, rt: &TabRuntime) -> bool { same_launch(rt, &self.launch) }
+    fn startup_stderr(&self) -> String { self.startup_stderr.lock().unwrap().clone() }
 }
 impl Sink for StdioSink {
     fn stdout_line(&self, line: String) {
@@ -317,7 +341,7 @@ impl Sink for StdioSink {
         let Engine::CodexStdio(engine) = &mut rt.engine else { return };
         let actions = engine.handle(&line);
         let result = actions.and_then(|actions| self.manager.apply_codex_actions(&mut rt, actions));
-        if let Err(error) = result { self.manager.codex_stdio_failed(&mut rt, &error); }
+        if let Err(error) = result { self.manager.codex_stdio_failed(&mut rt, &error, None); }
     }
     fn stderr_line(&self, line: String) {
         let rt = self.rt.lock().unwrap();
@@ -331,6 +355,9 @@ impl Sink for StdioSink {
         let mut end = line.len().min(remaining);
         while !line.is_char_boundary(end) { end -= 1; }
         *used += end.max(1);
+        let mut kept = self.startup_stderr.lock().unwrap();
+        kept.push_str(&line[..end]);
+        kept.push('\n');
         recovery::diagnose_codex_stdio(&rt.diagnostics_path(), serde_json::json!({
             "stage": "startup_stderr", "text": &line[..end], "truncated": end < line.len(),
         }));
@@ -342,7 +369,8 @@ impl Sink for StdioSink {
         rt.stdio_writer = None;
         self.manager.codex_stdio_loss(&mut rt, CompactionLoss::Disconnected);
         if !rt.stopping {
-            self.manager.codex_stdio_failed(&mut rt, &anyhow!("Codex output connection closed"));
+            let stderr = self.startup_stderr();
+            self.manager.codex_stdio_failed(&mut rt, &anyhow!("Codex output connection closed"), Some(&stderr));
         }
     }
     fn exited(&self, pid: u32, code: Option<i32>) {
@@ -361,11 +389,15 @@ impl Sink for StdioSink {
         rt.stdio_writer = None;
         self.manager.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
+        let starting = matches!(&rt.engine, Engine::CodexStdio(e) if !e.ready);
         rt.stdio_compaction = None;
         // Reader drain is not process-group extinction. Keep the engine and
         // exact child/PID even on spontaneous exit, until Stop confirms both.
         self.manager.cancel_asks(&mut rt);
         if manual { rt.turn_open = false; }
+        // Every line of its stderr is in by now: a Codex that exited before
+        // its thread was ready fails the turn with why (#667).
+        else if rt.turn_open && starting && !rt.stopping { self.manager.fail_open_turn(&mut rt, &recovery::EarlyExit::said(&self.startup_stderr())); }
         else if rt.turn_open { self.manager.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
         let status = if rt.recovery.is_some() && !rt.stopping { TabStatus::Waiting } else { TabStatus::Idle };
         self.manager.set_status(&mut rt, status);

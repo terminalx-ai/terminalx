@@ -6,6 +6,7 @@ import * as DocumentPicker from "expo-document-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
+import { forgetConversationState } from "@mobile/state/conversation-state";
 import { RelayOuterError } from "./transport/relay-client";
 
 const mocks = vi.hoisted(() => ({
@@ -20,11 +21,12 @@ const mocks = vi.hoisted(() => ({
   listProps: {} as any,
   scrollToOffset: vi.fn(),
   initialBatchOnly: false,
+  uuids: 0,
 }));
 vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
-vi.mock("expo-crypto", () => ({ randomUUID: () => "test" }));
+vi.mock("expo-crypto", () => ({ randomUUID: () => `uuid-${++mocks.uuids}` }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("expo-document-picker", () => ({ getDocumentAsync: vi.fn() }));
 vi.mock("expo-file-system", () => ({ File: class {} }));
@@ -84,6 +86,7 @@ beforeEach(() => {
   mocks.push.mockClear();
   mocks.scrollToOffset.mockClear();
   mocks.initialBatchOnly = false;
+  mocks.uuids = 0;
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
@@ -244,7 +247,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
 
   it("sends a text message straight to the agent and shows it once, as the prompt", async () => {
     await render(); await type("Run the tests"); await click("Send");
-    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Run the tests", []);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Run the tests", [], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Sent to the agent.");
     await publish("Run the tests");
@@ -254,7 +257,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
   it("sends the text and its attachments in one message", async () => {
     vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [{ uri: "file:///brief.pdf", name: "brief.pdf", mimeType: "application/pdf", size: 3, base64: "cGRm", lastModified: 1 }] } as any);
     await render(); await click("Attach file"); await type("See the brief"); await click("Send");
-    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "See the brief", [{ mediaType: "application/pdf", data: "cGRm", name: "brief.pdf" }]);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "See the brief", [{ mediaType: "application/pdf", data: "cGRm", name: "brief.pdf" }], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await publish("See the brief");
     expect(shown("See the brief")).toHaveLength(1);
@@ -262,7 +265,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
 
   it("adds a worktree note once and sends nothing to the agent", async () => {
     await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
-    expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "Deploying at 5");
+    expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "Deploying at 5", expect.any(String));
     expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Note added.");
     expect(shown("Deploying at 5")).toEqual([expect.objectContaining({ kind: "note" })]);
@@ -282,7 +285,10 @@ describe("messages for the agent and worktree notes (#541)", () => {
     await click("Send");
     expect(container.textContent).toContain("Sent to the agent.");
     expect(input().value).toBe("");
-    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "Retry me", []], ["claude", "Retry me", []], ["claude", "Retry me", []]]);
+    // Every try of one draft goes under one id, so a Mac that already has it does not take it again (#675).
+    const [first] = mocks.app.api.sendSession.mock.calls[0].slice(3);
+    expect(first).toEqual(expect.any(String));
+    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "Retry me", [], first], ["claude", "Retry me", [], first], ["claude", "Retry me", [], first]]);
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await publish("Retry me");
     expect(shown("Retry me")).toHaveLength(1);
@@ -301,7 +307,10 @@ describe("messages for the agent and worktree notes (#541)", () => {
     mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
     expect(button("Send again").disabled).toBe(false);
     await click("Send again");
-    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "How is it going?", []], ["claude", "How is it going?", []]]);
+    // Send again goes under the same id as the first try (#675).
+    const [sendId] = mocks.app.api.sendSession.mock.calls[0].slice(3);
+    expect(sendId).toEqual(expect.any(String));
+    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "How is it going?", [], sendId], ["claude", "How is it going?", [], sendId]]);
     expect(container.textContent).toContain("Sent to the agent.");
     expect(input().value).toBe("");
     expect(() => button("Send again")).toThrow();
@@ -376,6 +385,73 @@ describe("messages for the agent and worktree notes (#541)", () => {
   });
 });
 
+describe("sending a draft again after a lost reply (#675)", () => {
+  const sendIds = () => mocks.app.api.sendSession.mock.calls.map((call: unknown[]) => call[3]);
+  const dropped = () => new Error("Connection closed");
+
+  it("sends a draft again under its id, an edited one under a new id, and retires the id once sent", async () => {
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped()).mockRejectedValueOnce(dropped()).mockRejectedValueOnce(dropped());
+    await render(); await type("Ship it");
+    await click("Send"); await click("Send");
+    expect(sendIds()[0]).toEqual(expect.any(String));
+    expect(sendIds()[1]).toBe(sendIds()[0]);
+    // Space around the text is not sent, so it is the same message.
+    await type("  Ship it "); await click("Send");
+    expect(sendIds()[2]).toBe(sendIds()[0]);
+
+    await type("Ship it now"); await click("Send");
+    expect(sendIds()[3]).not.toBe(sendIds()[0]);
+    expect(container.textContent).toContain("Sent to the agent.");
+    expect(input().value).toBe("");
+    // The same text sent after that is meant as a second message.
+    await type("Ship it now"); await click("Send");
+    expect(sendIds()[4]).not.toBe(sendIds()[3]);
+  });
+
+  it("starts a new id when an attachment is added or removed", async () => {
+    vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [{ uri: "file:///brief.pdf", name: "brief.pdf", mimeType: "application/pdf", size: 3, base64: "cGRm", lastModified: 1 }] } as any);
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped()).mockRejectedValueOnce(dropped());
+    await render(); await type("See the brief");
+    await click("Send");
+    await click("Attach file"); await click("Send");
+    await click("Remove brief.pdf"); await click("Send");
+    const [plain, attached, removed] = sendIds();
+    expect(attached).not.toBe(plain);
+    expect(removed).not.toBe(attached);
+  });
+
+  it("posts a note again under its id, and the same text for the agent is another message", async () => {
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped());
+    mocks.app.api.postNote.mockRejectedValueOnce(dropped());
+    await render(); await type("Deploying at 5");
+    await click("Send");
+    await click("Add worktree note"); await click("Send"); await click("Send");
+    const [[, , first], [, , again]] = mocks.app.api.postNote.mock.calls;
+    expect(again).toBe(first);
+    expect(first).not.toBe(sendIds()[0]);
+    expect(container.textContent).toContain("Note added.");
+    expect(input().value).toBe("");
+  });
+
+  it("keeps a failed draft's id when the app is closed and opened again", async () => {
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped());
+    await render(); await type("Survive a restart"); await click("Send");
+    expect(container.textContent).toContain("Message not sent: Connection closed");
+
+    // Closed: only what the phone saved is left.
+    await act(async () => root.unmount());
+    forgetConversationState("");
+    root = createRoot(container);
+    await render();
+    expect(input().value).toBe("Survive a restart");
+    await click("Send");
+    expect(sendIds()[1]).toBe(sendIds()[0]);
+    expect(container.textContent).toContain("Sent to the agent.");
+    // Sent: neither the draft nor its id waits for the next launch.
+    expect([...mocks.storage.keys()].filter((key) => key.startsWith("terminalx:draft"))).toEqual([]);
+  });
+});
+
 describe("mobile transcript mount budget (#385)", () => {
   it("mounts only a small part of a page with twenty long prompts", async () => {
     mocks.initialBatchOnly = true;
@@ -434,7 +510,7 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).not.toContain("claude transcript");
     await type("Codex draft");
     await click("Send");
-    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("codex", "Codex draft", []);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("codex", "Codex draft", [], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await select("claude");
     expect(input().value).toBe("Claude draft");
