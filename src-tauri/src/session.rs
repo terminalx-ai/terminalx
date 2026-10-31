@@ -723,6 +723,8 @@ pub fn idle_orphaned_tabs() {
 #[derive(Clone)]
 pub struct SessionManager {
     pub(crate) history_downloads: Arc<crate::local_runtime::history::Downloads>,
+    /// Desktop typing waiting for its programs to read it (#661).
+    pub(crate) typing: Arc<crate::local_runtime::typing::Typing>,
     pub(crate) mobile: Arc<crate::local_runtime::mobile::Registry>,
     pub(crate) sharing: Arc<Mutex<crate::local_sharing::Sharing>>,
     sink: Arc<dyn EventSink>,
@@ -933,6 +935,7 @@ impl SessionManager {
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             history_downloads: Arc::default(),
+            typing: Arc::default(),
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
             follow: Arc::default(),

@@ -165,6 +165,8 @@ pub struct AppState {
     manager: std::sync::Mutex<Option<session::SessionManager>>,
     runtime: std::sync::Mutex<Option<Arc<local_runtime::desktop::Desktop>>>,
     runtime_error: std::sync::Mutex<String>,
+    /// Whether the attached runtime still answers (#661).
+    runtime_health: local_runtime::ui::Health,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
 }
 
@@ -183,6 +185,16 @@ impl AppState {
         Err(anyhow::anyhow!(self.runtime_error.lock().unwrap().clone()))
     }
 
+}
+
+/// Quitting fences the runtime's sharing and paired devices, on the main
+/// thread. A runtime that has stopped answering is let go first, so those
+/// fences fail at once instead of each waiting out a timeout (#661).
+#[cfg(feature = "desktop")]
+fn let_go_of_unresponsive_runtime(state: &AppState) {
+    if state.runtime_health.unresponsive().is_some() {
+        if let Some(runtime) = state.runtime() { runtime.disconnect(); }
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -235,6 +247,7 @@ pub fn run() {
         manager: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(None),
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
+        runtime_health: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
 
@@ -335,15 +348,18 @@ pub fn run() {
             browser.start_keepalive();
             floating::install(app.handle());
             if let Err(error) = local_runtime::ui::connect(app.handle()) {
-                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
                 log::error!("attach background runtime: {error:#}");
+                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
+                app.state::<AppState>().runtime_health.attach_failed(&error);
             }
+            local_runtime::ui::watch(app.handle());
             work_claims.start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
+            local_runtime::ui::local_runtime_restart,
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
@@ -769,6 +785,7 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
+                        let_go_of_unresponsive_runtime(&state);
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                         if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
@@ -805,6 +822,7 @@ pub fn run() {
                 // destroying the window first; the computer-use helper must
                 // not outlive the app on either path.
                 state.computer.shutdown();
+                let_go_of_unresponsive_runtime(&state);
                 state.pairing.stop();
                 if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                 state.browser.shutdown();

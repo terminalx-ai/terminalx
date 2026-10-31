@@ -43,11 +43,14 @@ pub mod sessions;
 #[cfg(unix)]
 pub mod launch;
 #[cfg(unix)]
+pub mod log_file;
+#[cfg(unix)]
 pub mod bridge;
 #[cfg(unix)]
 pub mod desktop;
 #[cfg(unix)]
 pub mod terminals;
+pub mod typing;
 #[cfg(all(unix, feature = "desktop"))]
 pub mod ui;
 
@@ -152,6 +155,11 @@ pub struct Lifetime {
     stream_socket: std::sync::OnceLock<std::path::PathBuf>,
     grace: Duration,
     state: Mutex<State>,
+    /// When the owner's loop last finished a pass, once it is running. A
+    /// window's watchdog reads its age from `status`: a loop that stopped
+    /// turning is an owner wedged behind a lock, even while `status` itself
+    /// still answers (#661).
+    turned: Mutex<Option<Instant>>,
 }
 
 pub struct RequestGuard(Arc<Lifetime>);
@@ -174,6 +182,7 @@ impl Lifetime {
             epoch: uuid::Uuid::new_v4().to_string(),
             stream_socket: std::sync::OnceLock::new(),
             grace,
+            turned: Mutex::new(None),
             state: Mutex::new(State {
                 starting: false,
                 leases: HashMap::new(), requests: 0, idle_since: Some(Instant::now()),
@@ -192,6 +201,12 @@ impl Lifetime {
         let mut state = self.state.lock().unwrap();
         state.starting = false;
         state.idle_since = Some(Instant::now());
+        self.turned();
+    }
+
+    /// The owner's loop finished a pass.
+    pub(crate) fn turned(&self) {
+        *self.turned.lock().unwrap() = Some(Instant::now());
     }
 
     pub fn enter(self: &Arc<Self>) -> Result<RequestGuard, ControlError> {
@@ -214,9 +229,10 @@ impl Lifetime {
         let mut state = self.state.lock().unwrap();
         let now = Instant::now();
         state.leases.retain(|_, attachment| attachment.valid_at(now));
+        let loop_age = self.turned.lock().unwrap().map(|turned| now.saturating_duration_since(turned).as_millis() as u64);
         json!({ "protocol": PROTOCOL, "epoch": self.epoch, "attachedClients": state.leases.len(),
             "stopping": state.stop_requested || state.exiting, "idleGraceSeconds": self.grace.as_secs(),
-            "eventSocket": self.stream_socket.get(), "nativeTray": native_tray() })
+            "eventSocket": self.stream_socket.get(), "nativeTray": native_tray(), "loopAgeMs": loop_age })
     }
 
     pub(crate) fn attachment(&self, epoch: &str, lease: &str) -> anyhow::Result<Arc<Attachment>> {
@@ -414,6 +430,19 @@ mod tests {
         assert!(life.enter().is_ok());
         assert!(life.command("runtime.attach", json!({"protocol": PROTOCOL})).is_ok());
         assert_eq!(life.status()["attachedClients"], 1);
+    }
+
+    #[test]
+    fn status_says_how_long_ago_the_owners_loop_finished_a_pass() {
+        let life = Lifetime::starting(Duration::ZERO);
+        assert!(life.status()["loopAgeMs"].is_null(), "no pass is owed before the loop starts");
+        life.ready();
+        assert!(life.status()["loopAgeMs"].as_u64().unwrap() < 1_000);
+        // A loop held up behind a lock stops turning; its age grows.
+        *life.turned.lock().unwrap() = Instant::now().checked_sub(Duration::from_secs(90));
+        assert!(life.status()["loopAgeMs"].as_u64().unwrap() >= 90_000);
+        life.turned();
+        assert!(life.status()["loopAgeMs"].as_u64().unwrap() < 1_000);
     }
 
     #[test]

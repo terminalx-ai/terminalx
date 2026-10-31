@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), listeners: new Map<string, () => void>() }));
+const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart: vi.fn(), listeners: new Map<string, () => void>() }));
 const localIndex = vi.hoisted(() => ({ loaded: true, sessions: [{ tabs: [{ id: "local-tab-a" }, { id: "local-tab-b" }, { id: "local-tab" }] }] }));
 vi.mock("@/lib/sessions", () => ({ getSessionStore: () => localIndex }));
 vi.mock("@/lib/cloudAgents", () => ({ cloudDraftsReadyForRecovery: () => true }));
@@ -13,11 +13,12 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-import { LocalRuntimeNotice } from "./LocalRuntimeNotice";
+import { LocalRuntimeNotice, UNRESPONSIVE_RECHECK } from "./LocalRuntimeNotice";
 import { clearDrafts, getDraft, setDraft } from "@/lib/drafts";
 
 const connected = { state: "connected", epoch: "owner", runningAgents: 1, terminals: 1 };
 const unavailable = { state: "unavailable", message: "Live terminal output in window main is disconnected. Agents and terminal commands may still be running." };
+const unresponsive = { state: "unresponsive", message: "The TerminalX runtime did not answer status within 15 seconds.", epoch: "owner" };
 beforeEach(() => {
   vi.useFakeTimers();
   sessionStorage.clear();
@@ -25,6 +26,10 @@ beforeEach(() => {
   clearDrafts(() => true);
   native.status.mockReset().mockResolvedValue(connected);
   native.reconnect.mockReset().mockImplementation(async () => {
+    native.status.mockResolvedValue(connected);
+    return connected;
+  });
+  native.restart.mockReset().mockImplementation(async () => {
     native.status.mockResolvedValue(connected);
     return connected;
   });
@@ -265,4 +270,48 @@ it("cancels timers and ignores an in-flight recovery after unmount", async () =>
   vi.resetModules();
   const nextDocument = await import("@/lib/localRuntimeRecovery");
   expect(nextDocument.recoveryAttempts()).toBe(1);
+});
+
+it("offers a restart, never a reconnect, for a runtime that stopped answering, and reloads onto the fresh one", async () => {
+  native.status.mockResolvedValue(unresponsive);
+  const { reload } = await mounted();
+  expect(screen.getByRole("status").textContent).toContain("TerminalX runtime is not responding");
+  expect(screen.getByRole("status").textContent).toContain("within 15 seconds");
+  expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+  await advance(60_000);
+  expect(native.reconnect).not.toHaveBeenCalled();
+  expect(native.restart).not.toHaveBeenCalled();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })));
+  await advance(0);
+  // Only the runtime this window found not responding.
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(reload).toHaveBeenCalledOnce();
+});
+
+it("keeps asking a runtime that stopped answering and clears once it answers again", async () => {
+  native.status.mockResolvedValue(unresponsive);
+  const { reload } = await mounted();
+  native.status.mockResolvedValue(connected);
+  await advance(UNRESPONSIVE_RECHECK);
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(reload).not.toHaveBeenCalled();
+});
+
+it("shows the watchdog's finding as soon as it reports one", async () => {
+  await mounted();
+  expect(screen.queryByRole("status")).toBeNull();
+  native.status.mockResolvedValue(unresponsive);
+  await disconnect("local_runtime_health");
+  expect(screen.getByRole("status").textContent).toContain("TerminalX runtime is not responding");
+});
+
+it("says why a restart failed and leaves it to be tried again", async () => {
+  native.status.mockResolvedValue(unresponsive);
+  native.restart.mockRejectedValue("Could not stop the TerminalX runtime: it was left running.");
+  const { reload } = await mounted();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })));
+  await advance(0);
+  expect(screen.getByRole("alert").textContent).toContain("Could not stop the TerminalX runtime");
+  expect((screen.getByRole("button", { name: "Restart runtime" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(reload).not.toHaveBeenCalled();
 });

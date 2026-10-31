@@ -1600,7 +1600,9 @@ impl WorkspaceRpc {
             for data in queue {
                 let written = terminals.write(&writer_id, &data);
                 input_pending.fetch_sub(data.len(), Ordering::SeqCst);
-                if written.is_err() {
+                // A program that stopped reading loses this input, not every
+                // later keystroke: it may read again.
+                if written.is_err_and(|error| !error.is::<crate::pty::InputStalled>()) {
                     break;
                 }
             }
