@@ -20,13 +20,13 @@ port-49871 listener. The key never crosses a share or the socket.
 
 | # | Stage | Actor | Effect | What it establishes |
 | --- | --- | --- | --- | --- |
-| 1 | Consent | Person, TerminalX guided Create | Chooses macOS26, the intended account name, and approves installing the TerminalX VM helper in this VM | Host-side human intent; never agent-callable |
+| 1 | Consent | Person, TerminalX guided Create | Chooses macOS26, the intended account name, and approves installing the TerminalX VM helper in this VM | Host-side human intent; must never be agent-callable. No shipped path meets this yet: an agent holding the runtime token can also send the existing `environment.create` consent ([person approval](#person-approval-for-person-only-actions)) |
 | 2 | Restore | Existing pinned `lume create --ipsw` | VM created and stopped | Existing `createReceipt` |
 | 3 | Offline seed | New privileged seeder | Writes exactly three root-owned items to the guest Data volume | Seed receipt from readback with ownership enabled |
 | 4 | First boot | Existing `run` | launchd starts the helper before any login | Nothing by itself |
 | 5 | Enrollment | Helper ↔ restricted owner listener | HMAC proof of the seeded key | `helperAuthenticated`: guest root in this exact VM holds the key |
 | 6 | Setup Assistant | Person, in the owned console | Creates the account and makes any security choices | Human-only; unchanged from the console proposal |
-| 7 | Account confirmation | Helper reports; person confirms in TerminalX | Authenticated account observation matched to stage-1 intent | `accountAuthenticated` for that one account |
+| 7 | Account confirmation | Helper reports; person confirms in TerminalX | Authenticated account observation matched to stage-1 intent | `accountAuthenticated` for that one account, once a verified person approval exists. This build refuses the confirmation ([person approval](#person-approval-for-person-only-actions)) |
 | 8 | Account effects | Helper child after dropping to that account | Existing restricted `authorized_keys` engine | Existing receipts |
 | 9 | Retirement | Helper | Deletes key, binary and plist | Retirement receipt |
 
@@ -212,7 +212,24 @@ the local personal accounts it observes (UID at least 501, `/Users/<name>`,
 home device and inode). The owner journals that as `account-observation.json`,
 with helper authentication only.
 
-The person confirms one of those accounts through `environment.confirmGuestAccount`:
+**Prepared flow versus this build.** The steps below are the prepared relay
+for the person to confirm one of those accounts through
+`environment.confirmGuestAccount`. In this build that call refuses before any
+lookup or effect, because no person approval can be verified (see
+[person approval](#person-approval-for-person-only-actions)). In TerminalX's
+own flow, the relay, the helper's acknowledgement, the key grant and install,
+and the host-key pin below all wait on a future verified approval mechanism.
+
+- Host-level fixtures reach these steps only with a test-only approver.
+- The Python suite drives the owner's relay directly, because the restricted
+  owner does not verify approvals yet. The person-approval section covers
+  this direct path.
+- The onboarding capability, `confirm: true` and the parent IDs scope a
+  request. They do not prove that a person made it, because an agent holding
+  the shared runtime token can send the same values.
+
+Once a verified approval is presented, the prepared confirmation works like
+this:
 
 - It is gated by the onboarding capability and needs `confirm: true`.
 - It must quote the exact observation digest and one account from it, from the
@@ -231,6 +248,29 @@ acknowledges with the confirmation digest. Only that acknowledgement makes
 that one account. Trust and readiness stay false.
 
 The confirmation request's payload digest joins all three owner-channel MACs.
+
+**On-screen confirmation.** Each conversation's Local VM section lists only the
+bootstraps whose original parent is that session, tab and conversation
+(`environment.guestAccountConfirmations`). It shows the exact reported
+accounts.
+
+- **Prepared flow.** It requires a selection and an explicit consent checkbox
+  before `environment.confirmGuestAccount`. It drops a selection when the list
+  changes and explains stale-list refusals and safe retries. It shows a
+  pending choice as immutable and states that confirmation is not trust or
+  SSH readiness. Nothing is confirmed on load.
+- **This build.** `personApproval.available` is false. The section keeps the
+  reports visible, disables choosing, installing and pinning, shows the
+  reason, and sends nothing.
+
+The checkbox is an interface step, not proof of consent. The prepared requests
+carry no approval, and how a verified approval reaches the host is part of
+the undecided mechanism.
+
+**Record publication.** The owner's `writeNew` and the host's `write_new` now
+write under a unique hidden name and rename with `RENAME_EXCL`. Readers see no
+record or the complete one, and an existing target of any kind is never
+replaced. A fixture confirmed that the old writer let readers see prefixes.
 
 **Account child.**
 
@@ -277,7 +317,10 @@ The helper's `child::Forking` installer works as follows:
 **Per-VM key producer (2026-10-31).** `environment.grantGuestKey` (onboarding
 capability, `confirm: true`, original parent session, tab and conversation
 only) takes no key material and refuses `publicKey`, `privateKey` and
-`keyReference` parameters. The host:
+`keyReference` parameters. In this build it refuses before any lookup or
+effect, because no person approval can be verified. The prepared route below
+runs only with a verified approval, which today means fixtures with a
+test-only approver. With one, the host:
 
 1. Requires the helper's exact acknowledgement of the person's confirmed
    account. Before it, and after a refusal, nothing is bound, reserved or
@@ -313,9 +356,11 @@ post-trust producer is unchanged and still gated by `require_available()`.
 
 `environment.guestAccounts` reports the key as `notGranted`, `keyPending`
 (intent published, no grant yet; retrying uses only that key),
-`grantPending`, or the helper's own result. The confirmation control offers
-**Install SSH key** only after the helper's acknowledgement, and **Retry with
-the original key** while pending. It never offers a retry after a result.
+`grantPending`, or the helper's own result. In the prepared flow, the
+confirmation control offers **Install SSH key** only after the helper's
+acknowledgement, and **Retry with the original key** while pending. It never
+offers a retry after a result. In this build the control shows the key state
+with these actions disabled.
 
 **Host-key review (2026-10-31).** This is the design's "Final trust
 confirmation", up to but not including the first SSH connection.
@@ -339,8 +384,10 @@ confirmation", up to but not including the first SSH connection.
    `changed`, always with `sshVerified: false` and `ready: false`.
    `environment.confirmGuestHostKey` (onboarding capability, `confirm: true`,
    original parent only) takes the observation digest and the exact
-   fingerprint the person reviewed. It refuses `hostKey`, `publicKey` and
-   `knownHosts` parameters. It then:
+   fingerprint shown for review. It refuses `hostKey`, `publicKey` and
+   `knownHosts` parameters. In this build it refuses before any lookup or
+   effect, because no person approval can be verified. With a verified
+   approval (today only a fixture's test-only approver), it then:
    - records `host-key-confirmation.json` exclusively; a different
      observation or key is refused for good and never re-pinned;
    - requires that the confirmed account is the account planned at Create;
@@ -351,7 +398,9 @@ confirmation", up to but not including the first SSH connection.
    line, `StrictHostKeyChecking=yes`, no accept-new, and the produced
    original key as the only identity.
 4. **UI.** The review shows the fingerprint and how to check it in the VM's
-   own Terminal. **Pin host key** needs explicit consent. A pinned key is
+   own Terminal. In the prepared flow, **Pin host key** needs an explicit
+   consent checkbox. In this build it is disabled, and the checkbox alone
+   would not be proof: the host requires a verified approval. A pinned key is
    described as not yet a verified SSH connection, and `changed` is an alert
    with no action.
 
@@ -397,29 +446,49 @@ The existing question cannot carry Local VM consent:
 
 ### Missing primitive
 
-A verifiable, one-time approval whose proof needs physical presence through
-an OS-protected prompt, and which the same-user agent can neither produce nor
-read:
+A verifiable, one-time approval with these properties:
+
+- Its proof needs physical presence through an OS-protected prompt.
+- The same-user agent can neither produce nor read it.
+- The host owner verifies it before any effect, and the restricted Lume owner
+  verifies it before relaying, so the file capability alone no longer
+  suffices.
+
+**Proposed candidate (consent option A below).** It is a design proposal,
+neither implemented nor proven:
 
 - a Secure Enclave P-256 key with `userPresence` access control (Touch ID or
   the login password);
 - usable only by the Developer ID–signed TerminalX app, through a keychain
   access group;
 - signing the canonical approval document below;
-- verified by the host owner before any effect, and by the restricted Lume
-  owner before relaying. Its public key is pinned in the version-3 binding at
-  Create, so the file capability alone no longer suffices.
+- its public key pinned in the version-3 binding at Create, with P-256
+  verification added to the restricted Lume owner.
 
-### Options
+It needs verification on the platform before anything relies on it:
+
+- that the key can be limited to the signed app this way, and which
+  entitlement and provisioning that takes;
+- that same-user Accessibility automation cannot satisfy the system prompt;
+- that the restricted owner can verify the signature.
+
+Developer ID signing and the entitlement are separately held.
+
+### Consent options
+
+These letters are separate from the delivery decision's Option A, the bundled
+seed daemon, above. The columns give each design's expected effect, not
+verified results.
 
 | Option | Closes the token, CLI and raw-request paths | Closes the file capability | Closes Accessibility clicks | Needs |
 | --- | --- | --- | --- | --- |
-| **A. Secure Enclave user-presence approval (recommended)** | Yes | Yes, once the restricted owner verifies | Yes: the system prompt needs presence, not a click | Developer ID signing and a keychain-access-group entitlement (held); the restricted owner verifies P-256 |
+| **A. Secure Enclave user-presence approval (proposed, recommended)** | Yes | Yes, once the restricted owner verifies | Expected, to be verified: the system prompt needs presence, not a click | Platform verification; Developer ID signing and a keychain-access-group entitlement (held); P-256 verification in the restricted owner |
 | B. Desktop question plus executing in the desktop | Yes | No, unless the owner capability leaves disk, which breaks reopen after a restart | No | Moving effects into the desktop process |
 | C. Isolating agent tabs: a separate macOS user or sandbox, a scoped tab token, no Accessibility | Yes | Yes | Yes | A platform-wide change to how tabs run |
 
-Recommendation: A for consent, with C's scoped tab token later as defense
-in depth.
+Proposed recommendation, pending the user's choice and the platform
+verification: consent option A, with C's scoped tab token later as defense
+in depth. Nothing of consent option A is implemented.
 
 ### Approval contract (implemented; production has no approver)
 
@@ -454,13 +523,21 @@ in depth.
   (`Reference::confirm_account`, `grant_guest_key_using`,
   `confirm_host_key` each take a verified approval). The shared token cannot
   issue, because an approval is a proof over the document, not a request
-  field.
+  field. The restricted Lume owner does not verify approvals yet.
 - **This build.** The approver is `Unavailable`, so the three version-3
   person-only actions fail closed before any effect, whatever the caller
   sends. `environment.guestAccounts` and `guestAccountConfirmations` stay
   read-only and report `personApproval: {available: false}`, and the UI
   keeps the observed accounts, key and host-key state visible with the
   actions disabled and the reason shown.
+  - Fixtures exercise the contract only with a test-only HMAC approver. No
+    person's approval was given, tested or achieved.
+  - Because the restricted owner does not verify approvals, a same-user
+    process that reads `control.capability` could still ask a running
+    version-3 owner to relay a confirmation or grant. Only owner-side
+    verification closes that path.
+  - Release builds launch no version-3 owner, because
+    `Artifact::production()` refuses.
 - **Not changed.** `environment.create` and `environment.setupAction`, the
   existing shipped onboarding consent for compatible VMs, have the same
   token-level weakness. Closing them now would disable that onboarding, so
@@ -470,25 +547,23 @@ in depth.
 
 ### Decision required
 
-Choose the consent primitive. Option A also needs the signing and
-keychain-entitlement work that is currently held. Separately, decide whether
-existing onboarding consent (`environment.create`, `environment.setupAction`)
-should also fail closed until that primitive exists.
+Two choices remain open for the user:
 
-**On-screen confirmation.** Each conversation's Local VM section lists only the
-bootstraps whose original parent is that session, tab and conversation
-(`environment.guestAccountConfirmations`). It shows the exact reported accounts
-and requires a selection plus an explicit consent checkbox before
-`environment.confirmGuestAccount`.
+1. **The consent mechanism** (the consent options above). Consent option A
+   is the proposal. It needs platform verification, and the signing and
+   keychain-entitlement work that is separately held.
+2. **Existing onboarding consent.** Whether `configure`,
+   `environment.create` and `environment.setupAction` should also fail closed
+   until that mechanism exists.
 
-It drops a selection when the list changes and explains stale-list refusals
-and safe retries. It shows a pending choice as immutable, and states that
-confirmation is not trust or SSH readiness. Nothing is confirmed on load.
+Until a mechanism is chosen, verified and built, this build cannot perform
+any of these:
 
-**Record publication.** The owner's `writeNew` and the host's `write_new` now
-write under a unique hidden name and rename with `RENAME_EXCL`. Readers see no
-record or the complete one, and an existing target of any kind is never
-replaced. A fixture confirmed that the old writer let readers see prefixes.
+- account confirmation, key install or host-key pin;
+- anything downstream of them: `accountAuthenticated`, the key grant, the
+  trust receipts, or the first strict SSH connection.
+
+No acceptance run may count any of them as the person's consent.
 
 ## Account confirmation and effects
 
@@ -497,11 +572,19 @@ replaced. A fixture confirmed that the old writer let readers see prefixes.
 - It observes local accounts with UID ≥ 501 through the existing `getpwuid_r`
   lookup (no password fields), plus home device/inode and the OS version/build,
   and reports them over the authenticated session.
-- The host matches a candidate to the stage-1 intent. TerminalX then asks the
-  person to confirm that exact account in the parent session's UI. This click,
-  bound to the parent session/tab/conversation, is the human-approved intent
-  writer the remaining gates call for.
-- The host sends the confirmed intent over the session. The helper forks a
+- The host matches a candidate to the stage-1 intent. In the prepared flow,
+  TerminalX then asks the person to confirm that exact account in the parent
+  session's UI.
+  - That click, its consent checkbox and the parent session/tab/conversation
+    are not human-approved intent. An agent holding the shared runtime token
+    can send the same request.
+  - The human-approved intent the remaining gates call for needs a verified,
+    one-time person approval
+    ([person approval](#person-approval-for-person-only-actions)).
+  - This build has no such approval, so it refuses the confirmation before
+    any effect.
+- Only after a confirmation accepted with such an approval does the host send
+  the confirmed intent over the session. The helper forks a
   child that calls `initgroups`/`setgid`/`setuid` to that account and verifies
   real and effective IDs. The child opens the home by descriptor and runs the
   existing restricted `authorized_keys` engine. Account files are never written
