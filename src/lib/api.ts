@@ -1503,6 +1503,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_repository_ref_not_found"
   | "cloud_workspace_repository_verification_unavailable"
   | "cloud_workspace_agent_credential_required"
+  | "cloud_agent_credential_reauth_required"
   | "cloud_workspace_device_auth_unavailable"
   | "cloud_workspace_operation_in_progress"
   | "cloud_workspace_active_work"
