@@ -481,27 +481,15 @@ fn native_exit_or_lost_startup_announcement_is_recorded_without_replacement() {
     }
 }
 
-/// The test approver's key; it stands in for the human-presence primitive.
-const APPROVER: [u8; 32] = [0x5a; 32];
-fn approved(action: &str, inputs: &Value) -> crate::local_vm::person_approval::Presented {
-    use crate::local_vm::person_approval::{fixture::{approve, TestApprover}, presented, LIFETIME};
-    presented(&TestApprover(APPROVER), &approve(APPROVER, action, inputs, std::time::SystemTime::now(), LIFETIME)).unwrap()
-}
-/// Each action with an approval over exactly the inputs the host computes.
+/// Each trusted host request, as its route makes it.
 fn confirm(reference: &Reference, confirmation: &super::super::AccountConfirmation) -> Result<Value> {
-    let inputs = reference.account_approval_inputs(&confirmation.observation_sha256, &confirmation.account);
-    reference.confirm_account(confirmation, &approved(super::super::CONFIRM_ACCOUNT, &inputs))
+    reference.confirm_account(confirmation)
 }
 fn grant_key(reference: &Reference, root: &Path, utility: &Path) -> Result<Value> {
-    let (_, inputs) = reference.key_approval_inputs(root)?;
-    reference.grant_guest_key_using(root, utility, Duration::from_secs(5), &approved(super::super::GRANT_KEY, &inputs))
+    reference.grant_guest_key_using(root, utility, Duration::from_secs(5))
 }
 fn pin(reference: &Reference, root: &Path, confirmation: &super::super::HostKeyConfirmation) -> Result<Value> {
-    let (bytes, observation) = reference.host_key_observation()?;
-    let fingerprint = crate::local_vm::macos_personalization::public_key(observation["hostKey"].as_str().unwrap_or_default())?;
-    let (_, answer) = reference.account_answer_bytes()?;
-    let inputs = reference.host_key_approval_inputs(&journal::digest(&bytes), &observation, &fingerprint, &answer["account"]);
-    reference.confirm_host_key(root, confirmation, &approved(super::super::PIN_HOST_KEY, &inputs))
+    reference.confirm_host_key(root, confirmation)
 }
 /// Exact seed readback for the recorded intent, as the seeder core reports it.
 fn seed(f: &Fixture) {
@@ -594,7 +582,7 @@ fn native_version_2_owner_has_no_stop() {
 
 #[test]
 #[ignore = "Requires explicitly compiled synthetic native owner fixture"]
-fn native_only_the_persons_confirmation_from_the_original_parent_is_relayed_once() {
+fn native_only_a_confirmation_from_the_original_parent_is_relayed_once() {
     let f = Fixture::new();
     seed(&f);
     assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
@@ -671,8 +659,8 @@ fn replace(path: &Path, bytes: &[u8]) {
     let _ = std::fs::remove_file(path);
     private(path, bytes);
 }
-/// The owner's enrollment and the helper's account observation, then the
-/// person's confirmation of `personal` from the original parent. Returns the
+/// The owner's enrollment and the helper's account observation, then a
+/// confirmation of `personal` from the original parent. Returns the
 /// chosen account and the recorded confirmation.
 fn confirmed_choice(f: &Fixture, reference: &Reference) -> (Value, Vec<u8>) {
     choose(f, reference, 0)
@@ -859,7 +847,7 @@ fn host_key_confirmation(reference: &Reference, observation: &[u8], fingerprint:
 
 #[test]
 #[ignore = "Requires explicitly compiled synthetic native owner fixture"]
-fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_changed_key_is_never_pinned() {
+fn native_a_pin_request_pins_only_the_owner_observed_host_key_once_and_a_changed_key_is_never_pinned() {
     let f = Fixture::new();
     let (reference, result) = installed(&f, 0);
     let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
@@ -953,7 +941,7 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     assert_eq!(crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap().trust.host_key, host_key);
 }
 
-/// Through the person's pin of the owner-observed host key, with the real
+/// Through the pin of the owner-observed host key, with the real
 /// version-3 key, grant and confirmation records. Returns the pinned host key.
 fn pinned(f: &Fixture) -> String {
     let (reference, result) = installed(f, 0);
@@ -1033,7 +1021,7 @@ fn native_changed_stale_or_colliding_evidence_never_becomes_an_environment() {
         replace(path, &canonical(&value).unwrap());
         original
     };
-    // The trusted key must be the person's pin, for this key and account.
+    // The trusted key must be the recorded pin, for this key and account.
     let confirmation = f.op().join("host-key-confirmation.json");
     /// Alters one field of the pin record.
     type Change = dyn Fn(&mut Value);
@@ -1230,7 +1218,7 @@ fn native_no_host_key_is_pinned_before_the_helpers_install_or_for_an_unplanned_a
     assert!(!f.op().join("host-key-confirmation.json").exists());
     drop(reference);
 
-    // The person confirmed `other`, not the account planned at Create.
+    // `other` was confirmed, not the account planned at Create.
     let g = Fixture::new();
     let (reference, result) = installed(&g, 1);
     let (observation, host_key) = host_key_observation(&g, &reference, &result, 9);
@@ -1242,9 +1230,7 @@ fn native_no_host_key_is_pinned_before_the_helpers_install_or_for_an_unplanned_a
 
 #[test]
 #[ignore = "Requires explicitly compiled synthetic native owner fixture"]
-fn native_person_only_actions_need_a_one_time_approval_of_exactly_the_hosts_inputs() {
-    use crate::local_vm::person_approval::{fixture::{approve, TestApprover}, presented, LIFETIME};
-    use std::time::SystemTime;
+fn native_a_host_request_binds_only_current_evidence_and_a_lost_reply_never_repeats_the_effect() {
     let f = Fixture::new();
     seed(&f);
     assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
@@ -1261,57 +1247,36 @@ fn native_person_only_actions_need_a_one_time_approval_of_exactly_the_hosts_inpu
         "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501), account("other", 502)], "helperAuthenticated": true,
         "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
     private(&f.op().join("account-observation.json"), &observation);
-    let confirmation = super::super::AccountConfirmation {
+    let stale = super::super::AccountConfirmation {
         confirm: true, observation_sha256: journal::digest(&observation), account: account("personal", 501),
         parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
         parent_conversation: reference.binding.parent_conversation.clone(),
     };
-    let inputs = reference.account_approval_inputs(&confirmation.observation_sha256, &confirmation.account);
-    let signed = |action: &str, inputs: &Value| approve(APPROVER, action, inputs, SystemTime::now(), LIFETIME);
-    let verify = |approval: &Value| presented(&TestApprover(APPROVER), approval);
     let nothing_recorded = || !f.op().join("account-confirmation.json").exists();
 
-    // This build: whatever is sent, the action is refused before any effect.
-    let production = crate::local_vm::person_approval::presented(&crate::local_vm::person_approval::Unavailable, &signed(super::super::CONFIRM_ACCOUNT, &inputs));
-    assert!(production.is_err());
-    // Forged: signed with a key the approver does not hold.
-    assert!(verify(&approve([0x11; 32], super::super::CONFIRM_ACCOUNT, &inputs, SystemTime::now(), LIFETIME)).is_err());
-    // Cross-parent, another account, another action, another VM binding.
-    let mut cross_parent = inputs.clone();
-    cross_parent["parentTab"] = json!(journal::new_id());
-    let mut other_account = inputs.clone();
-    other_account["account"] = account("other", 502);
-    let mut other_binding = inputs.clone();
-    other_binding["bindingDigest"] = json!("e".repeat(64));
-    for (action, bound) in [(super::super::CONFIRM_ACCOUNT, &cross_parent), (super::super::CONFIRM_ACCOUNT, &other_account),
-        (super::super::GRANT_KEY, &inputs), (super::super::CONFIRM_ACCOUNT, &other_binding)]
-    {
-        let approval = verify(&signed(action, bound)).unwrap();
-        assert!(reference.confirm_account(&confirmation, &approval).is_err(), "{action} {bound}");
-    }
-    assert!(nothing_recorded(), "no refused approval records a choice");
-
-    // Changed evidence: an approval of the earlier observation is refused after it changes.
-    let stale = verify(&signed(super::super::CONFIRM_ACCOUNT, &inputs)).unwrap();
+    // The helper's report changed: a request naming the earlier observation is refused.
     let changed = canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
         "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501)], "helperAuthenticated": true,
         "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
     replace(&f.op().join("account-observation.json"), &changed);
-    let mut current = super::super::AccountConfirmation { observation_sha256: journal::digest(&changed), ..confirmation };
-    assert!(reference.confirm_account(&current, &stale).is_err(), "approval of evidence that changed");
+    assert!(confirm(&reference, &stale).is_err(), "request for evidence that changed");
     assert!(nothing_recorded());
+    // An approval-shaped field is not part of the request and grants nothing.
+    let raw = json!({"confirm": true, "observationSha256": journal::digest(&changed), "account": account("personal", 501),
+        "parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
+        "parentConversation": reference.binding.parent_conversation, "approval": {"document": "e30=", "proof": "00"}});
+    assert!(serde_json::from_value::<super::super::AccountConfirmation>(raw).is_err());
 
-    // Interrupted after the approval was recorded, then a lost reply: the same
-    // approval completes the one effect, and retries return the same record.
-    let fresh_inputs = reference.account_approval_inputs(&current.observation_sha256, &current.account);
-    let approval = verify(&signed(super::super::CONFIRM_ACCOUNT, &fresh_inputs)).unwrap();
-    approval.consume(&reference.root, super::super::CONFIRM_ACCOUNT, &fresh_inputs, SystemTime::now()).unwrap();
-    assert!(nothing_recorded(), "recorded approval, no effect yet");
-    let relay = reference.confirm_account(&current, &approval).unwrap();
-    assert_eq!(reference.confirm_account(&current, &approval).unwrap(), relay, "lost reply");
-    // Replay of a used approval for anything else is refused.
+    // A lost reply: the identical request returns the one recorded effect.
+    let mut current = super::super::AccountConfirmation { observation_sha256: journal::digest(&changed), ..stale };
+    let relay = confirm(&reference, &current).unwrap();
+    let recorded = std::fs::read(f.op().join("account-confirmation.json")).unwrap();
+    assert_eq!(confirm(&reference, &current).unwrap(), relay, "lost reply");
+    assert_eq!(std::fs::read(f.op().join("account-confirmation.json")).unwrap(), recorded, "one record");
+    // Anything else for this VM afterwards is refused, never re-chosen.
     current.account = account("other", 502);
-    assert!(reference.confirm_account(&current, &approval).is_err());
-    let records = std::fs::read_dir(f.op()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("approval-")).count();
-    assert_eq!(records, 1, "one approval, one record");
+    assert!(confirm(&reference, &current).is_err());
+    assert_eq!(std::fs::read(f.op().join("account-confirmation.json")).unwrap(), recorded);
+    assert!(!std::fs::read_dir(f.op()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("approval-")),
+        "no approval record is written or claimed");
 }

@@ -1,4 +1,4 @@
-//! The personalized VM's environment record: the step after the person pinned
+//! The personalized VM's environment record: the step after the host pinned
 //! the guest's host key that makes the VM a Local VM environment whose
 //! transport is bound to its verified bootstrap. Every binding field comes from
 //! a record the host already verifies; nothing comes from the request except
@@ -7,7 +7,7 @@
 //!   (`macos_provision::created_for_bootstrap`);
 //! - sandbox: the endpoint pin that restore recorded;
 //! - account and home: the ledger's account receipt;
-//! - host key: the ledger's trust receipt, which must be the person's pin in
+//! - host key: the ledger's trust receipt, which must be the recorded pin in
 //!   `host-key-confirmation.json`;
 //! - per-VM key: the produced original reference;
 //! - runtime: an `ApprovedRuntime`.
@@ -62,7 +62,7 @@ fn environment(root: &Path, key: &str, name: &str, runtime: &ApprovedRuntime) ->
         bail!("The original restore recorded another sandbox for this VM")
     }
     let retained = macos_personalization::retained(root, key, &target)?;
-    // The ledger's trust must be the person's pin of the owner-observed key.
+    // The ledger's trust must be the recorded pin of the owner-observed key.
     let pinned: Value = serde_json::from_slice(&macos_keys::private_read(
         &root.join("bo").join(key).join("host-key-confirmation.json"),
         32 * 1024,
@@ -74,7 +74,7 @@ fn environment(root: &Path, key: &str, name: &str, runtime: &ApprovedRuntime) ->
         || pinned["keyReference"] != retained.plan.ssh_key_reference.as_str()
         || pinned["account"] != json!({"name": account.short_name, "uid": account.uid})
     {
-        bail!("The trusted host key is not the person's pin for this VM, key and account")
+        bail!("The trusted host key is not the recorded pin for this VM, key and account")
     }
     let binding = Binding {
         bootstrap_id: key.into(),

@@ -1548,12 +1548,14 @@ fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspa
 mod tests {
     use super::*;
 
-    /// What an agent tab can send with TERMINALX_NEXT_TOKEN: a raw Local VM
-    /// request with `confirm`, its own parent IDs and an approval-shaped value.
-    /// The person-only actions refuse before touching any bootstrap.
+    /// What an agent tab can send with TERMINALX_NEXT_TOKEN: the same Local VM
+    /// requests as the desktop, which the host trusts. They reach the action,
+    /// which still binds only the original bootstrap's own evidence: an unknown
+    /// operation, caller-supplied key material or an approval-shaped value
+    /// creates, chooses, grants or pins nothing.
     #[cfg(unix)]
     #[test]
-    fn raw_runtime_requests_cannot_supply_a_persons_approval() {
+    fn host_agent_requests_reach_bound_actions_and_change_nothing_without_their_bootstrap() {
         let _home = crate::store::temp_home();
         let (service, _sink) = headless_service();
         let life = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
@@ -1569,11 +1571,17 @@ mod tests {
                 let mut params = claimed.clone();
                 params["approval"] = approval.clone();
                 let error = service.execute("local_vm.request", json!({"method": method, "params": params}), "agent").unwrap_err();
-                assert!(format!("{error:?}").contains("cannot yet verify that a person approved"), "{method}: {error:?}");
+                assert!(!format!("{error:?}").contains("person approved"), "{method}: {error:?}");
             }
         }
+        for (method, field) in [("environment.grantGuestKey", "publicKey"), ("environment.confirmGuestHostKey", "hostKey")] {
+            let mut params = claimed.clone();
+            params[field] = json!("ssh-ed25519 AAAA");
+            let error = service.execute("local_vm.request", json!({"method": method, "params": params}), "agent").unwrap_err();
+            assert!(format!("{error:?}").contains("never accepted from a caller"), "{method}: {error:?}");
+        }
         let bootstrap = crate::local_vm::host::root().unwrap().join("bo").join(&key);
-        assert!(!bootstrap.exists(), "nothing was looked up or written");
+        assert!(!bootstrap.exists(), "nothing was created or written");
     }
 
     #[cfg(unix)]

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { localVmRequest } from "@/lib/localVm";
-import type { LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmGuestKeyStage, LocalVmGuestRetirementStatus, LocalVmPersonApproval } from "@/types/localVm";
+import type { LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmGuestKeyStage, LocalVmGuestRetirementStatus } from "@/types/localVm";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 const accountId = (account: LocalVmGuestAccount) => `${account.uid}:${account.name}`;
@@ -17,29 +17,24 @@ const keyStages: Record<LocalVmGuestKeyStage, string> = {
 };
 
 /** This conversation's guest-account choices. Key proof alone never chooses an
- *  account: the person picks one from the exact list the guest reported, and
- *  only the helper's acknowledgement authenticates it. Never trust or readiness. */
+ *  account: one is picked from the exact list the guest reported, and only the
+ *  helper's acknowledgement authenticates it. Never trust or readiness. */
 export function GuestAccountConfirmations({ session, tab, conversation, readOnly }: {
   session: SessionEntry; tab: TabEntry; conversation: string | null; readOnly: boolean;
 }) {
   const [items, setItems] = useState<LocalVmGuestAccountStatus[] | null>(null);
-  const [approval, setApproval] = useState<LocalVmPersonApproval>({ available: false });
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(async () => {
     if (!conversation) return;
     try {
       const result = await localVmRequest("environment.guestAccountConfirmations", { parentSession: session.id, parentTab: tab.id, parentConversation: conversation });
-      setItems(result.bootstraps); setApproval(result.personApproval ?? { available: false }); setError(null);
+      setItems(result.bootstraps); setError(null);
     } catch (error) { setError(errorMessage(error)); }
   }, [session.id, tab.id, conversation]);
   useEffect(() => { void load(); }, [load]);
   if (!conversation || (!items?.length && !error)) return null;
-  // Person-only steps are refused by the backend unless this build can verify
-  // the person's approval; the guest's reports stay visible either way.
-  const locked = readOnly || !approval.available;
   return <section aria-label="Guest account confirmation" className="space-y-2 py-2">
-    {!approval.available ? <p role="status" className="text-muted-foreground">{approval.reason ?? "TerminalX cannot yet verify that a person approved these steps."} The guest's reports are shown; choosing an account, installing the key and pinning the host key stay unavailable.</p> : null}
-    {items?.map((item) => <Confirmation key={item.idempotencyKey} item={item} session={session} tab={tab} conversation={conversation} readOnly={locked} reload={load} />)}
+    {items?.map((item) => <Confirmation key={item.idempotencyKey} item={item} session={session} tab={tab} conversation={conversation} readOnly={readOnly} reload={load} />)}
     {error ? <p role="alert" className="text-destructive">{error}</p> : null}
   </section>;
 }
@@ -156,7 +151,7 @@ function HelperRetirement({ retirement }: { retirement: LocalVmGuestRetirementSt
   </div>;
 }
 
-/** The person's review of the guest's SSH host key, as the authenticated helper
+/** The review of the guest's SSH host key, as the authenticated helper
  *  reported it. Pinning needs the exact fingerprint shown and explicit consent;
  *  a different key is refused, and pinning is not a verified SSH connection. */
 function HostKeyReview({ item, session, tab, conversation, readOnly, reload, checkButton }: {

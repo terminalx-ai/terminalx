@@ -1,7 +1,7 @@
 //! Private per-guest key lifecycle. No import-from-path API, host key discovery,
 //! agent lookup occurs. The fixed OpenSSH producer runs only behind an
 //! authenticated gate: the post-trust transport binding (still closed), or a
-//! version-3 owner's enrolled VM and helper-acknowledged, person-confirmed
+//! version-3 owner's enrolled VM and helper-acknowledged, host-confirmed
 //! account (`macos_owner_channel::grant_guest_key`). Tests use synthetic utilities.
 use super::{
     journal,

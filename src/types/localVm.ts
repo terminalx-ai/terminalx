@@ -301,7 +301,7 @@ export interface LocalVmFirstConnectionStatus {
 }
 
 /** The guest's existing SSH host key, as the owner observed it after the helper's
- *  own install, and where the person's review stands. A pin is not SSH
+ *  own install, and where its review stands. A pin is not SSH
  *  verification: only `firstConnection` evidence sets `sshVerified`. */
 export interface LocalVmGuestHostKeyStatus {
   stage: "awaitingHostKey" | "awaitingReview" | "confirmed" | "changed";
@@ -326,13 +326,6 @@ export interface LocalVmGuestRetirementStatus {
   verified: false;
   trustAccepted: false;
   ready: false;
-}
-
-/** Whether this build can verify a person's approval of a person-only action.
- *  Without it the backend refuses those actions, whoever asks. */
-export interface LocalVmPersonApproval {
-  available: boolean;
-  reason?: string;
 }
 
 /** Where one bootstrap's account confirmation stands, as the host verified it. */

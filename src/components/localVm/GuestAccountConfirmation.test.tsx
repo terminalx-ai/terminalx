@@ -14,18 +14,15 @@ const status = (overrides: Partial<LocalVmGuestAccountStatus> = {}): LocalVmGues
   accountAuthenticated: false, trustAccepted: false, ready: false, ...overrides,
 });
 let listing: LocalVmGuestAccountStatus[] = [];
-/** A build with a person-approval primitive; this build has none (see the last test). */
-let personApproval: { available: boolean; reason?: string } = { available: true };
 const calls = (method: string) => mocks.invoke.mock.calls.filter(([, args]) => args.method === method);
 const mount = (readOnly = false, conversation: string | null = "original") =>
   render(<GuestAccountConfirmations session={session} tab={tab} conversation={conversation} readOnly={readOnly} />);
 
 beforeEach(() => {
   listing = [status()];
-  personApproval = { available: true };
   mocks.invoke.mockReset();
   mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) =>
-    args.method === "environment.guestAccountConfirmations" ? { bootstraps: listing, personApproval } : { relay: {}, accountAuthenticated: false });
+    args.method === "environment.guestAccountConfirmations" ? { bootstraps: listing } : { relay: {}, accountAuthenticated: false });
 });
 afterEach(() => cleanup());
 
@@ -50,7 +47,7 @@ describe("guest account confirmation", () => {
   it("drops a selection when the reported list changes and explains a stale-list refusal", async () => {
     mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
       if (args.method === "environment.confirmGuestAccount") { listing = [status({ observationSha256: "b".repeat(64), accounts: [other] })]; throw "Confirm exactly one observed account from the original parent conversation"; }
-      return { bootstraps: listing, personApproval };
+      return { bootstraps: listing };
     });
     mount();
     fireEvent.click(await screen.findByLabelText(/personal · UID 501/));
@@ -87,7 +84,7 @@ describe("guest account confirmation", () => {
     listing = [status({ ...confirmed, key: { stage: "notGranted" } })];
     mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
       if (args.method === "environment.grantGuestKey") { listing = [status({ ...confirmed, key: { stage: "grantPending" } })]; return { relay: {}, installed: false }; }
-      return { bootstraps: listing, personApproval };
+      return { bootstraps: listing };
     });
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Install SSH key" }));
@@ -100,7 +97,7 @@ describe("guest account confirmation", () => {
     listing = [status({ ...confirmed, key: { stage: "keyPending" } })];
     mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
       if (args.method === "environment.grantGuestKey") throw "This VM's original key creation has an unknown outcome; it is never repeated or replaced";
-      return { bootstraps: listing, personApproval };
+      return { bootstraps: listing };
     });
     mount();
     expect(await screen.findByText(/a second key is never created/)).toBeTruthy();
@@ -123,7 +120,7 @@ describe("guest account confirmation", () => {
     listing = [status({ ...installed, hostKey: { stage: "awaitingReview", observationSha256: "c".repeat(64), fingerprint, sshVerified: false, ready: false } })];
     mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
       if (args.method === "environment.confirmGuestHostKey") { listing = [status({ ...installed, hostKey: { stage: "confirmed", fingerprint, sshVerified: false, ready: false } })]; return { hostKeyConfirmed: true }; }
-      return { bootstraps: listing, personApproval };
+      return { bootstraps: listing };
     });
     mount();
     expect(await screen.findByText(fingerprint)).toBeTruthy();
@@ -211,25 +208,23 @@ describe("guest account confirmation", () => {
     expect(screen.queryByRole("button", { name: /Install SSH key|Retry/ })).toBeNull();
   });
 
-  it("in this build shows the guest's reports but keeps every person-only step disabled and sends nothing", async () => {
-    personApproval = { available: false, reason: "TerminalX cannot yet verify that a person approved this action, so it was refused." };
+  it("offers each step to the original parent without an approval lock", async () => {
     const { unmount } = mount();
     await screen.findByText(/personal · UID 501/);
-    expect(screen.getByText(/cannot yet verify that a person approved.*choosing an account, installing the key and pinning the host key stay unavailable/)).toBeTruthy();
-    expect(screen.getByLabelText(/personal · UID 501/).matches(":disabled")).toBe(true);
-    expect((screen.getByRole("button", { name: "Confirm account" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText(/cannot yet verify|person approved/)).toBeNull();
+    expect(screen.getByLabelText(/personal · UID 501/).matches(":disabled")).toBe(false);
     unmount();
     const confirmed = { chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed" as const, accountAuthenticated: true, account: personal } };
     listing = [status({ ...confirmed, key: { stage: "notGranted" } })];
     const second = mount();
-    expect((await screen.findByRole("button", { name: "Install SSH key" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((await screen.findByRole("button", { name: "Install SSH key" }) as HTMLButtonElement).disabled).toBe(false);
     second.unmount();
     listing = [status({ ...confirmed, key: { stage: "publicKeyInstalled", installed: true }, hostKey: { stage: "awaitingReview", observationSha256: "c".repeat(64), fingerprint: "SHA256:abc", sshVerified: false, ready: false } })];
     mount();
     expect(await screen.findByText("SHA256:abc")).toBeTruthy();
-    fireEvent.click(screen.getByLabelText(/I reviewed this fingerprint/));
     expect((screen.getByRole("button", { name: "Pin host key" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(calls("environment.confirmGuestAccount").length + calls("environment.grantGuestKey").length + calls("environment.confirmGuestHostKey").length).toBe(0);
+    fireEvent.click(screen.getByLabelText(/I reviewed this fingerprint/));
+    expect((screen.getByRole("button", { name: "Pin host key" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("is read-only in a read-only tab and silent without a conversation", async () => {

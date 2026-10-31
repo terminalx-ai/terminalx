@@ -1,5 +1,5 @@
 //! The first strict SSH connection (design "Final trust confirmation"). After
-//! the person pinned the guest's host key and the helper installed this VM's
+//! the guest's host key was pinned and the helper installed this VM's
 //! original key, one connection made exactly as the transport plan says
 //! (`StrictHostKeyChecking=yes` against the single pinned `known_hosts` line,
 //! the produced key as the only identity, no agent, config or forwarding)
@@ -172,7 +172,7 @@ enum Evidence {
 
 /// The receipt for the one current environment bound to `bootstrap_id`,
 /// checked exactly as delivery checks it, plus two links status needs: the
-/// transport's trusted host key must be the one the person pinned, and the
+/// transport's trusted host key must be the recorded pin, and the
 /// receipt's key must be the reference's retained public key.
 fn evidence(root: &Path, bootstrap_id: &str, pinned: &str) -> Result<Evidence> {
     let state = journal::Journal::snapshot(root)?;
@@ -191,7 +191,7 @@ fn evidence(root: &Path, bootstrap_id: &str, pinned: &str) -> Result<Evidence> {
     binding.check_retained(root)?;
     let trust = macos_personalization::retained(root, bootstrap_id, &binding.target)?.trust;
     if trust.host_key != pinned {
-        bail!("The transport's trusted host key is not the one the person pinned")
+        bail!("The transport's trusted host key is not the recorded pin")
     }
     let Some(receipt) = recorded(root, binding)? else {
         return Ok(Evidence::NotRecorded);
@@ -204,7 +204,7 @@ fn evidence(root: &Path, bootstrap_id: &str, pinned: &str) -> Result<Evidence> {
 }
 
 /// Read-only status of the first strict connection to `bootstrap_id`, whose
-/// host key the person pinned as `pinned`. While transport admission is closed
+/// recorded host-key pin is `pinned`. While transport admission is closed
 /// it says only that, before reading anything. Otherwise it reports the
 /// canonical evidence. It never runs SSH, opens a private key, writes,
 /// fences or repairs anything, and never claims readiness.
