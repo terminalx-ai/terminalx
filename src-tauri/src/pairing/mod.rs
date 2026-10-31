@@ -8,11 +8,14 @@ mod crypto;
 mod diagnostics;
 mod direct;
 mod guest;
+mod host_poll;
 mod mobile;
 use crate::local_runtime::mobile::model;
 mod registry;
 mod relay;
+mod send_ids;
 pub(crate) mod sharing;
+mod wire;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -679,96 +682,8 @@ impl PairingManager {
         self.emit();
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
-            manager.host_poll(epoch, context, relay, generation).await;
+            manager.host_poll(epoch, context.user_id, relay, generation).await;
         });
-    }
-
-    async fn host_poll(
-        self: Arc<Self>,
-        epoch: u64,
-        context: AccountContext,
-        relay: RelayLive,
-        generation: u64,
-    ) {
-        let host_id = relay.relay_host_id.clone();
-        let mut last_heartbeat = 0i64;
-        while self.is_epoch(epoch) && !self.is_stopped() {
-            let now = Utc::now().timestamp_millis();
-            let context_for_request = context.clone();
-            let host_for_request = host_id.clone();
-            let poll = tokio::task::spawn_blocking(move || -> Result<_> {
-                if now - last_heartbeat >= 30_000 {
-                    cloud::heartbeat(&context_for_request, &host_for_request, generation, "live")?;
-                }
-                let grants =
-                    cloud::pending_grants(&context_for_request, &host_for_request, generation)?;
-                let revocations = cloud::pending_revocations(
-                    &context_for_request,
-                    &host_for_request,
-                    generation,
-                )?;
-                Ok((grants, revocations))
-            })
-            .await;
-            match poll {
-                Ok(Ok((grants, revocations))) => {
-                    if now - last_heartbeat >= 30_000 {
-                        last_heartbeat = now;
-                        if let Some(host) = self.inner.lock().unwrap().host.as_mut() {
-                            host.last_seen_at = Some(Utc::now().to_rfc3339());
-                        }
-                    }
-                    for grant in grants {
-                        self.fulfill_grant(epoch, &context, &relay, generation, grant)
-                            .await;
-                    }
-                    for revocation in revocations {
-                        if revocation.user_id != context.user_id
-                            || revocation.host_id != host_id
-                            || revocation.binding_generation != generation
-                        {
-                            continue;
-                        }
-                        if let Ok(Some(device)) = self.registry.automatic_for_grant(
-                            &context.user_id, &revocation.client_installation_id, &revocation.grant_request_id,
-                        ) {
-                            if let Err(error) = self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device.id})) {
-                                // The failed fence disconnects the attachment before
-                                // the persisted credential is retired below.
-                                log::warn!("fence revoked mobile grant: {error:#}");
-                            }
-                        }
-                        if let Ok(Some(device)) = self.registry.revoke_automatic_grant(
-                            &context.user_id,
-                            &revocation.client_installation_id,
-                            &revocation.grant_request_id,
-                        ) {
-                            let _ = self.secrets.delete_device_token(&device.id);
-                            self.cancel_connections(&device.id);
-                            relay.revoke(device.id);
-                        }
-                        let context = context.clone();
-                        let host_id = host_id.clone();
-                        let revocation_id = revocation.revocation_id;
-                        let _ = tokio::task::spawn_blocking(move || {
-                            cloud::acknowledge_revocation(
-                                &context,
-                                &host_id,
-                                &revocation_id,
-                                generation,
-                            )
-                        })
-                        .await;
-                    }
-                    self.emit();
-                }
-                Ok(Err(error)) => {
-                    log::debug!("host binding poll failed: {error:#}");
-                }
-                Err(error) => log::warn!("host binding poll task failed: {error}"),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
     }
 
     async fn fulfill_grant(
@@ -1019,10 +934,10 @@ impl PairingManager {
         };
         let hello: E2eeHello = serde_json::from_str(&hello).context("decode E2EE hello")?;
         let keypair = self.host_key(false)?;
-        let (transport, relay_host_id) = match &connection {
-            PairingConnectionContext::Direct { .. } => ("direct", None),
+        let (transport, relay_host_id, wire_transport) = match &connection {
+            PairingConnectionContext::Direct { .. } => ("direct", None, wire::Transport::Direct),
             PairingConnectionContext::Relay { relay_host_id, .. } => {
-                ("relay", Some(relay_host_id.as_str()))
+                ("relay", Some(relay_host_id.as_str()), wire::Transport::Relay)
             }
         };
         let (ready, mut session) = begin_e2ee_session(&keypair, hello, transport, relay_host_id)?;
@@ -1095,10 +1010,11 @@ impl PairingManager {
         mark_logged_in();
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         let mobile_connection = Arc::new(
-            mobile::MobileConnection::open(self, &device, outbound_tx)
+            mobile::MobileConnection::open(self, &device, outbound_tx, wire_transport)
                 .await
                 .context(diagnostics::Category::LocalRuntime)?,
         );
+        let mut reassembly = wire::Reassembly::default();
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.connections
             .lock()
@@ -1122,43 +1038,50 @@ impl PairingManager {
                         return Ok(());
                     };
                     mobile_connection.check_off_runtime(self).await?;
-                    send_encrypted_text(&mut socket, &mut session, &outgoing.to_string()).await?;
+                    send_message(&mut socket, &mut session, &outgoing, mobile_connection.wire()).await?;
                 }
                 incoming = socket.next() => {
                     let Some(incoming) = incoming else {
                         mobile_connection.close(self);
                         return Ok(());
                     };
-                    let incoming = incoming?;
-                    match incoming {
+                    let plaintext = match incoming? {
                         Message::Text(text) => {
                             let bytes = decode_canonical_base64(&text)?;
-                            let plaintext = session.open(&bytes, PayloadKind::Text)?;
-                            let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                            mobile_connection.check_off_runtime(self).await?;
-                            let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
-                            // Revalidate after asynchronous work: queued replies must not
-                            // disclose session data after revocation or account replacement.
-                            // Successful self-unpairing deliberately revokes this connection;
-                            // its acknowledgement contains no session data.
-                            let forgot_self = request["method"] == "pairing.forget"
-                                && response["ok"] == true;
-                            if !forgot_self { mobile_connection.check_off_runtime(self).await?; }
-                            send_encrypted_text(&mut socket, &mut session, &response.to_string()).await?;
+                            session.open(&bytes, PayloadKind::Text)?
                         }
                         Message::Binary(bytes) => {
-                            // Binary application streams are deliberately not attached to a
-                            // workspace in this foundation. Authentication and framing still
-                            // fail closed and the socket remains usable for RPC refusals.
-                            let _ = session.open(&bytes, PayloadKind::Binary)?;
+                            // Binary frames carry only the fragments of a request too
+                            // large for one frame (#669). Other binary application streams
+                            // are deliberately not attached to a workspace in this
+                            // foundation; authentication and framing still fail closed.
+                            let frame = session.open(&bytes, PayloadKind::Binary)?;
+                            match reassembly.push(&frame)? {
+                                Some(message) => message,
+                                None => continue,
+                            }
                         }
                         Message::Close(_) => {
                             mobile_connection.close(self);
                             return Ok(());
                         },
-                        Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                        Message::Pong(_) | Message::Frame(_) => {}
-                    }
+                        Message::Ping(bytes) => {
+                            socket.send(Message::Pong(bytes)).await?;
+                            continue;
+                        }
+                        Message::Pong(_) | Message::Frame(_) => continue,
+                    };
+                    let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
+                    mobile_connection.check_off_runtime(self).await?;
+                    let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
+                    // Revalidate after asynchronous work: queued replies must not
+                    // disclose session data after revocation or account replacement.
+                    // Successful self-unpairing deliberately revokes this connection;
+                    // its acknowledgement contains no session data.
+                    let forgot_self = request["method"] == "pairing.forget"
+                        && response["ok"] == true;
+                    if !forgot_self { mobile_connection.check_off_runtime(self).await?; }
+                    send_message(&mut socket, &mut session, &response, mobile_connection.wire()).await?;
                 }
             }
         }
@@ -1695,6 +1618,40 @@ where
     Ok(())
 }
 
+/// One application message to the phone: one encrypted text frame, or binary
+/// fragments when it is too large for the transport and the phone reassembles
+/// them. A message neither can carry never reaches the socket, where it would
+/// close the connection (#669): a reply becomes its request's error, and a
+/// notification, which the phone can read again, is dropped.
+async fn send_message<S>(
+    socket: &mut WebSocketStream<S>,
+    session: &mut crypto::E2eeSession,
+    message: &serde_json::Value,
+    wire: &wire::Wire,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let text = message.to_string();
+    match wire.delivery(text.len()) {
+        wire::Delivery::Frame => send_encrypted_text(socket, session, &text).await,
+        wire::Delivery::Fragments => {
+            for fragment in wire.fragments_of(text.as_bytes()) {
+                let frame = session.seal(&fragment, PayloadKind::Binary)?;
+                socket.send(Message::Binary(frame.into())).await?;
+            }
+            Ok(())
+        }
+        wire::Delivery::TooLarge => {
+            let Some(id) = message.get("id").and_then(serde_json::Value::as_str) else {
+                return Ok(());
+            };
+            let refusal = wire.too_large_response(id, text.len());
+            send_encrypted_text(socket, session, &refusal.to_string()).await
+        }
+    }
+}
+
 fn static_rpc_response(request: &serde_json::Value, scope: DeviceScope) -> serde_json::Value {
     let id = request
         .get("id")
@@ -1747,6 +1704,7 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "session.tail",
         "session.sync",
         "sync.capabilities",
+        "transport.negotiate",
         "session.subscribe",
         "session.unsubscribe",
         "session.status",

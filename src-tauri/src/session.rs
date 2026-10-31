@@ -182,6 +182,11 @@ struct ComposerEcho {
     /// drawn under a message it had not read. Its echo says where the CLI
     /// did take it.
     overtaken: bool,
+    /// Sent with a receipt: a continuation, the whole of a handoff. Its
+    /// waiter may give up before the CLI takes it — a handoff left in the
+    /// input until the reader presses Enter — and the CLI's record of it is
+    /// then the only word the dialog that sent it gets (#662).
+    continuation: bool,
 }
 
 /// A composer prompt the CLI's record was matched to.
@@ -190,6 +195,7 @@ struct Echoed {
     queued: bool,
     seq: u64,
     overtaken: bool,
+    continuation: bool,
 }
 
 /// How long a composer prompt waits for its echo once no turn is running.
@@ -205,6 +211,76 @@ const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30
 /// while it was idle. It answers within a second when it is going to.
 const SETTINGS_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
+/// How long a continuation's sender waits to hear that the CLI took it.
+#[derive(Debug, Clone, Copy)]
+struct ReceiptWait {
+    /// Past the last Enter written for it, once no nudge is still to come.
+    /// A CLI that took the prompt says so within a second.
+    after_enter: std::time::Duration,
+    /// The whole wait, the CLI's start and the typing included.
+    limit: std::time::Duration,
+    /// How often the waiter looks at where the prompt has got to.
+    poll: std::time::Duration,
+}
+
+impl ReceiptWait {
+    /// The limit is inside the 120 s the local runtime's client gives the
+    /// call carrying this wait, so the dialog is answered, never cut off.
+    const DEFAULT: Self = Self {
+        after_enter: std::time::Duration::from_secs(20),
+        limit: std::time::Duration::from_secs(105),
+        poll: std::time::Duration::from_millis(250),
+    };
+}
+
+/// What a continuation's waiter heard.
+#[derive(Debug, PartialEq, Eq)]
+enum Receipt {
+    Delivered,
+    Failed(String),
+    /// Nothing, by the time the wait was over.
+    Unconfirmed,
+}
+
+/// What the pane of a continuation nothing was heard for shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Unconfirmed {
+    agent: &'static str,
+    /// Input the CLI has yet to read: it is not reading at all.
+    unread: usize,
+    /// The composer shows the paste: a handoff one Enter from being sent.
+    in_input: bool,
+}
+
+/// What the sender of a continuation nothing was heard for is told, from
+/// what its pane shows. A CLI that is not reading its input was never given
+/// the handoff; one whose composer shows it is a handoff one Enter from
+/// being sent, which is no failure (#662). Anything else cannot be told
+/// apart from a failure, and is reported as one.
+fn answer_unconfirmed(seen: Option<Unconfirmed>, mut outcome: SendOutcome) -> Result<SendOutcome> {
+    match seen {
+        Some(Unconfirmed { agent, unread, .. }) if unread > 0 => Err(anyhow!("The new session opened, but {agent} has stopped reading its input, so the handoff was not sent. Check its terminal before retrying; the prepared prompt is retained.")),
+        Some(Unconfirmed { in_input: true, .. }) => {
+            outcome.in_input = true;
+            Ok(outcome)
+        }
+        _ => Err(anyhow!("The new session opened, but prompt delivery could not be confirmed. Check its terminal before retrying; the prepared prompt is retained.")),
+    }
+}
+
+/// What became of an Enter written again for a prompt not yet acknowledged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Nudged {
+    /// Written, or the write failed.
+    Written(bool),
+    /// Another prompt is being typed into the pane; its own Enter is coming.
+    Typing,
+    /// The CLI is asking something an Enter would answer.
+    Asking,
+    /// The CLI has this much of its input still to read.
+    Unread(usize),
+}
+
 /// What an agent is called in a sentence the reader is shown.
 fn agent_name(harness: &str) -> &'static str {
     match HarnessId::parse(harness) {
@@ -218,7 +294,11 @@ fn agent_name(harness: &str) -> &'static str {
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0, overtaken: false }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0, overtaken: false, continuation: false }
+    }
+
+    fn echoed(&self) -> Echoed {
+        Echoed { queued: self.queued, seq: self.seq, overtaken: self.overtaken, continuation: self.continuation }
     }
 
     fn matches(&self, echoed: &str) -> bool {
@@ -299,7 +379,7 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
         log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
     }
     pending[at].confirm_delivery();
-    let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq, overtaken: pending[at].overtaken };
+    let echoed = pending[at].echoed();
     pending.drain(..=at);
     Some(echoed)
 }
@@ -319,7 +399,7 @@ fn consume_codex_queue_echo(pending: &mut std::collections::VecDeque<ComposerEch
         if at > 0 && text == &combined {
             return pending.drain(..=at).map(|mut prompt| {
                 prompt.confirm_delivery();
-                Echoed { queued: prompt.queued, seq: prompt.seq, overtaken: prompt.overtaken }
+                prompt.echoed()
             }).collect();
         }
     }
@@ -328,7 +408,7 @@ fn consume_codex_queue_echo(pending: &mut std::collections::VecDeque<ComposerEch
     let Some(at) = pending.iter().position(|prompt| (prompt.receipt.is_none() || prompt.submitted) && prompt.matches(text)) else { return Vec::new() };
     let mut prompt = pending.remove(at).expect("the matched echo exists");
     prompt.confirm_delivery();
-    vec![Echoed { queued: prompt.queued, seq: prompt.seq, overtaken: prompt.overtaken }]
+    vec![prompt.echoed()]
 }
 
 /// The transcript has work the CLI did before taking any of the composer's
@@ -445,9 +525,16 @@ pub struct CliTab {
     /// acknowledged it by. Past it the reader is told, rather than left
     /// looking at a message the agent may never have been given (#403).
     accept_by: Option<Instant>,
-    /// Set with `accept_by`: when, still unacknowledged, the Enter is written
-    /// once more, in case the CLI let the first one go by.
+    /// Set once that prompt's Enter is written, with or without `accept_by`:
+    /// when, still unacknowledged, the Enter is written once more, in case
+    /// the CLI let the first one go by. A continuation is nudged too; it
+    /// only has no deadline here, its receipt being its sender's to judge.
     nudge_by: Option<Instant>,
+    /// How many more times that is to happen (`tui::NUDGES`).
+    nudges_left: u32,
+    /// When that prompt's Enter was last written, the nudges included: what
+    /// a continuation's waiter counts its patience from (#662).
+    entered_at: Option<Instant>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, DecisionSender>,
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
@@ -697,6 +784,26 @@ pub struct TabPtyEvent {
 pub struct SendOutcome {
     pub queued: bool,
     pub events: Vec<AgentEvent>,
+    /// A continuation the CLI has not taken, whose text is in its input,
+    /// where one Enter sends it (#662). Never set by a plain send.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_input: bool,
+}
+
+/// A tab as `terminalx wait` judges it (#668), read under the tab's lock so
+/// its parts agree with each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitView {
+    pub status: TabStatus,
+    /// Permission requests and questions someone can answer: what
+    /// `permissions list` shows of the tab.
+    pub asks: bool,
+    /// The error the agent stopped on, while the tab waits on someone for it.
+    pub recovery: Option<RecoveryKind>,
+    /// A prompt the agent has yet to take: queued by the app, or held behind
+    /// the turn in the CLI's input.
+    pub queued: bool,
+    pub running: bool,
 }
 
 struct PromptText {
@@ -890,26 +997,7 @@ impl SessionManager {
                 self.after_turn_completed(&rt_arc, rt, final_message);
                 continue;
             }
-            // A prompt still unacknowledged a few seconds after its Enter has
-            // most likely kept its text in the input, the Enter having gone
-            // by (a CLI still settling after a resume does that). Enter is
-            // written once more: it sends what is there, and does nothing on
-            // an input the CLI has emptied. Not while the CLI is asking
-            // something, where an Enter would answer it.
-            let nudge = match &mut rt.engine {
-                Engine::Cli(p) if p.awaiting_delivery.is_some() && p.nudge_by.is_some_and(|by| now >= by) => {
-                    p.nudge_by = None;
-                    p.awaiting_delivery.map(|seq| (seq, p.pane_id.clone(), p.delivery_sent_at))
-                }
-                _ => None,
-            };
-            if let Some((seq, pane, sent_at)) = nudge {
-                if rt.pending.is_empty() {
-                    let written = self.terminals.write(&pane, tui::SUBMIT).map_err(|e| log::warn!("[{pane}] write the Enter again: {e:#}")).is_ok();
-                    let elapsed = sent_at.map_or(std::time::Duration::ZERO, |at| now.saturating_duration_since(at));
-                    recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "nudged", elapsed, serde_json::json!({ "queued": false, "written": written }));
-                }
-            }
+            self.nudge_if_due(&mut rt, now);
             // A prompt whose Enter was written to an idle CLI is acknowledged
             // at once or not at all. The pane drawing is no acknowledgement —
             // a paste landing in the composer draws too — so this does not
@@ -963,6 +1051,86 @@ impl SessionManager {
                 rt.stalled_at = Some(now);
             }
         }
+    }
+
+    /// Write the awaited prompt's Enter once more, if that is due.
+    ///
+    /// A prompt still unacknowledged a few seconds after its Enter has most
+    /// likely kept its text in the input, the Enter having gone by: a CLI
+    /// still settling after a resume does that, and so does one that started
+    /// a moment ago and was still taking in a long paste (#662). Enter sends
+    /// what is there, and does nothing on an input the CLI has emptied.
+    ///
+    /// The session watcher runs this, and so does a continuation's waiter,
+    /// so a handoff is not left waiting a watcher pass for its Enter. One
+    /// held back for a prompt being typed is tried again at the next look.
+    fn nudge_if_due(&self, rt: &mut TabRuntime, now: Instant) {
+        let Engine::Cli(p) = &rt.engine else { return };
+        let Some(seq) = p.awaiting_delivery.filter(|_| p.nudge_by.is_some_and(|by| now >= by)) else { return };
+        let pane = p.pane_id.clone();
+        if self.enter_again(rt, &pane, seq, now, "app") == Nudged::Typing {
+            return;
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.nudges_left = p.nudges_left.saturating_sub(1);
+            p.nudge_by = (p.nudges_left > 0).then(|| now + tui::NUDGE_AFTER);
+        }
+    }
+
+    /// Write the Enter again for `seq`, the prompt the CLI has not
+    /// acknowledged, wherever an Enter can only send what is in its input.
+    /// `by` says for the diagnostics whose Enter it is: the app's nudge, or
+    /// the reader's from the handoff dialog.
+    ///
+    /// Not while another prompt is being typed into the pane, whose own Enter
+    /// is coming; not while the CLI is asking something, where an Enter would
+    /// answer it; and not into a CLI that has yet to read what it was given
+    /// already. That one is not taking input at all: an Enter queued behind
+    /// it says nothing new, and on a full input queue it would never finish
+    /// being written, with this tab's lock held (#661).
+    fn enter_again(&self, rt: &mut TabRuntime, pane: &str, seq: u64, now: Instant, by: &str) -> Nudged {
+        // Held across the write, so no prompt starts typing under it. Only
+        // tried: whoever is typing takes this tab's lock while holding it.
+        let writer = self.writers.lock().unwrap().get(pane).cloned();
+        let _writer = match writer.as_ref().map(|writer| writer.try_lock()) {
+            Some(Err(std::sync::TryLockError::WouldBlock)) => return Nudged::Typing,
+            Some(Err(std::sync::TryLockError::Poisoned(poisoned))) => Some(poisoned.into_inner()),
+            Some(Ok(held)) => Some(held),
+            None => None,
+        };
+        if !rt.pending.is_empty() {
+            return Nudged::Asking;
+        }
+        let (elapsed, continuation) = match &rt.engine {
+            Engine::Cli(p) => (
+                p.delivery_sent_at.map_or(std::time::Duration::ZERO, |at| now.saturating_duration_since(at)),
+                p.echoed.iter().any(|echo| echo.seq == seq && echo.continuation),
+            ),
+            _ => (std::time::Duration::ZERO, false),
+        };
+        if let Some(unread) = self.terminals.unread_input(pane).filter(|unread| *unread > 0) {
+            log::warn!("[{pane}] {unread} byte(s) of input still unread; not writing the Enter again");
+            recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "stalled", elapsed, serde_json::json!({ "queued": false, "unread": unread, "by": by }));
+            if continuation {
+                self.tell_delivery(&rt.session_id, &rt.tab_id, seq, "stalled");
+            }
+            return Nudged::Unread(unread);
+        }
+        let written = self.terminals.write(pane, tui::SUBMIT).map_err(|e| log::warn!("[{pane}] write the Enter again: {e:#}")).is_ok();
+        if let (true, Engine::Cli(p)) = (written, &mut rt.engine) {
+            p.entered_at = Some(now);
+        }
+        recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "nudged", elapsed, serde_json::json!({ "queued": false, "written": written, "by": by }));
+        if continuation {
+            self.tell_delivery(&rt.session_id, &rt.tab_id, seq, "nudged");
+        }
+        Nudged::Written(written)
+    }
+
+    /// Where a continuation's delivery has got to, for the dialog that sent
+    /// it (#662). Which prompt and which stage only, never its text.
+    fn tell_delivery(&self, session_id: &str, tab_id: &str, seq: u64, stage: &str) {
+        self.sink.emit("prompt_delivery", &serde_json::json!({ "sessionId": session_id, "tabId": tab_id, "seq": seq, "stage": stage }));
     }
 
     /// A model or effort change typed into a CLI that has not answered it.
@@ -1169,6 +1337,8 @@ impl SessionManager {
             accepted = p.awaiting_delivery.take().zip(p.delivery_sent_at.take());
             p.accept_by = None;
             p.nudge_by = None;
+            p.nudges_left = 0;
+            p.entered_at = None;
             p.ready.mark();
         }
         if let Some((seq, sent_at)) = accepted {
@@ -1301,6 +1471,27 @@ impl SessionManager {
 
     pub fn status_of(&self, session_id: &str, tab_id: &str) -> TabStatus {
         self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
+    }
+
+    /// What `terminalx wait` goes by. A tab with no runtime has nothing
+    /// running and nothing to answer.
+    pub fn wait_view(&self, session_id: &str, tab_id: &str) -> WaitView {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        let Some(runtime) = runtime else {
+            return WaitView { status: TabStatus::Idle, asks: false, recovery: None, queued: false, running: false };
+        };
+        let rt = runtime.lock().unwrap();
+        let (pane_running, held) = match &rt.engine {
+            Engine::Cli(cli) => (self.terminals.is_running(&cli.pane_id), !cli.held.is_empty() || cli.resend_after_abort.is_some()),
+            _ => (false, false),
+        };
+        WaitView {
+            status: rt.status,
+            asks: !rt.pending.is_empty(),
+            recovery: rt.recovery,
+            queued: held || !rt.queued.is_empty(),
+            running: rt.child.is_some() || pane_running,
+        }
     }
 
     fn running_agents(&self) -> std::collections::HashSet<String> {
@@ -1600,13 +1791,122 @@ impl SessionManager {
 
     /// Continuations use the normal send path, but only acknowledge delivery
     /// when the provider echoes the prompt or runs its UserPromptSubmit hook.
+    ///
+    /// A handoff the CLI let go by is no failure (#662). It is still in the
+    /// CLI's input, and is answered as that (`in_input`) for the reader to
+    /// send with one Enter; its echo is then told as `delivered`. Only a
+    /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
         let outcome = self.send_impl(session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
-        rx.recv_timeout(std::time::Duration::from_secs(90))
-            .map_err(|_| anyhow!("The new session opened, but prompt delivery could not be confirmed. Check its terminal before retrying; the prepared prompt is retained."))?
-            .map_err(anyhow::Error::msg)?;
-        Ok(outcome)
+        let seq = outcome.events.first().map(|event| event.seq).context("the continuation was not published")?;
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        match self.await_receipt(&rt_arc, seq, &rx, ReceiptWait::DEFAULT) {
+            Receipt::Delivered => Ok(outcome),
+            Receipt::Failed(message) => Err(anyhow!(message)),
+            Receipt::Unconfirmed => {
+                let seen = self.unconfirmed_continuation(&rt_arc, seq);
+                // The receipt may have come while the pane was looked at.
+                if rx.try_recv() == Ok(Ok(())) {
+                    return Ok(outcome);
+                }
+                answer_unconfirmed(seen, outcome)
+            }
+        }
+    }
+
+    /// Wait for a continuation's receipt for as long as its delivery is
+    /// moving: the CLI coming up and the prompt being typed, then
+    /// `after_enter` past the last Enter written for it (#662). Its nudges
+    /// are written from here as they fall due, not a watcher pass later.
+    ///
+    /// The tab is only ever tried, never waited on: one whose lock is held by
+    /// a write the CLI is not reading would otherwise hold this call as well,
+    /// past the time its caller gives it (#661).
+    fn await_receipt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, seq: u64, receipt: &std::sync::mpsc::Receiver<std::result::Result<(), String>>, wait: ReceiptWait) -> Receipt {
+        let limit = Instant::now() + wait.limit;
+        let mut until = limit;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Receipt::Unconfirmed;
+            }
+            match receipt.recv_timeout(left.min(wait.poll)) {
+                Ok(Ok(())) => return Receipt::Delivered,
+                Ok(Err(message)) => return Receipt::Failed(message),
+                // The typing is over and the echo that held the receipt is
+                // gone: nothing is left that could send it.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Receipt::Unconfirmed,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let Ok(mut rt) = rt_arc.try_lock() else { continue };
+            let now = Instant::now();
+            self.nudge_if_due(&mut rt, now);
+            if let Engine::Cli(p) = &rt.engine {
+                // Taken on lesser evidence than a receipt (the CLI at work),
+                // the prompt is no longer awaited: the receipt is close behind,
+                // and the wait is not lengthened for it.
+                if let (true, Some(entered)) = (p.awaiting_delivery == Some(seq), p.entered_at) {
+                    let last = p.nudge_by.map_or(entered, |next| next.max(entered));
+                    until = (last + wait.after_enter).min(limit);
+                }
+            }
+        }
+    }
+
+    /// The tab's lock for a look at it, tried for up to a second rather than
+    /// waited on (#661).
+    fn glance(rt_arc: &Arc<Mutex<TabRuntime>>) -> Option<std::sync::MutexGuard<'_, TabRuntime>> {
+        let until = Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match rt_arc.try_lock() {
+                Ok(rt) => return Some(rt),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < until => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(std::sync::TryLockError::WouldBlock) => return None,
+            }
+        }
+    }
+
+    /// A continuation nothing was heard for by the end of the wait, as its
+    /// pane shows it, noted in the tab's diagnostics. `None` when the tab
+    /// could not be looked at, or no longer runs a CLI.
+    fn unconfirmed_continuation(&self, rt_arc: &Arc<Mutex<TabRuntime>>, seq: u64) -> Option<Unconfirmed> {
+        let rt = Self::glance(rt_arc)?;
+        let Engine::Cli(p) = &rt.engine else { return None };
+        let unread = self.terminals.unread_input(&p.pane_id).unwrap_or(0);
+        let in_input = self.terminals.read_output(&p.pane_id).is_some_and(|output| tui::shows_paste(&output, p.harness.paste_placeholder()));
+        let elapsed = p.delivery_sent_at.map_or(std::time::Duration::ZERO, |at| at.elapsed());
+        recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "unconfirmed", elapsed, serde_json::json!({ "queued": false, "unread": unread, "in_input": in_input }));
+        Some(Unconfirmed { agent: agent_name(&rt.harness), unread, in_input })
+    }
+
+    /// The reader's Enter for a continuation left in the CLI's input (#662):
+    /// the handoff dialog's button, once the wait for its receipt is over.
+    /// Written only where the app's own nudge would be, and acknowledged the
+    /// same way: the CLI's record of the prompt, told as `delivered`.
+    ///
+    /// `false` when that prompt is no longer the one awaited, taken already
+    /// or replaced by another; the reason, when the Enter is held back.
+    pub fn submit_waiting(&self, session_id: &str, tab_id: &str, seq: u64) -> Result<bool> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let mut rt = rt_arc.lock().unwrap();
+        if let Some(left) = self.left_the_terminal(&rt) {
+            return Err(follow::Refusal(left).into());
+        }
+        let agent = agent_name(&rt.harness);
+        let pane = match &rt.engine {
+            Engine::Cli(p) if p.awaiting_delivery == Some(seq) => p.pane_id.clone(),
+            Engine::Cli(_) => return Ok(false),
+            _ => bail!("{agent} is not running in this tab."),
+        };
+        match self.enter_again(&mut rt, &pane, seq, Instant::now(), "reader") {
+            Nudged::Written(true) => Ok(true),
+            Nudged::Written(false) => bail!("Could not write to {agent}'s terminal. Press Enter there instead."),
+            Nudged::Typing => bail!("Another prompt is being typed into {agent}. Try again in a moment."),
+            Nudged::Asking => bail!("{agent} is asking something in its terminal. Answer it there first."),
+            Nudged::Unread(_) => bail!("{agent} has stopped reading its input. Check its terminal."),
+        }
     }
 
     /// Read tracking only; preparing a handoff must never instantiate or start
@@ -1750,7 +2050,7 @@ impl SessionManager {
                 },
                 None,
             );
-            return Ok(SendOutcome { queued: true, events: vec![ev] });
+            return Ok(SendOutcome { queued: true, events: vec![ev], in_input: false });
         }
 
         if rt.child.is_none() {
@@ -1797,7 +2097,7 @@ impl SessionManager {
         rt.open_turn();
         rt.turn_started_at = Some(Instant::now());
         self.set_status(&mut rt, TabStatus::InProgress);
-        Ok(SendOutcome { queued: false, events })
+        Ok(SendOutcome { queued: false, events, in_input: false })
     }
 
     /// With no process there is nobody left to answer a model or effort
@@ -2949,6 +3249,8 @@ impl SessionManager {
             delivery_sent_at: None,
             accept_by: None,
             nudge_by: None,
+            nudges_left: 0,
+            entered_at: None,
             held: Vec::new(),
             resend_after_abort: None,
             codex_interrupt_hooks_owed: 0,
@@ -3415,6 +3717,11 @@ impl SessionManager {
                     if matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery == Some(echo.seq)) {
                         self.delivery_confirmed(&mut rt);
                     }
+                    // Its waiter may have stopped waiting: a handoff the reader
+                    // sent with Enter after the dialog said it was in the input.
+                    if echo.continuation {
+                        self.tell_delivery(&rt.session_id, &rt.tab_id, echo.seq, "delivered");
+                    }
                     // A queued prompt the CLI held until its turn was over is the
                     // start of the next one. The `UserPromptSubmit` hook may have
                     // opened that turn already, but only a prompt resets the latch
@@ -3643,7 +3950,7 @@ impl SessionManager {
             mobile: prompt.mobile.map(|permit| (permit, entry.id.clone(), tab.id.clone(), ev.seq)),
             shared: prompt.shared_connection.map(|connection| (connection, entry.id.clone(), tab.id.clone(), ev.seq)),
         });
-        Ok(SendOutcome { queued, events: vec![ev] })
+        Ok(SendOutcome { queued, events: vec![ev], in_input: false })
     }
 
     /// The composer's half of a prompt: publish it, open the turn if none is
@@ -3657,6 +3964,7 @@ impl SessionManager {
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
         let ev = self.publish(rt, message, None);
         if let Engine::Cli(p) = &mut rt.engine {
+            echo.continuation = receipt.is_some();
             echo.receipt = receipt;
             echo.seq = ev.seq;
             expire_composer_echoes(&mut p.echoed, queued, Instant::now());
@@ -3669,6 +3977,9 @@ impl SessionManager {
                 p.awaiting_delivery = Some(ev.seq);
                 p.delivery_sent_at = Some(Instant::now());
                 p.accept_by = None;
+                p.nudge_by = None;
+                p.nudges_left = 0;
+                p.entered_at = None;
             }
         }
         if !queued {
@@ -3685,14 +3996,18 @@ impl SessionManager {
     /// sleeps, which no caller holding the tab lock could afford to do.
     ///
     /// Writing the Enter is still not delivery. A composer prompt's stages
-    /// are noted in the tab's diagnostics as they pass, and the watcher holds
-    /// the CLI to acknowledging it (`accept_by`).
+    /// are noted in the tab's diagnostics as they pass, a continuation's are
+    /// told to the dialog that sent it, and the Enter is written again while
+    /// the CLI has not acknowledged it (`nudge_by`); the watcher tells the
+    /// reader when it never does (`accept_by`).
     fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, delivery: PromptDelivery) {
         let PromptDelivery { ready, seq, queued, receipt, shared, mobile } = delivery;
         let sent_at = Instant::now();
-        // A slash command opens a palette or runs in the CLI itself, and a
-        // continuation has its own receipt: neither is held to the deadline.
-        let acknowledged = ready.is_some() && receipt.is_none() && !queued && !tui::is_slash_command(&text);
+        // A slash command opens a palette or runs in the CLI itself: it is
+        // held to acknowledging nothing. A continuation is held to it like any
+        // prompt, and only reports through its own receipt (#662).
+        let watched = ready.is_some() && !queued && !tui::is_slash_command(&text);
+        let continuation = receipt.is_some();
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let manager = self.clone();
@@ -3700,11 +4015,19 @@ impl SessionManager {
         let pane = pane.to_string();
         let spawn_receipt = receipt.clone();
         let spawned = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
-            let diagnostics = seq.map(|seq| (seq, rt_arc.lock().unwrap().diagnostics_path()));
+            let diagnostics = seq.map(|seq| {
+                let rt = rt_arc.lock().unwrap();
+                (seq, rt.diagnostics_path(), rt.session_id.clone(), rt.tab_id.clone())
+            });
             let stage = |stage: &str, mut detail: serde_json::Value| {
-                if let Some((seq, path)) = &diagnostics {
+                if let Some((seq, path, session_id, tab_id)) = &diagnostics {
                     detail["queued"] = queued.into();
                     recovery::diagnose_delivery(path, *seq, stage, sent_at.elapsed(), detail);
+                    // Readiness is told by what follows it: the typing, or
+                    // the receipt's error.
+                    if continuation && stage != "ready" {
+                        manager.tell_delivery(session_id, tab_id, *seq, stage);
+                    }
                 }
             };
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -3765,21 +4088,29 @@ impl SessionManager {
                 }
                 let unread = || terminals.unread_input(&pane);
                 if !attachments.is_empty() {
-                    tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
+                    let _ = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
                     std::thread::sleep(std::time::Duration::from_millis(300));
                 }
                 let body = tui::body_bytes(&text);
                 still_there()?;
                 terminals.write(&pane, &body)?;
                 stage("body_written", serde_json::json!({ "bytes": body.len(), "attachments": attachments.len() }));
-                let read = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
+                let (read, read_after) = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
                 if read == tui::PasteRead::Unread {
                     log::warn!("[{pane}] the CLI has not read the prompt; submitting anyway and watching for acceptance");
                 }
-                std::thread::sleep(tui::submit_delay(body.len()));
+                // Read is not yet taken in: a CLI busy with what it just
+                // read, as one up for a second or two is with a long paste,
+                // can lose an Enter it reads then (#662). It has the paste
+                // once it has drawn since, its composer showing it.
+                let drawn = tui::await_drawn(|| terminals.last_output(&pane), read_after, tui::PASTE_DRAW_TIMEOUT);
+                if !drawn {
+                    log::warn!("[{pane}] the CLI read the prompt but has drawn nothing since; submitting anyway");
+                }
+                std::thread::sleep(tui::submit_delay(body.len()).saturating_sub(read_after.elapsed()));
                 still_there()?;
-                Self::submit_composer_prompt(&rt_arc, seq, receipt.as_ref().map(|(seq, _)| *seq), acknowledged, || terminals.write(&pane, tui::SUBMIT))?;
-                stage("submit_written", serde_json::json!({ "paste": read.as_str() }));
+                Self::submit_composer_prompt(&rt_arc, seq, receipt.as_ref().map(|(seq, _)| *seq), watched, || terminals.write(&pane, tui::SUBMIT))?;
+                stage("submit_written", serde_json::json!({ "paste": read.as_str(), "drawn": drawn }));
                 Ok(())
             })();
             if let Err(e) = result {
@@ -3814,7 +4145,10 @@ impl SessionManager {
     /// Enter and its delivery identities become visible together. A provider
     /// can echo a combined queue as soon as it reads Enter; the transcript
     /// reader must not consume that record while an identity is still unarmed.
-    fn submit_composer_prompt(rt_arc: &Arc<Mutex<TabRuntime>>, seq: Option<u64>, receipt_seq: Option<u64>, acknowledged: bool, write: impl FnOnce() -> Result<()>) -> Result<()> {
+    ///
+    /// `watched`: the CLI is held to acknowledging the prompt, and given the
+    /// Enter again until it does.
+    fn submit_composer_prompt(rt_arc: &Arc<Mutex<TabRuntime>>, seq: Option<u64>, receipt_seq: Option<u64>, watched: bool, write: impl FnOnce() -> Result<()>) -> Result<()> {
         let mut rt = rt_arc.lock().unwrap();
         write()?;
         if let Engine::Cli(p) = &mut rt.engine {
@@ -3824,9 +4158,16 @@ impl SessionManager {
                 }
             }
             if let Some(seq) = seq {
-                if acknowledged && p.awaiting_delivery == Some(seq) {
-                    p.accept_by = Some(Instant::now() + tui::ACCEPT_TIMEOUT);
-                    p.nudge_by = Some(Instant::now() + tui::NUDGE_AFTER);
+                if watched && p.awaiting_delivery == Some(seq) {
+                    let now = Instant::now();
+                    // A continuation's receipt tells the dialog that sent it
+                    // what became of it; the tab does not tell it again.
+                    if receipt_seq.is_none() {
+                        p.accept_by = Some(now + tui::ACCEPT_TIMEOUT);
+                    }
+                    p.nudge_by = Some(now + tui::NUDGE_AFTER);
+                    p.nudges_left = tui::NUDGES;
+                    p.entered_at = Some(now);
                 }
             }
         }
@@ -4716,7 +5057,7 @@ mod tests {
             projected.push(composer);
 
             let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
-            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false }));
+            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false, continuation: false }));
         }
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");

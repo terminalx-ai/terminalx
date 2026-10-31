@@ -26,6 +26,9 @@ pub(super) enum Stage {
     ControlConnect,
     HostProof,
     ControlSession,
+    /// The account service's heartbeat, grant and revocation requests for
+    /// this host, made beside a connected control channel.
+    HostBinding,
     /// A phone's relay connection: the host data leg to the cell.
     PhoneAttach,
     /// The phone's E2EE handshake and device login, through the cell.
@@ -167,6 +170,8 @@ pub(super) enum Event {
     Started,
     Failed,
     Connected,
+    /// A host-binding request succeeded after `attempt` failed rounds.
+    Recovered,
     /// The cell asked for a host data leg (`conn-open`): a phone is connecting.
     PhoneRequested,
     PhoneAttached,

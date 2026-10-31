@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelInfo } from "@/lib/api";
 import type { Project, SessionEntry, TabEntry } from "@/types/session";
 import type { ContinuationContext } from "@/lib/continuation";
-const mocks = vi.hoisted(() => ({ prepare: vi.fn(), providers: vi.fn(), launch: vi.fn(), move: vi.fn() }));
+const mocks = vi.hoisted(() => ({ prepare: vi.fn(), providers: vi.fn(), launch: vi.fn(), move: vi.fn(), submit: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@/lib/api", async (original) => ({ ...await original<typeof import("@/lib/api")>(), agent: { prepareContinuation: mocks.prepare }, api: { listHarnesses: mocks.providers }, errorMessage: String }));
+vi.mock("@/lib/api", async (original) => ({ ...await original<typeof import("@/lib/api")>(), agent: { prepareContinuation: mocks.prepare, submitWaiting: mocks.submit }, api: { listHarnesses: mocks.providers }, errorMessage: String }));
 vi.mock("@/lib/continuation", async (original) => ({ ...await original<typeof import("@/lib/continuation")>(), launchContinuation: mocks.launch, moveChatToProject: mocks.move }));
 const model = (harness: string, id: string, label: string, efforts: string[], isDefault = false): ModelInfo =>
   ({ id, label, harness, efforts, defaultEffort: efforts[1] ?? null, acceptsImages: true, isDefault, upgrade: null, description: null });
@@ -23,8 +23,9 @@ vi.mock("@/lib/models", async (original) => ({
   refreshModels: vi.fn(),
   useModels: (harness?: string) => catalog.filter((m) => !harness || m.harness === harness),
 }));
+import { listen } from "@tauri-apps/api/event";
 import { getPrefs, setPrefs } from "@/lib/prefs";
-import { continuationPrompt } from "@/lib/continuation";
+import { continuationPrompt, IN_INPUT } from "@/lib/continuation";
 import { ContinuationDialog } from "./ContinuationDialog";
 const source = { id: "source", harness: "claude", title: "Fix issue", status: "waiting", model: "sonnet", effort: "low", permissionMode: "plan" } as TabEntry;
 const session = { id: "workspace", cwd: "/same/cwd", title: "Workspace" } as SessionEntry;
@@ -300,4 +301,92 @@ it.each(["delivered", "delivery"])("shows confirmation progress and handles dela
     expect(screen.queryByRole("button", { name: /Start|Confirming/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Open New Session" })).toBeTruthy();
   }
+});
+
+/** Lets a test say, as the new tab would, where its handoff has got to. */
+function tabTells() {
+  const heard: ((event: { payload: unknown }) => void)[] = [];
+  vi.mocked(listen).mockImplementation(async (_event, handler) => {
+    heard.push(handler as (event: { payload: unknown }) => void);
+    return () => {};
+  });
+  return (stage: string, tabId = "new") => act(() => {
+    for (const hear of heard) hear({ payload: { sessionId: session.id, tabId, seq: 3, stage } });
+  });
+}
+const launched = { sessionId: session.id, tab: { id: "new" } };
+/** A launch that creates its tab and answers `result`. */
+function launchAnswers(result: object) {
+  mocks.launch.mockImplementation(async (_context, _settings, _prompt, onCreated) => {
+    onCreated(launched);
+    return result;
+  });
+}
+
+it("says where the handoff has got to as the new tab tells it, and closes when it is taken", async () => {
+  const tell = tabTells();
+  let confirming!: () => void;
+  mocks.launch.mockImplementation((_context, _settings, _prompt, onCreated, _existing, onDelivering) => {
+    onCreated(launched);
+    confirming = onDelivering;
+    return new Promise(() => {});
+  });
+  const view = open(); await loaded();
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  await waitFor(() => expect(listen).toHaveBeenCalledWith("prompt_delivery", expect.any(Function)));
+  act(confirming);
+  expect(screen.getByText(/Waiting for Claude Code to start…/)).toBeTruthy();
+  tell("body_written");
+  expect(screen.getByText(/Typing the handoff into Claude Code…/)).toBeTruthy();
+  tell("submit_written");
+  expect(screen.getByText(/Waiting for Claude Code to take the handoff…/)).toBeTruthy();
+  tell("nudged");
+  expect(screen.getByText(/Pressed Enter again: Claude Code had not taken the handoff yet…/)).toBeTruthy();
+  tell("delivered", "another-tab");
+  expect(view.onClose).not.toHaveBeenCalled();
+  tell("delivered");
+  expect(view.onClose).toHaveBeenCalledTimes(1);
+});
+
+it("offers the one Enter a handoff left in the agent's input needs, and calls it no failure", async () => {
+  const tell = tabTells();
+  launchAnswers({ stage: "input", launched, seq: 3, error: IN_INPUT });
+  mocks.submit.mockResolvedValue(true);
+  const view = open(); await loaded();
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  expect(await screen.findByText("The handoff is in Claude Code's input but has not been sent yet. Press Enter to send it.")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("button", { name: /Start/ })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Press Enter" }));
+  await waitFor(() => expect(mocks.submit).toHaveBeenCalledWith(session.id, "new", 3));
+  expect(await screen.findByText(/Pressed Enter. Waiting for Claude Code to take the handoff…/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Press Enter Again" })).toBeTruthy();
+  expect(view.onClose).not.toHaveBeenCalled();
+  tell("delivered");
+  expect(view.onClose).toHaveBeenCalledTimes(1);
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+});
+
+it("says why the Enter was not written, or that nothing is waiting any more", async () => {
+  tabTells();
+  launchAnswers({ stage: "input", launched, seq: 3, error: IN_INPUT });
+  // A command refused by the backend rejects with its message, as Tauri does.
+  mocks.submit.mockRejectedValueOnce("Claude Code has stopped reading its input. Check its terminal.").mockResolvedValueOnce(false);
+  open(); await loaded();
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Press Enter" }));
+  expect((await screen.findByRole("alert")).textContent).toBe("Claude Code has stopped reading its input. Check its terminal.");
+  fireEvent.click(screen.getByRole("button", { name: "Press Enter" }));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("no longer waiting in the new session's input"));
+  expect(screen.queryByRole("button", { name: /Press Enter/ })).toBeNull();
+});
+
+it("turns a delivery it could not confirm into success when the agent takes the handoff after all", async () => {
+  const tell = tabTells();
+  launchAnswers({ stage: "delivery", launched, error: "The new session opened, but prompt delivery could not be confirmed." });
+  const view = open(); await loaded();
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("could not be confirmed");
+  tell("delivered");
+  expect(view.onClose).toHaveBeenCalledTimes(1);
 });
