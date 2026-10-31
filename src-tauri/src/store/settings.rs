@@ -43,6 +43,10 @@ pub struct Settings {
     /// What this Mac says about the issues its sessions work on (#441,
     /// `work_claims.rs`). The Rust side publishes it, so it lives here.
     pub work_status: WorkStatusSettings,
+    /// This Mac's name as the user typed it in Settings → Account (#686).
+    /// None follows the computer's own name (`pairing::MachineName`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -214,6 +218,7 @@ impl Default for Settings {
             floating: FloatingSettings::default(),
             merged_cleanup: MergedCleanupSettings::default(),
             work_status: WorkStatusSettings::default(),
+            machine_name: None,
         }
     }
 }

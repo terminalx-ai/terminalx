@@ -159,6 +159,20 @@ pub struct PairingStatus {
     pub last_error: Option<String>,
 }
 
+/// This Mac's name as the user's other devices show it (#686): on their work
+/// status ("You · on Studio") and, once bound, in the account directory that
+/// phones read. Settings → Account shows and changes it, with or without Relay.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineName {
+    pub name: String,
+    /// The user named this Mac in Settings → Account. Otherwise `name` is the
+    /// computer's own and follows a rename in System Settings.
+    pub chosen: bool,
+    /// System Settings → General → About → Name, when it can be read.
+    pub computer_name: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountPairingGrant {

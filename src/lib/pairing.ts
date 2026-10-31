@@ -81,16 +81,4 @@ export async function revokePairing(deviceId: string): Promise<void> {
   }
 }
 
-export async function setPairingHostName(displayName: string): Promise<void> {
-  set({ busy: true, status: { ...state.status, lastError: null } });
-  try {
-    applyStatus(await api.pairingSetHostName(displayName));
-  } catch (error) {
-    set({ status: { ...state.status, lastError: errorMessage(error) } });
-    throw error;
-  } finally {
-    set({ busy: false });
-  }
-}
-
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
