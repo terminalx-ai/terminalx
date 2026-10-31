@@ -14,18 +14,36 @@ use serde_json::{json, Value};
 use crate::control::{ControlRequest, ControlResponse};
 
 const MAX_RESPONSE: u64 = 32 * 1024 * 1024;
+/// A command may take a while to answer: starting a session, a large read.
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Discovery and attachment: an owner that cannot answer these promptly is
+/// not one a desktop can attach to, and a retry must not wait two minutes.
+pub const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The desktop pings each stream this often, and the owner answers every ping.
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// A hung owner never closes its socket. Silence this long, not even a pong,
+/// is the only sign of it.
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Retrying cannot help until something outside this desktop changes: an
+/// owner from an incompatible build, or another desktop serving its windows.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Blocked(pub String);
 
 pub struct Client {
     socket: PathBuf,
     token: zeroize::Zeroizing<String>,
     epoch: String,
     event_socket: PathBuf,
+    ping: Duration,
+    liveness: Duration,
 }
 
-fn request(socket: &Path, token: &str, command: &str, params: Value) -> Result<Value> {
+fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Duration) -> Result<Value> {
     let mut stream = UnixStream::connect(socket).context("connect to the local runtime")?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    stream.set_read_timeout(Some(timeout))?;
     let request = ControlRequest { id: uuid::Uuid::new_v4().to_string(), token: token.into(), command: command.into(), params };
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
@@ -64,10 +82,10 @@ impl Client {
         file.read_to_string(&mut token)?;
         let token = zeroize::Zeroizing::new(token.trim().to_string());
         if token.is_empty() { bail!("local runtime credential is empty"); }
-        let status = request(&run.join("hooks.sock"), &token, "status", json!({}))?;
+        let status = request(&run.join("hooks.sock"), &token, "status", json!({}), LIFECYCLE_TIMEOUT)?;
         let local = &status["localRuntime"];
         if status["runtimeKind"] != "local" || local["protocol"].as_u64() != Some(super::PROTOCOL) {
-            bail!("the running owner does not support this desktop's local runtime protocol; its work was left running");
+            return Err(Blocked("the running owner does not support this desktop's local runtime protocol; its work was left running".into()).into());
         }
         let socket = PathBuf::from(status["socket"].as_str().context("runtime has no control endpoint")?);
         let event_socket = PathBuf::from(local["eventSocket"].as_str().context("runtime has no event endpoint")?);
@@ -77,13 +95,26 @@ impl Client {
         let epoch = local["epoch"].as_str().context("runtime has no epoch")?.to_string();
         // Pin discovery to this owner. A publisher change between reading the
         // token and status cannot authorize commands to the replacement.
-        let pinned = request(&socket, &token, "status", json!({}))?;
+        let pinned = request(&socket, &token, "status", json!({}), LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
-        Ok(Arc::new(Self { socket, event_socket, token, epoch }))
+        Ok(Arc::new(Self { socket, event_socket, token, epoch, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT }))
     }
 
+    /// The same owner, pinged every `ping` and given up on after `liveness`
+    /// of silence: a test hangs an owner without waiting the full deadline.
+    pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
+        Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
+            event_socket: self.event_socket.clone(), ping, liveness })
+    }
+
+    pub(crate) fn ping_interval(&self) -> Duration { self.ping }
+
     pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
-        serde_json::from_value(request(&self.socket, &self.token, command, params)?).context("decode local runtime result")
+        self.call_within(command, params, CALL_TIMEOUT)
+    }
+
+    pub fn call_within<T: DeserializeOwned>(&self, command: &str, params: Value, timeout: Duration) -> Result<T> {
+        serde_json::from_value(request(&self.socket, &self.token, command, params, timeout)?).context("decode local runtime result")
     }
 
     pub fn stop_all(&self) -> Result<()> {
@@ -104,7 +135,9 @@ impl Client {
         }
         let attachment: AttachmentIdentity = serde_json::from_value(hello["attachment"].clone())?;
         if attachment.lease.is_empty() || attachment.lease.len() > 128 { bail!("invalid runtime attachment lease"); }
-        read.get_ref().set_read_timeout(None)?;
+        // The bridge pings every `ping` interval, so a live owner always has
+        // something to say well within this deadline.
+        read.get_ref().set_read_timeout(Some(self.liveness))?;
         Ok(Connection { read, write: socket, attachment })
     }
 }

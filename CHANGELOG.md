@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Background sessions
+
+- Reconnect to the background runtime automatically, with backoff and no attempt
+  limit, instead of after three tries per window. Recovery no longer reloads
+  windows: terminals re-attach in place from their retained output, and sessions,
+  history and pipelines are read again without restarting agents or resending
+  prompts. A hung runtime is now noticed, a restarted one is found again, and a
+  window whose terminal output alone dropped recovers without affecting others.
+  The notice stays quiet for short gaps and asks for action only when retrying
+  cannot help or has not helped for minutes. (#643)
 ### Relay
 
 - Poll the account service for pairing grants and revocations once every 30

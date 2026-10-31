@@ -165,6 +165,8 @@ pub struct AppState {
     manager: std::sync::Mutex<Option<session::SessionManager>>,
     runtime: std::sync::Mutex<Option<Arc<local_runtime::desktop::Desktop>>>,
     runtime_error: std::sync::Mutex<String>,
+    /// Re-establishes `runtime` after a loss, without reloading a window.
+    runtime_supervisor: local_runtime::supervisor::Supervisor,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
 }
 
@@ -235,6 +237,7 @@ pub fn run() {
         manager: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(None),
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
+        runtime_supervisor: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
 
@@ -334,9 +337,15 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
-            if let Err(error) = local_runtime::ui::connect(app.handle()) {
-                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
-                log::error!("attach background runtime: {error:#}");
+            let state = app.state::<AppState>();
+            state.runtime_supervisor.start(app.handle())?;
+            match local_runtime::supervisor::attach(app.handle()) {
+                Ok(generation) => state.runtime_supervisor.attached(generation),
+                Err(error) => {
+                    *state.runtime_error.lock().unwrap() = format!("{error:#}");
+                    log::error!("attach background runtime: {error:#}");
+                    state.runtime_supervisor.unattached(&error);
+                }
             }
             work_claims.start(app.handle().clone());
             Ok(())
@@ -769,6 +778,8 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
+                        // The app goes with it: nothing may attach again.
+                        state.runtime_supervisor.halt();
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                         if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
@@ -805,6 +816,7 @@ pub fn run() {
                 // destroying the window first; the computer-use helper must
                 // not outlive the app on either path.
                 state.computer.shutdown();
+                state.runtime_supervisor.halt();
                 state.pairing.stop();
                 if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                 state.browser.shutdown();

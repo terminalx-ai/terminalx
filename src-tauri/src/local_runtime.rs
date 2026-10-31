@@ -49,6 +49,8 @@ pub mod desktop;
 #[cfg(unix)]
 pub mod terminals;
 #[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod supervisor;
+#[cfg(all(unix, feature = "desktop"))]
 pub mod ui;
 
 pub const PROTOCOL: u64 = 1;

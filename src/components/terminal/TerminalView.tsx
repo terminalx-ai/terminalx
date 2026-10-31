@@ -110,20 +110,28 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   // once this page has dropped what a page before it had attached
   // (`subscribeTerminals`): attached before that, the view would be dropped
   // with them, and its terminal would stay blank.
-  // This attachment's own name: another terminal made for the same pane
-  // (this one disposed, the next one created) has another, and neither can
-  // detach or answer for the other, in whatever order their calls land.
-  const token = crypto.randomUUID();
-  const feed = feedLocalPane(id, token, term, {
-    paced: !isAgentPane(id),
-    retire: () => disposeInstance(id),
-  });
+  // Each attachment has its own name: another terminal made for the same pane
+  // (this one disposed, the next one created), or this one attached again
+  // over a new connection, has another, and neither can detach or answer for
+  // the other, in whatever order their calls land.
+  const attach = () => {
+    const token = crypto.randomUUID();
+    const view = { token, retired: false, feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
+    void subscribeTerminals()
+      .then(() => (view.retired ? undefined : pty.attach(id, token, view.feed.data)))
+      // Retired while the attach was on its way: it must not be left attached to nothing.
+      .then(() => (view.retired ? pty.detach(id, token) : undefined))
+      .catch(() => {});
+    return view;
+  };
+  const retire = (view: ReturnType<typeof attach>) => {
+    view.retired = true;
+    view.feed.stop();
+    void pty.detach(id, view.token).catch(() => {});
+  };
+  let view = attach();
   let released = false;
-  void subscribeTerminals()
-    .then(() => (released ? undefined : pty.attach(id, token, feed.data)))
-    // Disposed while the attach was on its way: it must not be left attached to nothing.
-    .then(() => (released ? pty.detach(id, token) : undefined))
-    .catch(() => {});
+  let reattaching = 0;
   const input = terminalInput(id);
   term.onData(input.write);
   term.onBinary(input.write);
@@ -133,11 +141,22 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     term,
     fit,
     restorable: true,
+    reattach: () => {
+      if (released) return;
+      retire(view);
+      const request = ++reattaching;
+      // What the old connection delivered is parsed first; then the screen is
+      // drawn again from the pane's scrollback, which the attach replays.
+      term.write("", () => {
+        if (released || request !== reattaching) return;
+        term.reset();
+        view = attach();
+      });
+    },
     release: () => {
       released = true;
       input.stop();
-      feed.stop();
-      void pty.detach(id, token).catch(() => {});
+      retire(view);
     },
   };
 }
