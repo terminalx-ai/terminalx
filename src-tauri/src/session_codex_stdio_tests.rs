@@ -16,7 +16,7 @@ pub(super) fn observed_full_pipe() {
 
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics"] {
+    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -90,11 +90,41 @@ fn child_fixture() {
     } else { Outbound::connection("large input".repeat(65536)) };
     let launch = engine.launch.clone();
     rt.engine = Engine::CodexStdio(engine);
+    // #667: a Codex whose provider refuses its sign-in before its thread is
+    // ready, said in a protocol error or on stderr as it exits.
+    if matches!(case.as_str(), "refused-handshake" | "refused-exit") {
+        const REVOKED: &str = "account/read failed: workspace routing discovery unauthorized (401)";
+        let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
+        engine.start("fix the build".into(), Vec::new()).unwrap();
+        manager.publish(&mut rt, Payload::UserMessage { author: None, text: "fix the build".into(), images: vec![], baseline: None, queued: false, cwd: None }, None);
+        rt.open_turn();
+        drop(rt);
+        let sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
+        let said = if case == "refused-handshake" {
+            sink.stdout_line(json!({"id": 1, "error": {"code": -32603, "message": REVOKED}}).to_string());
+            format!("Codex request failed: {REVOKED}")
+        } else {
+            sink.stderr_line("Starting Codex".into());
+            sink.stderr_line(REVOKED.into());
+            sink.stdout_closed(crate::harness::host::ReaderEnd::Eof);
+            REVOKED.to_string()
+        };
+        let events: Vec<AgentEvent> = store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+        let ended: Vec<_> = events.iter().filter_map(|event| match &event.payload {
+            Payload::TurnCompleted { status, auth_failed, detail, final_text, .. } => Some((*status, *auth_failed, detail.clone(), final_text.clone())),
+            _ => None,
+        }).collect();
+        assert_eq!(ended, [(TurnStatus::Error, true, Some(said), Some(RecoveryKind::SignedOut.message().to_string()))], "{case}");
+        let rt = rt_arc.lock().unwrap();
+        assert_eq!(rt.recovery, Some(RecoveryKind::SignedOut), "{case}");
+        assert!(!rt.turn_open);
+        return;
+    }
     if case == "private-diagnostics" {
         let path = rt.diagnostics_path();
         let seq = rt.seq;
         drop(rt);
-        let sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) };
+        let sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
         sink.stderr_line("é".repeat(3000));
         sink.stderr_line("must not exceed startup budget".into());
         let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
@@ -107,7 +137,7 @@ fn child_fixture() {
             let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
             engine.ready = true;
         }
-        let ready_sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) };
+        let ready_sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
         ready_sink.stderr_line("model-work stderr is not captured".into());
         assert_eq!(std::fs::read(&path).unwrap(), retained);
         let mut rt = rt_arc.lock().unwrap();
@@ -117,7 +147,7 @@ fn child_fixture() {
         engine.ready = false;
         rt.child_pid = Some(42);
         drop(rt);
-        let stale = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: Arc::new(()), startup_stderr_bytes: Mutex::new(0) };
+        let stale = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: Arc::new(()), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
         stale.stderr_line("wrong launch".into());
         stale.exited(42, Some(7));
         assert_eq!(std::fs::read(&path).unwrap(), retained);
@@ -138,7 +168,7 @@ fn child_fixture() {
         assert!(matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(e) if !e.blocked));
         return;
     }
-    let sink = Arc::new(GateSink { sink: StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0) },
+    let sink = Arc::new(GateSink { sink: StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) },
         entered, release: Mutex::new(gate), settled });
     // A complete buffered frame is held at the callback boundary. The process
     // exits naturally, so even a failed assertion leaves no long-lived child.

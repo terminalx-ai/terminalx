@@ -49,6 +49,168 @@ impl RecoveryKind {
     }
 }
 
+/// The most of an agent's own words the chat shows under an error, in characters.
+pub const DETAIL_CHARS: usize = 240;
+
+/// The agent's own words for a failure before it ever worked (#667): a launch
+/// that was refused, or a CLI that exited during startup. The chat shows them
+/// under the allowlisted message, so "update Codex" or "unauthorized (401)"
+/// is in sight without opening the terminal. Mid-turn provider text never
+/// gets here: the tab's own diagnostics keep that.
+///
+/// Only the last line, as plain text, with what looks like a credential, an
+/// address, a URL's path or a home folder cut out, and at most
+/// [`DETAIL_CHARS`]. Reading its own result back gives the same result.
+pub fn detail(text: &str) -> Option<String> {
+    let plain = plain_text(text);
+    let line = plain.lines().map(str::trim).rfind(|line| !line.is_empty())?;
+    let line = redact(line);
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= DETAIL_CHARS {
+        return Some(line.to_string());
+    }
+    Some(line.chars().take(DETAIL_CHARS - 1).chain(std::iter::once('…')).collect())
+}
+
+/// What a terminal shows, without its escape sequences or control bytes.
+/// A carriage return ends a line, as it does on screen.
+fn plain_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                // CSI: parameters up to the final byte.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC and the other strings: up to BEL or ESC \.
+                Some(']' | 'P' | '_' | '^' | 'X') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' | '\n' => out.push('\n'),
+            '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Cut from one line what must not reach a chat: credentials, addresses, a
+/// URL's userinfo, path and query, and the account folder in a path.
+fn redact(line: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<[(Regex, &'static str); 5]> = OnceLock::new();
+    static OPAQUE: OnceLock<Regex> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        let pattern = |text: &str| Regex::new(text).expect("valid pattern");
+        [
+            // Scheme and host only.
+            (pattern(r#"(?i)\b([a-z][a-z0-9+.-]*)://(?:[^\s/@()<>"']*@)?([^\s/?#()<>"']+)[^\s()<>"']*"#), "$1://$2"),
+            (pattern(r"(?i)\b(bearer|basic)\s+[^\s,;]+"), "$1 [redacted]"),
+            (pattern(r#"(?i)\b([a-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|apikey|credential|auth|cookie)[a-z0-9_.-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s,;]+)"#), "$1=[redacted]"),
+            (pattern(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[email]"),
+            (pattern(r"(?i)(?:/Users|/home)/[^/\s]+|/root\b|\b[a-z]:\\Users\\[^\\\s]+"), "~"),
+        ]
+    });
+    let mut line = line.to_string();
+    for (pattern, replacement) in patterns {
+        line = pattern.replace_all(&line, *replacement).into_owned();
+    }
+    // A long run of letters and digits together is a token, a key or an id.
+    let opaque = OPAQUE.get_or_init(|| Regex::new(r"[A-Za-z0-9_\-+=.]{24,}").expect("valid pattern"));
+    opaque
+        .replace_all(&line, |found: &regex::Captures| {
+            let text = &found[0];
+            if text.bytes().any(|b| b.is_ascii_digit()) && text.bytes().any(|b| b.is_ascii_alphabetic()) { "[redacted]".to_string() } else { text.to_string() }
+        })
+        .into_owned()
+}
+
+/// Whether an agent's own words say its provider refused its sign-in (#667):
+/// a 401, "unauthorized", "sign in again", a token that could not be
+/// refreshed. Only for words that are the agent's own about its account —
+/// what a CLI printed as it exited during startup, or a Codex turn's error,
+/// which is about its model request — never a tool's output, where a 401 is
+/// that tool's. A refresh that failed for want of a network is not a refusal.
+pub fn sign_in_refused(text: &str) -> bool {
+    use std::sync::OnceLock;
+    static STATUS_401: OnceLock<regex::Regex> = OnceLock::new();
+    let text = plain_text(text).to_ascii_lowercase();
+    if RecoveryKind::classify(&text) == RecoveryKind::SignedOut {
+        return true;
+    }
+    // 401 as a status, not a line number (`app.rs:401:9`) or a version.
+    let status = STATUS_401.get_or_init(|| regex::Regex::new(r"\(401\)|\b(?:status|http|code|error|returned|response)(?: code)?[\s:=]*401\b").expect("valid pattern"));
+    const REFUSED: &[&str] = &[
+        "unauthorized", "unauthenticated", "invalid_grant", "invalid api key", "invalid_api_key", "invalid_token", "not logged in", "not signed in",
+        "sign in again", "sign-in again", "log in again", "login again", "re-authenticate", "reauthenticate", "token expired", "token has expired",
+        "token is expired", "token_expired", "token was revoked", "token has been revoked", "token_revoked", "refresh token was already used",
+        "refresh_token_reused", "authentication failed", "authentication_error",
+    ];
+    if status.is_match(&text) || REFUSED.iter().any(|marker| text.contains(marker)) {
+        return true;
+    }
+    const REFRESH: &[&str] = &["refresh token", "token refresh", "could not be refreshed", "failed to refresh", "refresh failed", "please log in", "please sign in", "login required", "sign-in required", "sign in required"];
+    const UNREACHED: &[&str] = &[
+        "connection refused", "connection reset", "connection closed", "timed out", "timeout", "dns", "error sending request", "network", "could not resolve",
+        "failed to lookup", "name resolution", "tls", "certificate", "handshake", "too many requests", "429", "500", "502", "503", "504", "unavailable", "proxy",
+    ];
+    REFRESH.iter().any(|marker| text.contains(marker)) && !UNREACHED.iter().any(|marker| text.contains(marker))
+}
+
+/// What a CLI printed as it exited before it ever worked (#667), read from
+/// the end of its pane's output: the line to show, and whether it says the
+/// provider refused the agent's sign-in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EarlyExit {
+    pub detail: Option<String>,
+    pub sign_in_refused: bool,
+}
+
+impl EarlyExit {
+    /// The last lines are the error and a hint after it, not the screen a
+    /// TUI may have drawn before.
+    const LINES: usize = 3;
+    const BYTES: usize = 8 * 1024;
+
+    pub fn read(output: &[u8]) -> Self {
+        Self::said(&String::from_utf8_lossy(&output[output.len().saturating_sub(Self::BYTES)..]))
+    }
+
+    /// The same, of text the agent wrote (a protocol error, its stderr).
+    pub fn said(text: &str) -> Self {
+        let plain = plain_text(text);
+        let lines: Vec<&str> = plain.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+        let tail = lines[lines.len().saturating_sub(Self::LINES)..].join("\n");
+        Self { detail: detail(&tail), sign_in_refused: sign_in_refused(&tail) }
+    }
+
+    /// What it leaves the tab needing.
+    pub fn recovery(&self) -> RecoveryKind {
+        if self.sign_in_refused { RecoveryKind::SignedOut } else { RecoveryKind::Failed }
+    }
+}
+
 /// How long the session watcher waits before it says anything about a turn.
 #[derive(Debug, Clone, Copy)]
 pub struct Patience {
@@ -96,6 +258,8 @@ pub fn from_history(events: &[crate::events::AgentEvent]) -> Option<RecoveryKind
 pub fn failure(payload: &Payload) -> Option<RecoveryKind> {
     match payload {
         Payload::Error { message, .. } => Some(RecoveryKind::classify(message)),
+        // The agent said its provider refused its sign-in, in whatever words (#667).
+        Payload::TurnCompleted { auth_failed: true, .. } => Some(RecoveryKind::SignedOut),
         Payload::TurnCompleted { status: TurnStatus::Error, final_text, .. } => Some(RecoveryKind::classify(final_text.as_deref().unwrap_or(""))),
         // Some providers emit rate-limit warnings while requests still succeed.
         Payload::RateLimited { status, .. } if status.as_deref() == Some("rejected") => Some(RecoveryKind::UsageLimit),
@@ -170,8 +334,15 @@ fn append_diagnostic(path: &std::path::Path, line: &str) {
 
 pub fn sanitize(payload: &mut Payload) {
     match payload {
-        Payload::Error { message, .. } => *message = RecoveryKind::classify(message).message().into(),
-        Payload::TurnCompleted { status: TurnStatus::Error, final_text, .. } => *final_text = Some(RecoveryKind::classify(final_text.as_deref().unwrap_or("")).message().into()),
+        Payload::Error { message, detail, .. } => {
+            *message = RecoveryKind::classify(message).message().into();
+            *detail = detail.as_deref().and_then(self::detail);
+        }
+        Payload::TurnCompleted { status: TurnStatus::Error, final_text, auth_failed, detail, .. } => {
+            let kind = if *auth_failed { RecoveryKind::SignedOut } else { RecoveryKind::classify(final_text.as_deref().unwrap_or("")) };
+            *final_text = Some(kind.message().into());
+            *detail = detail.as_deref().and_then(self::detail);
+        }
         Payload::ToolCallCompleted { result, .. } if result.is_error => {
             result.text = RecoveryKind::Tool.message().into();
             result.structured = None;
@@ -202,7 +373,7 @@ mod tests {
             ("failed /home/private", RecoveryKind::Failed),
         ] {
             assert_eq!(RecoveryKind::classify(raw), expected);
-            let mut p = Payload::Error { message: raw.into(), fatal: false };
+            let mut p = Payload::Error { message: raw.into(), fatal: false, detail: None };
             sanitize(&mut p);
             assert!(matches!(p, Payload::Error { message, .. } if message == expected.message()));
         }
@@ -233,7 +404,7 @@ mod lifecycle_tests {
         assert_eq!(from_history(&events), Some(RecoveryKind::Disconnected));
         events.push(event(Payload::Status { text: SESSION_CLOSED_MESSAGE.into() }));
         assert_eq!(from_history(&events), None);
-        events.push(event(Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }));
+        events.push(event(Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }));
         assert_eq!(from_history(&events), None);
     }
     /// A tab follows its terminal (#437): what was owed to the conversation
@@ -280,7 +451,7 @@ mod lifecycle_tests {
     }
     #[test]
     fn a_turn_that_ends_in_an_error_is_a_failure_and_one_that_ends_well_is_not() {
-        let end = |status, final_text: Option<&str>| Payload::TurnCompleted { status, final_text: final_text.map(Into::into), usage: None, duration_ms: None, head: None, auth_failed: false };
+        let end = |status, final_text: Option<&str>| Payload::TurnCompleted { status, final_text: final_text.map(Into::into), usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
         assert_eq!(failure(&end(TurnStatus::Ok, None)), None);
         assert_eq!(failure(&end(TurnStatus::Aborted, None)), None);
         assert_eq!(failure(&end(TurnStatus::Error, Some("exited"))), Some(RecoveryKind::Failed));
@@ -340,6 +511,97 @@ mod lifecycle_tests {
         assert_eq!(RecoveryKind::classify(RecoveryKind::SignedOut.message()), RecoveryKind::SignedOut);
         assert_eq!(serde_json::to_value(RecoveryKind::SignedOut).unwrap(), "signed_out");
     }
+    /// #667, seen 2026-10-29 with codex 0.159.1: a revoked org login fails
+    /// the TUI's bootstrap in about 2 s.
+    const CODEX_REVOKED: &str = "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
+
+    #[test]
+    fn a_codex_that_exits_at_startup_refused_is_a_sign_in_and_says_why() {
+        // As the pane has it: colours, an alternate screen left, CRLF.
+        let output = format!("\x1b[?1049h\x1b[2J\x1b[H\x1b[1mCodex\x1b[0m\r\n\x1b[?1049l\x1b[31m{CODEX_REVOKED}\x1b[0m\r\n");
+        let exit = EarlyExit::read(output.as_bytes());
+        assert!(exit.sign_in_refused);
+        assert_eq!(exit.detail.as_deref(), Some(CODEX_REVOKED));
+        assert_eq!(exit.recovery(), RecoveryKind::SignedOut);
+        for text in [
+            "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+            "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+            "Error: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header",
+            "Not logged in. Run `codex login` first.",
+            "Token refresh failed",
+            // Claude Code's own words for the same.
+            "Invalid API key · Please run /login",
+            "Not logged in · Please run /login",
+            "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
+        ] {
+            assert!(EarlyExit::read(text.as_bytes()).sign_in_refused, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_network_failure_or_a_crash_at_startup_is_not_a_sign_in() {
+        for text in [
+            "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery failed: error sending request for url (https://chatgpt.com/backend-api/wham/accounts/check): connection refused (code -32603)",
+            "failed to refresh token: error sending request: connection reset by peer",
+            "token refresh failed: 503 Service Unavailable",
+            "stream error: 429 Too Many Requests",
+            "thread 'main' panicked at codex-rs/tui/src/app.rs:401:9: index out of bounds",
+            "error: unexpected argument '--no-daemon' found",
+            "codex-cli 0.401.2",
+        ] {
+            let exit = EarlyExit::read(text.as_bytes());
+            assert!(!exit.sign_in_refused, "{text}");
+            assert_eq!(exit.recovery(), RecoveryKind::Failed);
+            assert!(exit.detail.is_some());
+        }
+        assert_eq!(EarlyExit::read(b"\x1b[2J\r\n  \r\n"), EarlyExit::default());
+    }
+
+    #[test]
+    fn a_detail_is_the_last_line_with_secrets_addresses_and_homes_cut_out() {
+        assert_eq!(
+            detail("error: unexpected argument '--no-daemon' found\n\nUsage: codex [OPTIONS] [PROMPT]\n").as_deref(),
+            Some("Usage: codex [OPTIONS] [PROMPT]")
+        );
+        let cut = detail("401 for ada@example.com: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0 api_key=sk-proj-abc OPENAI_API_KEY='x y' at https://user:pw@chatgpt.com/backend-api/wham?token=s3cret in /Users/ada/.codex and /home/ada/x, id 0a1b2c3d4e5f6a7b8c9d0e1f2a3b").unwrap();
+        for secret in ["ada@example.com", "eyJ", "sk-proj", "'x y'", "user:pw", "backend-api", "s3cret", "/Users/ada", "/home/ada", "0a1b2c3d4e5f"] {
+            assert!(!cut.contains(secret), "{secret} in {cut}");
+        }
+        assert!(cut.starts_with("401 for [email]: Authorization: Bearer [redacted] api_key=[redacted] OPENAI_API_KEY=[redacted] at https://chatgpt.com in ~/.codex and ~/x, id [redacted]"), "{cut}");
+        // Bounded, and the same when read back (as `sanitize` does).
+        let long = detail(&"word ".repeat(200)).unwrap();
+        assert_eq!(long.chars().count(), DETAIL_CHARS);
+        assert!(long.ends_with('…'));
+        for text in [long.as_str(), cut.as_str(), CODEX_REVOKED] {
+            let once = detail(text).unwrap();
+            assert_eq!(detail(&once).as_deref(), Some(once.as_str()));
+        }
+        // What TerminalX says of a Codex too old for an isolated launch is shown whole.
+        let old = "TerminalX requires Codex's --no-daemon option to keep each session isolated. Update Codex to a version with this option (0.164.0 is verified), then retry. No agent was started.";
+        assert_eq!(detail(old).as_deref(), Some(old));
+    }
+
+    #[test]
+    fn a_refused_turn_keeps_its_kind_and_its_detail_through_sanitizing() {
+        let refused = Payload::TurnCompleted { status: TurnStatus::Error, final_text: Some("exited".into()), usage: None, duration_ms: None, head: None, auth_failed: true, detail: Some(CODEX_REVOKED.into()) };
+        assert_eq!(failure(&refused), Some(RecoveryKind::SignedOut));
+        let mut public = refused.clone();
+        sanitize(&mut public);
+        let Payload::TurnCompleted { final_text, detail, auth_failed, .. } = &public else { unreachable!() };
+        assert_eq!(final_text.as_deref(), Some(RecoveryKind::SignedOut.message()));
+        assert_eq!(detail.as_deref(), Some(CODEX_REVOKED));
+        assert!(*auth_failed);
+        // A detail set anywhere is bounded and redacted on the way out.
+        let mut error = Payload::Error { message: "Codex is not installed".into(), fatal: false, detail: Some("token=hunter2 at /Users/ada".into()) };
+        sanitize(&mut error);
+        assert!(matches!(&error, Payload::Error { detail: Some(detail), .. } if detail == "token=[redacted] at ~"), "{error:?}");
+        // The wire: `authFailed` and `detail`, which an older log has neither of.
+        let wire = serde_json::to_value(&public).unwrap();
+        assert_eq!((wire["authFailed"].as_bool(), wire["detail"].as_str()), (Some(true), Some(CODEX_REVOKED)));
+        let old: Payload = serde_json::from_value(serde_json::json!({"type": "turn_completed", "status": "error"})).unwrap();
+        assert!(matches!(old, Payload::TurnCompleted { auth_failed: false, detail: None, .. }));
+    }
+
     #[test]
     fn provider_capacity_records_reach_recovery() {
         let mut payloads = Vec::new();

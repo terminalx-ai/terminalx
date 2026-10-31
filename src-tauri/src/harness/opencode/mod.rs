@@ -229,7 +229,7 @@ impl OpenCode {
         let duration_ms = self.turn_started_at.take().map(|t| t.elapsed().as_millis() as u64);
         let usage = self.last_usage.map(|(used, max)| Usage { context_used: Some(used), context_max: max, ..Default::default() });
         let mut out = self.commit_open_text();
-        out.push(Action::Emit(Payload::TurnCompleted { status, final_text, usage, duration_ms, head: None, auth_failed }));
+        out.push(Action::Emit(Payload::TurnCompleted { status, final_text, usage, duration_ms, head: None, auth_failed, detail: None }));
         out
     }
 

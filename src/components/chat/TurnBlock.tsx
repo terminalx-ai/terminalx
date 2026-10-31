@@ -107,7 +107,10 @@ export const TurnBlock = memo(function TurnBlock({
       {failed && turn.finalText && (
         <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
           <CircleAlert className="mt-0.5 size-4 shrink-0" />
-          <div className="whitespace-pre-wrap select-text"><LinkedText text={turn.finalText} context={linkContext} /></div>
+          <div className="min-w-0 select-text">
+            <div className="whitespace-pre-wrap"><LinkedText text={turn.finalText} context={linkContext} /></div>
+            {turn.detail && <AgentSaid text={turn.detail} />}
+          </div>
         </div>
       )}
 
@@ -129,6 +132,19 @@ export const TurnBlock = memo(function TurnBlock({
     </div>
   );
 });
+
+/**
+ * The agent's own last line under an error (#667): "update Codex" or "unauthorized (401)" without opening its terminal.
+ * Plain text, already bounded and redacted by the runtime.
+ */
+function AgentSaid({ text }: { text: string }) {
+  return (
+    <p className="mt-1 break-words font-mono text-[12px] text-destructive/80" data-testid="agent-said">
+      <span className="sr-only">The agent said: </span>
+      {text}
+    </p>
+  );
+}
 
 /** What a folded turn still shows: the answer, and the reader's own words (#551). */
 function outsideFold(item: WorkItem): boolean {
@@ -203,7 +219,10 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
       return (
         <div className="my-1 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
           <CircleAlert className="mt-0.5 size-4 shrink-0" />
-          <span className="whitespace-pre-wrap select-text"><LinkedText text={item.text} context={linkContext} /></span>
+          <div className="min-w-0 select-text">
+            <span className="whitespace-pre-wrap"><LinkedText text={item.text} context={linkContext} /></span>
+            {item.detail && <AgentSaid text={item.detail} />}
+          </div>
         </div>
       );
     case "compaction":

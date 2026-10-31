@@ -221,6 +221,7 @@ impl Rig {
                 status_names_model: false,
                 settings_command_is_ours: false,
                 ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
+                recorded: false,
                 tail: tail.clone(),
                 echoed: Default::default(),
                 awaiting_delivery: None,
@@ -250,6 +251,7 @@ impl Rig {
             compact_boundary_at: None,
             turn_started_at: None,
             turn_by_command: false,
+            signed_out_in_turn: false,
             last_activity: now,
             recovery: None,
             stalled_at: None,
@@ -1103,7 +1105,7 @@ fn terminal_output_does_not_clear_a_timeout_the_provider_reported() {
     rig.pane_draws();
     {
         let mut rt = rig.rt.lock().unwrap();
-        rig.manager.apply(&mut rt, Payload::Error { message: "request timed out".into(), fatal: false }, None);
+        rig.manager.apply(&mut rt, Payload::Error { message: "request timed out".into(), fatal: false, detail: None }, None);
     }
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
     for _ in 0..3 {
@@ -1691,7 +1693,7 @@ fn a_turn_that_ends_in_an_error_asks_for_attention() {
         rig.append(&failed_command(kind, "call-1"));
         {
             let mut rt = rig.rt.lock().unwrap();
-            rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Error, final_text: Some("the agent crashed".into()), usage: None, duration_ms: None, head: None, auth_failed: false }, None);
+            rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Error, final_text: Some("the agent crashed".into()), usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
         }
         assert!(!rig.turn_open());
         assert_eq!(rig.status(), TabStatus::Waiting, "{kind:?}");
@@ -2152,7 +2154,7 @@ fn send_now_keeps_pending_identities_and_echo_order_after_interrupt() {
     // The Escape went in; the CLI ends the turn as interrupted.
     {
         let mut rt = rig.rt.lock().unwrap();
-        rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }, None);
+        rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
     }
     let rt = rig.rt.lock().unwrap();
     assert!(!rt.turn_open, "an interrupt acknowledgement does not prove delivery");

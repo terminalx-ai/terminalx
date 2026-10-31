@@ -1,4 +1,5 @@
 import { WebglAddon } from "@xterm/addon-webgl";
+import { recordRendererMemory } from "@/lib/terminalMemory";
 import type { Terminal } from "@xterm/xterm";
 import { onInstanceDisposed } from "@/lib/terminal";
 import { isOnScreen, setOnScreen, setRenderer, setWebglRefused, webglContexts } from "@/lib/terminalCounters";
@@ -86,6 +87,7 @@ function glCanvas(term: Terminal, addon: WebglAddon, before: Set<Element>): HTML
 function release(term: Terminal) {
   const entry = held.get(term);
   if (!entry) return;
+  recordRendererMemory(entry.addon, true);
   held.delete(term);
   entry.unlisten();
   stopCursorBlink(entry.addon);
@@ -139,6 +141,7 @@ function acquire(term: Terminal) {
     const own = addon;
     addon.onContextLoss(() => lost(term, own));
     term.loadAddon(addon);
+    recordRendererMemory(addon);
     const canvas = glCanvas(term, addon, before);
     // The addon reports a loss only after waiting three seconds for the
     // context to come back, and one WebKit took for the limit never does.
