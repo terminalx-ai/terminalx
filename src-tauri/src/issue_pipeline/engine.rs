@@ -28,6 +28,10 @@ use super::{categories, prompts, store, MergeRecord, MergeRequest, MergedBy, Pip
 /// How long checks may stay unfinished before a person is asked to look.
 pub const CHECKS_WAIT_MINUTES: u32 = 60;
 
+/// How long a reviewer that says its own checks are still running is waited
+/// for before it is asked for its verdict on what it has.
+pub const REVIEW_CHECKS_MINUTES: u32 = 20;
+
 /// How many times a pull request is read again while it still shows the head
 /// from before a push.
 const HEAD_CATCH_UP_TRIES: u32 = 5;
@@ -48,6 +52,17 @@ pub struct Workspace {
     pub dirty: Vec<String>,
     /// Commits the branch has that its base does not.
     pub ahead_of_base: u32,
+}
+
+/// What became of a request to stop a conversation's agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStop {
+    /// It sat idle, and its process (with anything it left running) is gone.
+    Stopped,
+    /// There was no agent process to stop.
+    NotRunning,
+    /// It is in a turn, or has a prompt waiting: left as it is.
+    Busy,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -73,6 +88,17 @@ pub trait Host: Send + Sync {
     fn pause(&self) {}
     /// Type a prompt into a session's tab.
     fn send(&self, to: &SessionRef, prompt: &str) -> Result<()>;
+    /// Whether a conversation's agent is in a turn, or has a prompt waiting for it.
+    fn agent_busy(&self, who: &SessionRef) -> bool {
+        self.session(&who.session_id).is_ok_and(|session| session.tab(&who.tab_id).is_some_and(|tab| matches!(tab.status, crate::store::index::TabStatus::InProgress | crate::store::index::TabStatus::Waiting)))
+    }
+    /// Stop a conversation's agent, and whatever it left running in the
+    /// background, if it sits idle; `note` is left in its transcript. The
+    /// conversation stays, and its next prompt resumes it. An agent a person
+    /// started by hand in a terminal is never stopped.
+    fn stop_agent(&self, _who: &SessionRef, _note: &str) -> Result<AgentStop> {
+        Ok(AgentStop::NotRunning)
+    }
     /// A tab's last finished turn: when it ended and its last reply. For a
     /// runtime that restarted between a turn's end and the step it started.
     fn last_reply(&self, _session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
@@ -152,7 +178,8 @@ impl Drop for Running {
 
 /// Pipelines that are doing something with nobody's turn to show for it: a
 /// stage's step in flight (a push, a pull request being opened, a review
-/// being started), or a pull request whose checks are being waited for. A
+/// being started), a pull request whose checks are being waited for, or a
+/// reviewer's own checks that it said are still running. A
 /// cloud workspace counts them as running turns, so it is not put to sleep
 /// halfway (`cloud_activity`). A look at a pipeline parked on a person is not
 /// counted: it would keep an idle workspace awake. A wait counts for
@@ -183,6 +210,40 @@ enum Merger {
     Agent,
 }
 
+/// How a pipeline came to an end, as far as the conversations that took part
+/// in it are concerned: nothing they say is pipeline work any more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Merged,
+    /// The pull request was closed without merging.
+    Closed,
+    /// Stopped, by a person or an agent's request. The author's conversation is
+    /// left alone: its work is not over, only the pipeline's part in it.
+    Stopped,
+}
+
+fn ending_at(state: State, reason: Option<&StopReason>) -> Option<Ending> {
+    match (state, reason) {
+        (State::Merged, _) => Some(Ending::Merged),
+        (State::Stopped, _) => Some(Ending::Stopped),
+        (State::NeedsYou, Some(StopReason::PullRequestClosed)) => Some(Ending::Closed),
+        _ => None,
+    }
+}
+
+fn ending_of(pipeline: &Pipeline) -> Option<Ending> {
+    ending_at(pipeline.state, pipeline.reason.as_ref())
+}
+
+/// Whether the reviewer said its checks were running, and has had as long
+/// as it is given, without being asked for its verdict since.
+fn review_overdue(pipeline: &Pipeline, now: DateTime<Utc>) -> bool {
+    pipeline.stage == Stage::Review
+        && pipeline.state == State::Working
+        && !pipeline.reminded
+        && pipeline.review_pending_since.as_deref().and_then(|since| DateTime::parse_from_rfc3339(since).ok()).is_some_and(|since| (now - since.with_timezone(&Utc)).num_minutes() >= i64::from(REVIEW_CHECKS_MINUTES))
+}
+
 /// What a step that failed does about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OnError {
@@ -206,6 +267,9 @@ struct Step<'a> {
     /// The part of the stage in hand, for the reason if it fails.
     doing: &'static str,
     background: bool,
+    /// The pipeline came to an end in this step: its conversations are told
+    /// once the step's work is done.
+    ended: Option<Ending>,
 }
 
 /// Run one step on a pipeline. A stopped pipeline takes no step unless a
@@ -231,7 +295,7 @@ fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, acti
         Ok(settings) => (settings, None),
         Err(error) => (IssuePipelineSettings::default(), Some(format!("{error:#}"))),
     };
-    let mut step = Step { host, p: pipeline, cwd, author, settings, settings_error, doing: "This step", background: on_error == OnError::Background };
+    let mut step = Step { host, p: pipeline, cwd, author, settings, settings_error, doing: "This step", background: on_error == OnError::Background, ended: None };
     if let Err(error) = action(&mut step) {
         match on_error {
             OnError::Report | OnError::Background => return Err(error),
@@ -242,6 +306,9 @@ fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, acti
         }
     }
     step.save()?;
+    if step.release_if_ended() {
+        step.save()?;
+    }
     Ok(step.p)
 }
 
@@ -267,6 +334,10 @@ impl Step<'_> {
     /// line in the record; the same state reached again is not.
     fn settle(&mut self, state: State, reason: Option<StopReason>, note: impl Into<String>) {
         let note = note.into();
+        let before = ending_of(&self.p);
+        if let Some(ending) = ending_at(state, reason.as_ref()).filter(|ending| before != Some(*ending)) {
+            self.ended = Some(ending);
+        }
         if self.p.state != state || self.p.reason != reason {
             let kind = match state {
                 State::Working => "note",
@@ -294,6 +365,8 @@ impl Step<'_> {
     fn enter(&mut self, stage: Stage, note: impl Into<String>) {
         self.p.stage = stage;
         self.p.reminded = false;
+        // At work again: a conversation told the pipeline had ended is not stopped for it now.
+        self.p.releasing.clear();
         self.settle(State::Working, None, note);
     }
 
@@ -436,6 +509,164 @@ impl Step<'_> {
         Ok(())
     }
 
+    // ---- the end, for the conversations that took part ----------------------
+
+    /// How the pipeline ended, in a sentence for the record and the conversations.
+    fn ending_why(&self, ending: Ending) -> String {
+        let pr = self.p.pr.as_ref().map(|link| format!("Pull request #{}", link.number)).unwrap_or_else(|| "The pull request".into());
+        match ending {
+            Ending::Merged => match &self.p.merged {
+                Some(merged) => format!("{pr} was merged at {}, so this pipeline is finished.", short(&merged.commit)),
+                None => format!("{pr} was merged, so this pipeline is finished."),
+            },
+            Ending::Closed => format!("{pr} was closed without merging, so this pipeline is finished."),
+            Ending::Stopped => "This pipeline was stopped.".into(),
+        }
+    }
+
+    /// Tell the conversations of a pipeline that ended in this step. `true`
+    /// when there was an end to tell.
+    fn release_if_ended(&mut self) -> bool {
+        let Some(ending) = self.ended.take().filter(|ending| ending_of(&self.p) == Some(*ending)) else { return false };
+        self.release(ending);
+        true
+    }
+
+    /// Nothing a conversation of an ended pipeline does is pipeline work, and
+    /// a background command or a watch it left behind can wake it for as long
+    /// as it runs. An idle agent is stopped, with whatever it left running:
+    /// a message would only be read once it woke. One still in a turn is told
+    /// to wind down, and stopped when that turn ends ([`Step::late_reply`]).
+    /// A stop leaves the author alone: the work goes on, only without the pipeline.
+    fn release(&mut self, ending: Ending) {
+        let why = self.ending_why(ending);
+        let author = (ending != Ending::Stopped).then(|| (Role::Author, self.p.author.clone()));
+        let others = [self.p.reviewer.clone().map(|who| (Role::Reviewer, who)), self.p.resolver.clone().map(|who| (Role::Resolver, who))];
+        let (mut stopped, mut told, mut finishing, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut seen: Vec<SessionRef> = Vec::new();
+        for (role, who) in author.into_iter().chain(others.into_iter().flatten()) {
+            if seen.contains(&who) || self.p.releasing.contains(&who) {
+                continue;
+            }
+            seen.push(who.clone());
+            let the = format!("the {}", role.label());
+            match self.host.stop_agent(&who, &prompts::agent_released(&why)) {
+                Ok(AgentStop::Stopped) => stopped.push(the),
+                Ok(AgentStop::NotRunning) => {}
+                Ok(AgentStop::Busy) => {
+                    // A resolver part way through its merge is left to finish
+                    // it: told to stop, it could leave the checkout half merged.
+                    let resolving = role == Role::Resolver && self.p.resolution.is_some();
+                    match (!resolving).then(|| self.host.send(&who, &prompts::pipeline_ended(&why))) {
+                        Some(Ok(())) => told.push(the),
+                        Some(Err(error)) => {
+                            log::warn!("issue pipeline {}: telling {the} the pipeline ended: {error:#}", self.p.id);
+                            finishing.push(the);
+                        }
+                        None => finishing.push(the),
+                    }
+                    self.p.releasing.push(who);
+                }
+                Err(error) => failed.push(format!("{}'s agent could not be stopped: {error:#}", capitalized(&the))),
+            }
+        }
+        let mut lines = Vec::new();
+        match stopped.as_slice() {
+            [] => {}
+            [one] => lines.push(format!("Stopped {one}'s agent, which sat idle; its conversation can be resumed.")),
+            many => lines.push(format!("Stopped the agents of {}, which sat idle; their conversations can be resumed.", list(many))),
+        }
+        if !told.is_empty() {
+            lines.push(format!("Told {}, still in a turn, to stop what it started for the pipeline; its agent is stopped when that turn ends.", list(&told)));
+        }
+        if !finishing.is_empty() {
+            lines.push(format!("{} is finishing a turn; its agent is stopped when it ends.", capitalized(&list(&finishing))));
+        }
+        lines.extend(failed.into_iter().map(|line| format!("{}.", line.trim_end_matches('.'))));
+        if !lines.is_empty() {
+            self.record("participantsReleased", format!("{why} {}", lines.join(" ")));
+        }
+    }
+
+    /// A conversation's turn ended after its pipeline did. What it said is not
+    /// used; one that was told of the end while in that turn now has its agent stopped.
+    fn late_reply(&mut self, role: Role, who: &SessionRef, ending: Ending) -> Result<()> {
+        if role == Role::Resolver {
+            // Its turn is over: it holds the checkout no longer.
+            self.p.resolution = None;
+        }
+        let after = match ending {
+            Ending::Merged => "after the merge",
+            Ending::Closed => "after the pull request was closed",
+            Ending::Stopped => "after the pipeline was stopped",
+        };
+        if self.p.releasing.contains(who) {
+            let stopped = match self.host.stop_agent(who, &prompts::agent_released(&self.ending_why(ending))) {
+                // A prompt is still waiting for it, most likely the notice itself: the turn that takes it ends next.
+                Ok(AgentStop::Busy) => return Ok(()),
+                Ok(AgentStop::Stopped) => " TerminalX stopped its agent.".to_string(),
+                Ok(AgentStop::NotRunning) => String::new(),
+                Err(error) => format!(" Its agent could not be stopped: {error:#}"),
+            };
+            self.p.releasing.retain(|releasing| releasing != who);
+            self.record("lateReply", format!("The {} replied {after}; its reply was ignored.{stopped}", role.label())).session_id = Some(who.session_id.clone());
+            return Ok(());
+        }
+        // The author's conversation is a person's own again once its pipeline ends.
+        if role == Role::Author {
+            return Ok(());
+        }
+        let line = format!("The {} replied {after}; its reply was ignored.", role.label());
+        if self.p.events.last().is_some_and(|last| last.kind == "lateReply" && last.message == line) {
+            return Ok(());
+        }
+        self.record("lateReply", line).session_id = Some(who.session_id.clone());
+        Ok(())
+    }
+
+    // ---- a reviewer whose checks are still running --------------------------
+
+    /// The reviewer ended its turn to wait for checks it started. That is
+    /// not a missing verdict, for [`REVIEW_CHECKS_MINUTES`]; after that it is
+    /// asked once for its verdict on what it has, and a second miss is a person's.
+    fn review_pending(&mut self, commit: &str, reason: Option<String>) -> Result<()> {
+        let minutes = REVIEW_CHECKS_MINUTES;
+        let ran_out = self.p.review_pending_since.as_deref().and_then(|since| self.seconds_since(since)).is_some_and(|waited| waited >= i64::from(minutes) * 60);
+        if ran_out {
+            return self.ask_for_overdue_verdict(commit);
+        }
+        // Not the missing block it may have been reminded of: the reminder is spent.
+        self.p.reminded = false;
+        if self.p.review_pending_since.is_none() {
+            self.p.review_pending_since = Some(self.stamp());
+            let what = reason.as_deref().map(|reason| format!(": {}", reason.trim_end_matches('.'))).unwrap_or_default();
+            let reviewer = self.p.reviewer.as_ref().map(|reviewer| reviewer.session_id.clone());
+            let event = self.record("reviewPending", format!("The reviewer is still running its checks on {}{what}. Its verdict is waited for up to {minutes} minutes.", short(commit)));
+            event.commit = Some(commit.to_string());
+            event.session_id = reviewer;
+        }
+        self.settle(State::Working, None, format!("The reviewer is running its checks on {}; its verdict is due within {minutes} minutes.", short(commit)));
+        Ok(())
+    }
+
+    fn ask_for_overdue_verdict(&mut self, commit: &str) -> Result<()> {
+        let minutes = REVIEW_CHECKS_MINUTES;
+        let otherwise = StopReason::NoVerdict { detail: format!("Its checks were still running after {minutes} minutes, and it gave no verdict.") };
+        self.remind(Role::Reviewer, prompts::reviewer_deadline(commit, minutes), otherwise)
+    }
+
+    /// From the poller: a reviewer that has said nothing since its checks'
+    /// time ran out is asked for its verdict. One still at work is not
+    /// interrupted; the turn it is in ends with its answer.
+    fn look_at_overdue_review(&mut self) -> Result<()> {
+        let reviewer = self.p.reviewer.clone().context("the pipeline has no reviewer session")?;
+        if self.host.agent_busy(&reviewer) {
+            return Ok(());
+        }
+        let commit = self.p.review_commit.clone().context("no review was asked for")?;
+        self.ask_for_overdue_verdict(&commit)
+    }
+
     fn reviewer_turn(&mut self, message: &str) -> Result<()> {
         if self.p.stage != Stage::Review || self.p.state != State::Working {
             return Ok(());
@@ -444,6 +675,7 @@ impl Step<'_> {
         let no_verdict = |problem: String| (prompts::reviewer_reminder(&commit, &problem), StopReason::NoVerdict { detail: capitalized(&problem) });
         let read = verdict::review(message, self.p.round, &self.stamp());
         let unusable = match &read {
+            Err(ReviewError::Pending(reason)) => return self.review_pending(&commit, reason.clone()),
             Err(ReviewError::Missing) => Some(no_verdict("its reply did not end with the review block.".into())),
             Err(ReviewError::Unreadable(why)) => Some(no_verdict(format!("{why}."))),
             Ok(verdict) if !same_commit(&verdict.commit, &commit) => Some(no_verdict(format!("its verdict is for commit {} and the pull request is at {}.", verdict.commit, short(&commit)))),
@@ -480,6 +712,7 @@ impl Step<'_> {
         event.commit = Some(commit.clone());
         event.session_id = reviewer;
         self.p.reminded = false;
+        self.p.review_pending_since = None;
         self.p.verdict = Some(verdict.clone());
         self.save()?;
 
@@ -742,6 +975,7 @@ impl Step<'_> {
         self.p.round += 1;
         self.p.review_commit = Some(pr.head_sha.clone());
         self.p.review_requested_at = Some(self.stamp());
+        self.p.review_pending_since = None;
         self.p.waiting_since = None;
         self.p.merge_requested = None;
         self.p.merge_refused = None;
@@ -918,6 +1152,7 @@ impl Step<'_> {
         // everything that makes a merge wrong still applies to them.
         let by_person = merger == Merger::Person;
         let (auto_merge, _) = self.switches();
+        let local_checked = self.p.local_check.as_ref().is_some_and(|check| same_commit(&check.head, &pr.head_sha) && self.settings.local_check_command.as_deref() == Some(check.command.as_str()));
         let decision = gate::decide_with_local(&Facts {
             auto_merge: merger == Merger::Agent || by_person || auto_merge,
             require_person: !by_person && self.settings.require_person,
@@ -928,7 +1163,9 @@ impl Step<'_> {
             protected: if by_person { &[] } else { &protected },
             ignored_checks: &self.settings.ignored_checks,
             allow_no_ci: self.settings.allow_no_ci,
-        }, self.settings.local_checks_only && self.p.local_check.as_ref().is_some_and(|check| same_commit(&check.head, &pr.head_sha) && self.settings.local_check_command.as_deref() == Some(check.command.as_str())));
+            // A person pressing Merge takes on what a review by reading alone leaves open.
+            checks_vouched: by_person || local_checked,
+        }, self.settings.local_checks_only && local_checked);
         self.p.stage = Stage::Merge;
         self.p.pr = Some(link.clone());
         if !matches!(decision, Gate::Wait(_)) {
@@ -1126,7 +1363,8 @@ fn verdict_line(verdict: &Verdict, max_rounds: u32) -> String {
         SecurityPass::Clean => " Security pass: clean.",
         SecurityPass::Flagged => " Security pass: flagged.",
     };
-    format!("Review {} of {max_rounds} of {}: {decision}, {findings}.{security}", verdict.round, short(&verdict.commit))
+    let checks = verdict.checks_line().map(|line| format!(" {line}")).unwrap_or_default();
+    format!("Review {} of {max_rounds} of {}: {decision}, {findings}.{security}{checks}", verdict.round, short(&verdict.commit))
 }
 
 // ---- what moves a pipeline -------------------------------------------------
@@ -1247,6 +1485,7 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         max_rounds: settings.max_rounds,
         review_commit: None,
         review_requested_at: None,
+        review_pending_since: None,
         findings_sent_round: 0,
         verdict: None,
         failed_local_checks: Vec::new(),
@@ -1259,6 +1498,7 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         merge_requested: None,
         merge_refused: None,
         merged: None,
+        releasing: Vec::new(),
         events: Vec::new(),
         created: now.clone(),
         modified: now.clone(),
@@ -1276,16 +1516,27 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
 }
 
 /// A turn ended in some session. Nothing happens unless that tab is the
-/// author or the reviewer of a pipeline.
+/// author, the reviewer or the conflict resolver of a pipeline. Once the
+/// pipeline has ended, what the turn says is not pipeline work.
 pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_message: Option<&str>) {
     let Some((pipeline, role)) = taking_part(session_id, tab_id) else {
         return;
     };
     let message = final_message.unwrap_or_default();
-    let result = run(host, &pipeline.id, role == Role::Resolver, OnError::NeedsYou, |step| match role {
-        Role::Author => step.author_turn(message),
-        Role::Reviewer => step.reviewer_turn(message),
-        Role::Resolver => step.resolver_turn(message),
+    let who = SessionRef { session_id: session_id.to_string(), tab_id: tab_id.to_string() };
+    let result = run(host, &pipeline.id, true, OnError::NeedsYou, |step| {
+        let ended = ending_of(&step.p);
+        match role {
+            // Stopped or not, its turn ending releases the checkout it holds.
+            Role::Resolver => step.resolver_turn(message)?,
+            _ if ended.is_some() || step.p.stopped => {}
+            Role::Author => step.author_turn(message)?,
+            Role::Reviewer => step.reviewer_turn(message)?,
+        }
+        match ended {
+            Some(ending) => step.late_reply(role, &who, ending),
+            None => Ok(()),
+        }
     });
     if let Err(error) = result {
         log::warn!("issue pipeline {}: {error:#}", pipeline.id);
@@ -1442,6 +1693,8 @@ pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
                     return Ok(());
                 }
                 step.record("resumed", "Resumed.");
+                // Its conversations are the pipeline's again.
+                step.p.releasing.clear();
                 match step.p.stage {
                     // The author may have finished while it was stopped; only it, or a person, can say.
                     Stage::Work | Stage::Address => {
@@ -1536,7 +1789,7 @@ pub fn poll(host: &dyn Host) {
     for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && (pipeline.pr.is_some() || pipeline.resolve_conflicts)) {
         let at_gate = pipeline.stage == Stage::Merge;
         let due = match pipeline.state {
-            State::Waiting | State::Working => at_gate || pipeline.resolve_conflicts,
+            State::Waiting | State::Working => at_gate || pipeline.resolve_conflicts || review_overdue(&pipeline, now),
             // Parked on a person, at any stage: they may have merged or
             // closed the pull request by hand.
             State::ReadyToMerge | State::NeedsYou => {
@@ -1555,6 +1808,7 @@ pub fn poll(host: &dyn Host) {
         LOOKED.lock().unwrap_or_else(|error| error.into_inner()).insert(pipeline.id.clone(), now);
         // GitHub being unreachable for a pass changes nothing and is tried again.
         let look = |step: &mut Step<'_>| {
+            if review_overdue(&step.p, step.host.now()) { return step.look_at_overdue_review(); }
             if step.watch_conflicts()? { return Ok(()); }
             if step.p.stage == Stage::Merge { step.evaluate(Merger::Pipeline) }
             else if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) }

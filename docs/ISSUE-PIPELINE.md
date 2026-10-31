@@ -115,7 +115,7 @@ It is told to leave the checkout as it found it and to end with
 
 ````
 ```terminalx-review
-{"commit": "<sha>", "verdict": "merge", "securityPass": "not_needed", "findings": []}
+{"commit": "<sha>", "verdict": "merge", "securityPass": "not_needed", "checks": "passed", "checksNote": "cargo test", "findings": []}
 ```
 ````
 
@@ -124,6 +124,22 @@ Each finding has a `severity` (`critical`, `high`, `medium`, `low`, `nit`), a
 counts only for the commit it names, and only if the checkout is still at that
 commit with nothing uncommitted when the reviewer finishes: a reviewer that
 edited or committed has voided its review.
+
+`checks` says whether the reviewer ran the project's checks on that commit:
+`passed`, `failed`, or `not_run` when it judged by reading the code alone
+(anything else, the field left out included, is read as `not_run`), with a few
+words in `checksNote`. The record, the issue page and the pull request comment
+say "Reviewed by reading only, tests not run" for a `not_run` verdict. A
+reviewer whose checks failed stops the pipeline for a person, whatever its
+verdict says.
+
+A reviewer may end its turn to wait for checks it started, with
+`{"verdict": "pending", "reason": "…"}` in the same block. That is not a
+missing verdict: TerminalX waits up to 20 minutes for the verdict, through any
+number of turns, then asks once for a verdict on what the reviewer has. A
+reviewer still pending after that, or one that ends a turn without a block
+twice, is left to a person. Once it gives a verdict, its review is over, and it
+is told to stop the background commands and watches it started for it.
 
 When the diff touches authorization, secrets, billing, deletion or connection
 handling (judged from the changed paths and the added lines), the reviewer is
@@ -136,8 +152,8 @@ With **Merge automatically when the review is addressed** on for the issue, and
 only then, the pull request is merged if all of this is true of its current
 head:
 
-- The reviewer's last verdict is for that exact commit, says `merge`, and has
-  no finding of medium severity or higher.
+- The reviewer's last verdict is for that exact commit, says `merge`, has no
+  finding of medium severity or higher, and does not report its checks failed.
 - The checks on that commit have passed. Where branch protection names
   required checks, those are the ones that count; where it names none, every
   check reported on the commit counts, except ones the project lists as never
@@ -156,6 +172,9 @@ head:
   Empty validation never becomes successful simply because time has passed.
 - GitHub says the branch merges without conflicts and branch protection does
   not block it.
+- Something ran the tests: CI, TerminalX's own run of the project's local
+  check command, or the reviewer. A review by reading alone in a project with
+  no CI is left at *Ready to merge* for a person.
 - The change is not in a category the project marks as always needing a
   person.
 - The project does not require a person for every merge.
@@ -188,6 +207,17 @@ so its page and record stay within reach. The twenty most recent are shown;
 **Stop** on the issue's page halts a pipeline where it is; while stopped, a
 session's report is not acted on, and after **Resume** the stage's own button
 (open the pull request, review the changes) carries it on.
+
+When a pipeline ends (its pull request is merged or closed, or it is stopped),
+its conversations are released. An idle agent is stopped, together with the
+background commands and watches it left running, which could otherwise wake it
+for as long as they run; a note in its transcript says why, and its next
+message resumes the conversation. A conversation still in a turn is told the
+pipeline ended, and its agent is stopped when that turn ends. Stop releases
+the reviewer and the conflict resolver; a merge or close releases the author
+too. A conflict resolver part way through its merge is not told to stop, so it
+cannot leave the checkout half merged. A reply that comes after the end is
+noted in the record and ignored.
 
 The switch can be turned off at any time. It is read again immediately before
 the merge is asked for, so turning it off stops a merge that had not yet been
@@ -248,7 +278,9 @@ commit it was about and a link to the pull request or the session. It is kept
 in `~/.raccoon/issue-pipelines.json` and shown under **Record** on the issue's
 page. A merge made somewhere else (GitHub, the PR panel) is noticed at
 whatever stage the pipeline was, and recorded as such; so is a pull request
-closed without merging.
+closed without merging. Releasing the conversations at the end is a
+`participantsReleased` line, a reply after it a `lateReply` line, and a
+reviewer waiting on its own checks a `reviewPending` line.
 
 ## From the command line
 

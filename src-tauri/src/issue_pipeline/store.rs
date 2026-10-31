@@ -14,7 +14,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Pipeline, State};
+use super::{Pipeline, Stage, State};
 
 /// Finished pipelines kept for the record; ones still in flight are never dropped.
 const RETENTION: usize = 200;
@@ -49,7 +49,16 @@ pub fn list() -> Result<Vec<Pipeline>> {
 }
 
 fn note_waiting(pipelines: &[Pipeline]) {
-    let since = pipelines.iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Waiting).filter_map(waiting_since).collect();
+    let since = pipelines
+        .iter()
+        .filter(|pipeline| !pipeline.stopped)
+        .filter_map(|pipeline| match pipeline.state {
+            State::Waiting => waiting_since(pipeline),
+            // A reviewer waiting on checks it started: they run in this workspace.
+            State::Working if pipeline.stage == Stage::Review => pipeline.review_pending_since.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)),
+            _ => None,
+        })
+        .collect();
     *WAITING.lock().unwrap_or_else(|error| error.into_inner()) = since;
 }
 
@@ -66,7 +75,7 @@ pub fn waiting_since(pipeline: &Pipeline) -> Option<DateTime<Utc>> {
 }
 
 /// When each pipeline waiting on GitHub (checks, mergeability, a merge
-/// queue) began to wait.
+/// queue), or on its reviewer's own checks, began to wait.
 pub fn waits() -> Vec<DateTime<Utc>> {
     WAITING.lock().unwrap_or_else(|error| error.into_inner()).clone()
 }

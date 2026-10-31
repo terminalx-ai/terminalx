@@ -115,6 +115,7 @@ mod relay_e2ee;
 pub mod remote;
 mod session;
 mod session_ops;
+mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
