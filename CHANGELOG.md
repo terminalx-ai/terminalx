@@ -43,6 +43,16 @@
   compaction start/completion events and retained interruption status. Existing
   PTY sessions keep their current behavior. (#644)
 
+### Status bar
+
+- Claude usage keeps refreshing when Claude Code's keychain login is large.
+  The read no longer stalls until its deadline once the item outgrew the pipe
+  buffer, as it did as MCP sign-ins accumulated, and then reported "OAuth
+  credentials were not found". A failure now says whether the keychain read
+  timed out, failed (with its exit code), or found no login, and Refresh
+  retries a failed credential read at once instead of waiting out a backoff
+  of up to four hours. A provider's Retry-After still holds it. (#664)
+
 ### Issue work status
 
 - Refresh shared issue work when the account service changes its supported
