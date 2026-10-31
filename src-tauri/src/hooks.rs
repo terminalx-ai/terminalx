@@ -601,9 +601,7 @@ impl Frames {
     }
 
     fn take(&self) -> Option<FrameSlot> {
-        use std::sync::atomic::Ordering;
-        self.count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| (count < self.limit).then_some(count + 1)).ok()?;
-        Some(FrameSlot(self.count.clone()))
+        crate::local_runtime::permissions::increment_bounded(&self.count, self.limit).then(|| FrameSlot(self.count.clone()))
     }
 }
 
