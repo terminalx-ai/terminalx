@@ -72,10 +72,41 @@ describe("guest account confirmation", () => {
     expect(await screen.findByText(/You chose personal \(UID 501\).*cannot be changed/)).toBeTruthy();
     expect(screen.queryByRole("radio")).toBeNull();
     unmount();
-    listing = [status({ chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed", accountAuthenticated: true, account: personal }, key: { stage: "awaitingKeyProducer" } })];
+    listing = [status({ chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed", accountAuthenticated: true, account: personal }, key: { stage: "notGranted" } })];
     mount();
     expect(await screen.findByText(/authenticated for this VM only; it is not trust or SSH readiness/)).toBeTruthy();
-    expect(screen.getByText(/No SSH key has been granted/)).toBeTruthy();
+    expect(screen.getByText(/not installed in this account yet.*does not trust the VM or make SSH ready/)).toBeTruthy();
+    expect(calls("environment.grantGuestKey")).toHaveLength(0);
+  });
+
+  it("installs the key only on a deliberate action, sends no key material, and retries with the original key", async () => {
+    const confirmed = { chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed" as const, accountAuthenticated: true, account: personal } };
+    listing = [status({ ...confirmed, key: { stage: "notGranted" } })];
+    mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
+      if (args.method === "environment.grantGuestKey") { listing = [status({ ...confirmed, key: { stage: "grantPending" } })]; return { relay: {}, installed: false }; }
+      return { bootstraps: listing };
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Install SSH key" }));
+    await waitFor(() => expect(calls("environment.grantGuestKey")).toHaveLength(1));
+    expect(calls("environment.grantGuestKey")[0][1].params).toEqual({ idempotencyKey: "boot-1", confirm: true,
+      parentSession: session.id, parentTab: tab.id, parentConversation: "original" });
+    expect(await screen.findByText(/Waiting for the guest helper's install result/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry with the original key" })).toBeTruthy();
+    cleanup();
+    listing = [status({ ...confirmed, key: { stage: "keyPending" } })];
+    mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
+      if (args.method === "environment.grantGuestKey") throw "This VM's original key creation has an unknown outcome; it is never repeated or replaced";
+      return { bootstraps: listing };
+    });
+    mount();
+    expect(await screen.findByText(/a second key is never created/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry with the original key" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/unknown outcome.*Retrying uses only this VM's original key/);
+    cleanup();
+    listing = [status({ ...confirmed, key: { stage: "notGranted" } })];
+    mount(true);
+    expect((await screen.findByRole("button", { name: "Install SSH key" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("reports a refused account or key install without treating it as success", async () => {
@@ -86,6 +117,7 @@ describe("guest account confirmation", () => {
     listing = [status({ chosen: personal, accountAuthenticated: true, answer: { outcome: "confirmed", accountAuthenticated: true, account: personal }, key: { stage: "outcomeUnknown" } })];
     mount();
     expect(await screen.findByText(/outcome is unknown. It is not retried or treated as installed/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Install SSH key|Retry/ })).toBeNull();
   });
 
   it("is read-only in a read-only tab and silent without a conversation", async () => {

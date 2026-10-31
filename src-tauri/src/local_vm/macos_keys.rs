@@ -1,6 +1,8 @@
 //! Private per-guest key lifecycle. No import-from-path API, host key discovery,
-//! agent lookup occurs. The fixed OpenSSH producer remains behind the
-//! authenticated bootstrap gate and is tested only with synthetic utilities.
+//! agent lookup occurs. The fixed OpenSSH producer runs only behind an
+//! authenticated gate: the post-trust transport binding (still closed), or a
+//! version-3 owner's enrolled VM and helper-acknowledged, person-confirmed
+//! account (`macos_owner_channel::grant_guest_key`). Tests use synthetic utilities.
 use super::{
     journal,
     macos_transport::{self, Binding},
@@ -63,10 +65,11 @@ pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 fn directory(root: &Path, binding: &Binding) -> Result<PathBuf> {
-    journal::validate_id(&binding.key_reference)?;
-    Ok(root
-        .join("macos-personalization-keys")
-        .join(&binding.key_reference))
+    reference_directory(root, &binding.key_reference)
+}
+fn reference_directory(root: &Path, key_reference: &str) -> Result<PathBuf> {
+    journal::validate_id(key_reference)?;
+    Ok(root.join("macos-personalization-keys").join(key_reference))
 }
 fn lock(path: &Path) -> Result<std::fs::File> {
     check_directory(path)?;
@@ -83,17 +86,31 @@ fn lock(path: &Path) -> Result<std::fs::File> {
     }
     Ok(lock)
 }
+/// An immutable binding as a record holds it: its JSON and the digest of the
+/// bytes it was serialized from, so each binding type keeps its own encoding.
+pub(super) struct Bound {
+    value: Value,
+    digest: String,
+}
+impl Bound {
+    pub(super) fn of(binding: &impl serde::Serialize) -> Result<Self> {
+        Ok(Self { value: serde_json::to_value(binding)?, digest: journal::digest(&serde_json::to_vec(binding)?) })
+    }
+    fn record(&self, state: &str) -> Value {
+        json!({"binding":self.value,"inputDigest":self.digest,"state":state,"producer":PRODUCER})
+    }
+}
 fn read(path: &Path, binding: &Binding) -> Result<Value> {
+    read_bound(path, &Bound::of(binding)?)
+}
+fn read_bound(path: &Path, bound: &Bound) -> Result<Value> {
     let record: Value =
         serde_json::from_slice(&private_read(&path.join("record.json"), 32 * 1024)?)?;
-    if record["binding"] != json!(binding)
-        || record["inputDigest"] != journal::digest(&serde_json::to_vec(binding)?)
-    {
+    if record["binding"] != bound.value || record["inputDigest"] != bound.digest.as_str() {
         bail!("Per-guest key reference belongs to another immutable binding");
     }
     Ok(record)
 }
-#[allow(dead_code)] // The authenticated provisioning producer/retirement route is not activated.
 fn retain(path: &Path, value: &Value) -> Result<()> {
     journal::atomic_private_write(&path.join("record.json"), &serde_json::to_vec(value)?)
 }
@@ -167,11 +184,22 @@ pub(super) fn resolve(
     budget: Duration,
 ) -> Result<std::fs::File> {
     binding.check_retained(root)?;
+    Ok(resolve_in(root, &binding.key_reference, &Bound::of(binding)?, verifier, budget)?.0)
+}
+/// The retained reference, verified as the same original private file and
+/// pairing, for any immutable binding. Returns the held lock and the record.
+pub(super) fn resolve_in(
+    root: &Path,
+    key_reference: &str,
+    binding: &Bound,
+    verifier: &Path,
+    budget: Duration,
+) -> Result<(std::fs::File, Value)> {
     check_directory(root)?;
     check_directory(&root.join("macos-personalization-keys"))?;
-    let path = directory(root, binding)?;
+    let path = reference_directory(root, key_reference)?;
     let guard = lock(&path)?;
-    let record = read(&path, binding)?;
+    let record = read_bound(&path, binding)?;
     if record["state"] != "ready" {
         bail!(
             "Guest key generation/revocation remains fenced; original reference was not replayed"
@@ -190,7 +218,7 @@ pub(super) fn resolve(
     if record["receipt"]["publicKey"] != derive(verifier, &private, budget)? {
         bail!("Private key no longer matches its retained public key");
     }
-    Ok(guard)
+    Ok((guard, record))
 }
 #[allow(dead_code)] // Future authenticated lifecycle action; fixtures cover retained tombstones.
 pub(super) fn retire(root: &Path, binding: &Binding) -> Result<()> {
@@ -224,13 +252,55 @@ pub(super) fn produce_using(
     after_receipt: impl FnOnce() -> Result<()>,
 ) -> Result<Value> {
     binding.check_retained(root)?;
+    produce_in(root, &binding.key_reference, &Bound::of(binding)?, utility, recover, after_receipt)
+}
+fn keys_parent(root: &Path) -> Result<()> {
     check_directory(root)?;
     let parent = root.join("macos-personalization-keys");
-    if !parent.try_exists()? {
-        std::fs::DirBuilder::new().mode(0o700).create(&parent)?;
+    // A concurrent first claim may create it too; either way it is checked.
+    match std::fs::DirBuilder::new().mode(0o700).create(&parent) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error.into()),
+        _ => {}
     }
-    check_directory(&parent)?;
-    let path = directory(root, binding)?;
+    check_directory(&parent)
+}
+const PRODUCER: &str = "openssh-ed25519-v1";
+/// Claims `key_reference` for `binding` before anything is generated, recorded
+/// as `reserved`. Idempotent for the same binding, including after a crash
+/// before the record was written; a reference that has any other history,
+/// or another binding, stays fenced.
+pub(super) fn reserve(root: &Path, key_reference: &str, binding: &Bound) -> Result<()> {
+    keys_parent(root)?;
+    let path = reference_directory(root, key_reference)?;
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error.into()),
+        _ => {}
+    }
+    let _lock = lock(&path)?;
+    if path.join("record.json").try_exists()? {
+        read_bound(&path, binding)?;
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&path)? {
+        if entry?.file_name() != "operation.lock" {
+            bail!("Key reference has unrecorded history; it stays fenced")
+        }
+    }
+    retain(&path, &binding.record("reserved"))
+}
+/// The producer for any immutable binding. A `reserved` reference is generated
+/// once; an existing unknown outcome is only ever recovered from the original
+/// child's receipt, and a missing reference is never recreated on recovery.
+pub(super) fn produce_in(
+    root: &Path,
+    key_reference: &str,
+    binding: &Bound,
+    utility: &Path,
+    recover: bool,
+    after_receipt: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
+    keys_parent(root)?;
+    let path = reference_directory(root, key_reference)?;
     let existed = path.try_exists()?;
     if !existed {
         if recover {
@@ -240,22 +310,33 @@ pub(super) fn produce_using(
     }
     let _guard = lock(&path)?;
     let mut record = if existed {
-        read(&path, binding)?
+        read_bound(&path, binding)?
     } else {
-        let value = json!({"binding":binding,"inputDigest":journal::digest(&serde_json::to_vec(binding)?),"state":"outcomeUnknown","producer":"openssh-ed25519-v1"});
+        let value = binding.record("outcomeUnknown");
         retain(&path, &value)?;
         value
     };
-    if existed && (!recover || record["state"] != "outcomeUnknown") {
-        return Ok(record);
-    }
-    if record["producer"] != "openssh-ed25519-v1" {
+    if record["producer"] != PRODUCER {
         bail!("Original operation was not this key producer")
     }
+    // A reservation has never taken the producer lease or run the utility.
+    let reserved = existed && record["state"] == "reserved";
+    if reserved {
+        for name in ["producer.lock", "private_key", "private_key.pub", "producer-receipt.json"] {
+            if std::fs::symlink_metadata(path.join(name)).is_ok() {
+                bail!("Reserved key reference already has producer history; it stays fenced")
+            }
+        }
+        record["state"] = json!("outcomeUnknown");
+        retain(&path, &record)?;
+    } else if existed && (!recover || record["state"] != "outcomeUnknown") {
+        return Ok(record);
+    }
+    let fresh = !existed || reserved;
     let lease = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(!existed)
+        .create(fresh)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -273,7 +354,7 @@ pub(super) fn produce_using(
     if !crate::local_vm::journal::try_exclusive(&lease)? {
         bail!("Original key producer is still owned; no recovery or replacement")
     }
-    if !existed {
+    if fresh {
         let mut command = macos_transport::isolated(utility, &path);
         command
             .args([
@@ -305,7 +386,7 @@ pub(super) fn produce_using(
         write_new(
             &path.join("producer-receipt.json"),
             &serde_json::to_vec(
-                &json!({"binding":binding,"exit":"originalChildSuccess","receipt":receipt}),
+                &json!({"binding":binding.value,"exit":"originalChildSuccess","receipt":receipt}),
             )?,
         )?;
         after_receipt()?;
@@ -314,7 +395,7 @@ pub(super) fn produce_using(
         &path.join("producer-receipt.json"),
         32 * 1024,
     )?)?;
-    if proof["binding"] != json!(binding)
+    if proof["binding"] != binding.value
         || proof["exit"] != "originalChildSuccess"
         || proof["receipt"] != produced_pair(&path, utility)?
     {

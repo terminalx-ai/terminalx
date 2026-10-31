@@ -127,12 +127,13 @@ fn account_status(reference: &Reference) -> Result<Value> {
     let (bytes, observation) = reference.account_observation()?;
     let answer = reference.account_answer().ok();
     let authenticated = answer.as_ref().is_some_and(|a| a["accountAuthenticated"] == true);
-    // The per-guest key producer is not routed yet, so no grant is made from
-    // here; an existing grant's result is reported exactly as the helper gave it.
+    // Read-only: nothing is produced or granted here. A grant's result is
+    // reported exactly as the helper gave it.
     let key = match reference.key_result() {
         Ok(result) => result,
         Err(_) if reference.root.exists("key-grant.json")? => json!({"stage": "grantPending"}),
-        Err(_) if authenticated => json!({"stage": "awaitingKeyProducer"}),
+        Err(_) if reference.root.exists("key-intent.json")? => json!({"stage": "keyPending"}),
+        Err(_) if authenticated => json!({"stage": "notGranted"}),
         Err(_) => Value::Null,
     };
     let chosen = match reference.root.exists("account-confirmation.json")? {
@@ -151,6 +152,71 @@ pub(super) fn confirm_guest_account(params: &Value) -> Result<Value> {
         "parentConversation": params["parentConversation"]}))?;
     let relay = reference.confirm_account(&confirmation)?;
     Ok(json!({"relay": relay, "accountAuthenticated": false, "trustAccepted": false, "ready": false}))
+}
+/// The person's request, from the original parent, to install this VM's SSH
+/// key in the account the helper acknowledged. No key material is accepted:
+/// the host produces or recovers the VM's one original key and grants only its
+/// public half. An install is never host trust, SSH success or readiness.
+pub(super) fn grant_guest_key(params: &Value) -> Result<Value> {
+    if ["publicKey", "privateKey", "keyReference"].iter().any(|name| !params[*name].is_null()) {
+        bail!("Key material or references are never accepted from a caller")
+    }
+    let reference = operation(params)?;
+    let b = &reference.binding;
+    if params["parentSession"] != b.parent_session.as_str()
+        || params["parentTab"] != b.parent_tab.as_str()
+        || params["parentConversation"] != b.parent_conversation.as_str()
+    {
+        bail!("Only the original parent conversation can install this VM's key")
+    }
+    let relay = reference.grant_guest_key_using(&super::host::root()?, Path::new("/usr/bin/ssh-keygen"), Duration::from_secs(15))?;
+    Ok(json!({"relay": relay, "installed": false, "trustAccepted": false, "ready": false}))
+}
+/// This VM's one original SSH key: `planned`, the reference its provisioning
+/// intent minted, published in `key-intent.json` and produced under exactly
+/// `binding`. The reference is reserved before the intent is published
+/// exclusively, so a lost reply, a concurrent claim or a crash at any point never
+/// generates a second key. A changed binding, or missing or corrupt history,
+/// refuses and stays fenced. Returns the reference and its verified public key;
+/// the private key stays in its owner-only reference.
+fn original_key(journal_dir: &Directory, keys_root: &Path, planned: &str, binding: &Value, utility: &Path, budget: Duration) -> Result<(String, String)> {
+    journal::validate_id(planned)?;
+    let published = || -> Result<Option<String>> {
+        if !journal_dir.exists("key-intent.json")? {
+            return Ok(None);
+        }
+        let intent: Value = serde_json::from_slice(&journal_dir.read("key-intent.json", 32 * 1024, true)?)
+            .context("This VM's original key intent is corrupt; no key is created or replaced")?;
+        let reference = intent["keyReference"].as_str().context("This VM's original key intent is corrupt")?;
+        if intent.as_object().map(|o| o.len()) != Some(2) || intent["binding"] != *binding || reference != planned {
+            bail!("This VM's original key belongs to another enrollment, account or parent; no key is created or replaced")
+        }
+        journal::validate_id(reference)?;
+        Ok(Some(reference.to_string()))
+    };
+    let bound = |reference: &str| {
+        let mut bound = binding.clone();
+        bound["keyReference"] = json!(reference);
+        super::macos_keys::Bound::of(&bound)
+    };
+    let reference = match published()? {
+        Some(reference) => reference,
+        None => {
+            super::macos_keys::reserve(keys_root, planned, &bound(planned)?)?;
+            match journal_dir.write_new("key-intent.json", &canonical(&json!({"binding": binding, "keyReference": planned}))?) {
+                Ok(()) => planned.to_string(),
+                // A concurrent claim published first; it is used only if identical.
+                Err(error) => published()?.ok_or(error)?,
+            }
+        }
+    };
+    let record = super::macos_keys::produce_in(keys_root, &reference, &bound(&reference)?, utility, true, || Ok(()))?;
+    if record["state"] != "ready" {
+        bail!("This VM's original key creation has an unknown outcome; it is never repeated or replaced")
+    }
+    let (_guard, record) = super::macos_keys::resolve_in(keys_root, &reference, &bound(&reference)?, utility, budget)?;
+    let public = record["receipt"]["publicKey"].as_str().context("This VM's original key receipt is incomplete")?;
+    Ok((reference, public.to_string()))
 }
 pub(super) fn canonical(value: &Value) -> Result<Vec<u8>> {
     fn encode(value: &Value) -> Result<String> {
@@ -822,11 +888,66 @@ impl Reference {
         }
         Ok((receipt.bytes, answer))
     }
+    /// Version 3: the immutable identities this VM's key is bound to, each
+    /// verified through the owner: VM, owner epoch, seed, the helper's
+    /// enrollment, the person's confirmation, the helper's exact acknowledgement
+    /// of that one account, and the original parent. Before that
+    /// acknowledgement nothing is bound, reserved or generated.
+    fn key_binding(&self) -> Result<Value> {
+        let (answer_bytes, answer) = self.account_answer_bytes()?;
+        if answer["outcome"] != "confirmed" || answer["accountAuthenticated"] != true {
+            bail!("The person's account choice was not acknowledged by the helper; no key is created or granted")
+        }
+        let enrolled = self.enrollment()?;
+        let confirmation = self.root.read("account-confirmation.json", 32 * 1024, true)?;
+        let b = &self.binding;
+        Ok(json!({"version": 3, "bootstrapId": b.bootstrap_id, "bindingDigest": journal::digest(&self.raw),
+            "ownerEpoch": b.owner_epoch, "environmentId": b.environment_id, "generation": b.generation,
+            "vmFingerprint": b.vm_fingerprint, "seedId": b.seed_id, "seedReceiptSha256": b.seed_receipt_sha256,
+            "enrollment": {"bindingDigest": enrolled.binding_digest, "challengeSha256": enrolled.challenge_sha256,
+                "claimsSha256": enrolled.claims_sha256},
+            "confirmationSha256": journal::digest(&confirmation), "answerSha256": journal::digest(&answer_bytes),
+            "account": answer["account"], "parentSession": b.parent_session, "parentTab": b.parent_tab,
+            "parentConversation": b.parent_conversation}))
+    }
+    /// Produces or recovers this VM's one original key, then grants its public
+    /// half to the acknowledged account. `utility` is the fixed OpenSSH producer
+    /// in production and a synthetic one in fixtures.
+    fn grant_guest_key_using(&self, keys_root: &Path, utility: &Path, budget: Duration) -> Result<Value> {
+        let mut binding = self.key_binding()?;
+        let (planned, intent_digest) = self.planned_key(keys_root)?;
+        binding["accountIntentDigest"] = json!(intent_digest);
+        let (key_reference, public_key) = original_key(&self.root, keys_root, &planned, &binding, utility, budget)?;
+        self.relay_grant(&key_reference, &public_key)
+    }
+    /// The SSH key reference this bootstrap's provisioning intent minted before
+    /// the VM existed, and that intent's digest. The post-trust transport uses
+    /// the same reference; no other is ever minted for this VM.
+    fn planned_key(&self, root: &Path) -> Result<(String, String)> {
+        // SAFETY: geteuid has no memory preconditions.
+        let dir = Directory::open(&root.join("macos-personalization").join(&self.binding.bootstrap_id), unsafe { libc::geteuid() }, true)?;
+        let record: Value = fs::json(&dir, "record.json", 64 * 1024)?;
+        let digest = journal::digest(&serde_json::to_vec(&record["intent"])?);
+        let target = &record["intent"]["target"];
+        let b = &self.binding;
+        if record["inputDigest"] != digest.as_str()
+            || target["environmentId"] != b.environment_id.as_str()
+            || target["generation"] != b.generation.as_str()
+            || target["vmFingerprint"] != b.vm_fingerprint.as_str()
+            || target["restoreSha256"] != b.restore_sha256.as_str()
+        {
+            bail!("Original account preparation changed; no key is created")
+        }
+        let plan: super::macos_personalization::AccountPlan = serde_json::from_value(record["intent"]["account"].clone())?;
+        journal::validate_id(&plan.ssh_key_reference)?;
+        Ok((plan.ssh_key_reference, digest))
+    }
     /// The SSH public key grant for the account the helper confirmed: recorded
     /// once, exclusively, then relayed. Bound to that confirmation, the exact
     /// answer, the account and the original parent. A retry re-presents the same
-    /// grant; a different key or reference is refused for good.
-    fn grant_key(&self, key_reference: &str, public_key: &str) -> Result<Value> {
+    /// grant; a different key or reference is refused for good. Only
+    /// `grant_guest_key_using` calls this, with the VM's original produced key.
+    fn relay_grant(&self, key_reference: &str, public_key: &str) -> Result<Value> {
         let (answer_bytes, answer) = self.account_answer_bytes()?;
         if answer["outcome"] != "confirmed" || answer["accountAuthenticated"] != true {
             bail!("The person's account choice was not acknowledged by the helper; no key is granted")
@@ -1012,3 +1133,7 @@ pub(super) mod launch;
 #[cfg(test)]
 #[path = "macos_owner_channel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "macos_owner_key_tests.rs"]
+mod key_tests;

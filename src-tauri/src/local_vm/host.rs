@@ -171,6 +171,9 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         "environment.confirmGuestAccount" => {
             confirm(&params)?;super::macos_owner_channel::confirm_guest_account(&params)
         }
+        "environment.grantGuestKey" => {
+            confirm(&params)?;super::macos_owner_channel::grant_guest_key(&params)
+        }
         "environment.reconcileProvision" => super::provisioning::reconcile(&journal, params),
         "environment.bootstrapDeliveryStatus" => {
             let env=environment(&journal,&params)?;

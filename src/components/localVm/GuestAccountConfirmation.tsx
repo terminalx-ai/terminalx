@@ -8,7 +8,8 @@ import type { SessionEntry, TabEntry } from "@/types/session";
 const accountId = (account: LocalVmGuestAccount) => `${account.uid}:${account.name}`;
 
 const keyStages: Record<LocalVmGuestKeyStage, string> = {
-  awaitingKeyProducer: "No SSH key has been granted: the per-guest key is not available yet.",
+  notGranted: "TerminalX's SSH key is not installed in this account yet. Installing it creates this VM's one key; it does not trust the VM or make SSH ready.",
+  keyPending: "TerminalX started creating this VM's SSH key and has not granted it yet. Retrying uses only that original key; a second key is never created.",
   grantPending: "A key grant is recorded. Waiting for the guest helper's install result.",
   publicKeyInstalled: "The guest helper installed TerminalX's public key in this account. SSH is not trusted or ready yet.",
   outcomeUnknown: "The key install outcome is unknown. It is not retried or treated as installed; inspect the VM.",
@@ -55,6 +56,17 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
     try { await reload(); } finally { lock.current = false; setBusy(false); }
   }
 
+  async function grantKey() {
+    if (lock.current || readOnly) return;
+    lock.current = true; setBusy(true); setError(null);
+    try {
+      await localVmRequest("environment.grantGuestKey", { idempotencyKey: item.idempotencyKey, confirm: true,
+        parentSession: session.id, parentTab: tab.id, parentConversation: conversation });
+    } catch (error) {
+      setError(`${errorMessage(error)} Retrying uses only this VM's original key; it is never replaced.`);
+    } finally { await reload(); lock.current = false; setBusy(false); }
+  }
+
   async function confirm() {
     const account = item.accounts.find((candidate) => accountId(candidate) === selected);
     if (lock.current || readOnly || !consent || !account || !item.observationSha256) return;
@@ -76,7 +88,11 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
         ? `The guest helper confirmed ${account.name} (UID ${account.uid}). This account is authenticated for this VM only; it is not trust or SSH readiness.`
         : `The guest helper refused ${account.name}: it no longer matches the guest. The choice is not changed or retried; inspect the VM.`}</p>
       {outcome === "confirmed" && item.key ? <p role="status">{keyStages[item.key.stage]}</p> : null}
-      {item.key?.stage === "grantPending" || !item.key ? checkButton : null}
+      {outcome === "confirmed" && item.key && ["notGranted", "keyPending", "grantPending"].includes(item.key.stage) ? <div className="flex gap-2">
+        <Button type="button" size="sm" disabled={busy || readOnly} onClick={() => void grantKey()}>{busy ? "Working…" : item.key.stage === "notGranted" ? "Install SSH key" : "Retry with the original key"}</Button>
+        {checkButton}
+      </div> : null}
+      {outcome === "confirmed" && !item.key ? checkButton : null}
     </>;
   } else if (item.chosen) {
     body = <>

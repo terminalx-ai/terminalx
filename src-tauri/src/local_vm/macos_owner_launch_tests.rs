@@ -121,7 +121,7 @@ impl Fixture {
         let op = self.op();
         private(
             &op.join("fixture-control.json"),
-            &canonical(&json!({"requests":24,"fault":fault})).unwrap(),
+            &canonical(&json!({"requests":64,"fault":fault})).unwrap(),
         );
         private(&op.join("fixture-view.json"),&canonical(&json!({"running":true,"shares":[{"name":"input","path":op.join("input"),"readOnly":true},{"name":"receipt","path":op.join("receipt"),"readOnly":false}]})).unwrap());
     }
@@ -615,66 +615,179 @@ fn native_only_the_persons_confirmation_from_the_original_parent_is_relayed_once
     assert!(reference.account_answer().is_err());
 }
 
+/// A synthetic OpenSSH producer next to `public-key`; counts generations.
+fn producer(f: &Fixture, fill: u8) -> (PathBuf, String) {
+    use base64::Engine;
+    let mut bytes = 11_u32.to_be_bytes().to_vec();
+    bytes.extend(b"ssh-ed25519");
+    bytes.extend(32_u32.to_be_bytes());
+    bytes.extend([fill; 32]);
+    let public = format!("ssh-ed25519 {}", base64::engine::general_purpose::STANDARD.encode(bytes));
+    let dir = f.root.join("synthetic-producer");
+    directory(&dir);
+    std::fs::write(dir.join("public-key"), &public).unwrap();
+    let utility = dir.join("ssh-keygen");
+    std::fs::write(&utility, r#"#!/usr/bin/python3
+import sys,pathlib
+root=pathlib.Path(__file__).parent;a=sys.argv[1:]
+if a[:2]==['-y','-f']:
+ assert pathlib.Path(a[2]).read_bytes()==b'synthetic fixture material, never a real key'
+ print((root/'public-key').read_text());sys.exit(0)
+assert a[:8]==['-q','-t','ed25519','-N','','-C','terminalx-local-vm','-f'] and len(a)==9
+with (root/'generation-count').open('a') as out:out.write('once\n')
+p=pathlib.Path(a[8]);p.write_bytes(b'synthetic fixture material, never a real key')
+if (root/'partial-output').exists():sys.exit(71)
+p.with_name(p.name+'.pub').write_text((root/'public-key').read_text()+' terminalx-local-vm\n')
+"#).unwrap();
+    std::fs::set_permissions(&utility, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (utility, public)
+}
+fn generations(f: &Fixture) -> usize {
+    std::fs::read_to_string(f.root.join("synthetic-producer/generation-count")).map(|s| s.lines().count()).unwrap_or(0)
+}
+fn replace(path: &Path, bytes: &[u8]) {
+    let _ = std::fs::remove_file(path);
+    private(path, bytes);
+}
+/// The owner's enrollment and the helper's account observation, then the
+/// person's confirmation of `personal` from the original parent. Returns the
+/// chosen account and the recorded confirmation.
+fn confirmed_choice(f: &Fixture, reference: &Reference) -> (Value, Vec<u8>) {
+    let digest = journal::digest(&reference.raw);
+    let (receipt, receipt_digest) = crate::local_vm::macos_seed::seeded(&f.root, &f.key).unwrap();
+    private(&f.op().join("enrollment.json"), &canonical(&json!({"version":2,"bindingDigest":digest,"ownerEpoch":reference.binding.owner_epoch,
+        "bootstrapId":f.key,"seedId":receipt["seedId"],"seedReceiptSha256":receipt_digest,"attempt":0,
+        "challengeSha256":"c".repeat(64),"claimsSha256":"d".repeat(64),
+        "helperAuthenticated":true,"accountAuthenticated":false,"trustAccepted":false,"ready":false})).unwrap());
+    let account = |name: &str, uid: u32| json!({"gid": 20, "home": format!("/Users/{name}"), "homeDevice": 1, "homeInode": uid + 100, "name": name, "uid": uid});
+    let observation = canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501), account("other", 502)], "helperAuthenticated": true,
+        "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
+    private(&f.op().join("account-observation.json"), &observation);
+    reference.confirm_account(&super::super::AccountConfirmation {
+        confirm: true, observation_sha256: journal::digest(&observation), account: account("personal", 501),
+        parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
+        parent_conversation: reference.binding.parent_conversation.clone(),
+    }).unwrap();
+    (account("personal", 501), std::fs::read(f.op().join("account-confirmation.json")).unwrap())
+}
+fn answer(reference: &Reference, recorded: &[u8], account: &Value, outcome: &str) -> Vec<u8> {
+    canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
+        "confirmationSha256": journal::digest(recorded), "account": account, "outcome": outcome,
+        "accountAuthenticated": outcome == "confirmed", "trustAccepted": false, "ready": false})).unwrap()
+}
+
 #[test]
 #[ignore = "Requires explicitly compiled synthetic native owner fixture"]
-fn native_key_grant_follows_only_an_acknowledged_confirmation_and_never_becomes_success_by_itself() {
-    use base64::Engine;
+fn native_the_vms_original_key_follows_only_the_helpers_acknowledgement_and_is_granted_once() {
     let f = Fixture::new();
     seed(&f);
     assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
     let reference = Reference::reopen(&f.op()).unwrap();
     let digest = journal::digest(&reference.raw);
-    let account = json!({"gid": 20, "home": "/Users/personal", "homeDevice": 1, "homeInode": 601, "name": "personal", "uid": 501});
-    let observation = canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
-        "challengeSha256": "c".repeat(64), "accounts": [account], "helperAuthenticated": true,
-        "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
-    private(&f.op().join("account-observation.json"), &observation);
-    let key = |fill: u8| {
-        let mut bytes = 11_u32.to_be_bytes().to_vec();
-        bytes.extend(b"ssh-ed25519");
-        bytes.extend(32_u32.to_be_bytes());
-        bytes.extend([fill; 32]);
-        format!("ssh-ed25519 {}", base64::engine::general_purpose::STANDARD.encode(bytes))
-    };
-    let key_reference = journal::new_id();
-    reference.confirm_account(&super::super::AccountConfirmation {
-        confirm: true, observation_sha256: journal::digest(&observation), account: account.clone(),
-        parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
-        parent_conversation: reference.binding.parent_conversation.clone(),
-    }).unwrap();
-    assert!(reference.grant_key(&key_reference, &key(7)).is_err(), "no grant before the helper acknowledged the account");
-    assert!(!f.op().join("key-grant.json").exists());
-    let recorded = std::fs::read(f.op().join("account-confirmation.json")).unwrap();
-    let answer = json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
-        "confirmationSha256": journal::digest(&recorded), "account": account, "outcome": "confirmed",
-        "accountAuthenticated": true, "trustAccepted": false, "ready": false});
-    private(&f.op().join("account-confirmation-answer.json"), &canonical(&answer).unwrap());
-    let relay = reference.grant_key(&key_reference, &key(7)).unwrap();
-    assert_eq!((relay["relayed"].as_bool(), relay["installed"].as_bool()), (Some(true), Some(false)));
-    assert_eq!(relay["account"], json!({"name": "personal", "uid": 501}));
-    let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
-    assert!(!String::from_utf8_lossy(&grant).contains("PRIVATE"), "only the public key is granted");
-    assert_eq!(reference.grant_key(&key_reference, &key(7)).unwrap(), relay, "a retry relays the same grant");
-    assert!(reference.grant_key(&key_reference, &key(8)).is_err(), "never a different key");
-    assert!(reference.grant_key(&journal::new_id(), &key(7)).is_err(), "never a different reference");
-    assert_eq!(std::fs::read(f.op().join("key-grant.json")).unwrap(), grant);
-    assert!(reference.key_result().is_err(), "no result before the helper reports");
+    let (utility, public) = producer(&f, 7);
+    let budget = Duration::from_secs(5);
+    let grant = |reference: &Reference| reference.grant_guest_key_using(&f.root, &utility, budget);
+    let (account, recorded) = confirmed_choice(&f, &reference);
     let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
         "parentConversation": reference.binding.parent_conversation});
-    let listed = super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap();
-    assert_eq!(listed["bootstraps"].as_array().map(Vec::len), Some(1));
-    assert_eq!(listed["bootstraps"][0]["idempotencyKey"], f.key.as_str());
-    assert_eq!(listed["bootstraps"][0]["chosen"], account);
-    assert_eq!(listed["bootstraps"][0]["key"]["stage"], "grantPending");
+    let stage = || super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap()["bootstraps"][0]["key"].clone();
+
+    // Before the helper's acknowledgement, and after its refusal, nothing is bound or generated.
+    assert!(grant(&reference).is_err(), "no acknowledgement yet");
+    assert_eq!(stage(), Value::Null);
+    private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "refused"));
+    assert!(grant(&reference).is_err(), "the helper refused the account");
+    assert!(!f.op().join("key-intent.json").exists() && !f.root.join("macos-personalization-keys").exists());
+    assert_eq!(generations(&f), 0);
+
+    replace(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
+    assert_eq!(stage()["stage"], "notGranted");
+    let relay = grant(&reference).unwrap();
+    let intent: Value = serde_json::from_slice(&std::fs::read(f.op().join("key-intent.json")).unwrap()).unwrap();
+    let key_reference = intent["keyReference"].as_str().unwrap().to_string();
+    let plan: Value = serde_json::from_slice(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap()).unwrap();
+    assert_eq!(plan["intent"]["account"]["sshKeyReference"], key_reference.as_str(), "the provisioning plan's original reference");
+    assert_eq!(intent["binding"]["accountIntentDigest"], journal::digest(&serde_json::to_vec(&plan["intent"]).unwrap()).as_str());
+    assert_eq!(intent["binding"]["account"], account);
+    assert_eq!(intent["binding"]["seedId"], reference.binding.seed_id.as_deref().unwrap());
+    assert_eq!(intent["binding"]["enrollment"]["challengeSha256"], "c".repeat(64));
+    assert_eq!(intent["binding"]["parentConversation"], reference.binding.parent_conversation.as_str());
+    assert_eq!(relay, json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "grantSha256": journal::digest(&std::fs::read(f.op().join("key-grant.json")).unwrap()), "keyReference": key_reference,
+        "publicKey": public, "account": {"name": "personal", "uid": 501}, "relayed": true, "installed": false,
+        "trustAccepted": false, "ready": false}));
+    assert_eq!(stage()["stage"], "grantPending");
+    let granted = std::fs::read(f.op().join("key-grant.json")).unwrap();
+
+    // Lost replies and retries return the same grant; nothing is generated again.
+    for _ in 0..2 {
+        assert_eq!(grant(&Reference::reopen(&f.op()).unwrap()).unwrap(), relay);
+    }
+    assert_eq!(generations(&f), 1);
+    assert_eq!(std::fs::read(f.op().join("key-grant.json")).unwrap(), granted);
+
+    // A replaced enrollment or answer is refused; the original key is never re-bound.
+    let enrollment = std::fs::read(f.op().join("enrollment.json")).unwrap();
+    let mut changed: Value = serde_json::from_slice(&enrollment).unwrap();
+    changed["challengeSha256"] = json!("e".repeat(64));
+    replace(&f.op().join("enrollment.json"), &canonical(&changed).unwrap());
+    assert!(format!("{:#}", grant(&reference).unwrap_err()).contains("belongs to another"));
+    replace(&f.op().join("enrollment.json"), &enrollment);
+    let other = json!({"gid": 20, "home": "/Users/other", "homeDevice": 1, "homeInode": 602, "name": "other", "uid": 502});
+    replace(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &other, "confirmed"));
+    assert!(grant(&reference).is_err(), "another account");
+    replace(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
+    assert_eq!(grant(&reference).unwrap(), relay);
+    assert_eq!(generations(&f), 1);
+
+    // The private key stays in its owner-only reference: no journal or relay names it.
+    let private = std::fs::read(f.root.join("macos-personalization-keys").join(&key_reference).join("private_key")).unwrap();
+    for entry in std::fs::read_dir(f.op()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let text = std::fs::read(&path).unwrap();
+            assert!(!text.windows(private.len()).any(|w| w == private.as_slice()), "{path:?}");
+        }
+    }
+
+    // Only the helper's own result counts; unknown or refused never becomes success.
+    let result = |stage: &str, installed: bool| canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "grantSha256": journal::digest(&granted), "keyReference": key_reference, "stage": stage, "installed": installed,
+        "trustAccepted": false, "ready": false})).unwrap();
+    for (outcome, installed) in [("refused", false), ("outcomeUnknown", false), ("publicKeyInstalled", true)] {
+        replace(&f.op().join("key-install-result.json"), &result(outcome, installed));
+        let reported = stage();
+        assert_eq!((reported["stage"].as_str(), reported["installed"].as_bool()), (Some(outcome), Some(installed)));
+        assert_eq!((reported["trustAccepted"].as_bool(), reported["ready"].as_bool()), (Some(false), Some(false)));
+    }
+    replace(&f.op().join("key-install-result.json"), &result("outcomeUnknown", true));
+    assert!(reference.key_result().is_err(), "an unknown outcome never reads as installed");
     let mut elsewhere = parents.clone();
     elsewhere["parentTab"] = json!(journal::new_id());
     assert_eq!(super::super::confirmations_in(&f.root.join("bo"), &elsewhere).unwrap()["bootstraps"], json!([]), "another tab sees nothing");
-    let result = |stage: &str, installed: bool| json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
-        "grantSha256": journal::digest(&grant), "keyReference": key_reference, "stage": stage, "installed": installed,
-        "trustAccepted": false, "ready": false});
-    private(&f.op().join("key-install-result.json"), &canonical(&result("refused", false)).unwrap());
-    assert_eq!(reference.key_result().unwrap()["installed"], false);
-    std::fs::remove_file(f.op().join("key-install-result.json")).unwrap();
-    private(&f.op().join("key-install-result.json"), &canonical(&result("outcomeUnknown", true)).unwrap());
-    assert!(reference.key_result().is_err(), "an unknown outcome never reads as installed");
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_an_interrupted_key_creation_is_pending_and_never_repeated_or_granted() {
+    let f = Fixture::new();
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    let (utility, _) = producer(&f, 7);
+    let (account, recorded) = confirmed_choice(&f, &reference);
+    private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
+    std::fs::write(f.root.join("synthetic-producer/partial-output"), b"").unwrap();
+    assert!(reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).is_err());
+    std::fs::remove_file(f.root.join("synthetic-producer/partial-output")).unwrap();
+    for _ in 0..2 {
+        assert!(reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).is_err());
+    }
+    assert_eq!(generations(&f), 1);
+    assert!(!f.op().join("key-grant.json").exists(), "an unknown key is never granted");
+    let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
+        "parentConversation": reference.binding.parent_conversation});
+    let listed = super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap();
+    assert_eq!(listed["bootstraps"][0]["key"]["stage"], "keyPending");
 }

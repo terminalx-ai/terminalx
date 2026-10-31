@@ -288,7 +288,7 @@ export interface LocalVmGuestAccount {
   homeInode: number;
 }
 
-export type LocalVmGuestKeyStage = "publicKeyInstalled" | "outcomeUnknown" | "refused" | "grantPending" | "awaitingKeyProducer";
+export type LocalVmGuestKeyStage = "notGranted" | "keyPending" | "grantPending" | "publicKeyInstalled" | "outcomeUnknown" | "refused";
 
 /** Where one bootstrap's account confirmation stands, as the host verified it. */
 export interface LocalVmGuestAccountStatus {

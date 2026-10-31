@@ -274,9 +274,52 @@ The helper's `child::Forking` installer works as follows:
 - Without root it refuses before any fork or write. That refusal is what the
   host, owner and helper fixture records end to end.
 
-The per-guest key producer is still not routed, so no production RPC grants a
-key, and none accepts a caller-supplied public key. `environment.guestAccounts`
-reports `awaitingKeyProducer` in that state.
+**Per-VM key producer (2026-10-31).** `environment.grantGuestKey` (onboarding
+capability, `confirm: true`, original parent session, tab and conversation
+only) takes no key material and refuses `publicKey`, `privateKey` and
+`keyReference` parameters. The host:
+
+1. Requires the helper's exact acknowledgement of the person's confirmed
+   account. Before it, and after a refusal, nothing is bound, reserved or
+   generated.
+2. Binds the key to immutable identities verified through the owner: the
+   binding digest and owner epoch, environment, generation and VM fingerprint,
+   seed and seed receipt, the enrollment challenge and claims, the
+   confirmation and exact answer digests, the account, the original parent,
+   and the provisioning intent's digest.
+3. Uses the SSH key reference the provisioning intent minted before the VM
+   existed (`AccountPlan.ssh_key_reference`). That is the reference the
+   post-trust transport requires, so no second reference is ever minted.
+4. Reserves that reference in the existing key lifecycle
+   (`macos-personalization-keys/<reference>`, state `reserved`), then
+   publishes `key-intent.json` exclusively in the bootstrap journal.
+5. Produces with the fixed OpenSSH producer under the existing lease and
+   receipt rules, verifies the retained private file and pairing, and grants
+   only the public half through the existing exact grant relay.
+
+| Situation | Result |
+| --- | --- |
+| Lost reply or retry | The same reference and public key; the same grant record |
+| Concurrent claims | One generation; the others get "in use" or the original key |
+| Crash before publication or before generation | The same planned reference is generated once |
+| Interrupted generation | `outcomeUnknown`; recovered only from the original child's receipt, never repeated, never granted |
+| Missing reference, corrupt record or intent, changed private file | Fenced; nothing is generated |
+| Changed enrollment, answer, account, epoch or parent | Refused: the key "belongs to another" binding |
+| The planned reference already holds another binding's history | Fenced |
+
+The private key stays in its owner-only reference. Tests check that no
+bootstrap journal, intent, grant or relay contains it. The existing
+post-trust producer is unchanged and still gated by `require_available()`.
+
+`environment.guestAccounts` reports the key as `notGranted`, `keyPending`
+(intent published, no grant yet; retrying uses only that key),
+`grantPending`, or the helper's own result. The confirmation control offers
+**Install SSH key** only after the helper's acknowledgement, and **Retry with
+the original key** while pending. It never offers a retry after a result.
+
+Still to join: the post-trust transport's `macos_keys::resolve` checks the
+record's transport binding, so it does not yet accept this version-3 record
+for the same reference. That join belongs with the host-key trust step.
 
 **On-screen confirmation.** Each conversation's Local VM section lists only the
 bootstraps whose original parent is that session, tab and conversation
