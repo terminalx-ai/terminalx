@@ -9,6 +9,7 @@
 //   node scripts/perf/terminal-bench.mjs --home ~/.txperf --pid 12345 \
 //     [--scenarios yes,cat,tui,echo,interrupt,soak,churn,covered,background] [--terminals 1,8,20] [--out results.json]
 //     [--interrupt-after 2000] [--soak sessions,tabs,switches,agents] [--work dir] [--label text]
+//     [--memory-diagnostics] (soak only; profiles are not acceptance measurements)
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -38,12 +39,16 @@ function parseArgs(argv) {
       }
       case "--interrupt-after": options.interruptAfterMs = Number(value()); break;
       case "--label": options.label = value(); break;
+      case "--memory-diagnostics": options.memoryDiagnostics = true; break;
       default: fail(`unknown option ${argv[i]}`);
     }
   }
   options.home = resolve((options.home ?? process.env.TERMINALX_HOME ?? fail("pass --home, the benchmark app's TERMINALX_HOME")).replace(/^~(?=\/|$)/, homedir()));
   options.work = resolve(options.work ?? join(options.home, "perf"));
   for (const scenario of options.scenarios) if (!SCENARIOS.includes(scenario)) fail(`unknown scenario ${scenario}; one of ${SCENARIOS.join(", ")}`);
+  if (options.memoryDiagnostics && (options.scenarios.length !== 1 || options.scenarios[0] !== "soak" || !options.pid || !options.out)) {
+    fail("--memory-diagnostics requires --scenarios soak, --pid and --out; diagnostic runs are not acceptance runs");
+  }
   return options;
 }
 
@@ -141,7 +146,9 @@ function memory(pid) {
       const [child, name] = line.split(" ");
       if (child) names.set(child, name);
     }
-    const text = execFileSync("/usr/bin/footprint", [...names.keys()], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    // Default formatted MB values round before parsing. The strict percentage
+    // criterion needs the integer byte count, not reconstructed rounded MB.
+    const text = execFileSync("/usr/bin/footprint", ["-f", "bytes", ...names.keys()], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     const sample = {};
     for (const [, child, amount, unit] of text.matchAll(/\[(\d+)\]: \S+\s+Footprint: ([\d.]+) (B|KB|MB|GB)/g)) {
       const name = names.get(child);
@@ -227,6 +234,7 @@ const status = await control(options.home, "status").catch((error) => fail(`no a
 if (options.pid && status.pid !== options.pid) fail(`the app under ${options.home} is pid ${status.pid}, not ${options.pid}`);
 // Agent tabs are only opened against the stand-in CLI that bench-app.sh puts on the app's path, never a real one.
 status.agent = existsSync(join(options.home, "bin/claude"));
+if (options.memoryDiagnostics && !status.agent) fail("memory diagnostics require the private stand-in agent CLI; refusing to skip agent churn");
 console.error(`terminal-bench: app ${status.appVersion} pid ${status.pid}, workloads in ${options.work}${status.agent ? "" : "; no stand-in agent CLI, so no agent tabs"}`);
 const files = writeWorkloads(options.work);
 await writeLog(files.log);
@@ -241,10 +249,60 @@ const drainWorkloads = {
 const flood = `i=0; while [ $i -lt 40 ]; do cat "${files.log}"; i=$((i+1)); done`;
 
 const results = [];
+/** Matched diagnostic checkpoints, deliberately separate from acceptance runs.
+ * Reading WeakRefs and suspending a process for heap inspection can affect GC.
+ * Keep every raw profile and its timestamps rather than substituting a late
+ * reading for the normal endpoint. No forced collection or retries.
+ */
+async function memoryDiagnostic(step) {
+  const directory = `${resolve(options.out)}.profiles/${step}`;
+  mkdirSync(directory, { recursive: true });
+  const startedAt = new Date().toISOString();
+  const { requestId } = await control(options.home, "perf.terminal.start", { scenario: "memory", stop: step === "cleanup" });
+  let inventory;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const answer = await control(options.home, "perf.terminal.poll", { requestId });
+    if (answer.done) {
+      if (!answer.result || answer.result.error) throw new Error(`missing memory inventory: ${JSON.stringify(answer.result)}`);
+      inventory = answer.result;
+      break;
+    }
+    await sleep(100);
+  }
+  if (!inventory) throw new Error("memory inventory timed out");
+  writeFileSync(join(directory, "inventory.json"), JSON.stringify(inventory, null, 2));
+  const processes = execFileSync("/usr/bin/python3", ["-c", RESPONSIBLE, String(status.pid)], { encoding: "utf8" }).trim().split("\n")
+    .map((line) => line.split(" ")).filter(([pid, name]) => /^\d+$/.test(pid) && name === "WebContent");
+  if (!processes.length) throw new Error("no WebContent responsible to the verified benchmark PID");
+  const captures = [];
+  for (const [pid] of processes) {
+    for (const [tool, args] of [
+      ["footprint", ["-f", "bytes", "-j", join(directory, `${pid}.footprint.json`), pid]],
+      ["vmmap", ["-summary", pid]],
+      ["heap", ["--noContent", "--showSizes", "-z", pid]],
+    ]) {
+      const capture = { pid: Number(pid), tool, startedAt: new Date().toISOString() };
+      try {
+        writeFileSync(join(directory, `${pid}.${tool}.txt`), execFileSync(`/usr/bin/${tool}`, args, { encoding: "utf8", timeout: 60_000, maxBuffer: 32 * 1024 * 1024 }));
+        capture.ok = true;
+      } catch (error) {
+        capture.ok = false;
+        capture.error = String(error);
+        writeFileSync(join(directory, `${pid}.${tool}.txt`), `${error.stdout ?? ""}\n${error.stderr ?? ""}`);
+      }
+      capture.finishedAt = new Date().toISOString();
+      captures.push(capture);
+    }
+  }
+  const result = { directory, startedAt, finishedAt: new Date().toISOString(), inventory, captures };
+  writeFileSync(join(directory, "capture.json"), JSON.stringify(result, null, 2));
+  return result;
+}
 function saveReport(terminalsAfter = null, complete = false) {
   if (!options.out) return;
   writeFileSync(options.out, JSON.stringify({
     label: options.label ?? null, at: new Date().toISOString(), complete,
+    measurement: options.memoryDiagnostics ? "diagnostic-not-acceptance" : "acceptance",
     app: { version: status.appVersion, pid: status.pid },
     host: { platform: process.platform, release: release(), arch: process.arch, cpus: cpus().length, memoryBytes: totalmem(), loadBefore, loadAfter: loadavg() },
     terminalsAfter, results,
@@ -255,6 +313,10 @@ const record = async (name, bytes, request) => {
   results.push({ name, bytes, request, ...(await run(options, status.pid, request)) });
   // Preserve completed cases if a later workload times out or the app exits.
   saveReport();
+  if (options.memoryDiagnostics && request.scenario === "soak") {
+    results.at(-1).diagnostic = await memoryDiagnostic(request.step);
+    saveReport();
+  }
 };
 
 /** A small repository of the benchmark's own, for the scenarios that open real sessions. */
@@ -331,7 +393,7 @@ for (const scenario of options.scenarios) {
     const project = soakProject();
     // Each terminal fills its scrollback, then waits: the most a terminal holds.
     const soak = { scenario: "soak", projectPath: project, fill: sh("seq 1 20000; exec cat") };
-    await record(`${options.soak.sessions} sessions open (baseline)`, null, { ...soak, step: "open", sessions: options.soak.sessions });
+    await record(`${options.soak.sessions} sessions open (baseline)`, null, { ...soak, step: "open", sessions: options.soak.sessions, ...(options.memoryDiagnostics ? { memoryDiagnostics: true } : {}) });
     await record(`${options.soak.tabs} tabs opened and closed`, null, { ...soak, step: "tabs", count: options.soak.tabs });
     if (status.agent) await record(`${options.soak.agents} agent tabs opened and closed`, null, { ...soak, step: "agents", count: options.soak.agents, harness: "claude" });
     await record(`${options.soak.switches} session switches`, null, { ...soak, step: "switches", count: options.soak.switches });

@@ -344,3 +344,142 @@ describe("the conversations of one tab", () => {
     expect(buildTranscript(selected, false, { conversationId: "A", compactionContinuityKnown: true }).turns).toEqual([]);
   });
 });
+
+describe("terminal view metadata lifetime", () => {
+  async function populated() {
+    const window = await openWindow("main");
+    const { renderHook } = await import("@testing-library/react/pure");
+    const hook = renderHook(() => window.tabViews.useTabViews());
+    const info = { sessionId: session.id, tabId: "first", paneId: "first", command: "codex --resume retained-conversation", harness: "codex" };
+    emit("tab_pty", info);
+    await vi.waitFor(() => expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === "first")).toBeDefined());
+    return { ...window, hook, info };
+  }
+
+  it("adopts the pane of an agent started by hand, announced before the session update that lists its tab (#437)", async () => {
+    const main = await openWindow("main");
+    const floating = await openWindow("floating");
+    const { renderHook } = await import("@testing-library/react/pure");
+    const hooks = [main, floating].map((window) => renderHook(() => window.tabViews.useTabViews()));
+    const shell = await main.terminal.openTerminal(session.id, session.cwd);
+    expect(main.terminal.getTerminalState().active[session.id]).toBe(shell.id);
+    // The backend's order when it attaches to the agent: the pane, then the tab.
+    const tab = agentTab(`tab-of-${shell.id}`, "claude", shell.created!, { front: "by_hand", pane: shell.id, permissionMode: "terminal" });
+    session.tabs.push(tab);
+    emit("tab_pty", { sessionId: session.id, tabId: tab.id, paneId: shell.id, command: "claude (started in this terminal)", harness: "claude", byHand: true } satisfies TabPtyEvent);
+    for (const [index, window] of [main, floating].entries()) {
+      // Every window owns the agent's pane, so none of them treats it as a shell of the session.
+      await vi.waitFor(() => expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === shell.id)).toMatchObject({ hidden: true, owned: true }));
+      hooks[index].rerender();
+      expect(hooks[index].result.current.info[tab.id]?.command).toBe("claude (started in this terminal)");
+    }
+    // The window that was on the shell is on the tab it became, and has no shell as its terminal.
+    expect(main.terminal.getTerminalState().selected[session.id]).toEqual({ kind: "agent", id: tab.id });
+    expect(main.terminal.getTerminalState().active[session.id]).toBe("");
+    emit("session_updated", structuredClone(session));
+    expect(main.selected()).toBe(`agent:${tab.id}`);
+    for (const hook of hooks) hook.unmount();
+  });
+
+  it("drops all transient metadata on removal, without removing archived history or unrelated cloud view choices", async () => {
+    const window = await populated();
+    const tab = session.tabs[0];
+    await window.tabViews.enterTerminalView(session, tab, { remote: true });
+    await window.tabViews.enterTerminalView(session, { ...tab, id: "cloud-tab" }, { remote: true });
+    const retained = { ...session, archived: true, worktreeRemoved: true, futureField: { preserved: true } };
+    window.sessions.upsertSession(retained);
+    window.hook.rerender();
+    expect(window.hook.result.current.info.first.command).toContain("retained-conversation");
+    expect(window.hook.result.current.views.first).toBe("terminal");
+    expect(window.sessions.getSessionStore().sessions[0]).toMatchObject(retained);
+    window.sessions.upsertSession({ ...retained, tabs: [] });
+    window.hook.rerender();
+    for (const map of Object.values(window.hook.result.current)) expect(map).not.toHaveProperty("first");
+    expect(window.hook.result.current.views["cloud-tab"]).toBe("terminal");
+    // A delayed event for a removed tab must not put its metadata back.
+    emit("tab_pty", window.info);
+    window.hook.rerender();
+    expect(window.hook.result.current.info).toEqual({});
+    window.hook.unmount();
+  });
+
+  it("keeps metadata when deletion fails, then clears it when the session disappears on refresh", async () => {
+    const window = await populated();
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "remove_tab") throw new Error("store unavailable");
+      return backend(command, args);
+    });
+    await expect(window.sessions.removeTab(session.id, "first")).rejects.toThrow("store unavailable");
+    window.hook.rerender();
+    expect(window.hook.result.current.info.first).toBeDefined();
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "list_sessions" ? [] : backend(command, args));
+    await window.sessions.refreshSessions();
+    window.hook.rerender();
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    window.hook.unmount();
+  });
+
+  it("ignores an old pane response after closing and reopening the same retained tab", async () => {
+    const window = await populated();
+    let release!: (value: TabPtyEvent) => void;
+    const oldPane = new Promise<TabPtyEvent>((resolve) => { release = resolve; });
+    let releaseNew!: (value: TabPtyEvent) => void;
+    const newPane = new Promise<TabPtyEvent>((resolve) => { releaseNew = resolve; });
+    let requests = 0;
+    let starts = 0;
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "ensure_tab_started") { starts++; return null; }
+      if (command === "tab_pane") return ++requests === 1 ? oldPane : newPane;
+      return backend(command, args);
+    });
+    const oldStart = window.tabViews.startTabAgent(session, session.tabs[0]);
+    await vi.waitFor(() => expect(requests).toBe(1));
+    window.sessions.upsertSession({ ...session, tabs: [] });
+    await Promise.resolve(); // Finish the old pane's queued disposal before reattachment.
+    window.sessions.upsertSession(session);
+    const newStart = window.tabViews.startTabAgent(session, session.tabs[0]);
+    await vi.waitFor(() => expect(requests).toBe(2));
+    release({ ...window.info, paneId: "obsolete-pane" });
+    await oldStart;
+    // Completing the old promise must not evict the new shared start.
+    const sharedStart = window.tabViews.startTabAgent(session, session.tabs[0]);
+    releaseNew({ ...window.info, paneId: "new-pane", command: "new command" });
+    await Promise.all([newStart, sharedStart]);
+    expect(starts).toBe(2);
+    window.hook.rerender();
+    expect(window.hook.result.current.info.first.command).toBe("new command");
+    expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === "new-pane")).toBeDefined();
+    expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === "obsolete-pane")).toBeUndefined();
+    window.hook.unmount();
+  });
+
+  it("clears successful tab removal and cancels pane adoption already waiting on subscription", async () => {
+    const window = await populated();
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "remove_tab" ? null : backend(command, args));
+    await window.sessions.removeTab(session.id, "first");
+    window.hook.rerender();
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    expect(window.sessions.getSessionStore().sessions[0].tabs).toEqual([]);
+    let active = true;
+    const adoption = window.terminal.adoptPane({ id: "late-pane", sessionId: session.id, title: "Agent", hidden: true, owned: true }, () => active);
+    active = false;
+    await adoption;
+    expect(window.terminal.getTerminalState().panes.some((pane) => pane.id === "late-pane")).toBe(false);
+    window.hook.unmount();
+  });
+
+  it("does not restore a start error or switching state after the tab is removed", async () => {
+    const window = await populated();
+    let reject!: (error: Error) => void;
+    const pending = new Promise<void>((_, fail) => { reject = fail; });
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "ensure_tab_started" ? pending : backend(command, args));
+    const entering = window.tabViews.enterTerminalView(session, session.tabs[0]);
+    await vi.waitFor(() => expect(bus.invoke).toHaveBeenCalledWith("ensure_tab_started", { sessionId: session.id, tabId: "first" }));
+    window.sessions.removeSessions([session.id]);
+    reject(new Error("late failure"));
+    await entering;
+    window.hook.rerender();
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    window.hook.unmount();
+  });
+});
