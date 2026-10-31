@@ -27,6 +27,7 @@ function host(initial = 20, supported = true) {
   let failOffset = -1;
   let afterPage: (() => void) | undefined;
   let path: "direct" | "relay" = "direct";
+  let fitted = false;
   // The connection drops with every session.sync in flight, as an oversized page does over Relay (#669).
   let drop: number | null = null;
   const digest = (offset: number) => createHash("sha256").update(JSON.stringify(events.slice(0, offset))).digest("hex");
@@ -45,7 +46,7 @@ function host(initial = 20, supported = true) {
     return { ok: true, value };
   });
   const subscribe = vi.fn((_method, _params, callback) => { listener = callback; ready = () => callback({ subscriptionId: "subscription" }); return () => { listener = () => {}; }; });
-  const connection = { request, subscribe, transport: () => path } as unknown as HostConnection;
+  const connection = { request, subscribe, transport: () => path, reassemblesFragments: async () => fitted } as unknown as HostConnection;
   let api = new HostApi(connection);
   const updates: { state: TranscriptCache; replace: boolean }[] = [];
   const error = vi.fn();
@@ -53,7 +54,7 @@ function host(initial = 20, supported = true) {
     const stop = watchTranscript(api, hostId, "session", "tab", connected, (state, replace) => updates.push({ state, replace }), error);
     stops.push(stop); return stop;
   };
-  return { request, subscribe, updates, error, start, restartApi: () => { api = new HostApi(connection); }, ready: () => ready(), live: (e: AgentEvent) => listener({ event: e }), append: (count: number) => { events.push(...Array.from({ length: count }, (_, i) => event(events.length + i + 1))); }, edit: () => { events[events.length - 1] = event(events.length, "reconciled"); }, fail: (offset: number) => { failOffset = offset; }, race: (callback: () => void) => { afterPage = callback; }, path: (next: "direct" | "relay") => { path = next; }, drop: (code: number | null) => { drop = code; } };
+  return { request, subscribe, updates, error, start, restartApi: () => { api = new HostApi(connection); }, ready: () => ready(), live: (e: AgentEvent) => listener({ event: e }), append: (count: number) => { events.push(...Array.from({ length: count }, (_, i) => event(events.length + i + 1))); }, edit: () => { events[events.length - 1] = event(events.length, "reconciled"); }, fail: (offset: number) => { failOffset = offset; }, race: (callback: () => void) => { afterPage = callback; }, path: (next: "direct" | "relay") => { path = next; }, fits: (next: boolean) => { fitted = next; }, drop: (code: number | null) => { drop = code; } };
 }
 
 // Clearing the caches also resets the drop counts kept across watchers.
@@ -254,6 +255,16 @@ describe("a read that keeps dropping the connection", () => {
     const h = host(100); h.path("direct"); h.drop(1006);
     await connection(h, "direct"); await connection(h, "direct");
     expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
+  });
+
+  it("does not blame the page's size on a Mac that sizes its pages to Relay (#669)", async () => {
+    const h = host(100); h.path("relay"); h.fits(true); h.drop(1001);
+    await connection(h, "fitted"); await connection(h, "fitted");
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
+    expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
+    h.request.mockClear();
+    await connection(h, "fitted");
+    expect(syncs(h)).toEqual([]);
   });
 
   it("sends a halted read once more on Retry, and halts at once if that drops too", async () => {

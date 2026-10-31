@@ -95,6 +95,7 @@ beforeEach(() => {
     api: {
       features: async () => ({}),
       transport: () => "relay",
+      reassemblesFragments: async () => false,
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),
       listNotes: vi.fn(async () => []),
       subscribeSession: vi.fn((tab, listener, ready) => { mocks.sessionListeners.set(tab, listener); if (ready) mocks.sessionReady.set(tab, ready); return () => { mocks.sessionListeners.delete(tab); mocks.sessionReady.delete(tab); }; }),
@@ -316,6 +317,15 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(() => button("Send again")).toThrow();
     expect(input().value).toBe("Run the migration");
     expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", timedOut);
+  });
+
+  it("says a worktree note the Mac never answered may have been added, not that it reached the agent", async () => {
+    mocks.app.api.postNote.mockRejectedValueOnce(new Error("RPC timed out: chat.post"));
+    await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
+    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the note may have been added. Check the notes before adding it again.");
+    expect(container.textContent).not.toContain("agent. Check");
+    expect(() => button("Send again")).toThrow();
+    expect(input().value).toBe("Deploying at 5");
   });
 
   it("does not offer Send again when the relay refuses the pairing, and keeps the Mac's own refusals as they are", async () => {

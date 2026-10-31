@@ -228,8 +228,12 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
       // the same draft again for when it is back (#670). The code is logged.
       app.connection.reportError("Session message failed", error);
       // A Mac that never answered most likely has it: sending it again could
-      // give the agent the same prompt twice (#675).
-      if (mayHaveArrived(problem)) return setSendFeedback({ kind: "error", message: `Not confirmed: ${problemText(problem)}, so the message may have reached the agent. Check the conversation before sending it again.` });
+      // give the agent the same prompt twice, or add the note twice (#675).
+      if (mayHaveArrived(problem)) {
+        return setSendFeedback({ kind: "error", message: sendToAgent
+          ? `Not confirmed: ${problemText(problem)}, so the message may have reached the agent. Check the conversation before sending it again.`
+          : `Not confirmed: ${problemText(problem)}, so the note may have been added. Check the notes before adding it again.` });
+      }
       setSendFeedback({ kind: "error", message: `Not sent: ${problemText(problem)}. Your message is still in the box.`, resend: canRetry(problem) });
     } finally {
       setSending(false);

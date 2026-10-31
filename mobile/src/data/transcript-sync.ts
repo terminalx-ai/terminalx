@@ -20,13 +20,17 @@ const haltAfter = (code: number) => code === MESSAGE_TOO_LARGE ? 1 : LOSSES_BEFO
  * a fresh count, and so does clearing the host's transcript caches (unpair,
  * sign-out), which moves its cache epoch on.
  */
-const losses = new Map<string, { epoch: number; request: string; path: TransportPath | null; count: number; code: number }>();
+const losses = new Map<string, { epoch: number; request: string; path: TransportPath | null; count: number; code: number; fitted: boolean }>();
 const lossKey = (host: string, session: string, tab: string) => JSON.stringify([host, session, tab]);
 
-/** The same read was in flight each time the connection dropped: it is not sent again over this path until someone asks. */
+/**
+ * The same read was in flight each time the connection dropped: it is not
+ * sent again over this path until someone asks. `fitted`: the Mac sizes its
+ * pages to the connection (#669), so the page's size is not what dropped it.
+ */
 export class TranscriptHaltedError extends Error {
-  constructor(readonly path: TransportPath | null, readonly code: number) {
-    super(path === "relay" || code === MESSAGE_TOO_LARGE
+  constructor(readonly path: TransportPath | null, readonly code: number, readonly fitted = false) {
+    super(code === MESSAGE_TOO_LARGE || (path === "relay" && !fitted)
       ? "This conversation is too large to load over Relay; open it on the same Wi-Fi as your Mac."
       : "Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
     this.name = "TranscriptHaltedError";
@@ -70,9 +74,11 @@ export function watchTranscript(
   const read = async <T>(request: string, send: () => Promise<T>): Promise<T> => {
     const key = lossKey(host, session, tab);
     const path = api.transport();
+    // Asked now, while this connection is up: it is gone by the time a drop is counted.
+    const fitted = api.reassemblesFragments();
     if (losses.get(key)?.epoch !== epoch) losses.delete(key);
     const loss = losses.get(key);
-    if (loss && loss.request === request && loss.path === path && loss.count >= haltAfter(loss.code)) throw new TranscriptHaltedError(path, loss.code);
+    if (loss && loss.request === request && loss.path === path && loss.count >= haltAfter(loss.code)) throw new TranscriptHaltedError(path, loss.code, loss.fitted);
     try {
       const result = await send();
       losses.delete(key);
@@ -81,8 +87,9 @@ export function watchTranscript(
       if (cause instanceof RelayOuterError) {
         const previous = losses.get(key);
         const count = previous && previous.request === request && previous.path === path ? previous.count + 1 : 1;
-        losses.set(key, { epoch, request, path, count, code: cause.code });
-        if (count >= haltAfter(cause.code)) throw new TranscriptHaltedError(path, cause.code);
+        const loss = { epoch, request, path, count, code: cause.code, fitted: await fitted };
+        losses.set(key, loss);
+        if (count >= haltAfter(loss.code)) throw new TranscriptHaltedError(path, loss.code, loss.fitted);
       } else if (!connectionProblem(cause)) {
         // The Mac answered, if with a refusal: the read did not take the connection down.
         losses.delete(key);

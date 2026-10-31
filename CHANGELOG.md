@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Relay
+
+- Poll the account service for pairing grants and revocations once every 30
+  seconds while idle, over one kept-alive connection, instead of a new TLS
+  connection every two seconds. Back off on failures, honour `Retry-After`, use
+  a refreshed access token, and record failures in `relay-diagnostics.json`.
+  Report this Mac as live only while its Relay control channel is still hearing
+  from the cell, so a phone stops offering Pair for a Mac it cannot reach.
+  Accept a cell's `account-pairing-changed` hint, which polls at once and then
+  every two seconds for a minute. (#671)
+
 ### Mobile
 
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
@@ -15,6 +26,12 @@
 
 ### Chat
 
+- Deliver Continue in New Session handoffs that the new agent left in its input.
+  The Enter waits until the agent has shown the paste, and is written again up
+  to twice. A handoff still in the input is offered as **Press Enter**, not
+  reported as a failure. The dialog shows each delivery step, finishes about
+  20 s after the last Enter instead of after 90 s, and turns a late delivery
+  into success. (#662)
 - Recognize completed Codex context compaction and preserve scoped compaction
   history and status across conversation changes. Add a default-off experimental
   owned-stdio connection for explicitly created new Codex sessions, with confirmed

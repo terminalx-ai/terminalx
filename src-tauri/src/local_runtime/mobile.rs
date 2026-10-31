@@ -291,7 +291,7 @@ impl Registry {
                 // insertion still cannot make the permit current again.
                 if !pending.permit.valid() { bail!("The mobile grant changed before queueing."); }
                 queue.items.push_back(pending);
-                Ok(crate::session::SendOutcome { queued:true, events:Vec::new() })
+                Ok(crate::session::SendOutcome { queued:true, events:Vec::new(), in_input:false })
             }
             Err(error) => Err(error),
         }

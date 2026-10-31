@@ -46,7 +46,7 @@ impl SessionManager {
             self.codex_stdio_failed(rt, &error);
             return Err(error);
         }
-        Ok(SendOutcome { queued: false, events })
+        Ok(SendOutcome { queued: false, events, in_input: false })
     }
 
     fn start_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {

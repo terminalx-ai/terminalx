@@ -4,6 +4,7 @@ import { deriveKeySchedule } from "./e2ee-session";
 import { encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
 import { RelayClient, RelayOuterError } from "./relay-client";
+import { encodeFragments, RELAY_MESSAGE_BYTES_LIMIT, textPlaintextLimit } from "./wire";
 
 class FakeSocket {
   static readonly OPEN = 1;
@@ -55,15 +56,51 @@ class EncryptedPeer extends FakeSocket {
   private received = 0n;
   private sentFrames = 0n;
   private kind = "invite";
+  private agreed = false;
+  private partial: { bytes: Uint8Array; received: number } | null = null;
+  /** The largest WebSocket message each way, as the relay cell would count it. */
+  largestFromPhone = 0;
+  largestToPhone = 0;
+  requests: { method: string; params?: unknown }[] = [];
+
+  /** `fragments`: whether this Mac agrees to them, as a desktop from #669 on does. `unanswered`: a method it never replies to. */
+  constructor(private readonly options: { fragments?: boolean; reply?: (method: string) => unknown; unanswered?: string } = {}) { super(); }
 
   private emit(value: unknown) { queueMicrotask(() => this.onmessage?.({ data: JSON.stringify(value) })); }
   private encrypted(value: unknown) {
     const schedule = this.schedule!;
-    const frame = sealFrame({ payload: new TextEncoder().encode(JSON.stringify(value)), key: schedule.desktopToMobileKey, sessionId: schedule.sessionId, direction: "desktop-to-mobile", payloadKind: "text", counter: this.sentFrames++ });
-    queueMicrotask(() => this.onmessage?.({ data: encodeBase64(frame) }));
+    const payload = new TextEncoder().encode(JSON.stringify(value));
+    if (this.agreed && payload.length > textPlaintextLimit("relay")) {
+      for (const fragment of encodeFragments(payload, "relay")) {
+        const frame = sealFrame({ payload: fragment, key: schedule.desktopToMobileKey, sessionId: schedule.sessionId, direction: "desktop-to-mobile", payloadKind: "binary", counter: this.sentFrames++ });
+        this.largestToPhone = Math.max(this.largestToPhone, frame.length);
+        // React Native delivers binary messages as ArrayBuffers (binaryType "arraybuffer").
+        queueMicrotask(() => this.onmessage?.({ data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) }));
+      }
+      return;
+    }
+    const frame = encodeBase64(sealFrame({ payload, key: schedule.desktopToMobileKey, sessionId: schedule.sessionId, direction: "desktop-to-mobile", payloadKind: "text", counter: this.sentFrames++ }));
+    this.largestToPhone = Math.max(this.largestToPhone, frame.length);
+    queueMicrotask(() => this.onmessage?.({ data: frame }));
+  }
+  /** Read independently of wire.ts: the layout is the desktop's. */
+  private reassemble(fragment: Uint8Array): Uint8Array | null {
+    const view = new DataView(fragment.buffer, fragment.byteOffset, fragment.byteLength);
+    expect([fragment[0], fragment[1], fragment[2], fragment[3]]).toEqual([0x66, 1, 0, 0]);
+    const total = view.getUint32(4, true);
+    const offset = view.getUint32(8, true);
+    if (offset === 0) this.partial = { bytes: new Uint8Array(total), received: 0 };
+    expect(this.partial?.received).toBe(offset);
+    this.partial!.bytes.set(fragment.subarray(12), offset);
+    this.partial!.received += fragment.length - 12;
+    if (this.partial!.received < total) return null;
+    const message = this.partial!.bytes;
+    this.partial = null;
+    return message;
   }
   override send(raw: unknown) {
     this.sent.push(raw);
+    this.largestFromPhone = Math.max(this.largestFromPhone, typeof raw === "string" ? raw.length : (raw as Uint8Array).byteLength);
     if (!this.schedule) {
       const value = JSON.parse(String(raw));
       if (value.type === "relay-auth") {
@@ -83,22 +120,31 @@ class EncryptedPeer extends FakeSocket {
       return;
     }
     const schedule = this.schedule;
-    const plaintext = openFrame({ frame: Uint8Array.from(atob(String(raw)), (c) => c.charCodeAt(0)), key: schedule.mobileToDesktopKey,
-      sessionId: schedule.sessionId, direction: "mobile-to-desktop", payloadKind: "text", expectedCounter: this.received++ });
-    expect(plaintext).not.toBeNull();
-    const value = JSON.parse(new TextDecoder().decode(plaintext!));
+    const binary = typeof raw !== "string";
+    const opened = openFrame({ frame: binary ? raw as Uint8Array : Uint8Array.from(atob(String(raw)), (c) => c.charCodeAt(0)), key: schedule.mobileToDesktopKey,
+      sessionId: schedule.sessionId, direction: "mobile-to-desktop", payloadKind: binary ? "binary" : "text", expectedCounter: this.received++ });
+    expect(opened).not.toBeNull();
+    const plaintext = binary ? this.reassemble(opened!) : opened;
+    if (!plaintext) return;
+    const value = JSON.parse(new TextDecoder().decode(plaintext));
+    if (value.method) this.requests.push({ method: value.method, params: value.params });
     if (value.type === "e2ee_auth") {
       expect(value.deviceToken).toBe("test-device-token");
       expect(value.transcriptHashB64).toBe(encodeBase64(schedule.transcriptHash));
       this.encrypted({ type: "e2ee_authenticated", v: 2, transcriptHashB64: value.transcriptHashB64 });
-    } else if (value.method === "session.sync") {
-      // Never answered: the request is still in flight when the socket closes.
+    } else if (value.method && value.method === this.options.unanswered) {
+      // Still in flight when the socket closes.
     } else if (value.method === "pairing.getEndpoints") {
       this.encrypted({ id: value.id, ok: true, result: { v: 1, relay: relayEndpoint,
         resumeConfirmation: { v: 1, reqId: value.params.resumeConfirmReqId, currentVersion: 1, acceptedAs: "current", renewed: false, resumeExpiresAt: Date.now() + 60_000 },
       } });
+    } else if (value.method === "transport.negotiate") {
+      this.agreed = !!this.options.fragments && value.params?.fragments === 1;
+      // A Mac from before #669 refuses the method, as static_rpc_response does.
+      this.encrypted(this.options.fragments ? { id: value.id, ok: true, result: { fragments: 1 } }
+        : { id: value.id, ok: false, error: { code: "forbidden", message: "Method 'transport.negotiate' is not available to this paired device" } });
     } else {
-      this.encrypted({ id: value.id, ok: true, result: value.method === "status.get" ? { protocolVersion: 2, product: "TerminalX", deviceScope: "driver" } : { sessions: [] } });
+      this.encrypted({ id: value.id, ok: true, result: this.options.reply?.(value.method) ?? (value.method === "status.get" ? { protocolVersion: 2, product: "TerminalX", deviceScope: "driver" } : { sessions: [] }) });
     }
   }
 }
@@ -135,7 +181,7 @@ it("rejects a refused invite before sending the inner device credential", async 
 // #669/#670: the close code alone cannot tell a relay close from iOS ending the stream.
 describe("a connection that closes with requests in flight", () => {
   const open = async () => {
-    const socket = new EncryptedPeer();
+    const socket = new EncryptedPeer({ unanswered: "session.sync" });
     const client = new RelayClient({ relay: relayEndpoint, credential: "test-resume", credentialKind: "resume", credentialVersion: 1, deviceToken: "test-device-token",
       desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket });
     const connected = client.connect();
@@ -170,4 +216,72 @@ describe("a connection that closes with requests in flight", () => {
     expect(error).toMatchObject({ code: 1006, reason: "" });
     expect((error as RelayOuterError).wasClean).toBeUndefined();
   });
+});
+
+function relayClient(socket: EncryptedPeer): RelayClient {
+  return new RelayClient({ relay: relayEndpoint, credential: "test-invite", credentialKind: "invite", deviceToken: "test-device-token",
+    desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket });
+}
+
+// A 3 MB attachment: about 4 MB of base64 in one request, four times what the relay cell accepts in one message (#669).
+const attachment = { mediaType: "image/png", data: "A".repeat(4_000_000), name: "photo.png" };
+
+describe("messages larger than one relay frame (#669)", () => {
+  it("cross as fragments both ways once the Mac agrees, and the connection stays usable", async () => {
+    const transcript = { events: [], blob: "🦝 \"tool\" output\n".repeat(150_000) };
+    const socket = new EncryptedPeer({ fragments: true, reply: (method) => method === "session.sync" ? transcript : undefined });
+    const client = relayClient(socket);
+    try {
+      const connected = client.connect();
+      socket.onopen?.();
+      await connected;
+      expect(await client.request("session.send", { tabId: "tab", text: "", attachments: [attachment] })).toEqual({ ok: true, value: { sessions: [] } });
+      expect(socket.requests.find((request) => request.method === "session.send")?.params).toEqual({ tabId: "tab", text: "", attachments: [attachment] });
+      expect(await client.request("session.sync", { sessionId: "session", tabId: "tab" })).toEqual({ ok: true, value: transcript });
+      expect(await client.request("status.get")).toMatchObject({ ok: true });
+      expect(socket.largestFromPhone).toBeLessThanOrEqual(RELAY_MESSAGE_BYTES_LIMIT);
+      expect(socket.largestToPhone).toBeLessThanOrEqual(RELAY_MESSAGE_BYTES_LIMIT);
+      // About 4 MB of request, in four fragments.
+      expect(socket.sent.filter((frame) => typeof frame !== "string")).toHaveLength(4);
+    } finally { client.close(); }
+  });
+
+  it("are refused before sending when the Mac cannot reassemble them, and nothing else fails", async () => {
+    const socket = new EncryptedPeer();
+    const client = relayClient(socket);
+    try {
+      const connected = client.connect();
+      socket.onopen?.();
+      await connected;
+      await expect(client.request("session.send", { tabId: "tab", text: "", attachments: [attachment] }))
+        .rejects.toThrow("This is too large to send over Relay (4.0 MB; the limit is 0.8 MB). Update TerminalX on your Mac, or send it on the same Wi-Fi as your Mac.");
+      expect(socket.requests.map((request) => request.method)).not.toContain("session.send");
+      expect(socket.largestFromPhone).toBeLessThanOrEqual(RELAY_MESSAGE_BYTES_LIMIT);
+      expect(await client.request("status.get")).toMatchObject({ ok: true });
+    } finally { client.close(); }
+  });
+
+  it("go one frame at a time on a direct connection, as they always have", async () => {
+    const socket = new EncryptedPeer();
+    const client = new RelayClient({ transport: "direct", endpoint: "ws://example.test", deviceToken: "test-device-token",
+      desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket });
+    try {
+      const connected = client.connect();
+      socket.onopen?.();
+      await connected;
+      expect(await client.request("session.send", { tabId: "tab", text: "", attachments: [attachment] })).toMatchObject({ ok: true });
+      expect(socket.sent.every((frame) => typeof frame === "string")).toBe(true);
+    } finally { client.close(); }
+  });
+});
+
+it("keeps the close frame's reason while connecting, which tells an oversized message from a lost network", async () => {
+  const socket = new FakeSocket();
+  const client = new RelayClient({ relay: relayEndpoint, credential: "test-invite", credentialKind: "invite", deviceToken: "test-device-token",
+    desktopPublicKeyB64: encodeBase64(new Uint8Array(32).fill(4)), createSocket: () => socket as unknown as WebSocket });
+  const connecting = client.connect();
+  socket.onopen?.();
+  socket.onclose?.({ code: 1001, reason: "Stream end encountered" });
+  // The reason is for the connection log; the message stays the code (#670).
+  await expect(connecting).rejects.toMatchObject({ code: 1001, reason: "Stream end encountered", wasClean: false, message: "relay_outer_1001" });
 });

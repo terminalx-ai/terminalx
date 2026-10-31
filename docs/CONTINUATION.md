@@ -68,10 +68,21 @@ it or answer its pending permissions. Escape in the dialog cannot reach the
 source chat's interrupt shortcut.
 
 Continuation uses `send_message` with `confirmDelivery: true`. This runs the
-ordinary PTY input machinery, waits for readiness, and waits up to 90 seconds
-for the provider transcript to echo the submitted prompt. A created tab or a
-locally rendered user message is not delivery confirmation. A readiness or
-write failure is returned; an echo timeout is reported as uncertain delivery.
+ordinary PTY input machinery, waits for readiness, and waits for the provider
+transcript to echo the submitted prompt (or its `UserPromptSubmit` hook). A
+created tab or a locally rendered user message is not delivery confirmation.
+The Enter is written only once the CLI has read the paste and drawn since, and
+it is written again up to twice, 4 s apart, while the CLI has not acknowledged
+the prompt (#662). The wait ends 20 s after the last Enter, within 105 s in all.
+A readiness or write failure is returned. When nothing was heard, the pane is
+read: a CLI that has stopped reading its input is reported as such, and a
+composer showing the paste placeholder (`[Pasted text #…]`, `[Pasted Content …]`)
+is answered with `inInput` instead of an error. The dialog then offers
+**Press Enter**, which writes Enter only where the app's own retry would. Any
+other silence is reported as uncertain delivery. A `prompt_delivery` event tells
+the dialog each stage (typed, Enter written, written again, stalled, delivered),
+so it shows real progress, and a delivery confirmed after the dialog gave up
+closes it as a success and removes the prompt it put back in the composer.
 The dialog prevents duplicate clicks, retries launch failures in the same tab,
 and shows “Confirming delivery…” while awaiting the provider echo. Before sending,
 it clears its prepared composer draft so the pending message does not also appear

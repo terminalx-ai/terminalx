@@ -167,6 +167,11 @@ export class HostConnection {
     return this.client?.getTransport() ?? null;
   }
 
+  /** Whether the Mac on the usable connection reassembles fragments; false while there is none. */
+  reassemblesFragments(): Promise<boolean> {
+    return this.client?.reassemblesFragments() ?? Promise.resolve(false);
+  }
+
   /**
    * Someone asked to try again (#670): the next connect attempt starts now
    * instead of after the reconnect delay. A usable connection, or an attempt
