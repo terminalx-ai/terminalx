@@ -37,6 +37,16 @@ export class HostApi {
     if (hostChanged) { this.lists = new Map(); this.pendingLists = new Map(); }
   }
 
+  /** The path requests go over right now; null while disconnected. */
+  transport(): "direct" | "relay" | null {
+    return this.connection.transport();
+  }
+
+  /** Whether the Mac reassembles fragments, which also means it sizes transcript pages to the connection (#669). */
+  reassemblesFragments(): Promise<boolean> {
+    return this.connection.reassemblesFragments();
+  }
+
   features(): Promise<{ transcript?: number; conditionalLists?: number }> {
     if (this.capabilities) return this.capabilities;
     const pending = this.connection.request<{ transcript?: number; conditionalLists?: number }>("sync.capabilities")

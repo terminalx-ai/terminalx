@@ -9,8 +9,10 @@ import { ChevronUp, FileText, Paperclip, Radio, Send, X } from "lucide-react-nat
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
-import { watchTranscript } from "@mobile/data/transcript-sync";
+import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
+import type { ConnectionStage } from "@mobile/transport/connection";
+import { canRetry, connectionProblem, mayHaveArrived, problemText } from "@mobile/transport/connection-errors";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 import { conversationKey } from "@mobile/data/conversations";
@@ -26,12 +28,17 @@ import { useConversationState } from "@mobile/state/conversation-state";
 const MOBILE_TERMINAL_ENABLED = false;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 8;
+/** Failed reconnect attempts before the transcript card stops saying "Reconnecting" and says the Mac isn't reachable. */
+const UNREACHABLE_AFTER_ATTEMPTS = 5;
 
 interface MobileAttachment extends AttachmentInput {
   id: string;
   uri: string;
   size: number;
 }
+
+/** What the transcript card says, and whether its Retry can help. */
+interface TranscriptNotice { title: string; detail: string; retry: boolean }
 
 export default function SessionScreen() {
   const params = useLocalSearchParams<{ sessionId: string; tabId?: string; hostId?: string; title?: string }>();
@@ -55,7 +62,7 @@ export default function SessionScreen() {
     </> : null}
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
     {MOBILE_TERMINAL_ENABLED ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
-    {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
+    {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} available={available} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
   </View>;
 }
 
@@ -64,7 +71,7 @@ function Segment({ label, selected, onPress }: { label: string; selected: boolea
   return <Pressable accessibilityRole="button" accessibilityState={{ selected }} onPress={onPress} style={[styles.segmentItem, selected && { backgroundColor: palette.card }]}><Text style={{ color: selected ? palette.ink : palette.muted, fontWeight: selected ? "600" : "500" }}>{label}</Text></Pressable>;
 }
 
-function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: string; sessionId: string; tabId: string; connected: boolean; epoch: number }) {
+function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { hostId: string; sessionId: string; tabId: string; available: boolean; connected: boolean; epoch: number }) {
   const app = useApp();
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
@@ -74,7 +81,7 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const [hasMore, setHasMore] = useConversationState(`${stateKey}:hasMore`, false);
   const [before, setBefore] = useConversationState<number | undefined>(`${stateKey}:before`, undefined);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<{ cause: unknown } | null>(null);
   const [retry, setRetry] = useState(0);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [earlierError, setEarlierError] = useState<string | null>(null);
@@ -82,7 +89,8 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const [draft, setDraft] = useConversationState(`${stateKey}:draft`, "");
   const [sendToAgent, setSendToAgent] = useConversationState(`${stateKey}:sendToAgent`, true);
   const [sending, setSending] = useConversationState(`${stateKey}:sending`, false);
-  const [sendFeedback, setSendFeedback] = useConversationState<{ kind: "error" | "success"; message: string } | null>(`${stateKey}:sendFeedback`, null);
+  // `resend`: the send failed with the connection, and sending the same draft again can help.
+  const [sendFeedback, setSendFeedback] = useConversationState<{ kind: "error" | "success"; message: string; resend?: boolean } | null>(`${stateKey}:sendFeedback`, null);
   const [attachments, setAttachments] = useConversationState<MobileAttachment[]>(`${stateKey}:attachments`, []);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [answeringPermission, setAnsweringPermission] = useConversationState<string | null>(`${stateKey}:answeringPermission`, null);
@@ -96,7 +104,8 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     setLoading(true);
     setLoadingEarlier(false);
     setEarlierError(null);
-    setLoadError(connected ? null : "Reconnect to your Mac to load the transcript.");
+    // While disconnected the card follows the connection stage instead (`transcriptNotice`).
+    setLoadError(null);
     const stop = watchTranscript(app.api, hostId, sessionId, tabId, connected, (cache, replace, source) => {
       setEvents((existing) => replace ? cache.events : source === "cache" ? mergeEvents(cache.events, existing) : mergeEvents(existing, cache.events));
       if (source === "page") {
@@ -117,7 +126,7 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
       }
     }, (cause) => {
       setLoading(false);
-      setLoadError(cause instanceof Error ? cause.message : "Could not load the transcript. Try again.");
+      setLoadError({ cause });
       app.connection.reportError("Transcript sync failed", cause);
     });
     return () => { stop(); earlierRequest.current = null; };
@@ -196,6 +205,7 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
       // A message for the agent is one request, and the transcript shows it
       // as the turn's prompt. Saving it as a note first showed it twice, and
       // a failed promotion left a note behind for every retry (#541).
+      // A failed send leaves the draft and its attachments where they are.
       if (sendToAgent) {
         const inputs = attachments.map(({ mediaType, data, name }) => ({ mediaType, data, name }));
         const sent = await app.api.sendSession(tabId, text, inputs);
@@ -212,7 +222,19 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
       setAttachmentError(null);
       await AsyncStorage.removeItem(cacheKey);
     } catch (error) {
-      showError(error instanceof Error ? error.message : "The host could not send this message.");
+      const problem = connectionProblem(error);
+      if (!problem) return showError(error instanceof Error ? error.message : "The host could not send this message.");
+      // The connection failed, not the Mac: say so in plain words, and offer
+      // the same draft again for when it is back (#670). The code is logged.
+      app.connection.reportError("Session message failed", error);
+      // A Mac that never answered most likely has it: sending it again could
+      // give the agent the same prompt twice, or add the note twice (#675).
+      if (mayHaveArrived(problem)) {
+        return setSendFeedback({ kind: "error", message: sendToAgent
+          ? `Not confirmed: ${problemText(problem)}, so the message may have reached the agent. Check the conversation before sending it again.`
+          : `Not confirmed: ${problemText(problem)}, so the note may have been added. Check the notes before adding it again.` });
+      }
+      setSendFeedback({ kind: "error", message: `Not sent: ${problemText(problem)}. Your message is still in the box.`, resend: canRetry(problem) });
     } finally {
       setSending(false);
     }
@@ -279,11 +301,20 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     }
   };
 
+  const notice = transcriptNotice(app.connectionStage, app.connectionAttempt, epoch > 0, available, loadError, events.length > 0, loading);
+  const retryTranscript = () => {
+    // One more read, even of a page that halted after breaking the connection.
+    retryHaltedTranscript(hostId, sessionId, tabId);
+    if (connected) setRetry((value) => value + 1);
+    // Reconnecting: try now rather than after the delay. The reconnect reads the transcript.
+    else app.connection.retryNow();
+  };
+  const noticeCard = notice ? <Card style={styles.notice}>
+    <Text accessibilityLiveRegion="polite" style={[styles.noticeTitle, { color: palette.ink }]}>{notice.title}</Text>
+    <Text style={[styles.noticeDetail, { color: palette.muted }]}>{notice.detail}</Text>
+    <Button label="Retry loading transcript" kind="secondary" disabled={!notice.retry} onPress={retryTranscript} />
+  </Card> : null;
   const transcriptHeader = <>
-    {loadError ? <Card>
-      <EmptyState title="Could not load transcript" detail={loadError} />
-      <Button label="Retry loading transcript" kind="secondary" disabled={!connected || loading} onPress={() => setRetry((value) => value + 1)} />
-    </Card> : null}
     {earlierError ? <EmptyState title="Could not load earlier turns" detail={earlierError} /> : null}
     {hasMore ? <Button
       label={loadingEarlier ? "Loading earlier…" : earlierError ? "Retry loading earlier" : "Load earlier"}
@@ -292,15 +323,38 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
       onPress={() => void loadEarlier()}
     /> : null}
   </>;
-  const emptyTranscript = loading
+  // With turns on screen the card sits at the latest edge, where the reader is; with none it takes the empty space.
+  const emptyTranscript = noticeCard ?? (loading
     ? <EmptyState title="Loading transcript" detail="Reading the latest turns from your Mac." busy />
-    : loadError ? null
-      : hasMore ? <EmptyState title="Earlier turns available" detail="Load earlier to see the context for these updates." />
-        : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />;
+    : hasMore ? <EmptyState title="Earlier turns available" detail="Load earlier to see the context for these updates." />
+      : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />);
 
   const sendDisabled = !connected || (!draft.trim() && !attachments.length) || sending;
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><TranscriptList data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 12 }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder="Message this session" placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
+  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><TranscriptList data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{items.length ? noticeCard : null}{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 12 }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text>{sendFeedback.resend ? <Button label="Send again" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder="Message this session" placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
 }
+
+/**
+ * What the transcript card says (#670): what is happening, in plain words.
+ * Reconnecting keeps whatever this phone saved on screen, and Retry stays
+ * available whenever it can help.
+ */
+function transcriptNotice(stage: ConnectionStage, attempt: number, everConnected: boolean, available: boolean, loadError: { cause: unknown } | null, saved: boolean, loading: boolean): TranscriptNotice | null {
+  // The page above already says this conversation is gone from the Mac.
+  if (!available) return null;
+  // Reconnecting would only ask for the same read again.
+  if (loadError?.cause instanceof TranscriptHaltedError) return { title: "Could not load transcript", detail: loadError.cause.message, retry: true };
+  if (stage !== "connected") {
+    const shown = saved ? "Showing the transcript saved on this phone." : "The transcript loads once the phone is connected.";
+    if (attempt >= UNREACHABLE_AFTER_ATTEMPTS) return { title: "Your Mac isn't reachable", detail: `Check that your Mac is awake and TerminalX is open; the phone keeps trying. ${shown}`, retry: true };
+    return { title: everConnected ? "Reconnecting to your Mac…" : "Connecting to your Mac…", detail: shown, retry: true };
+  }
+  if (!loadError) return null;
+  const problem = connectionProblem(loadError.cause);
+  const detail = problem ? `${capitalize(problemText(problem))}.` : loadError.cause instanceof Error ? loadError.cause.message : "Could not load the transcript. Try again.";
+  return { title: "Could not load transcript", detail, retry: !loading && (!problem || canRetry(problem)) };
+}
+
+const capitalize = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
 
 function base64Size(value: string): number {
   const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
@@ -388,7 +442,12 @@ const styles = StyleSheet.create({
   composer: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 12, gap: 10 },
   modeLine: { flexDirection: "row", gap: 6 },
   modeChoice: { minHeight: 30, paddingHorizontal: 9, borderRadius: 8, flexDirection: "row", gap: 5, alignItems: "center" },
-  sendFeedback: { fontSize: 12, lineHeight: 17, paddingHorizontal: 3 },
+  sendFeedback: { flex: 1, fontSize: 12, lineHeight: 17, paddingHorizontal: 3 },
+  feedbackLine: { flexDirection: "row", alignItems: "center", gap: 9 },
+  resend: { minHeight: 36, paddingHorizontal: 12 },
+  notice: { padding: 15, gap: 8 },
+  noticeTitle: { fontSize: 15, fontWeight: "700" },
+  noticeDetail: { fontSize: 13, lineHeight: 19 },
   composeLine: { flexDirection: "row", alignItems: "flex-end", gap: 9 },
   attachments: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   attachment: { width: 58, height: 58 },
