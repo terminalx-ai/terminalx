@@ -40,6 +40,11 @@ pub(super) struct Imported {
     pub(super) refused: Option<String>,
 }
 
+/// The payload on disk is a regular file of the recorded size.
+fn held(dir: &Path, a: &Artifact) -> bool {
+    fs::symlink_metadata(dir.join(&a.id)).is_ok_and(|m| m.is_file() && m.len() == a.bytes)
+}
+
 fn same(a: &Artifact, b: &Artifact) -> bool {
     a.id == b.id && a.name == b.name && a.sha256 == b.sha256 && a.bytes == b.bytes && a.media_type == b.media_type
 }
@@ -49,7 +54,11 @@ fn same(a: &Artifact, b: &Artifact) -> bool {
 fn validate(manifest: &[Artifact], limits: Limits) -> Result<()> {
     let mut ids = HashSet::new();
     for a in manifest {
-        journal::validate_id(&a.id)?;
+        // One spelling per id: the guest's own lowercase hyphenated form. Other
+        // spellings of one UUID could name the same file on a case-insensitive volume.
+        if uuid::Uuid::parse_str(&a.id).map(|id| id.hyphenated().to_string()).ok().as_deref() != Some(a.id.as_str()) {
+            bail!("The guest declared a non-canonical artifact id; nothing was imported")
+        }
         if !ids.insert(a.id.as_str()) {
             bail!("The guest declared artifact {} twice; nothing was imported", a.id)
         }
@@ -158,6 +167,9 @@ pub(super) fn import(
     for a in manifest.iter().filter(|a| ledger.iter().any(|r| r.id == a.id)) {
         let path = dir.join(&a.id);
         if fs::symlink_metadata(&path).is_ok() {
+            if !held(dir, a) {
+                bail!("Retained artifact {} differs from its record on disk; inspect it before importing more", a.id)
+            }
             continue;
         }
         let bytes = fetch(a)?;
@@ -166,10 +178,7 @@ pub(super) fn import(
         }
         journal::atomic_private_write(&path, &bytes)?;
     }
-    let retained = ledger
-        .into_iter()
-        .filter(|a| fs::symlink_metadata(dir.join(&a.id)).is_ok_and(|m| m.is_file()))
-        .collect();
+    let retained = ledger.into_iter().filter(|a| held(dir, a)).collect();
     let refused = (refused > 0).then(|| {
         format!(
             "{refused} more artifact(s) ({refused_bytes} bytes) exceed this task's host limit of {} artifacts and {} MiB and were not imported. Imported artifacts are kept; the rest stay in the guest and need explicit export.",
@@ -264,7 +273,15 @@ mod tests {
         bad_id.id = "../escape".into();
         let mut huge = a.clone();
         huge.bytes = u64::MAX;
-        for manifest in [vec![a.clone(), a.clone()], guest.manifest(&["big"]), vec![bad_sha], vec![bad_id], vec![huge]] {
+        let mut upper = a.clone();
+        upper.id = a.id.to_uppercase();
+        let mut braced = a.clone();
+        braced.id = format!("{{{}}}", a.id);
+        let mut simple = a.clone();
+        simple.id = a.id.replace('-', "");
+        for manifest in [vec![a.clone(), a.clone()], guest.manifest(&["big"]), vec![bad_sha], vec![bad_id], vec![huge],
+            vec![upper.clone()], vec![braced], vec![simple], vec![a.clone(), upper]]
+        {
             assert!(import(&dir, &[], &manifest, SMALL, |a| guest.fetch(a)).is_err(), "{manifest:?}");
         }
         assert!(!dir.exists() && guest.fetched().is_empty(), "refused before any read or write");
@@ -278,6 +295,11 @@ mod tests {
             assert!(import(&dir, &[], &[changed], SMALL, |a| guest.fetch(a)).is_err());
         }
         assert_eq!((ledger(&dir), payloads(&dir), guest.fetched()), (vec!["a".to_string()], 1, Vec::<String>::new()));
+        // A retained file that no longer matches its record is neither listed nor skipped silently.
+        fs::write(dir.join(&a.id), b"changed").unwrap();
+        assert!(import(&dir, &[], std::slice::from_ref(&a), SMALL, |a| guest.fetch(a)).is_err());
+        assert!(import(&dir, &[], &[], SMALL, |a| guest.fetch(a)).unwrap().retained.is_empty());
+        assert_eq!((fs::read(dir.join(&a.id)).unwrap(), guest.fetched()), (b"changed".to_vec(), Vec::<String>::new()));
     }
 
     #[test]
