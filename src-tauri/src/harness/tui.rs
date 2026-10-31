@@ -311,8 +311,10 @@ impl Ready {
 
 /// How many of the last lines a CLI printed are kept as why it went.
 const LAST_WORDS_LINES: usize = 3;
-/// And how much of them, so a CLI that printed a wall does not fill the chat.
-const LAST_WORDS_CHARS: usize = 300;
+/// And how much of them, so a CLI that printed a wall does not fill the chat:
+/// no more than the chat shows of an agent's own words (#667), whose cut
+/// would otherwise take the end, where the reason is.
+const LAST_WORDS_CHARS: usize = crate::recovery::DETAIL_CHARS;
 /// How far back to look: an exit message is the last thing printed.
 const LAST_WORDS_TAIL_BYTES: usize = 64 * 1024;
 

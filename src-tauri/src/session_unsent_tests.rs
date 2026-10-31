@@ -25,6 +25,9 @@ const LISTENS: &str = "printf 'listening\\n'\nstty -icanon\nexec cat\n";
 const QUITS: &str = "printf 'listening\\n'\nread line\n";
 /// Or gone at once, saying why.
 const REFUSES: &str = "printf 'No conversation found with session ID: 12cfb036\\n' >&2\nexit 1\n";
+/// Or gone at once with a credential and a home folder in what it said, as a
+/// failing `apiKeyHelper` prints them.
+const LEAKS: &str = "printf 'apiKeyHelper failed: ANTHROPIC_API_KEY=sk-ant-api03-Zx9Qw8Er7Ty6Ui5Op4As3Df2 in /Users/alice/.claude/key.sh\\n' >&2\nexit 1\n";
 
 /// No CLI here was started by hand, so none needs finding.
 struct Nowhere;
@@ -275,6 +278,21 @@ fn a_cli_that_exits_as_it_starts_says_why() {
         rig.manager.ensure_started(SESSION, TAB).unwrap();
         rig.wait("the exit to be told", || rig.said().iter().any(|line| line.starts_with("status: Claude Code exited")));
         assert_eq!(rig.said(), ["status: Claude Code exited: No conversation found with session ID: 12cfb036"], "following: {following}");
+    }
+}
+
+/// Why it went reaches the chat, which is kept, forked and broadcast, only
+/// as the agent's own words always do (#667): no credential, no home folder.
+#[test]
+fn what_a_cli_says_as_it_exits_is_redacted() {
+    for following in [true, false] {
+        let rig = Rig::new(claude_tab(None), LEAKS);
+        if following {
+            rig.manager.follow_with(Arc::new(Nowhere));
+        }
+        rig.manager.ensure_started(SESSION, TAB).unwrap();
+        rig.wait("the exit to be told", || rig.said().iter().any(|line| line.starts_with("status: Claude Code exited")));
+        assert_eq!(rig.said(), ["status: Claude Code exited: apiKeyHelper failed: ANTHROPIC_API_KEY=[redacted] in ~/.claude/key.sh"], "following: {following}");
     }
 }
 

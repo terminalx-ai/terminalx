@@ -880,7 +880,13 @@ impl SessionManager {
         let by_hand = p.by_hand.is_some();
         // Gone before it ever got going: the last thing it printed is why,
         // where the reader is told it went, and not only in its terminal.
-        let said = (!closing && p.never_got_going()).then(|| self.terminals.program_output(pane)).flatten().and_then(|output| tui::last_words(&output));
+        // Redacted as the agent's own words always are (#667): the chat is
+        // kept on disk, copied into forks and broadcast, as its screen is not.
+        let said = (!closing && p.never_got_going())
+            .then(|| self.terminals.program_output(pane))
+            .flatten()
+            .and_then(|output| tui::last_words(&output))
+            .and_then(|words| recovery::detail(&words));
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         let turn_was_open = rt.turn_open;
         let early = (!by_hand && !closing && !p.ready.marked() && !p.recorded)

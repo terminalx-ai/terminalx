@@ -72,7 +72,10 @@ which sends it as it was sent, images included.
 A CLI that exits before it said it was up, within 15 s of being started, is
 named with its last printed lines ("Claude Code exited: No conversation found
 …"), read from what that program printed and not from what the pane held
-before it. A CLI the reader quits after it was up is only said to have exited.
+before it, and redacted as an agent's own words always are (`recovery::detail`,
+#667): the chat is kept, forked and broadcast, so credentials, addresses and
+home folders are cut out. A CLI the reader quits after it was up is only said
+to have exited.
 
 The pane's environment carries `RACCOON_TAB_ID`, `RACCOON_SESSION_ID`,
 `RACCOON_HOOK_SOCKET` and `RACCOON_HOOK_TOKEN`, all of which the CLI passes on
