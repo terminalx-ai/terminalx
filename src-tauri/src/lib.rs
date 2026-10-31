@@ -544,6 +544,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::resend_unsent,
+            commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
             commands::tab_handoff,

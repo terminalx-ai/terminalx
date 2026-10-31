@@ -203,55 +203,11 @@ const BLOCKING_SCREENS: &[(&str, &str)] = &[
     ),
 ];
 
-/// How much of the newest output to look at: a dialog is the last thing drawn.
-const SCREEN_TAIL_BYTES: usize = 64 * 1024;
-
-/// Printable text of terminal output: escape sequences (CSI, OSC, and
-/// two-byte escapes) and all whitespace dropped.
-fn screen_text(output: &[u8]) -> String {
-    let tail = &output[output.len().saturating_sub(SCREEN_TAIL_BYTES)..];
-    let text = String::from_utf8_lossy(tail);
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            if !c.is_whitespace() && !c.is_control() {
-                out.push(c);
-            }
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                // Parameters and intermediates, then one final byte.
-                for c in chars.by_ref() {
-                    if ('@'..='~').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            Some(']') | Some('P') | Some('_') | Some('^') => {
-                // A string, ended by BEL or ST (ESC \).
-                while let Some(c) = chars.next() {
-                    if c == '\u{7}' {
-                        break;
-                    }
-                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 /// The message for a first-run screen the CLI is sitting on, if the newest
 /// output shows one. Only meaningful before the CLI has said it is ready:
 /// once a dialog is answered its text stays in the scrollback.
 pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
-    let text = screen_text(output);
+    let text = crate::harness::tui::screen_text(output);
     BLOCKING_SCREENS.iter().find_map(|(needle, message)| {
         let needle: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
         text.contains(&needle).then_some(*message)

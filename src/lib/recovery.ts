@@ -37,3 +37,6 @@ export function recoveryFromEvents(events: AgentEvent[]): RecoveryKind | null {
 
 // A new conversation turn, never a replay of tool input or the original prompt.
 export const RECOVERY_PROMPT = "Review the previous interrupted or failed turn and check the current outcome first. Do not repeat completed tool calls. If a command may still be running or its side effects are unknown, verify its state before taking further action. Continue only the unfinished work; ask me if you cannot safely determine what remains.";
+
+// The light nudge (#665): what a reader would type to have the agent carry on in the same conversation.
+export const CONTINUE_PROMPT = "continue";

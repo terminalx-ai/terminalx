@@ -1,5 +1,5 @@
 import { preparePipelineLaunch, preparePipelineContinuation } from "@/lib/pipelineLaunch";
-import { agent, api, errorMessage } from "@/lib/api";
+import { agent, api, errorMessage, onPromptDelivery } from "@/lib/api";
 import { applyEvent } from "@/lib/agentEvents";
 import { getDraftRevision, setDraft } from "@/lib/drafts";
 import { addTab, archiveSession, selectSession, upsertSession } from "@/lib/sessions";
@@ -68,10 +68,16 @@ export interface Launched {
  * How far a continuation got. Only "launch" may be retried: past it the
  * prompt has been sent, or may have been ("delivery"), and "archive" is a
  * handoff that arrived while the chat it moved could not be archived.
+ * "input" is a handoff the new session has not taken but holds in its
+ * input, where one Enter sends it; `seq` is the prompt that Enter is for,
+ * and `error` what to tell a reader who is not looking at the dialog (#662).
  */
 export type ContinuationResult =
   | { stage: "delivered"; launched: Launched }
+  | { stage: "input"; launched: Launched; seq: number; error: string }
   | { stage: "launch" | "delivery" | "archive"; launched?: Launched; error: string };
+
+export const IN_INPUT = "The handoff is in the new session's input but has not been sent yet. Press Enter there to send it.";
 
 async function ensureAvailable(harness: string) {
   const providers = await api.listHarnesses();
@@ -97,15 +103,38 @@ async function deliver(launched: Launched, prompt: string, onDelivering?: () => 
     onDelivering?.();
     const out = await agent.send(launched.sessionId, launched.tab.id, prompt, undefined, true);
     for (const event of out.events) applyEvent(event);
+    // In the agent's input, not in the composer: it is there to send, once.
+    const seq = out.events[0]?.seq;
+    if (out.inInput && seq !== undefined) return { stage: "input", launched, seq, error: IN_INPUT };
     return { stage: "delivered", launched };
   } catch (e) {
     const edited = removedRevision === undefined || getDraftRevision(launched.tab.id) !== removedRevision;
     const recovery = edited
       ? "Your composer edits have been preserved."
       : "The prepared prompt is in its composer.";
-    if (!edited) setDraft(launched.tab.id, prompt);
+    if (!edited) forgetOnceDelivered(launched, setDraft(launched.tab.id, prompt));
     return { stage: "delivery", launched, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. ${recovery} ${errorMessage(e)}` };
   }
+}
+
+/**
+ * A handoff reported undelivered can still arrive: the reader presses Enter
+ * in its terminal, or the agent takes it late (#662). The prompt put back in
+ * the composer for a retry would then be sent twice, so it goes once the
+ * agent has the handoff, unless the reader has changed it since.
+ */
+function forgetOnceDelivered(launched: Launched, revision: number) {
+  let delivered = false;
+  let stop: (() => void) | undefined;
+  void onPromptDelivery(launched.sessionId, launched.tab.id, (stage) => {
+    if (stage !== "delivered" || delivered) return;
+    delivered = true;
+    if (getDraftRevision(launched.tab.id) === revision) setDraft(launched.tab.id, "");
+    stop?.();
+  }).then((unlisten) => {
+    stop = unlisten;
+    if (delivered) unlisten();
+  });
 }
 
 /** A tab is created once, with exactly the chosen settings. A failed launch

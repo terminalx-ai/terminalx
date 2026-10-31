@@ -39,11 +39,19 @@ There is no upload. It retains the latest 128 events with a hard 64 KiB cap,
 including bounded reads on startup. Each write atomically replaces the snapshot;
 files are mode 0600 on Unix. Invalid or non-allowlisted old records are discarded.
 
-Records contain only timestamp, event (`started`, `failed`, `connected`), attempt,
-retry count, and optional typed failure stage/category/HTTP status. Attempt 1 is
-the initial connection, retry count 0. A control-session failure after a successful
-connection has attempt/retry count 0, before the next connection attempt starts.
-The connected event records the successful attempt before resetting the counter.
+Records contain only timestamp, event (`started`, `failed`, `connected`,
+`recovered`), attempt, retry count, and optional typed failure stage/category/HTTP
+status. Attempt 1 is the initial connection, retry count 0. A control-session failure
+after a successful connection has attempt/retry count 0, before the next connection
+attempt starts. The connected event records the successful attempt before resetting
+the counter.
+
+The `host-binding` stage is the account service's heartbeat, pairing-grant and
+revocation requests for this Mac, made while the control channel is connected
+(#671). There `attempt` counts consecutive failed rounds. A streak records `failed`
+on its first round and again only when the category or status changes, so a long
+outage does not push out the connection history; `recovered` records the number of
+failed rounds once a round succeeds.
 
 No arbitrary string fields accept exception text, response bodies, headers, URLs,
 account identifiers, host/device identifiers, local addresses, paths, tokens,

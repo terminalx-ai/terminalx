@@ -37,11 +37,25 @@ pub enum Action {
 }
 
 /// Which CLI a PTY-first tab is running. The two differ in their launch line,
-/// their hook plumbing and their transcript, and in nothing else.
+/// their hook plumbing and their transcript, and in the stand-in they draw
+/// for a long paste.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliKind {
     Claude,
     Codex,
+}
+
+impl CliKind {
+    /// How the CLI's composer shows a long paste it is holding, up to the
+    /// part that varies. Read off the installed CLIs (Claude Code 2.1.314,
+    /// Codex 0.165.0) after a 6 KB paste: `[Pasted text #1 +33 lines]` and
+    /// `[Pasted Content 6143 chars]`. A continuation is always this long.
+    pub fn paste_placeholder(self) -> &'static str {
+        match self {
+            Self::Claude => "[Pasted text #",
+            Self::Codex => "[Pasted Content ",
+        }
+    }
 }
 
 /// The harness a tab runs on. Unknown names are carried verbatim.
@@ -268,6 +282,26 @@ pub fn offered() -> Vec<HarnessInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What each CLI drew after a 6 KB bracketed paste and nothing else,
+    /// recorded byte for byte. Claude Code moves the cursor around the
+    /// placeholder; Codex paints it in a colour at an absolute position.
+    #[test]
+    fn each_cli_is_seen_holding_a_long_paste_in_its_composer() {
+        let drawn = [
+            (CliKind::Claude, &include_bytes!("claude/fixtures/pasted_composer.bin")[..]),
+            (CliKind::Codex, &include_bytes!("codex/fixtures/pasted_composer.bin")[..]),
+        ];
+        for (kind, output) in drawn {
+            assert!(tui::shows_paste(output, kind.paste_placeholder()), "{kind:?}");
+        }
+        // Each is the other's negative: one CLI's stand-in is not the other's.
+        assert!(!tui::shows_paste(drawn[0].1, CliKind::Codex.paste_placeholder()));
+        assert!(!tui::shows_paste(drawn[1].1, CliKind::Claude.paste_placeholder()));
+        // A composer showing the text itself, or nothing, holds no long paste.
+        assert!(!tui::shows_paste(b"\x1b[2C> continue the work\x1b[K", CliKind::Claude.paste_placeholder()));
+        assert!(!tui::shows_paste(b"", CliKind::Codex.paste_placeholder()));
+    }
 
     #[test]
     fn the_hidden_agents_are_kept_but_not_offered() {

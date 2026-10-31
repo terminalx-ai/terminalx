@@ -25,7 +25,7 @@ import { applyEvent, setTabStatus } from "@/lib/agentEvents";
 import { upsertSession, useSessionStore, selectSession } from "@/lib/sessions";
 import { bucketSessions } from "@/lib/dashboard";
 import { getDraft, setDraft } from "@/lib/drafts";
-import { RECOVERY_PROMPT } from "@/lib/recovery";
+import { CONTINUE_PROMPT, RECOVERY_PROMPT } from "@/lib/recovery";
 
 let seq = 0;
 let session: SessionEntry;
@@ -46,14 +46,18 @@ beforeEach(() => {
     tabs: [{ id: `tab${seq}`, harness: "codex", model: "original", permissionMode: "default", status: "in_progress", created: "", modified: "" }] };
   mocks.views.views = { [session.tabs[0].id]: "terminal" };
   mocks.invoke.mockReset();
-  mocks.invoke.mockImplementation(async (command: string) => {
+  mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
     if (command === "load_tab_events" || command === "list_workspaces") return [];
     if (command === "list_models") return [{ id: "available", harness: "codex", label: "Available model", efforts: [] }];
     if (command === "stop_tab") {
       applyEvent(event({ type: "recovery", kind: null }));
       setTabStatus(session.id, session.tabs[0].id, "idle");
     }
-    if (command === "send_message") return { queued: false, events: [event({ type: "user_message", text: RECOVERY_PROMPT, queued: false })] };
+    if (command === "send_message") {
+      // As the runtime does for a prompt that starts a turn.
+      setTabStatus(session.id, session.tabs[0].id, "in_progress");
+      return { queued: false, events: [event({ type: "user_message", text: (args as { text: string }).text, queued: false })] };
+    }
   });
   upsertSession(session);
   selectSession(session.id);
@@ -88,6 +92,8 @@ describe("TabView recovery lifecycle", () => {
     expect(screen.getByText(/Prompt delivery could not be confirmed.*press Up in the composer/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Stop session" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
+    // Typing into the CLI clears its input first, and the unsent prompt with it.
+    expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
     expect(screen.queryByText(/No progress was confirmed before the timeout/)).toBeNull();
     emit({ type: "recovery", kind: null });
     act(() => setTabStatus(session.id, session.tabs[0].id, "in_progress"));
@@ -179,5 +185,60 @@ describe("TabView recovery lifecycle", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "Retry safely" }) as HTMLButtonElement).disabled).toBe(false));
     expect(mocks.invoke.mock.calls.some(([c]) => c === "send_message" || c === "set_tab_model")).toBe(false);
     expect(document.body.textContent).not.toMatch(/secret|TOKEN|\/Users/);
+  });
+
+  it("sends \"continue\" once in the same conversation without stopping, and keeps the draft", async () => {
+    let deliver!: () => void;
+    const delivered = new Promise<void>(resolve => { deliver = resolve; });
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "send_message") await delivered;
+      return original(command, args);
+    });
+    render(<Harness />);
+    emit({ type: "user_message", text: "Implement my change", queued: false });
+    emit({ type: "recovery", kind: "failed" });
+    fireEvent.click(screen.getByRole("button", { name: "Continue here" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue here" }));
+    await act(async () => deliver());
+    // The sent message is the new turn, which ends the recovery.
+    await waitFor(() => expect(screen.queryByLabelText("Session recovery")).toBeNull());
+    const actions = mocks.invoke.mock.calls.filter(([c]) => ["stop_tab", "set_tab_model", "send_message"].includes(c));
+    expect(actions).toEqual([["send_message", expect.objectContaining({ sessionId: session.id, tabId: session.tabs[0].id, text: CONTINUE_PROMPT, images: [] })]]);
+    expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
+  });
+
+  it("continues the same conversation from the closed session's bar after Stop", async () => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "capacity" });
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    await screen.findByText(/^Session closed/);
+    const button = screen.getByRole("button", { name: "Continue here" }) as HTMLButtonElement;
+    await waitFor(() => expect(button.disabled).toBe(false));
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByText(/^Session closed/)).toBeNull());
+    // Stop's own exit, then the send that starts the agent again on its conversation; no second stop.
+    const actions = mocks.invoke.mock.calls.filter(([c]) => ["stop_tab", "send_message"].includes(c));
+    expect(actions.map(([c, args]) => [c, (args as { text?: string }).text])).toEqual([["stop_tab", undefined], ["send_message", CONTINUE_PROMPT]]);
+    expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
+  });
+
+  it("leaves an empty draft empty when \"continue\" cannot be sent", async () => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "send_message"
+      ? Promise.reject("Stop has not confirmed local process exit. Retry Stop before resuming.")
+      : original(command, args));
+    setDraft(session.tabs[0].id, "");
+    render(<Harness />);
+    emit({ type: "recovery", kind: "disconnected" });
+    const button = screen.getByRole("button", { name: "Continue here" }) as HTMLButtonElement;
+    fireEvent.click(button);
+    expect(button.disabled).toBe(true);
+    await waitFor(() => expect(button.disabled).toBe(false));
+    expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ text: CONTINUE_PROMPT }));
+    expect(mocks.invoke.mock.calls.some(([c]) => c === "stop_tab")).toBe(false);
+    // Unlike a composer send, recovery does not put what it sent into the draft.
+    expect(getDraft(session.tabs[0].id)).toBe("");
+    expect(screen.getByLabelText("Session recovery")).toBeTruthy();
   });
 });

@@ -83,7 +83,8 @@ pub fn attachment_bytes(path: &str) -> Vec<u8> {
 /// the slope is how fast a pty ingests a paste, so a long prompt still gets
 /// its Enter after the last character has arrived. Counted from when the CLI
 /// has read the paste (`await_read`), not from when it was written: a busy
-/// CLI can leave a paste unread for longer than this.
+/// CLI can leave a paste unread for longer than this. Nor is it sent before
+/// the CLI has drawn since reading it (`await_drawn`).
 pub fn submit_delay(body_len: usize) -> Duration {
     Duration::from_millis(250 + (body_len / 4096) as u64)
 }
@@ -108,6 +109,18 @@ pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(20);
 /// the prompt in its input, where a second Enter sends it. On an input the
 /// CLI has already emptied, an Enter does nothing.
 pub const NUDGE_AFTER: Duration = Duration::from_secs(4);
+/// How many times the Enter is written again, `NUDGE_AFTER` apart. A CLI
+/// that has only just started can let a second Enter go by as well (#662).
+pub const NUDGES: u32 = 2;
+
+/// How long the Enter waits, once the CLI has read the paste, for it to draw.
+/// An idle CLI redraws its composer at once: Claude Code 2.1.314 drew its
+/// `[Pasted text #1 +33 lines]` 18 ms after a 6 KB paste, Codex 0.165.0 its
+/// `[Pasted Content 6143 chars]` in 2 ms. A CLI that has read the bytes but
+/// not drawn is still busy taking them in, and an Enter it reads then can be
+/// lost with nothing on screen to say so (#662). Past this the Enter goes
+/// anyway and the nudges are the fallback.
+pub const PASTE_DRAW_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Whether the CLI read what was written into its pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,16 +145,98 @@ impl PasteRead {
 
 /// Wait until the CLI has read everything written into its pane. `unread` is
 /// how many bytes it has yet to take, or `None` where that cannot be asked.
-pub fn await_read(unread: impl Fn() -> Option<usize>, timeout: Duration) -> PasteRead {
-    let deadline = std::time::Instant::now() + timeout;
+///
+/// Also when it was last seen with something still to read, or when the
+/// wait began: it read the paste after that. Not when the wait ended, which
+/// can be a poll behind — a CLI quick to draw what it read (Codex, in 2 ms)
+/// would seem to have drawn before it had read anything.
+pub fn await_read(unread: impl Fn() -> Option<usize>, timeout: Duration) -> (PasteRead, std::time::Instant) {
+    let mut unread_at = std::time::Instant::now();
+    let deadline = unread_at + timeout;
     loop {
+        let asked = std::time::Instant::now();
         match unread() {
-            None => return PasteRead::Unknown,
-            Some(0) => return PasteRead::Read,
-            Some(_) if std::time::Instant::now() >= deadline => return PasteRead::Unread,
-            Some(_) => std::thread::sleep(Duration::from_millis(5)),
+            None => return (PasteRead::Unknown, unread_at),
+            Some(0) => return (PasteRead::Read, unread_at),
+            Some(_) if asked >= deadline => return (PasteRead::Unread, asked),
+            Some(_) => {
+                unread_at = asked;
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
     }
+}
+
+/// Wait until the pane has drawn after `since`, the moment the CLI read the
+/// paste. `drawn` says when it last drew. `false` when it had not by the
+/// timeout: the CLI read the paste but has yet to show it.
+pub fn await_drawn(drawn: impl Fn() -> Option<std::time::Instant>, since: std::time::Instant, timeout: Duration) -> bool {
+    let deadline = since + timeout;
+    loop {
+        if drawn().is_some_and(|at| at > since) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// How much of the newest output to look at: a dialog, or the composer, is
+/// among the last things drawn.
+const SCREEN_TAIL_BYTES: usize = 64 * 1024;
+
+/// Printable text of terminal output: escape sequences (CSI, OSC, and
+/// two-byte escapes) and all whitespace dropped. A TUI draws with cursor
+/// moves rather than spaces, so anything compared with this is compared with
+/// its whitespace removed too.
+pub fn screen_text(output: &[u8]) -> String {
+    let tail = &output[output.len().saturating_sub(SCREEN_TAIL_BYTES)..];
+    let text = String::from_utf8_lossy(tail);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            if !c.is_whitespace() && !c.is_control() {
+                out.push(c);
+            }
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // Parameters and intermediates, then one final byte.
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') | Some('P') | Some('_') | Some('^') => {
+                // A string, ended by BEL or ST (ESC \).
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether the newest output shows `placeholder`, the stand-in a CLI draws in
+/// its composer for a long paste. Asked only of a prompt the CLI has not
+/// acknowledged: there, it is a prompt still in the input, one Enter from
+/// being sent.
+pub fn shows_paste(output: &[u8], placeholder: &str) -> bool {
+    let placeholder: String = placeholder.chars().filter(|c| !c.is_whitespace()).collect();
+    screen_text(output).contains(&placeholder)
 }
 
 /// A TUI drops keystrokes while it is still painting its first frame, and the
@@ -891,12 +986,38 @@ mod tests {
         // Read on the third look: the wait ends there, however long is left.
         let looks = AtomicUsize::new(0);
         let unread = || Some(if looks.fetch_add(1, Ordering::Relaxed) < 2 { 64 } else { 0 });
-        assert_eq!(await_read(unread, Duration::from_secs(60)), PasteRead::Read);
+        let began = std::time::Instant::now();
+        let (read, unread_at) = await_read(unread, Duration::from_secs(60));
+        assert_eq!(read, PasteRead::Read);
         assert_eq!(looks.load(Ordering::Relaxed), 3);
+        // It was read after the second look, which saw it still there.
+        assert!(unread_at > began && unread_at < std::time::Instant::now());
         // A CLI that never reads is given up on, and a PTY that cannot be
         // asked is not waited on at all.
-        assert_eq!(await_read(|| Some(64), Duration::from_millis(20)), PasteRead::Unread);
-        assert_eq!(await_read(|| None, Duration::from_secs(60)), PasteRead::Unknown);
+        assert_eq!(await_read(|| Some(64), Duration::from_millis(20)).0, PasteRead::Unread);
+        assert_eq!(await_read(|| None, Duration::from_secs(60)).0, PasteRead::Unknown);
+    }
+
+    /// Only a draw after the paste was read says the CLI has taken it in: one
+    /// from before, the startup screen say, is no answer.
+    #[test]
+    fn the_enter_waits_for_the_cli_to_draw_after_reading_the_paste() {
+        use std::time::Instant;
+        let before = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        let read = Instant::now();
+        let drawn = std::sync::Mutex::new(Some(before));
+        assert!(!await_drawn(|| *drawn.lock().unwrap(), read, Duration::from_millis(20)), "a draw from before the read");
+        assert!(!await_drawn(|| None, read, Duration::from_millis(20)), "a pane that never drew");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                *drawn.lock().unwrap() = Some(Instant::now());
+            });
+            let waited = Instant::now();
+            assert!(await_drawn(|| *drawn.lock().unwrap(), read, Duration::from_secs(60)));
+            assert!(waited.elapsed() < Duration::from_secs(10), "the wait ends at the draw, however long is left");
+        });
     }
 
     #[test]
