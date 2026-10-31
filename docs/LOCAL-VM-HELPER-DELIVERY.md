@@ -372,29 +372,108 @@ Before the pin the ledger is not `trustObserved`, so nothing resolves.
 and the account, home and target, is not wired. Transport admission
 (`require_available()`) and live runs remain closed.
 
-**Unresolved invariant: person-only methods are not yet person-only against
-agents.** The persistent owner accepts `local_vm.request` from any holder of
-the runtime control token. App-launched tabs receive that token as
-`TERMINALX_NEXT_TOKEN`, and the desktop client reads the same token from
-`run/control.token`. The onboarding check runs only on the desktop client
-(`Sessions::local_vm`).
+## Person approval for person-only actions
 
-As a result, an agent in a TerminalX tab can call any person-only method:
-`environment.create`/setup consent, `confirmGuestAccount`, `grantGuestKey`
-and `confirmGuestHostKey`. The parent IDs it passes are its own, which it
-knows.
+### What the source shows (2026-10-31)
 
-Integrity holds: no method accepts key material, and every piece of
-evidence is owner-authenticated. Consent does not hold.
+Who can reach what today:
 
-Closing this needs an owner-side person gate that does not rest on the
-shared token or on caller-supplied IDs. One option is the person approving
-through the desktop's question flow, as issue writes do with
-`issue_control::Ask`.
+| Path | Who can use it | Evidence |
+| --- | --- | --- |
+| Owner `local_vm.request` → `host::request` | Any holder of the runtime control token. App-launched tabs get it as `TERMINALX_NEXT_TOKEN`; the desktop client reads the same `run/control.token`. The onboarding check is client-side only. | `control.rs` `execute`, `local_runtime/sessions.rs` `local_vm`, `session.rs` tab environment |
+| `runtime.attach`, then `runtime.window.register` | Any token holder gets a lease. A window registration is exclusive only while one is valid, so when no desktop is attached an agent can register its own socket in the run directory. | `local_runtime.rs` `command`, `local_runtime/window.rs` `register` |
+| Restricted Lume owner channel | Anyone who can read `bo/<key>/control.capability`, a 0600 file owned by the user, which includes any same-user agent. The owner relays a confirmation or grant MAC'd with it. | `macos_owner_launch.rs`, `TerminalXBootstrapOwner.swift` |
+| Desktop issue question (`issue_control::Ask`) | Creating a question: any token holder, which is acceptable because agents may request. Reading and answering: only the `main` webview, through in-process IPC (`issue_confirmation_pending`/`_reply`). One question at a time, a 40 s TTL, a one-shot answer, late or stale answers ignored, back-off after refusal. | `issue_confirmation.rs`, `cloud_control.rs` |
+| Click guard while a question is shown | Pauses only TerminalX's own `computer.*` actions, not other same-user Accessibility automation. | `computer/mod.rs` `call` |
 
-Until that exists, no acceptance run may count account consent or host-key
-consent as the person's. Default builds have no version-3 bootstrap, so
-there is no exposure today.
+The existing question cannot carry Local VM consent:
+
+1. Its result is a boolean in the desktop's memory. Local VM effects run in
+   the persistent owner and in the restricted Lume owner, and neither can
+   verify it. Relaying it through the token channel or the registered window
+   can be impersonated.
+2. The restricted owner trusts a file capability that agents can read. A
+   host-only gate cannot stop an agent that talks to that owner directly.
+
+### Missing primitive
+
+A verifiable, one-time approval whose proof needs physical presence through
+an OS-protected prompt, and which the same-user agent can neither produce nor
+read:
+
+- a Secure Enclave P-256 key with `userPresence` access control (Touch ID or
+  the login password);
+- usable only by the Developer ID–signed TerminalX app, through a keychain
+  access group;
+- signing the canonical approval document below;
+- verified by the host owner before any effect, and by the restricted Lume
+  owner before relaying. Its public key is pinned in the version-3 binding at
+  Create, so the file capability alone no longer suffices.
+
+### Options
+
+| Option | Closes the token, CLI and raw-request paths | Closes the file capability | Closes Accessibility clicks | Needs |
+| --- | --- | --- | --- | --- |
+| **A. Secure Enclave user-presence approval (recommended)** | Yes | Yes, once the restricted owner verifies | Yes: the system prompt needs presence, not a click | Developer ID signing and a keychain-access-group entitlement (held); the restricted owner verifies P-256 |
+| B. Desktop question plus executing in the desktop | Yes | No, unless the owner capability leaves disk, which breaks reopen after a restart | No | Moving effects into the desktop process |
+| C. Isolating agent tabs: a separate macOS user or sandbox, a scoped tab token, no Accessibility | Yes | Yes | Yes | A platform-wide change to how tabs run |
+
+Recommendation: A for consent, with C's scoped tab token later as defense
+in depth.
+
+### Approval contract (implemented; production has no approver)
+
+- **Document.** Canonical JSON with exactly these fields: `version` 1,
+  `approvalId` (UUID), `action`, `bootstrapId`, `inputsSha256`,
+  `parentSession`, `parentTab`, `parentConversation`, `issuedAt` and
+  `expiresAt` (Unix milliseconds, at most 120 s apart). The proof is the
+  approver's verification over the exact bytes.
+- **Inputs.** The host computes them from current owner-verified evidence;
+  the caller supplies none.
+
+  | Action | Inputs (each also includes `bootstrapId`, `bindingDigest`, `ownerEpoch` and the original parent) |
+  | --- | --- |
+  | `environment.confirmGuestAccount` | the account-observation digest and the full chosen account |
+  | `environment.grantGuestKey` | the acknowledged answer digest, the account's name and uid, and the planned key reference |
+  | `environment.confirmGuestHostKey` | the host-key observation digest, the fingerprint, the key reference, and the account |
+
+- **One use.** `approval-<id>.json` is recorded exclusively before any
+  effect.
+  - **Lost reply or interrupted action:** retrying the identical approval
+    within its lifetime proceeds. Every underlying action is idempotent, so
+    the result is the same record.
+  - **Replay:** another action or other inputs under a used id is refused.
+  - **Cancellation:** `cancelled` recorded first makes the approval
+    unusable.
+  - **Expiry:** checked on every use; after it, a new approval is needed.
+  - **Replacement:** a new approval for the same inputs is allowed, and the
+    effect is still single. One for other inputs reaches the action's own
+    refusal, which never re-chooses.
+- **Who can issue and consume.** Only the chosen primitive can issue. The
+  host consumes inside the owner, at the action itself
+  (`Reference::confirm_account`, `grant_guest_key_using`,
+  `confirm_host_key` each take a verified approval). The shared token cannot
+  issue, because an approval is a proof over the document, not a request
+  field.
+- **This build.** The approver is `Unavailable`, so the three version-3
+  person-only actions fail closed before any effect, whatever the caller
+  sends. `environment.guestAccounts` and `guestAccountConfirmations` stay
+  read-only and report `personApproval: {available: false}`, and the UI
+  keeps the observed accounts, key and host-key state visible with the
+  actions disabled and the reason shown.
+- **Not changed.** `environment.create` and `environment.setupAction`, the
+  existing shipped onboarding consent for compatible VMs, have the same
+  token-level weakness. Closing them now would disable that onboarding, so
+  they stay as they are pending the decision. So does `configure`, the
+  Settings opt-in toggle, which is also reachable with the token.
+  `environment.createPersonalized` is already closed by `require_available()`.
+
+### Decision required
+
+Choose the consent primitive. Option A also needs the signing and
+keychain-entitlement work that is currently held. Separately, decide whether
+existing onboarding consent (`environment.create`, `environment.setupAction`)
+should also fail closed until that primitive exists.
 
 **On-screen confirmation.** Each conversation's Local VM section lists only the
 bootstraps whose original parent is that session, tab and conversation

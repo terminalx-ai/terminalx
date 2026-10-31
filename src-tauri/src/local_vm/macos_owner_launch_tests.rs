@@ -121,7 +121,7 @@ impl Fixture {
         let op = self.op();
         private(
             &op.join("fixture-control.json"),
-            &canonical(&json!({"requests":64,"fault":fault})).unwrap(),
+            &canonical(&json!({"requests":128,"fault":fault})).unwrap(),
         );
         private(&op.join("fixture-view.json"),&canonical(&json!({"running":true,"shares":[{"name":"input","path":op.join("input"),"readOnly":true},{"name":"receipt","path":op.join("receipt"),"readOnly":false}]})).unwrap());
     }
@@ -481,6 +481,28 @@ fn native_exit_or_lost_startup_announcement_is_recorded_without_replacement() {
     }
 }
 
+/// The test approver's key; it stands in for the human-presence primitive.
+const APPROVER: [u8; 32] = [0x5a; 32];
+fn approved(action: &str, inputs: &Value) -> crate::local_vm::person_approval::Presented {
+    use crate::local_vm::person_approval::{fixture::{approve, TestApprover}, presented, LIFETIME};
+    presented(&TestApprover(APPROVER), &approve(APPROVER, action, inputs, std::time::SystemTime::now(), LIFETIME)).unwrap()
+}
+/// Each action with an approval over exactly the inputs the host computes.
+fn confirm(reference: &Reference, confirmation: &super::super::AccountConfirmation) -> Result<Value> {
+    let inputs = reference.account_approval_inputs(&confirmation.observation_sha256, &confirmation.account);
+    reference.confirm_account(confirmation, &approved(super::super::CONFIRM_ACCOUNT, &inputs))
+}
+fn grant_key(reference: &Reference, root: &Path, utility: &Path) -> Result<Value> {
+    let (_, inputs) = reference.key_approval_inputs(root)?;
+    reference.grant_guest_key_using(root, utility, Duration::from_secs(5), &approved(super::super::GRANT_KEY, &inputs))
+}
+fn pin(reference: &Reference, root: &Path, confirmation: &super::super::HostKeyConfirmation) -> Result<Value> {
+    let (bytes, observation) = reference.host_key_observation()?;
+    let fingerprint = crate::local_vm::macos_personalization::public_key(observation["hostKey"].as_str().unwrap_or_default())?;
+    let (_, answer) = reference.account_answer_bytes()?;
+    let inputs = reference.host_key_approval_inputs(&journal::digest(&bytes), &observation, &fingerprint, &answer["account"]);
+    reference.confirm_host_key(root, confirmation, &approved(super::super::PIN_HOST_KEY, &inputs))
+}
 /// Exact seed readback for the recorded intent, as the seeder core reports it.
 fn seed(f: &Fixture) {
     use crate::local_vm::macos_seed;
@@ -591,17 +613,17 @@ fn native_only_the_persons_confirmation_from_the_original_parent_is_relayed_once
         parent_conversation: reference.binding.parent_conversation.clone(),
     };
     let original = reference.binding.parent_session.clone();
-    assert!(reference.confirm_account(&confirmation(observed["accounts"][0].clone(), &journal::new_id())).is_err(), "another parent");
-    assert!(reference.confirm_account(&confirmation(account("ghost", 503), &original)).is_err(), "unobserved account");
+    assert!(confirm(&reference, &confirmation(observed["accounts"][0].clone(), &journal::new_id())).is_err(), "another parent");
+    assert!(confirm(&reference, &confirmation(account("ghost", 503), &original)).is_err(), "unobserved account");
     let mut unconfirmed = confirmation(observed["accounts"][0].clone(), &original);
     unconfirmed.confirm = false;
-    assert!(reference.confirm_account(&unconfirmed).is_err());
+    assert!(confirm(&reference, &unconfirmed).is_err());
     assert!(!f.op().join("account-confirmation.json").exists(), "refusals record nothing");
-    let relay = reference.confirm_account(&confirmation(observed["accounts"][0].clone(), &original)).unwrap();
+    let relay = confirm(&reference, &confirmation(observed["accounts"][0].clone(), &original)).unwrap();
     assert_eq!((relay["relayed"].as_bool(), relay["accountAuthenticated"].as_bool()), (Some(true), Some(false)));
     let recorded = std::fs::read(f.op().join("account-confirmation.json")).unwrap();
-    assert_eq!(reference.confirm_account(&confirmation(observed["accounts"][0].clone(), &original)).unwrap(), relay, "a retry relays the same record");
-    assert!(reference.confirm_account(&confirmation(observed["accounts"][1].clone(), &original)).is_err(), "never re-chosen");
+    assert_eq!(confirm(&reference, &confirmation(observed["accounts"][0].clone(), &original)).unwrap(), relay, "a retry relays the same record");
+    assert!(confirm(&reference, &confirmation(observed["accounts"][1].clone(), &original)).is_err(), "never re-chosen");
     assert_eq!(std::fs::read(f.op().join("account-confirmation.json")).unwrap(), recorded);
     let answer = json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
         "confirmationSha256": journal::digest(&recorded), "account": observed["accounts"][0], "outcome": "confirmed",
@@ -669,7 +691,7 @@ fn choose(f: &Fixture, reference: &Reference, pick: usize) -> (Value, Vec<u8>) {
         "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
     private(&f.op().join("account-observation.json"), &observation);
     let chosen = [account("personal", 501), account("other", 502)][pick].clone();
-    reference.confirm_account(&super::super::AccountConfirmation {
+    confirm(reference, &super::super::AccountConfirmation {
         confirm: true, observation_sha256: journal::digest(&observation), account: chosen.clone(),
         parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
         parent_conversation: reference.binding.parent_conversation.clone(),
@@ -691,8 +713,7 @@ fn native_the_vms_original_key_follows_only_the_helpers_acknowledgement_and_is_g
     let reference = Reference::reopen(&f.op()).unwrap();
     let digest = journal::digest(&reference.raw);
     let (utility, public) = producer(&f, 7);
-    let budget = Duration::from_secs(5);
-    let grant = |reference: &Reference| reference.grant_guest_key_using(&f.root, &utility, budget);
+    let grant = |reference: &Reference| grant_key(reference, &f.root, &utility);
     let (account, recorded) = confirmed_choice(&f, &reference);
     let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
         "parentConversation": reference.binding.parent_conversation});
@@ -784,10 +805,10 @@ fn native_an_interrupted_key_creation_is_pending_and_never_repeated_or_granted()
     let (account, recorded) = confirmed_choice(&f, &reference);
     private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
     std::fs::write(f.root.join("synthetic-producer/partial-output"), b"").unwrap();
-    assert!(reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).is_err());
+    assert!(grant_key(&reference, &f.root, &utility).is_err());
     std::fs::remove_file(f.root.join("synthetic-producer/partial-output")).unwrap();
     for _ in 0..2 {
-        assert!(reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).is_err());
+        assert!(grant_key(&reference, &f.root, &utility).is_err());
     }
     assert_eq!(generations(&f), 1);
     assert!(!f.op().join("key-grant.json").exists(), "an unknown key is never granted");
@@ -805,7 +826,7 @@ fn installed(f: &Fixture, pick: usize) -> (Reference, Vec<u8>) {
     let (utility, _) = producer(f, 7);
     let (account, recorded) = choose(f, &reference, pick);
     private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
-    let relay = reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).unwrap();
+    let relay = grant_key(&reference, &f.root, &utility).unwrap();
     let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
     let result = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
         "grantSha256": journal::digest(&grant), "keyReference": relay["keyReference"], "stage": "publicKeyInstalled", "installed": true,
@@ -860,7 +881,7 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     elsewhere.parent_tab = journal::new_id();
     refused.extend([unconfirmed, elsewhere]);
     for confirmation in &refused {
-        assert!(reference.confirm_host_key(&f.root, confirmation).is_err());
+        assert!(pin(&reference, &f.root, confirmation).is_err());
     }
     assert!(!f.op().join("host-key-confirmation.json").exists());
     let (unpinned_utility, _) = producer(&f, 7);
@@ -876,10 +897,10 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     let ledger = |f: &Fixture| serde_json::from_slice::<Value>(&std::fs::read(f.root.join("macos-personalization").join(&f.key).join("record.json")).unwrap()).unwrap();
     assert_eq!(ledger(&f)["status"], "planned");
 
-    let confirmed = reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap();
+    let confirmed = pin(&reference, &f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap();
     assert_eq!((confirmed["hostKeyConfirmed"].as_bool(), confirmed["sshVerified"].as_bool(), confirmed["ready"].as_bool(),
         confirmed["ledgerStatus"].as_str()), (Some(true), Some(false), Some(false), Some("trustObserved")));
-    assert_eq!(reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap()["confirmation"],
+    assert_eq!(pin(&reference, &f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap()["confirmation"],
         confirmed["confirmation"], "a retry returns the same confirmation");
     assert_eq!(status()["stage"], "confirmed");
 
@@ -917,7 +938,7 @@ fn native_the_persons_review_pins_only_the_owner_observed_host_key_once_and_a_ch
     let (changed, changed_key) = host_key_observation(&f, &reference, &result, 10);
     assert_eq!(status()["stage"], "changed");
     let changed_fingerprint = crate::local_vm::macos_personalization::public_key(&changed_key).unwrap();
-    let error = reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &changed, &changed_fingerprint)).unwrap_err();
+    let error = pin(&reference, &f.root, &host_key_confirmation(&reference, &changed, &changed_fingerprint)).unwrap_err();
     assert!(format!("{error:#}").contains("never replaced"), "{error:#}");
     assert_eq!(ledger(&f)["trustReceipt"], record["trustReceipt"]);
     assert_eq!(crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap().trust.host_key, host_key);
@@ -933,7 +954,7 @@ fn native_no_host_key_is_pinned_before_the_helpers_install_or_for_an_unplanned_a
     let (utility, _) = producer(&f, 7);
     let (account, recorded) = confirmed_choice(&f, &reference);
     private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
-    let relay = reference.grant_guest_key_using(&f.root, &utility, Duration::from_secs(5)).unwrap();
+    let relay = grant_key(&reference, &f.root, &utility).unwrap();
     let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
     let refused = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
         "grantSha256": journal::digest(&grant), "keyReference": relay["keyReference"], "stage": "refused", "installed": false,
@@ -941,7 +962,7 @@ fn native_no_host_key_is_pinned_before_the_helpers_install_or_for_an_unplanned_a
     private(&f.op().join("key-install-result.json"), &refused);
     let (observation, host_key) = host_key_observation(&f, &reference, &refused, 9);
     let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
-    assert!(reference.confirm_host_key(&f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).is_err(), "after a refused install");
+    assert!(pin(&reference, &f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).is_err(), "after a refused install");
     assert!(!f.op().join("host-key-confirmation.json").exists());
     drop(reference);
 
@@ -950,7 +971,83 @@ fn native_no_host_key_is_pinned_before_the_helpers_install_or_for_an_unplanned_a
     let (reference, result) = installed(&g, 1);
     let (observation, host_key) = host_key_observation(&g, &reference, &result, 9);
     let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
-    let error = reference.confirm_host_key(&g.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap_err();
+    let error = pin(&reference, &g.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap_err();
     assert!(format!("{error:#}").contains("not the account planned"), "{error:#}");
     assert!(!g.op().join("host-key-confirmation.json").exists());
+}
+
+#[test]
+#[ignore = "Requires explicitly compiled synthetic native owner fixture"]
+fn native_person_only_actions_need_a_one_time_approval_of_exactly_the_hosts_inputs() {
+    use crate::local_vm::person_approval::{fixture::{approve, TestApprover}, presented, LIFETIME};
+    use std::time::SystemTime;
+    let f = Fixture::new();
+    seed(&f);
+    assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&f.op()).unwrap();
+    // Observation and enrollment as in `choose`, without confirming.
+    let digest = journal::digest(&reference.raw);
+    let (receipt, receipt_digest) = crate::local_vm::macos_seed::seeded(&f.root, &f.key).unwrap();
+    private(&f.op().join("enrollment.json"), &canonical(&json!({"version":2,"bindingDigest":digest,"ownerEpoch":reference.binding.owner_epoch,
+        "bootstrapId":f.key,"seedId":receipt["seedId"],"seedReceiptSha256":receipt_digest,"attempt":0,
+        "challengeSha256":"c".repeat(64),"claimsSha256":"d".repeat(64),
+        "helperAuthenticated":true,"accountAuthenticated":false,"trustAccepted":false,"ready":false})).unwrap());
+    let account = |name: &str, uid: u32| json!({"gid": 20, "home": format!("/Users/{name}"), "homeDevice": 1, "homeInode": uid + 100, "name": name, "uid": uid});
+    let observation = canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501), account("other", 502)], "helperAuthenticated": true,
+        "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
+    private(&f.op().join("account-observation.json"), &observation);
+    let confirmation = super::super::AccountConfirmation {
+        confirm: true, observation_sha256: journal::digest(&observation), account: account("personal", 501),
+        parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
+        parent_conversation: reference.binding.parent_conversation.clone(),
+    };
+    let inputs = reference.account_approval_inputs(&confirmation.observation_sha256, &confirmation.account);
+    let signed = |action: &str, inputs: &Value| approve(APPROVER, action, inputs, SystemTime::now(), LIFETIME);
+    let verify = |approval: &Value| presented(&TestApprover(APPROVER), approval);
+    let nothing_recorded = || !f.op().join("account-confirmation.json").exists();
+
+    // This build: whatever is sent, the action is refused before any effect.
+    let production = crate::local_vm::person_approval::presented(&crate::local_vm::person_approval::Unavailable, &signed(super::super::CONFIRM_ACCOUNT, &inputs));
+    assert!(production.is_err());
+    // Forged: signed with a key the approver does not hold.
+    assert!(verify(&approve([0x11; 32], super::super::CONFIRM_ACCOUNT, &inputs, SystemTime::now(), LIFETIME)).is_err());
+    // Cross-parent, another account, another action, another VM binding.
+    let mut cross_parent = inputs.clone();
+    cross_parent["parentTab"] = json!(journal::new_id());
+    let mut other_account = inputs.clone();
+    other_account["account"] = account("other", 502);
+    let mut other_binding = inputs.clone();
+    other_binding["bindingDigest"] = json!("e".repeat(64));
+    for (action, bound) in [(super::super::CONFIRM_ACCOUNT, &cross_parent), (super::super::CONFIRM_ACCOUNT, &other_account),
+        (super::super::GRANT_KEY, &inputs), (super::super::CONFIRM_ACCOUNT, &other_binding)]
+    {
+        let approval = verify(&signed(action, bound)).unwrap();
+        assert!(reference.confirm_account(&confirmation, &approval).is_err(), "{action} {bound}");
+    }
+    assert!(nothing_recorded(), "no refused approval records a choice");
+
+    // Changed evidence: an approval of the earlier observation is refused after it changes.
+    let stale = verify(&signed(super::super::CONFIRM_ACCOUNT, &inputs)).unwrap();
+    let changed = canonical(&json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
+        "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501)], "helperAuthenticated": true,
+        "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
+    replace(&f.op().join("account-observation.json"), &changed);
+    let mut current = super::super::AccountConfirmation { observation_sha256: journal::digest(&changed), ..confirmation };
+    assert!(reference.confirm_account(&current, &stale).is_err(), "approval of evidence that changed");
+    assert!(nothing_recorded());
+
+    // Interrupted after the approval was recorded, then a lost reply: the same
+    // approval completes the one effect, and retries return the same record.
+    let fresh_inputs = reference.account_approval_inputs(&current.observation_sha256, &current.account);
+    let approval = verify(&signed(super::super::CONFIRM_ACCOUNT, &fresh_inputs)).unwrap();
+    approval.consume(&reference.root, super::super::CONFIRM_ACCOUNT, &fresh_inputs, SystemTime::now()).unwrap();
+    assert!(nothing_recorded(), "recorded approval, no effect yet");
+    let relay = reference.confirm_account(&current, &approval).unwrap();
+    assert_eq!(reference.confirm_account(&current, &approval).unwrap(), relay, "lost reply");
+    // Replay of a used approval for anything else is refused.
+    current.account = account("other", 502);
+    assert!(reference.confirm_account(&current, &approval).is_err());
+    let records = std::fs::read_dir(f.op()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("approval-")).count();
+    assert_eq!(records, 1, "one approval, one record");
 }

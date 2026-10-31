@@ -301,6 +301,13 @@ export interface LocalVmGuestHostKeyStatus {
   ready: false;
 }
 
+/** Whether this build can verify a person's approval of a person-only action.
+ *  Without it the backend refuses those actions, whoever asks. */
+export interface LocalVmPersonApproval {
+  available: boolean;
+  reason?: string;
+}
+
 /** Where one bootstrap's account confirmation stands, as the host verified it. */
 export interface LocalVmGuestAccountStatus {
   idempotencyKey: string;

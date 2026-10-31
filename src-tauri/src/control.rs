@@ -1548,6 +1548,34 @@ fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspa
 mod tests {
     use super::*;
 
+    /// What an agent tab can send with TERMINALX_NEXT_TOKEN: a raw Local VM
+    /// request with `confirm`, its own parent IDs and an approval-shaped value.
+    /// The person-only actions refuse before touching any bootstrap.
+    #[cfg(unix)]
+    #[test]
+    fn raw_runtime_requests_cannot_supply_a_persons_approval() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let life = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let _lease = life.command("runtime.attach", json!({"protocol": 1})).unwrap();
+        let service = service.with_local_lifetime(life).with_vm_controller();
+        service.execute("local_vm.request", json!({"method": "configure", "params": {"enabled": true}}), "agent").unwrap();
+        let key = uuid::Uuid::new_v4().to_string();
+        let claimed = json!({"idempotencyKey": key, "confirm": true, "parentSession": uuid::Uuid::new_v4().to_string(),
+            "parentTab": uuid::Uuid::new_v4().to_string(), "parentConversation": "original", "observationSha256": "a".repeat(64),
+            "account": {"name": "personal", "uid": 501}, "fingerprint": "SHA256:x"});
+        for approval in [Value::Null, json!(true), json!({"approved": true}), json!({"document": "e30=", "proof": "00"})] {
+            for method in ["environment.confirmGuestAccount", "environment.grantGuestKey", "environment.confirmGuestHostKey"] {
+                let mut params = claimed.clone();
+                params["approval"] = approval.clone();
+                let error = service.execute("local_vm.request", json!({"method": method, "params": params}), "agent").unwrap_err();
+                assert!(format!("{error:?}").contains("cannot yet verify that a person approved"), "{method}: {error:?}");
+            }
+        }
+        let bootstrap = crate::local_vm::host::root().unwrap().join("bo").join(&key);
+        assert!(!bootstrap.exists(), "nothing was looked up or written");
+    }
+
     #[cfg(unix)]
     #[test]
     fn local_vm_requests_belong_to_the_persistent_owner_and_stop_refusal_preserves_attachment() {

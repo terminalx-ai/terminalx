@@ -5,6 +5,7 @@ use super::{journal, macos_bootstrap_helper};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use fs::{Directory, Node};
+use super::person_approval::Presented;
 use hmac::{Hmac, Mac};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
@@ -133,7 +134,7 @@ fn confirmations_in(root: &Path, params: &Value) -> Result<Value> {
         }
     }
     bootstraps.sort_by(|a, b| a["idempotencyKey"].as_str().cmp(&b["idempotencyKey"].as_str()));
-    Ok(json!({"bootstraps": bootstraps}))
+    Ok(json!({"bootstraps": bootstraps, "personApproval": super::person_approval::availability()}))
 }
 fn account_status(reference: &Reference) -> Result<Value> {
     let (bytes, observation) = reference.account_observation()?;
@@ -158,16 +159,26 @@ fn account_status(reference: &Reference) -> Result<Value> {
     };
     Ok(json!({"observationSha256": journal::digest(&bytes), "accounts": observation["accounts"], "helperAuthenticated": true,
         "accountAuthenticated": authenticated, "chosen": chosen, "answer": answer, "key": key, "hostKey": host_key,
-        "trustAccepted": false, "ready": false}))
+        "personApproval": super::person_approval::availability(), "trustAccepted": false, "ready": false}))
 }
+/// The approval the request carries, verified first. This build has no
+/// approver, so every person-only action is refused here, before any lookup
+/// or effect, whatever the caller sends.
+fn person_approval(params: &Value) -> Result<Presented> {
+    super::person_approval::presented(&super::person_approval::Unavailable, &params["approval"])
+}
+pub(super) const CONFIRM_ACCOUNT: &str = "environment.confirmGuestAccount";
+pub(super) const GRANT_KEY: &str = "environment.grantGuestKey";
+pub(super) const PIN_HOST_KEY: &str = "environment.confirmGuestHostKey";
 /// The person's explicit confirmation of one reported account.
 pub(super) fn confirm_guest_account(params: &Value) -> Result<Value> {
+    let approval = person_approval(params)?;
     let reference = operation(params)?;
     let confirmation: AccountConfirmation = serde_json::from_value(json!({"confirm": params["confirm"],
         "observationSha256": params["observationSha256"], "account": params["account"],
         "parentSession": params["parentSession"], "parentTab": params["parentTab"],
         "parentConversation": params["parentConversation"]}))?;
-    let relay = reference.confirm_account(&confirmation)?;
+    let relay = reference.confirm_account(&confirmation, &approval)?;
     Ok(json!({"relay": relay, "accountAuthenticated": false, "trustAccepted": false, "ready": false}))
 }
 /// The person's request, from the original parent, to install this VM's SSH
@@ -178,6 +189,7 @@ pub(super) fn grant_guest_key(params: &Value) -> Result<Value> {
     if ["publicKey", "privateKey", "keyReference"].iter().any(|name| !params[*name].is_null()) {
         bail!("Key material or references are never accepted from a caller")
     }
+    let approval = person_approval(params)?;
     let reference = operation(params)?;
     let b = &reference.binding;
     if params["parentSession"] != b.parent_session.as_str()
@@ -186,7 +198,7 @@ pub(super) fn grant_guest_key(params: &Value) -> Result<Value> {
     {
         bail!("Only the original parent conversation can install this VM's key")
     }
-    let relay = reference.grant_guest_key_using(&super::host::root()?, Path::new("/usr/bin/ssh-keygen"), Duration::from_secs(15))?;
+    let relay = reference.grant_guest_key_using(&super::host::root()?, Path::new("/usr/bin/ssh-keygen"), Duration::from_secs(15), &approval)?;
     Ok(json!({"relay": relay, "installed": false, "trustAccepted": false, "ready": false}))
 }
 /// The person's confirmation of the guest's SSH host key after reviewing its
@@ -197,12 +209,13 @@ pub(super) fn confirm_guest_host_key(params: &Value) -> Result<Value> {
     if ["hostKey", "publicKey", "knownHosts"].iter().any(|name| !params[*name].is_null()) {
         bail!("Host keys are never accepted from a caller")
     }
+    let approval = person_approval(params)?;
     let reference = operation(params)?;
     let confirmation: HostKeyConfirmation = serde_json::from_value(json!({"confirm": params["confirm"],
         "observationSha256": params["observationSha256"], "fingerprint": params["fingerprint"],
         "parentSession": params["parentSession"], "parentTab": params["parentTab"],
         "parentConversation": params["parentConversation"]}))?;
-    reference.confirm_host_key(&super::host::root()?, &confirmation)
+    reference.confirm_host_key(&super::host::root()?, &confirmation, &approval)
 }
 /// This VM's one original SSH key: `planned`, the reference its provisioning
 /// intent minted, published in `key-intent.json` and produced under exactly
@@ -863,7 +876,15 @@ impl Reference {
     /// parent session, tab and conversation. Recorded once, exclusively, before
     /// it is relayed: a retry re-presents the same choice, and a different
     /// account is refused for good. Relaying authenticates nothing by itself.
-    fn confirm_account(&self, confirmation: &AccountConfirmation) -> Result<Value> {
+    /// The inputs a person approves for confirming `account` from the observation
+    /// with digest `observation_sha256`, from this VM's original parent.
+    fn account_approval_inputs(&self, observation_sha256: &str, account: &Value) -> Value {
+        let b = &self.binding;
+        json!({"bootstrapId": b.bootstrap_id, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": b.owner_epoch,
+            "observationSha256": observation_sha256, "account": account, "parentSession": b.parent_session,
+            "parentTab": b.parent_tab, "parentConversation": b.parent_conversation})
+    }
+    fn confirm_account(&self, confirmation: &AccountConfirmation, approval: &Presented) -> Result<Value> {
         let (bytes, observation) = self.account_observation()?;
         if !confirmation.confirm
             || confirmation.observation_sha256 != journal::digest(&bytes)
@@ -874,6 +895,8 @@ impl Reference {
         {
             bail!("Confirm exactly one observed account from the original parent conversation")
         }
+        let inputs = self.account_approval_inputs(&journal::digest(&bytes), &confirmation.account);
+        approval.consume(&self.root, CONFIRM_ACCOUNT, &inputs, std::time::SystemTime::now())?;
         let record = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&self.raw),
             "ownerEpoch": self.binding.owner_epoch, "observationSha256": confirmation.observation_sha256,
             "account": confirmation.account, "parentSession": self.binding.parent_session,
@@ -946,12 +969,26 @@ impl Reference {
     /// Produces or recovers this VM's one original key, then grants its public
     /// half to the acknowledged account. `utility` is the fixed OpenSSH producer
     /// in production and a synthetic one in fixtures.
-    fn grant_guest_key_using(&self, keys_root: &Path, utility: &Path, budget: Duration) -> Result<Value> {
-        let mut binding = self.key_binding()?;
+    fn grant_guest_key_using(&self, keys_root: &Path, utility: &Path, budget: Duration, approval: &Presented) -> Result<Value> {
+        let (mut binding, inputs) = self.key_approval_inputs(keys_root)?;
+        approval.consume(&self.root, GRANT_KEY, &inputs, std::time::SystemTime::now())?;
         let (planned, intent_digest) = self.planned_key(keys_root)?;
         binding["accountIntentDigest"] = json!(intent_digest);
         let (key_reference, public_key) = original_key(&self.root, keys_root, &planned, &binding, utility, budget)?;
         self.relay_grant(&key_reference, &public_key)
+    }
+    /// The key binding, and the inputs a person approves for granting this VM's
+    /// key: the helper's exact acknowledgement, the account and the planned
+    /// reference. Fails, binding nothing, before that acknowledgement.
+    fn key_approval_inputs(&self, keys_root: &Path) -> Result<(Value, Value)> {
+        let binding = self.key_binding()?;
+        let (planned, _) = self.planned_key(keys_root)?;
+        let b = &self.binding;
+        let inputs = json!({"bootstrapId": b.bootstrap_id, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": b.owner_epoch,
+            "answerSha256": binding["answerSha256"], "account": {"name": binding["account"]["name"], "uid": binding["account"]["uid"]},
+            "keyReference": planned, "parentSession": b.parent_session, "parentTab": b.parent_tab,
+            "parentConversation": b.parent_conversation});
+        Ok((binding, inputs))
     }
     /// The SSH key reference this bootstrap's provisioning intent minted before
     /// the VM existed, and that intent's digest. The post-trust transport uses
@@ -1082,7 +1119,16 @@ impl Reference {
     /// key or observation is refused for good and never re-pinned. Then the
     /// existing ledger records the acknowledged account and this host key, which
     /// the strict SSH plan pins. No SSH connection is made here.
-    fn confirm_host_key(&self, root: &Path, confirmation: &HostKeyConfirmation) -> Result<Value> {
+    /// The inputs a person approves for pinning the host key in the owner's
+    /// observation with digest `observation_sha256`.
+    fn host_key_approval_inputs(&self, observation_sha256: &str, observation: &Value, fingerprint: &str, account: &Value) -> Value {
+        let b = &self.binding;
+        json!({"bootstrapId": b.bootstrap_id, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": b.owner_epoch,
+            "observationSha256": observation_sha256, "fingerprint": fingerprint, "keyReference": observation["keyReference"],
+            "account": {"name": account["name"], "uid": account["uid"]}, "parentSession": b.parent_session,
+            "parentTab": b.parent_tab, "parentConversation": b.parent_conversation})
+    }
+    fn confirm_host_key(&self, root: &Path, confirmation: &HostKeyConfirmation, approval: &Presented) -> Result<Value> {
         let (bytes, observation) = self.host_key_observation()?;
         let host_key = observation["hostKey"].as_str().unwrap_or_default();
         let fingerprint = super::macos_personalization::public_key(host_key)?;
@@ -1110,6 +1156,8 @@ impl Reference {
             home_device: a["homeDevice"].as_u64().context("Confirmed account home device missing")?,
             home_inode: a["homeInode"].as_u64().context("Confirmed account home inode missing")?,
         };
+        let inputs = self.host_key_approval_inputs(&journal::digest(&bytes), &observation, &fingerprint, a);
+        approval.consume(&self.root, PIN_HOST_KEY, &inputs, std::time::SystemTime::now())?;
         let record = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&self.raw), "ownerEpoch": b.owner_epoch,
             "observationSha256": journal::digest(&bytes), "keyResultSha256": observation["keyResultSha256"],
             "grantSha256": observation["grantSha256"], "keyReference": observation["keyReference"],

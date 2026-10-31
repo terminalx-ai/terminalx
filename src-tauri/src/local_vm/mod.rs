@@ -41,3 +41,5 @@ mod macos_bootstrap_helper;
 mod authorized_keys_text;
 #[allow(dead_code)] // Candidate only; no approved profile or production launch route.
 mod macos_owner_channel;
+#[allow(dead_code)] // Person-only actions; this build has no approver, so they fail closed.
+mod person_approval;

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { localVmRequest } from "@/lib/localVm";
-import type { LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmGuestKeyStage } from "@/types/localVm";
+import type { LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmGuestKeyStage, LocalVmPersonApproval } from "@/types/localVm";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 const accountId = (account: LocalVmGuestAccount) => `${account.uid}:${account.name}`;
@@ -23,18 +23,23 @@ export function GuestAccountConfirmations({ session, tab, conversation, readOnly
   session: SessionEntry; tab: TabEntry; conversation: string | null; readOnly: boolean;
 }) {
   const [items, setItems] = useState<LocalVmGuestAccountStatus[] | null>(null);
+  const [approval, setApproval] = useState<LocalVmPersonApproval>({ available: false });
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(async () => {
     if (!conversation) return;
     try {
       const result = await localVmRequest("environment.guestAccountConfirmations", { parentSession: session.id, parentTab: tab.id, parentConversation: conversation });
-      setItems(result.bootstraps); setError(null);
+      setItems(result.bootstraps); setApproval(result.personApproval ?? { available: false }); setError(null);
     } catch (error) { setError(errorMessage(error)); }
   }, [session.id, tab.id, conversation]);
   useEffect(() => { void load(); }, [load]);
   if (!conversation || (!items?.length && !error)) return null;
+  // Person-only steps are refused by the backend unless this build can verify
+  // the person's approval; the guest's reports stay visible either way.
+  const locked = readOnly || !approval.available;
   return <section aria-label="Guest account confirmation" className="space-y-2 py-2">
-    {items?.map((item) => <Confirmation key={item.idempotencyKey} item={item} session={session} tab={tab} conversation={conversation} readOnly={readOnly} reload={load} />)}
+    {!approval.available ? <p role="status" className="text-muted-foreground">{approval.reason ?? "TerminalX cannot yet verify that a person approved these steps."} The guest's reports are shown; choosing an account, installing the key and pinning the host key stay unavailable.</p> : null}
+    {items?.map((item) => <Confirmation key={item.idempotencyKey} item={item} session={session} tab={tab} conversation={conversation} readOnly={locked} reload={load} />)}
     {error ? <p role="alert" className="text-destructive">{error}</p> : null}
   </section>;
 }
