@@ -18,7 +18,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::model::{AccountMirror, DeviceProvenance};
-use super::send_ids::{SendIds, SendKey, ID_REUSED};
+use super::send_ids::{Reply, SendIds, SendKey, ID_REUSED, STILL_SENDING};
+use crate::local_runtime::mobile::Repeat;
 use super::wire::{megabytes, ReplyLimits, Transport, Wire};
 use super::{DeviceEntry, DeviceScope, PairingManager};
 use crate::events::{AgentEvent, Payload};
@@ -833,19 +834,53 @@ struct SessionSendParams {
 }
 
 fn send_session(manager: &PairingManager, connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
-    let SessionSendParams { tab_id, text, attachments, client_message_id } = params;
-    let Some(id) = checked_message_id(client_message_id)? else {
-        return deliver(connection, &tab_id, &text, attachments);
-    };
-    let digest = send_digest(&text, &attachments);
-    let key = SendKey { tab_id: tab_id.clone(), client_message_id: id };
-    manager.mobile.send_ids.once(key, digest, || deliver(connection, &tab_id, &text, attachments))
+    send_once(&manager.mobile.send_ids, params, |tab_id, text, attachments, message| {
+        let (session, _) = find_tab(tab_id)?;
+        send_attributed(connection, &session.id, tab_id, text, attachments, message)
+    })
 }
 
-fn deliver(connection: &MobileConnection, tab_id: &str, text: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<Value> {
-    let (session, _) = find_tab(tab_id)?;
-    let outcome = send_attributed(connection, &session.id, tab_id, text, attachments)?;
-    Ok(json!({ "status": "sent", "queued": outcome.queued }))
+/// A phone's send, once per message id (#675). `owner_send` is the
+/// runtime's send, given the id too: a queued send is answered by the
+/// runtime on every repeat, since only it knows where that copy is.
+fn send_once(
+    ids: &SendIds,
+    params: SessionSendParams,
+    owner_send: impl FnOnce(&str, &str, Vec<RemoteAttachmentInput>, Option<&str>) -> Result<OwnerSend>,
+) -> Result<Value> {
+    let SessionSendParams { tab_id, text, attachments, client_message_id } = params;
+    let Some(id) = checked_message_id(client_message_id)? else {
+        return Ok(settle(owner_send(&tab_id, &text, attachments, None)?)?.into_value());
+    };
+    let digest = send_digest(&text, &attachments);
+    let key = SendKey { tab_id: tab_id.clone(), client_message_id: id.clone() };
+    ids.once(key, digest, || settle(owner_send(&tab_id, &text, attachments, Some(&id))?))
+}
+
+/// The phone's reply to what the runtime made of a send.
+fn settle(sent: OwnerSend) -> Result<Reply> {
+    // The first copy is being typed to the agent right now. The draft keeps
+    // its id, so the next try learns whether it arrived.
+    if sent.repeat == Some(Repeat::Delivering) {
+        bail!(STILL_SENDING);
+    }
+    let reply = json!({ "status": "sent", "queued": sent.outcome.queued });
+    // A queued copy is dropped if the connection it came over closes before
+    // the agent's turn ends, and that is the connection whose drop lost this
+    // reply. So a queued reply answers no repeat: each goes to the runtime,
+    // which delivers, re-queues or reports that copy instead of adding one.
+    Ok(if sent.outcome.queued { Reply::Unsettled(reply) } else { Reply::Settled(reply) })
+}
+
+/// The runtime's answer to a send: its outcome and, for a phone message sent
+/// again, what it found of the first copy (#675). An older runtime ignores the
+/// id and never reports `repeat`; its outcome reads as it always has.
+#[derive(Deserialize)]
+struct OwnerSend {
+    #[serde(flatten)]
+    outcome: crate::session::SendOutcome,
+    #[serde(default)]
+    repeat: Option<Repeat>,
 }
 
 /// The id a phone gave a message (#675): a UUID, held to what fits a key.
@@ -969,26 +1004,32 @@ fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostPar
         promoted_to: Vec::new(),
         client_message_id,
     };
-    {
-        let _guard = manager.mobile.notes.lock().unwrap();
-        let mut file = load_notes()?;
-        let notes = file.sessions.entry(params.worktree_id.clone()).or_default();
-        // Found under the same lock that adds notes: two tries of one draft
-        // cannot both miss each other.
-        if let Some(earlier) = posted_before(notes, &note)? {
-            return Ok(json!({ "status": "sent", "message": earlier }));
-        }
-        notes.push(note.clone());
-        if notes.len() > NOTES_LIMIT {
-            notes.drain(..notes.len() - NOTES_LIMIT);
-        }
-        save_notes(&file)?;
+    let (note, added) = add_note(&manager.mobile.notes, &params.worktree_id, note)?;
+    if added {
+        manager.mobile.broadcast(json!({
+            "method": "chat.changed",
+            "params": { "worktreeId": params.worktree_id },
+        }));
     }
-    manager.mobile.broadcast(json!({
-        "method": "chat.changed",
-        "params": { "worktreeId": params.worktree_id },
-    }));
     Ok(json!({ "status": "sent", "message": note }))
+}
+
+/// Add `note` to its worktree's notes, unless its draft was already posted
+/// (#675): then that note, and false. Looked up under the same lock that
+/// adds notes, so two tries of one draft cannot both miss each other.
+fn add_note(lock: &Mutex<()>, worktree_id: &str, note: ChatNote) -> Result<(ChatNote, bool)> {
+    let _guard = lock.lock().unwrap();
+    let mut file = load_notes()?;
+    let notes = file.sessions.entry(worktree_id.to_string()).or_default();
+    if let Some(earlier) = posted_before(notes, &note)? {
+        return Ok((earlier.clone(), false));
+    }
+    notes.push(note.clone());
+    if notes.len() > NOTES_LIMIT {
+        notes.drain(..notes.len() - NOTES_LIMIT);
+    }
+    save_notes(&file)?;
+    Ok((note, true))
 }
 
 /// The note this draft was already posted as, if it was (#675): returned as
@@ -1034,7 +1075,7 @@ fn promote_notes(manager: &PairingManager, connection: &MobileConnection, params
         text.push(note.body.clone());
     }
     drop(_guard);
-    let outcome = send_attributed(connection, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)?;
+    let outcome = send_attributed(connection, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments, None)?.outcome;
     let message = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. }));
     if let Some(message) = message {
         let promotion = NotePromotion { tab_id: params.tab_id.clone(), seq: message.seq };
@@ -1082,7 +1123,8 @@ fn send_attributed(
     tab_id: &str,
     text: &str,
     attachments: Vec<RemoteAttachmentInput>,
-) -> Result<crate::session::SendOutcome> {
+    message: Option<&str>,
+) -> Result<OwnerSend> {
     validate_session_tab(session_id, tab_id)?;
     let text = text.trim();
     if text.is_empty() && attachments.is_empty() {
@@ -1100,8 +1142,11 @@ fn send_attributed(
         prompt.push('@');
         prompt.push_str(&path);
     }
-    serde_json::from_value(connection.call("send", json!({"sessionId":session_id,"tabId":tab_id,
-        "text":text,"prompt":prompt,"images":images}))?).context("Invalid owner send result")
+    let mut params = json!({"sessionId":session_id,"tabId":tab_id,"text":text,"prompt":prompt,"images":images});
+    if let Some(message) = message {
+        params["clientMessageId"] = json!(message);
+    }
+    serde_json::from_value(connection.call("send", params)?).context("Invalid owner send result")
 }
 
 fn prepare_attachments(session_id: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<(Vec<crate::session::ImageInput>, Vec<String>)> {
@@ -1989,6 +2034,94 @@ mod tests {
         ] {
             assert_ne!(first, edited);
         }
+    }
+
+    /// What the runtime was asked to send: tab, text, attachment count and id.
+    type OwnerCalls = std::cell::RefCell<Vec<(String, String, usize, Option<String>)>>;
+
+    /// A phone send through `send_once`, against a runtime answering
+    /// `answer` as its JSON would read. Records what the runtime was asked.
+    fn sends(ids: &SendIds, calls: &OwnerCalls, text: &str, id: Option<&str>, answer: Value) -> Result<Value> {
+        let params: SessionSendParams = serde_json::from_value(json!({
+            "tabId": "tab", "text": text, "clientMessageId": id,
+            "attachments": [{ "mediaType": "image/png", "data": general_purpose::STANDARD.encode([1]), "name": "a.png" }],
+        })).unwrap();
+        send_once(ids, params, |tab_id, text, attachments, message| {
+            calls.borrow_mut().push((tab_id.into(), text.into(), attachments.len(), message.map(str::to_owned)));
+            Ok(serde_json::from_value(answer)?)
+        })
+    }
+
+    #[test]
+    fn a_send_the_agent_has_is_answered_again_without_sending() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = SendIds::at(dir.path().join("sends.json"));
+        let calls = std::cell::RefCell::new(Vec::new());
+        let sent = json!({ "status": "sent", "queued": false });
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap(), sent);
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap(), sent);
+        assert_eq!(*calls.borrow(), vec![("tab".into(), "Ship it".into(), 1, Some("draft-0001".into()))]);
+        // The same id with another message is refused before the runtime sees it.
+        assert_eq!(sends(&ids, &calls, "Ship it now", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap_err().to_string(), ID_REUSED);
+        // Without an id (an older phone) every send goes through.
+        sends(&ids, &calls, "Ship it", None, json!({ "queued": false, "events": [] })).unwrap();
+        sends(&ids, &calls, "Ship it", None, json!({ "queued": false, "events": [] })).unwrap();
+        assert_eq!(calls.borrow()[1..], [("tab".into(), "Ship it".into(), 1, None), ("tab".into(), "Ship it".into(), 1, None)]);
+    }
+
+    #[test]
+    fn a_queued_send_goes_to_the_runtime_on_every_repeat_until_it_is_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = SendIds::at(dir.path().join("sends.json"));
+        let calls = std::cell::RefCell::new(Vec::new());
+        let queued = json!({ "status": "sent", "queued": true });
+        // The agent's turn is open, and the reply saying so is lost.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [] })).unwrap(), queued);
+        // Not answered from here: the runtime is asked, with the id, and finds
+        // the copy queued under the dropped connection.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [], "repeat": "requeued" })).unwrap(), queued);
+        // An older runtime knows no ids, and queues it again: as on a Mac
+        // before #675, never lost.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [] })).unwrap(), queued);
+        // Being typed to the agent right now: not known yet, so not sent.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [], "repeat": "delivering" })).unwrap_err().to_string(), STILL_SENDING);
+        // Delivered: that settles it, and later repeats are answered here.
+        let sent = json!({ "status": "sent", "queued": false });
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [], "repeat": "delivered" })).unwrap(), sent);
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap(), sent);
+        assert_eq!(calls.borrow().len(), 5);
+        assert!(calls.borrow().iter().all(|call| *call == ("tab".into(), "Ship it".into(), 1, Some("draft-0001".into()))));
+    }
+
+    #[test]
+    fn a_note_posted_again_adds_nothing_and_returns_the_first() {
+        let _home = store::temp_home();
+        let lock = Mutex::new(());
+        let note = |id: &str, body: &str, client: Option<&str>| ChatNote {
+            id: id.into(),
+            body: body.into(),
+            created_at: 1,
+            author: NoteAuthor { user_id: "user-1".into(), display_name: "Paresh".into() },
+            promoted_to: Vec::new(),
+            client_message_id: client.map(str::to_owned),
+        };
+        let saved = || load_notes().unwrap().sessions.remove("worktree").unwrap_or_default().into_iter().map(|note| note.id).collect::<Vec<_>>();
+
+        let (first, added) = add_note(&lock, "worktree", note("note-1", "Deploying at 5", Some("draft-1"))).unwrap();
+        assert!(added);
+        let (again, added) = add_note(&lock, "worktree", note("note-2", "Deploying at 5", Some("draft-1"))).unwrap();
+        assert!(!added);
+        assert_eq!(again.id, first.id);
+        assert_eq!(saved(), vec!["note-1"]);
+
+        // Another draft, a phone that sends no id, or another worktree: added.
+        assert!(add_note(&lock, "worktree", note("note-3", "Deploying at 5", Some("draft-2"))).unwrap().1);
+        assert!(add_note(&lock, "worktree", note("note-4", "Deploying at 5", None)).unwrap().1);
+        assert!(add_note(&lock, "worktree", note("note-5", "Deploying at 5", None)).unwrap().1);
+        assert!(add_note(&lock, "elsewhere", note("note-6", "Deploying at 5", Some("draft-1"))).unwrap().1);
+        // The id with other text: refused, and nothing written.
+        assert_eq!(add_note(&lock, "worktree", note("note-7", "Deploying at 6", Some("draft-1"))).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(saved(), vec!["note-1", "note-3", "note-4", "note-5"]);
     }
 
     #[test]

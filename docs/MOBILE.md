@@ -277,16 +277,27 @@ reports `sendIds: 1` in `sync.capabilities` accepts the field on `session.send`
 and `chat.post`; the phone sends it to no other host, since every params type
 refuses fields it does not know.
 
-- `session.send`: the host keeps its reply (`{ status, queued }`) for each
-  tab and id in `mobile-sends.json`, for 24 hours and at most 1,000 replies. A
-  repeat returns that reply and sends nothing. One that arrives while the
-  first is still being sent waits up to 20 seconds for its reply (the phone
-  gives up after 30) and is otherwise refused with a message to try again in a
-  moment. A send that failed is not kept; sending it again tries it in full.
+- `session.send`, delivered: the host keeps its reply (`{ status, queued }`)
+  for each tab and id in `mobile-sends.json`, for 24 hours and at most 1,000
+  replies. A repeat returns that reply and sends nothing.
+- `session.send`, queued behind the agent's turn: the queued copy belongs to
+  the connection it came over, and is skipped if that connection closes before
+  the turn ends; that is the connection whose drop lost the reply. So a queued
+  reply answers no repeat. The repeat goes to the runtime with the id, which
+  knows where the first copy is: delivered (it answers sent, and sends
+  nothing), still queued (that copy moves under the new connection, in the
+  same place in line, instead of a second one joining it), being delivered
+  right now (refused, to try again in a moment), or dropped (sent as new). A
+  runtime that predates #675 ignores the id and queues it again, as before.
+- A repeat that arrives while the first try is still being sent is refused at
+  once, with a message to send it again in a moment, rather than holding the
+  connection it came over. A send that failed is not kept; sending it again
+  tries it in full.
 - `chat.post`: the note records the id, and the same draft posted again
   returns that note, promotions included, without adding another.
 - The same id with other text or attachments is refused, never answered with
   the reply to a different message.
+
 Presence aggregates multiple surfaces belonging to the same verified person.
 The host must still have `multiplayer.use`, and the session must have passed the
 Bypass-mode share gate.
