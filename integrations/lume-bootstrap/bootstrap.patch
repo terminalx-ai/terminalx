@@ -82,6 +82,27 @@
              Logger.error("Failed to run VM", metadata: ["error": error.localizedDescription])
              throw error
          }
+--- a/libs/lume/src/SSH/SystemSSHClient.swift
++++ b/libs/lume/src/SSH/SystemSSHClient.swift
+@@ -387,7 +387,7 @@
+     // MARK: - Private
+ 
+     private func sshArguments(extraArgs: [String]) -> [String] {
+-        var args = [
++        var args = TerminalXSSHPolicy.arguments + [
+             "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null",
+             "-o", "LogLevel=ERROR",
+@@ -442,8 +442,7 @@
+         sourcePaths: [String],
+         destinationDirectory: String
+     ) -> [String] {
+-        var args = [
+-            "-q", "-r",
++        var args = ["-q", "-r"] + TerminalXSSHPolicy.arguments + [
+             "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null",
+             "-o", "LogLevel=ERROR",
 --- a/libs/lume/src/VM/VM.swift
 +++ b/libs/lume/src/VM/VM.swift
 @@ -50,6 +50,8 @@
@@ -1620,3 +1641,32 @@
 +    init(_ connection: VZVirtioSocketConnection) { self.connection = connection }
 +}
 +#endif
+--- /dev/null
++++ b/libs/lume/src/TerminalXBootstrap/TerminalXSSHPolicy.swift
+@@ -0,0 +1,26 @@
++// Fixed options for every system `ssh` and `scp` that Lume runs when its
++// built-in client cannot connect. `-F /dev/null` reads neither the user's nor
++// the system's ssh_config, so a host configuration cannot forward the agent,
++// ports, X11, a tunnel or environment variables to the guest, run a local or
++// proxy command, or share a control connection. Each option also wins over a
++// configuration file by itself. Lume signs in with the guest password, so no
++// host key is offered either.
++enum TerminalXSSHPolicy {
++    static let arguments = [
++        "-F", "/dev/null",
++        "-o", "ForwardAgent=no",
++        "-o", "IdentityAgent=none",
++        "-o", "ForwardX11=no",
++        "-o", "ClearAllForwardings=yes",
++        "-o", "Tunnel=no",
++        "-o", "PermitLocalCommand=no",
++        "-o", "ProxyCommand=none",
++        "-o", "ProxyJump=none",
++        "-o", "ControlMaster=no",
++        "-o", "ControlPath=none",
++        "-o", "PubkeyAuthentication=no",
++        "-o", "HostbasedAuthentication=no",
++        "-o", "GSSAPIAuthentication=no",
++        "-o", "PKCS11Provider=none",
++    ]
++}

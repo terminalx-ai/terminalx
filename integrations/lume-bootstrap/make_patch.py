@@ -12,6 +12,7 @@ PINS = {
     "Package.swift": "2c0520b2c097ace92be3a8312c7a3ca722141f825e9281807df7a9396a42cb7b",
     "src/Commands/Run.swift": "f7946c96b086115f92ea3dde118249417624ccb1e94c211fe7c9a4c5e38c229e",
     "src/LumeController.swift": "dc492065d56dec99ac1e6224c03f0486eb3252e088b44a47cdeac052cb82edcb",
+    "src/SSH/SystemSSHClient.swift": "be761fd85608087007448273acb2842921dd14b29e29d0b1fb8ce805d638fad7",
     "src/VM/VM.swift": "fef4b8760d61947078575931a37bda0b2625104363f915c8a0d46712696b5b15",
     "src/Virtualization/VMVirtualizationService.swift": "93b81a4d30d5cfe15ee893ba675d9b0fb2a4ac9b1976cb7dee976708847c88e0",
 }
@@ -111,6 +112,19 @@ def render(base):
         edit(vm, signature, signature + "\n        try txRequire(!terminalXBootstrapMode)")
     edit(vm, "        removeShutdownSignalHandlers()", "        terminalXBootstrapOwner?.close()\n        terminalXBootstrapOwner = nil\n        removeShutdownSignalHandlers()")
     edit(vm, "        if !activeVNCPolicy.isEnabled {", "        if !activeVNCPolicy.isEnabled && !terminalXBootstrapMode {")
+
+    # The system ssh/scp fallback reads no ssh_config and forwards nothing
+    # (TerminalXSSHPolicy); `lume ssh` reaches it when its built-in client fails.
+    ssh = "src/SSH/SystemSSHClient.swift"
+    edit(ssh, """    private func sshArguments(extraArgs: [String]) -> [String] {
+        var args = [
+            "-o", "StrictHostKeyChecking=no",""", """    private func sshArguments(extraArgs: [String]) -> [String] {
+        var args = TerminalXSSHPolicy.arguments + [
+            "-o", "StrictHostKeyChecking=no",""")
+    edit(ssh, """        var args = [
+            "-q", "-r",
+            "-o", "StrictHostKeyChecking=no",""", """        var args = ["-q", "-r"] + TerminalXSSHPolicy.arguments + [
+            "-o", "StrictHostKeyChecking=no",""")
 
     service = "src/Virtualization/VMVirtualizationService.swift"
     edit(service, "    let networkMode: NetworkMode\n}", "    let networkMode: NetworkMode\n    var terminalXBootstrapMode: Bool = false\n}")

@@ -846,7 +846,7 @@ What a process in the guest, including guest root, can reach on the host.
 | Inputs sent to the guest | Read the files the host selected | Read other host files: at most 64 files and 10 MiB, canonicalized inside the chosen root, credential paths refused, bytes pinned to the approved hashes | `real_files_require_approved_bytes_and_reject_symlink_escape` | — |
 | Host credentials and tokens | — | Receive the host control token, socket, hook tokens or Cua daemon tokens (`process::remove_control_credentials`). On the personalized path, any inherited variable (`env_clear`). | `process.rs`; the transport, delivery, first-connection and owner fixtures assert no `SSH_AUTH_SOCK`, `TERMINALX_NEXT_TOKEN`, `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` | Provider sign-in happens inside the guest; nothing is imported |
 | SSH, personalized path | Answer as the pinned host key | Use any forwarding: `-F none`, `IdentityAgent=none`, `ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes`, `ProxyCommand=none`, `ControlMaster=no`, `PermitLocalCommand=no`, `StrictHostKeyChecking=yes` against one pinned line | `ssh_plan_pins_guest_host_key_account_and_target_without_inherited_authentication` | Admission is closed; never run live |
-| SSH, legacy path (`cua sb exec`) | Run as the guest account that Lume signs in to | Since this checkpoint, reach the host SSH agent through `SSH_AUTH_SOCK` (`process::without_host_agent`) | `guest_session_tools_never_inherit_the_host_ssh_agent` (new) | Pinned Cua 0.7.0 calls `lume ssh` (`cua-vmm` `lume/mod.rs`). Lume tries its built-in client first, then falls back to `/usr/bin/ssh` with the user's `~/.ssh/config`, `StrictHostKeyChecking=no` and the inherited environment. In that fallback, a user config that names an agent with `IdentityAgent` and enables `ForwardAgent`, or sets `RemoteForward` or `SendEnv`, for the VM's address would still apply. Not verified live. |
+| SSH, legacy path (`cua sb exec`) | Run as the guest account that Lume signs in to | Reach the host SSH agent through `SSH_AUTH_SOCK` (`process::without_host_agent`, active). In TerminalX's Lume candidate, also any forwarding, environment or command from an ssh_config: its system `ssh`/`scp` fallback reads no config (`-F /dev/null`) and fixes `ForwardAgent=no`, `IdentityAgent=none`, `ClearAllForwardings=yes`, `Tunnel=no`, `PermitLocalCommand=no`, `ProxyCommand=none`, `ControlMaster=no` and password-only sign-in (`TerminalXSSHPolicy`, patch `019f29dc…`) | `guest_session_tools_never_inherit_the_host_ssh_agent`; `Tests/ssh_policy_test.py` evaluates the compiled options with `ssh -G` (no connection) against a hostile config, which also shows that only `-F /dev/null` removes `SendEnv` and `SetEnv`; build 13 compiles it | **Open in the shipped path:** pinned Cua 0.7.0 runs the pinned Cua-signed Lume 0.6.1 (`lume ssh`), whose fallback to `/usr/bin/ssh` still reads the user's `~/.ssh/config` with `StrictHostKeyChecking=no`. A guest can provoke that fallback by refusing the first TCP connection. Closing it needs TerminalX's own Lume build in that slot, which waits on the held signing and adoption. Not verified live. |
 | Computer and MCP endpoints | Serve its own Driver tools to the host's attachment adapter, which carries back data | Reach the host desktop: the guest worker gets only guest native and browser tools (`desktop.rs`); provider MCP names only `local-vm-computer --stdio --task <bound target>`; no host Unix socket is forwarded or shared | `provider_mcp_configs_only_name_the_bound_guest_proxy` | — |
 | Shares | Nothing on a version-3 VM, which has no host share since the share-free checkpoint. Versions 1 and 2, which have no production route, keep `bo/<key>/input` (read-only) and `bo/<key>/receipt` | Have a share at all on version 3: no input or receipt directory is created, bound or passed to Lume, and the owner refuses a version-3 run or VM with any share, or a binding that still names one. Read the enrollment key or `control.capability` (never in a share). Personalized Create passes no share. | Native: `native_seeded_launch_binds_version_3_and_accepts_only_exact_helper_enrollment`, `native_a_version_3_owner_refuses_a_mounted_share_and_a_binding_that_still_names_one`; Swift protocol suite; plan tests | VirtioFS confinement for versions 1 and 2 is Apple's and untested here. What `cua sb create` shares on the legacy path is not verified. |
 | Network | Use NAT egress, and reach host services listening on all interfaces, as a LAN peer would: TerminalX's nearby pairing listener on `0.0.0.0:6768` (`pairing/direct.rs`) and anything else the user runs that way | Reach host loopback services: TerminalX's local listeners bind `127.0.0.1`, as does Lume's API at the pinned commit (`127.0.0.1:7777`) | — | Live vmnet reachability and the user's other listeners are not verified |
@@ -859,18 +859,21 @@ What a process in the guest, including guest root, can reach on the host.
 source review, within its own channels the guest cannot do any of these:
 
 - read host files beyond what the host sends;
-- obtain host tokens or, since this checkpoint, the host SSH agent through the
-  environment;
+- obtain host tokens, or the host SSH agent through the environment;
 - reach the host desktop or loopback services;
 - write anywhere on the host except its task's bounded artifact store;
 - change a host checkout without a host request.
 
-Three limits remain:
+Four limits remain:
 
 - **Disk use.** Artifact import is bounded per task (128 artifacts, 256 MiB),
   and each new task adds its own budget.
 - **Network.** It can reach host services listening on all interfaces, as any
   LAN peer can.
+- **Legacy SSH fallback.** Until TerminalX's own Lume replaces the pinned Cua
+  release, the legacy path's fallback still applies the user's ssh_config. If
+  that config forwards an agent named with `IdentityAgent`, ports or
+  environment variables to the VM's address, the guest receives them.
 - **Guest-written content.** Patches and text it writes reach the host as
   data. Host agents and people must review that data before acting on it.
 

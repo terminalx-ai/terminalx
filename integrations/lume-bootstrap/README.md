@@ -99,7 +99,14 @@ The fixed operations are `observe`, `accountReceipt`, `keyReceipt` and
 authentication is available. Receipt
 names are fixed inside the original writable share of versions 1 and 2. A
 version-3 binding has no share: its run passes no `--shared-dir`, and the owner
-refuses one, a mounted share, or a binding that names a share. No request can choose a
+refuses one, a mounted share, or a binding that names a share.
+
+`TerminalXSSHPolicy` fixes the options of Lume's system `ssh` and `scp`
+fallback, which `lume ssh` uses when its built-in client cannot connect:
+`-F /dev/null` (no user or system ssh_config) plus no agent, X11, port,
+tunnel, local-command, proxy or control-socket use, and password-only sign-in.
+`Tests/ssh_policy_test.py` checks the compiled options against a hostile
+ssh_config with `ssh -G`, which evaluates configuration without connecting. No request can choose a
 filename, host endpoint, VM, share, account, input action or termination target.
 
 ## Original host launch lifecycle

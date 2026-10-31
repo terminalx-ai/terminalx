@@ -42,6 +42,8 @@ def main():
         helper=helper_target/'debug/examples/enroll-fixture'
         run('python3',str(HERE/'Tests/protocol_test.py'),str(binary),str(helper),env=env)
         run('python3',str(HERE/'Tests/enrollment_test.py'),str(binary),str(helper),env=env)
-    print(json.dumps({'patchAppliesToPinnedSource':True,'patchedSwiftParsed':True,'ownerAndAppleAdapterTypechecked':True,'nativeProtocolFixtures':'passed','enrollmentV2CrossLanguage':'passed','enrollmentListenerV3':'passed','fullUpstreamBuildVerified':False,'profileInstalled':False,'consoleEnabled':False,'liveAcceptanceVerified':False}))
+        # The patched ssh/scp fallback options against a hostile ssh_config (`ssh -G` evaluation only).
+        run('python3',str(HERE/'Tests/ssh_policy_test.py'),str(binary),env=env)
+    print(json.dumps({'patchAppliesToPinnedSource':True,'patchedSwiftParsed':True,'ownerAndAppleAdapterTypechecked':True,'nativeProtocolFixtures':'passed','enrollmentV2CrossLanguage':'passed','enrollmentListenerV3':'passed','sshFallbackPolicy':'passed','fullUpstreamBuildVerified':False,'profileInstalled':False,'consoleEnabled':False,'liveAcceptanceVerified':False}))
 
 if __name__=='__main__':main()

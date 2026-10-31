@@ -53,6 +53,11 @@ import Darwin
                 "sessionRetained": service.session != nil]), as: UTF8.self))
             return
         }
+        // ssh-policy: the fixed options Lume's system ssh and scp fallback use.
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "ssh-policy" {
+            print(String(decoding: try txJSON(["arguments": TerminalXSSHPolicy.arguments]), as: UTF8.self))
+            return
+        }
         // publish <owned directory> <count> <size>: the real TXPinnedPath.writeNew
         // for enrollment-attempt-N.json records, for reader-race and path tests.
         if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "publish",

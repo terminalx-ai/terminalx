@@ -47,7 +47,15 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   retirement record actions (patch `ef880012…`, commit `17011ad4`), 22,129,816
   bytes, SHA-256
   `3682708efb6864bd28fa2121a5724f564f64908ac1c108b7b0fe8cb07c58c6ea`, again
-  with no warnings or errors in TerminalX sources.
+  with no warnings or errors in TerminalX sources. With no host share for version 3
+  (patch `5675cf19…`, commit `95d481d1`) and the fixed system ssh/scp fallback
+  options (patch `019f29dc…`, which also pins upstream
+  `src/SSH/SystemSSHClient.swift` at `be761fd8…`), build 13 in `work-13`
+  produced 22,131,000 bytes, SHA-256
+  `dd34b87667b4936ef44e23f3359f979271cdcc2b1c9ea711b9a02e2a17571437`, with no
+  warnings or errors in TerminalX sources or the edited upstream file. The
+  policy strings are present in it and absent from build 12 (static `strings`
+  check; the executable was not run).
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those
