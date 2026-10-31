@@ -534,6 +534,62 @@ connected to anything.
     With admission closed it says SSH to this VM is not enabled in this
     build.
 
+### Personalized environment record
+
+**2026-10-31 (source and fixtures only).** The trace found no production
+code that turned a pinned bootstrap into the Local VM environment its
+transport needs; only tests built that environment. Delivery, the first
+connection and every guest RPC need one.
+
+- **Where each field comes from.** `macos_environment.rs` builds the
+  environment only from records the host already verifies:
+
+  | Field | Verified source |
+  | --- | --- |
+  | VM, environment id and generation | The original completed restore (`macos_provision::created_for_bootstrap`), whose endpoint pin is re-verified |
+  | Sandbox | That pin's recorded `local:terminalx-<key>` (new read-only `macos_endpoint::pinned_sandbox`) |
+  | Account and home | The ledger's account receipt (`retained`) |
+  | Host key and trust | The ledger's trust receipt, which must equal the person's pin in `host-key-confirmation.json` (key, fingerprint, observation digest, key reference, account) |
+  | Per-VM key | The produced original reference, accepted only through `retained_public` (version-3 binding for this bootstrap, VM and account) |
+  | Runtime | An `ApprovedRuntime` |
+
+  The request supplies only the display name. The binding then passes
+  `check_retained` and `macos_transport::binding`.
+- **Recording.**
+  - The environment is recorded once.
+  - An identical retry returns the original record.
+  - A different name or runtime, a deleted record, another environment with
+    the same sandbox, or another claim on the bootstrap is refused, never
+    replaced or recreated.
+  - Stale evidence (a changed VM, pin, trust or key) is refused even on an
+    identical retry.
+- **Route and gates.** The route is `environment.bindPersonalizedTransport`
+  (`confirm: true`, onboarding-gated). It refuses at `require_available()`,
+  and then at `ApprovedRuntime::production()`, before reading or writing
+  anything.
+- **Dependency: approved runtime.** The profile names the runtime as "the
+  signed runtime bundled with this TerminalX owner", and the guest checks it
+  against its own executable's SHA-256 (`bootstrap::owner_runtime_sha256`).
+  Nothing in source pins the TerminalX release signing identity or a runtime
+  catalog entry. Taking the running executable's digest would bind a local
+  development build. So no approved runtime exists in this build. That
+  depends on the held signing and distribution work, not on either open
+  consent choice.
+- **Tests.**
+  - **Native, against the compiled owner, after the real version-3 key,
+    grant and pin:**
+    - nothing is bound before the pin;
+    - the exact binding is recorded once, and an identical retry returns it;
+    - a conflicting name or runtime, a malformed digest and a deleted record
+      are refused;
+    - another pinned key, observation, key reference or account, a missing
+      pin record, a forged key binding, another environment holding the
+      sandbox, and a changed VM are refused, and nothing is recorded or
+      replaced.
+  - **Unit:** the production entry refuses before reading anything.
+- **No real records.** No environment was created on the running
+  installation.
+
 ### Guest helper executable
 
 **2026-10-31.** `terminalx-vm-bootstrap` (`native/vm-bootstrap`, run loop
