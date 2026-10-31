@@ -31,7 +31,11 @@ fn parse(bytes: &[u8]) -> io::Result<String> {
     let text = std::str::from_utf8(bytes).map_err(|_| refused("the host key is not text"))?;
     let line = text.strip_suffix('\n').unwrap_or(text);
     let mut parts = line.split(' ');
-    let (kind, blob, comment) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default(), parts.next());
+    let (kind, blob, comment) = (
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+        parts.next(),
+    );
     let decoded = STANDARD.decode(blob).unwrap_or_default();
     if kind != "ssh-ed25519"
         || parts.next().is_some()
@@ -59,10 +63,14 @@ pub fn read_host_key(ssh_dir: &Path, owner: u32) -> io::Result<Option<String>> {
     }
     let (file, before) = dir.open_regular(HOST_KEY)?;
     if before.st_uid != owner || before.st_mode & 0o022 != 0 || before.st_nlink != 1 {
-        return Err(refused("the public host key is writable by another account"));
+        return Err(refused(
+            "the public host key is writable by another account",
+        ));
     }
     let mut bytes = Vec::new();
-    Read::by_ref(&mut &file).take(4097).read_to_end(&mut bytes)?;
+    Read::by_ref(&mut &file)
+        .take(4097)
+        .read_to_end(&mut bytes)?;
     let after = fstat(file.as_raw_fd())?;
     if bytes.len() > 4096
         || after.st_size != before.st_size
@@ -135,12 +143,16 @@ mod tests {
     }
     fn write(dir: &Path, text: &str, mode: u32) {
         std::fs::write(dir.join(HOST_KEY), text).unwrap();
-        std::fs::set_permissions(dir.join(HOST_KEY), std::fs::Permissions::from_mode(mode)).unwrap();
+        std::fs::set_permissions(dir.join(HOST_KEY), std::fs::Permissions::from_mode(mode))
+            .unwrap();
     }
 
     #[test]
     fn only_one_ed25519_public_host_key_line_is_accepted() {
-        assert_eq!(parse(format!("{} root@guest\n", key(3)).as_bytes()).unwrap(), key(3));
+        assert_eq!(
+            parse(format!("{} root@guest\n", key(3)).as_bytes()).unwrap(),
+            key(3)
+        );
         assert_eq!(parse(key(3).as_bytes()).unwrap(), key(3));
         let blob = key(3).split_once(' ').unwrap().1.to_string();
         for bad in [
@@ -163,12 +175,29 @@ mod tests {
         assert_eq!(read_host_key(temp.path(), euid()).unwrap(), None);
         write(temp.path(), &format!("{} root@guest\n", key(5)), 0o644);
         assert_eq!(read_host_key(temp.path(), euid()).unwrap(), Some(key(5)));
-        assert!(read_host_key(temp.path(), euid() + 1).is_err(), "another owner");
-        std::fs::set_permissions(temp.path().join(HOST_KEY), std::fs::Permissions::from_mode(0o664)).unwrap();
-        assert!(read_host_key(temp.path(), euid()).is_err(), "group-writable file");
-        std::fs::set_permissions(temp.path().join(HOST_KEY), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            read_host_key(temp.path(), euid() + 1).is_err(),
+            "another owner"
+        );
+        std::fs::set_permissions(
+            temp.path().join(HOST_KEY),
+            std::fs::Permissions::from_mode(0o664),
+        )
+        .unwrap();
+        assert!(
+            read_host_key(temp.path(), euid()).is_err(),
+            "group-writable file"
+        );
+        std::fs::set_permissions(
+            temp.path().join(HOST_KEY),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o775)).unwrap();
-        assert!(read_host_key(temp.path(), euid()).is_err(), "group-writable directory");
+        assert!(
+            read_host_key(temp.path(), euid()).is_err(),
+            "group-writable directory"
+        );
     }
 
     #[test]
@@ -189,20 +218,46 @@ mod tests {
         let session_key = [0x41; 32];
         let (mut helper, mut owner) = UnixStream::pair().unwrap();
         let mut session = Session::fixture(session_key);
-        let none = report_host_key(&mut session, &mut helper, REFERENCE, temp.path(), euid(), Duration::from_millis(200)).unwrap();
+        let none = report_host_key(
+            &mut session,
+            &mut helper,
+            REFERENCE,
+            temp.path(),
+            euid(),
+            Duration::from_millis(200),
+        )
+        .unwrap();
         assert_eq!(none, None);
         let pending = json!({"hostKeyPending": {"keyReference": REFERENCE}});
-        let frame = |seq: u64, owner: &mut UnixStream| Session::helper_body(&session_key, seq, &read_frame(owner, Instant::now() + Duration::from_secs(1)).unwrap()).unwrap();
+        let frame = |seq: u64, owner: &mut UnixStream| {
+            Session::helper_body(
+                &session_key,
+                seq,
+                &read_frame(owner, Instant::now() + Duration::from_secs(1)).unwrap(),
+            )
+            .unwrap()
+        };
         assert_eq!(frame(0, &mut owner), pending, "waiting, never a key");
         let path = temp.path().to_path_buf();
         let writer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(150));
             write(&path, &key(8), 0o644);
         });
-        let reported = report_host_key(&mut session, &mut helper, REFERENCE, temp.path(), euid(), Duration::from_secs(5)).unwrap();
+        let reported = report_host_key(
+            &mut session,
+            &mut helper,
+            REFERENCE,
+            temp.path(),
+            euid(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
         writer.join().unwrap();
         assert_eq!(reported, Some(key(8)));
         assert_eq!(frame(1, &mut owner), pending);
-        assert_eq!(frame(2, &mut owner), json!({"hostKey": {"keyReference": REFERENCE, "publicKey": key(8)}}));
+        assert_eq!(
+            frame(2, &mut owner),
+            json!({"hostKey": {"keyReference": REFERENCE, "publicKey": key(8)}})
+        );
     }
 }

@@ -359,6 +359,49 @@ pub fn enroll(
     Ok((session, challenge_sha256))
 }
 
+/// A conforming owner's side of one enrollment, written against the spec for
+/// in-crate fixtures: reads the hello, sends a challenge (changed by `tamper`),
+/// verifies the proof and sends the tagged acceptance. Returns the proof and
+/// the session key. The real owner is the Swift implementation, covered
+/// cross-language.
+#[cfg(test)]
+pub(crate) fn accept_fixture(
+    stream: &mut impl Stream,
+    key: [u8; 32],
+    tamper: fn(&mut Value),
+) -> io::Result<(Value, [u8; 32])> {
+    let deadline = || Instant::now() + Duration::from_secs(3);
+    let hello: Value = serde_json::from_slice(&read_frame(stream, deadline())?)?;
+    let mut challenge = json!({"bindingDigest": "d".repeat(64), "bootstrapId": hello["bootstrapId"],
+        "clientNonce": hello["clientNonce"], "ownerEpoch": "epoch-7", "seedId": hello["seedId"],
+        "seedReceiptSha256": "e".repeat(64), "serverNonce": crate::hex(&crate::random::<32>()?), "version": 2});
+    tamper(&mut challenge);
+    let bytes = canonical(&challenge);
+    write_frame(stream, &bytes, deadline())?;
+    let proof: Value = serde_json::from_slice(&read_frame(stream, deadline())?)?;
+    let challenge_sha256 = sha256(&bytes);
+    verify(
+        &key,
+        "enrollment",
+        &[&challenge_sha256, &sha256(&canonical(&proof["claims"]))],
+        proof["proof"].as_str().unwrap_or_default(),
+    )?;
+    let session = session_key(
+        &key,
+        challenge["clientNonce"].as_str().unwrap_or_default(),
+        challenge["serverNonce"].as_str().unwrap_or_default(),
+        &challenge_sha256,
+    )?;
+    let body = acceptance(&challenge_sha256);
+    let frame_tag = tag(&session, "frame", &[OWNER, "0", &sha256(&canonical(&body))]);
+    write_frame(
+        stream,
+        &canonical(&json!({"body": body, "seq": 0, "tag": frame_tag})),
+        deadline(),
+    )?;
+    Ok((proof, session))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,38 +448,10 @@ mod tests {
             .to_owned()
     }
 
-    /// A conforming owner written against the spec, for in-crate fixtures.
-    /// The real owner is the Swift implementation, covered cross-language.
+    /// The fixture owner's enrollment, then one echoed frame.
     fn owner(mut stream: UnixStream, key: [u8; 32], tamper: fn(&mut Value)) -> io::Result<Value> {
         let deadline = || Instant::now() + Duration::from_secs(3);
-        let hello: Value = serde_json::from_slice(&read_frame(&mut stream, deadline())?).unwrap();
-        let mut challenge = json!({"bindingDigest": "d".repeat(64), "bootstrapId": hello["bootstrapId"],
-            "clientNonce": hello["clientNonce"], "ownerEpoch": "epoch-7", "seedId": hello["seedId"],
-            "seedReceiptSha256": "e".repeat(64), "serverNonce": crate::hex(&crate::random::<32>().unwrap()), "version": 2});
-        tamper(&mut challenge);
-        let bytes = canonical(&challenge);
-        write_frame(&mut stream, &bytes, deadline())?;
-        let proof: Value = serde_json::from_slice(&read_frame(&mut stream, deadline())?).unwrap();
-        let challenge_sha256 = sha256(&bytes);
-        verify(
-            &key,
-            "enrollment",
-            &[&challenge_sha256, &sha256(&canonical(&proof["claims"]))],
-            proof["proof"].as_str().unwrap(),
-        )?;
-        let session = session_key(
-            &key,
-            challenge["clientNonce"].as_str().unwrap(),
-            challenge["serverNonce"].as_str().unwrap(),
-            &challenge_sha256,
-        )?;
-        let body = acceptance(&challenge_sha256);
-        let frame_tag = tag(&session, "frame", &[OWNER, "0", &sha256(&canonical(&body))]);
-        write_frame(
-            &mut stream,
-            &canonical(&json!({"body": body, "seq": 0, "tag": frame_tag})),
-            deadline(),
-        )?;
+        let (proof, session) = accept_fixture(&mut stream, key, tamper)?;
         // Echo one helper frame back as owner frame 1.
         let frame: Value = serde_json::from_slice(&read_frame(&mut stream, deadline())?).unwrap();
         verify(

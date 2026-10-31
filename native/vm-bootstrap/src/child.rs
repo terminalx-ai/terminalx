@@ -15,7 +15,7 @@ use serde_json::json;
 use std::{
     io::{self, Read, Write},
     os::fd::FromRawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -39,28 +39,38 @@ fn stage_of(result: io::Result<serde_json::Value>) -> String {
     }
 }
 
-impl Forking {
-    /// Root only: the account's private journal, created and given to the
-    /// account before the drop so the child can write intent before effect.
-    fn journal(&self, account: &ConfirmedAccount) -> io::Result<PathBuf> {
-        let state = Dir::open_root(&self.state)?;
-        if state.stat.st_uid != 0 || state.stat.st_mode & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "helper state must be root-only",
-            ));
-        }
-        let name = format!("account-{}", account.uid);
-        if state.stat_at(&name)?.is_none() {
-            state.make_dir(&name, 0o700)?;
-        }
-        let journal = state.open_dir(&name)?;
-        // SAFETY: journal owns its descriptor; changes only this directory's owner.
-        if unsafe { libc::fchown(journal.fd(), account.uid, account.gid) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(self.state.join(name))
+/// The account's private journal under the helper's `state` directory, which
+/// must belong to `owner` (root in production) and be private to it. It is
+/// created and given to the account before the drop so the child can write
+/// intent before effect, and it is returned open: the state directory stays
+/// root-only, so the dropped child can reach its journal only through this
+/// descriptor, never by path.
+fn account_journal(state: &Path, owner: u32, account: &ConfirmedAccount) -> io::Result<Dir> {
+    let state = Dir::open_root(state)?;
+    if state.stat.st_uid != owner || state.stat.st_mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "helper state must be root-only",
+        ));
     }
+    let name = format!("account-{}", account.uid);
+    if state.stat_at(&name)?.is_none() {
+        state.make_dir(&name, 0o700)?;
+    }
+    let created = state.open_dir(&name)?;
+    // SAFETY: created owns its descriptor; changes only this directory's owner.
+    if unsafe { libc::fchown(created.fd(), account.uid, account.gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Reopened so its recorded identity carries the account as owner.
+    let journal = state.open_dir(&name)?;
+    if (journal.stat.st_dev, journal.stat.st_ino) != (created.stat.st_dev, created.stat.st_ino) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the account journal changed while it was prepared",
+        ));
+    }
+    Ok(journal)
 }
 
 impl Installer for Forking {
@@ -69,7 +79,7 @@ impl Installer for Forking {
         if unsafe { libc::geteuid() } != 0 {
             return "refused".into(); // nothing is prepared, forked or written
         }
-        let Ok(journal) = self.journal(account) else {
+        let Ok(journal) = account_journal(&self.state, 0, account) else {
             return "refused".into();
         };
         let mut pipe = [0; 2];
@@ -85,7 +95,6 @@ impl Installer for Forking {
             let mut out = unsafe { std::fs::File::from_raw_fd(pipe[1]) };
             let stage = stage_of(drop_to(account).and_then(|dropped| {
                 let home = keys::open_home(&dropped)?;
-                let journal = Dir::open_root(&journal)?;
                 keys::install(&dropped, grant, &home, &journal, |_| Ok(()))
             }));
             let _ = out.write_all(stage.as_bytes());
@@ -269,6 +278,53 @@ mod tests {
         assert_eq!(reported["keyResult"]["stage"], "refused");
         assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
         assert!(!temp.path().join("state").exists());
+    }
+
+    #[test]
+    fn the_dropped_child_installs_through_its_open_journal_without_a_path_into_state() {
+        // SAFETY: no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if euid == 0 {
+            return; // root traverses any mode, so this models only the dropped child
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (home, state) = (temp.path().join("home"), temp.path().join("state"));
+        for dir in [&home, &state] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let account = account(&home);
+        assert!(
+            account_journal(&state, euid + 1, &account).is_err(),
+            "another owner"
+        );
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(
+            account_journal(&state, euid, &account).is_err(),
+            "group-readable state"
+        );
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let journal = account_journal(&state, euid, &account).unwrap();
+        assert_eq!(
+            (journal.stat.st_uid, journal.stat.st_mode & 0o777),
+            (account.uid, 0o700)
+        );
+        // As for the dropped account under root-only state, no path leads in.
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let by_path = Dir::open_root(&state.join(format!("account-{}", account.uid)));
+        let installed = keys::install(
+            &Dropped::fixture(account.clone()),
+            &KeyGrant::fixture(KEY, "boot-1"),
+            &Dir::open_root(&home).unwrap(),
+            &journal,
+            |_| Ok(()),
+        );
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(by_path.is_err(), "the state directory admits no path");
+        assert_eq!(installed.unwrap()["stage"], "publicKeyInstalled");
+        assert!(state
+            .join(format!("account-{}/key-receipt.json", account.uid))
+            .exists());
     }
 
     #[test]

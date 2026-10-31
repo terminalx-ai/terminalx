@@ -2,7 +2,7 @@ import { test, expect } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { build, parseCodesign, sha256, BINARIES, PLIST } from './build-vm-bootstrap.mjs'
+import { build, parseCodesign, sha256, BINARIES, PLISTS } from './build-vm-bootstrap.mjs'
 
 test('codesign reports are read as ad hoc or Developer ID without guessing', () => {
   expect(parseCodesign('Executable=/x\nCodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0\nSignature=adhoc\nTeamIdentifier=not set\n'))
@@ -17,9 +17,9 @@ test.skipIf(process.platform !== 'darwin' || process.env.TX_VM_BOOTSTRAP_BUILD !
   const out = path.join(mkdtempSync(path.join(tmpdir(), 'tx-vm-bootstrap-')), 'out')
   try {
     const manifest = build(out)
-    expect(manifest.artifacts.map(a => a.name)).toEqual([...BINARIES, PLIST])
+    expect(manifest.artifacts.map(a => a.name)).toEqual([...BINARIES, ...PLISTS])
     for (const artifact of manifest.artifacts) expect(sha256(readFileSync(artifact.path))).toBe(artifact.sha256)
-    for (const artifact of manifest.artifacts.slice(0, 2)) {
+    for (const artifact of manifest.artifacts.slice(0, BINARIES.length)) {
       expect(artifact.archs).toBe('arm64')
       expect(artifact.signing).toMatchObject({ signature: 'adhoc', teamIdentifier: null, developerId: false })
     }

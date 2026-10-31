@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Builds the macOS VM validation probe and seed tool (native/vm-bootstrap) for
-// arm64, offline from the locked crates, and writes a manifest of digests and
-// signing state. It never signs: Developer ID signing and notarization are a
-// separate, held release step, so these artifacts carry only the linker's ad
-// hoc signature and the manifest says so.
+// Builds the macOS VM guest helper, validation probe and seed tool
+// (native/vm-bootstrap) for arm64, offline from the locked crates, and writes a
+// manifest of digests and signing state. It never signs: Developer ID signing
+// and notarization are a separate, held release step, so these artifacts carry
+// only the linker's ad hoc signature and the manifest says so.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(import.meta.dirname, '..')
 const crate = path.join(root, 'native/vm-bootstrap')
 const target = 'aarch64-apple-darwin'
-export const BINARIES = ['terminalx-vm-validation-probe', 'terminalx-vm-seed']
-export const PLIST = 'com.terminalx.next.vm-validation-probe.plist'
+export const BINARIES = ['terminalx-vm-bootstrap', 'terminalx-vm-validation-probe', 'terminalx-vm-seed']
+export const PLISTS = ['com.terminalx.next.vm-bootstrap.plist', 'com.terminalx.next.vm-validation-probe.plist']
 
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, encoding: 'utf8' })
@@ -51,12 +51,14 @@ export function build(out) {
     const signing = parseCodesign(spawnSync('codesign', ['-dv', file], { encoding: 'utf8' }).stderr)
     return { name, path: file, bytes: bytes.length, sha256: sha256(bytes), archs, signing }
   })
-  const plist = path.join(out, PLIST)
-  copyFileSync(path.join(crate, PLIST), plist)
-  run('plutil', ['-lint', plist])
-  const plistBytes = readFileSync(plist)
-  if (!plistBytes.equals(readFileSync(path.join(crate, PLIST)))) throw new Error('Plist copy differs from source')
-  artifacts.push({ name: PLIST, path: plist, bytes: plistBytes.length, sha256: sha256(plistBytes) })
+  for (const name of PLISTS) {
+    const plist = path.join(out, name)
+    copyFileSync(path.join(crate, name), plist)
+    run('plutil', ['-lint', plist])
+    const plistBytes = readFileSync(plist)
+    if (!plistBytes.equals(readFileSync(path.join(crate, name)))) throw new Error('Plist copy differs from source')
+    artifacts.push({ name, path: plist, bytes: plistBytes.length, sha256: sha256(plistBytes) })
+  }
   const manifest = {
     version: 1,
     crate: 'native/vm-bootstrap',

@@ -1,5 +1,5 @@
-//! The built executables on this host, unprivileged. Neither is ever run as
-//! root here and no guest is involved.
+//! The built executables on this host, unprivileged. None is ever run as root
+//! here and no guest is involved.
 #![cfg(target_os = "macos")]
 use std::{
     path::Path,
@@ -35,6 +35,35 @@ fn probe_refuses_cleanly_outside_a_seeded_guest() {
     );
     assert!(output.stdout.is_empty());
     assert!(!Path::new(STATE).exists());
+}
+
+/// Outside a seeded guest the helper's state directory is absent, so it must
+/// refuse before waiting or connecting, write nothing and still exit 0.
+#[test]
+fn helper_refuses_cleanly_outside_a_seeded_guest() {
+    const HELPER_STATE: &str = "/private/var/db/com.terminalx.next.vm-bootstrap";
+    assert!(
+        !Path::new(HELPER_STATE).exists(),
+        "this host must not have the helper's state directory"
+    );
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_terminalx-vm-bootstrap"))
+        .arg("ignored")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("com.terminalx.next.vm-bootstrap: Refused("),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!Path::new(HELPER_STATE).exists());
 }
 
 fn seed_tool(args: &[&str]) -> std::process::Output {

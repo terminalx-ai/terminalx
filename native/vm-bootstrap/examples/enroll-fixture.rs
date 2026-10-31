@@ -39,43 +39,28 @@ fn main() {
             return Ok(json!({"authenticated": true, "challengeSha256": challenge}));
         }
         if mode == "confirm" {
-            // Read-only observation of this host's personal accounts; no account
-            // file is opened or written.
+            // The production helper's conversation after acceptance. Accounts
+            // are a read-only observation of this host's personal accounts, and
+            // the real forking installer, unprivileged, refuses before any fork
+            // or write; that refusal is what gets reported. The host key would
+            // be read only from root-owned /etc/ssh, never generated or changed.
             let accounts = terminalx_vm_bootstrap::account::observe();
-            session.report_accounts(&mut stream, &accounts)?;
-            let account =
-                session.await_confirmation(&mut stream, &accounts, Duration::from_secs(30))?;
-            // The real forking installer. Unprivileged, it refuses before any
-            // fork or write, and that refusal is what gets reported.
             let state =
                 std::env::temp_dir().join(format!("tx-helper-state-{}", std::process::id()));
             let mut installer = terminalx_vm_bootstrap::child::Forking { state };
-            let (stage, key_reference) = terminalx_vm_bootstrap::child::grant_and_report(
+            let mut reached = terminalx_vm_bootstrap::helper::converse(
                 &mut session,
                 &mut stream,
-                &account,
                 &seed.bootstrap_id,
-                Duration::from_secs(30),
+                &accounts,
                 &mut installer,
+                std::path::Path::new("/etc/ssh"),
+                0,
+                Duration::from_secs(30),
             )?;
-            // Only after its own install: the guest's existing public host key,
-            // read from root-owned /etc/ssh. Never generated or changed.
-            let host_key = if stage == "publicKeyInstalled" {
-                terminalx_vm_bootstrap::hostkey::report_host_key(
-                    &mut session,
-                    &mut stream,
-                    &key_reference,
-                    std::path::Path::new("/etc/ssh"),
-                    0,
-                    Duration::from_secs(30),
-                )?
-            } else {
-                None
-            };
-            return Ok(
-                json!({"authenticated": true, "challengeSha256": challenge, "confirmed": account.name,
-                "confirmationSha256": account.confirmation_sha256, "keyStage": stage, "hostKey": host_key}),
-            );
+            reached["authenticated"] = json!(true);
+            reached["challengeSha256"] = json!(challenge);
+            return Ok(reached);
         }
         session.send(&mut stream, json!({"hello": "rust helper"}))?;
         let echo = session.receive(&mut stream)?;

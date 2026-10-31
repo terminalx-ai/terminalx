@@ -1,6 +1,8 @@
 //! TerminalX macOS VM first-boot pieces from docs/LOCAL-VM-HELPER-DELIVERY.md:
-//! the validation-only probe (validation plan P3/P8) and the offline seeder core.
-//! Nothing here authenticates a helper, approves an account or marks Ready.
+//! the guest helper (`helper`, entry point `terminalx-vm-bootstrap`), the
+//! validation-only probe (validation plan P3/P8) and the offline seeder core.
+//! The helper only proves possession of its seeded key and follows the owner;
+//! nothing here chooses or approves an account, accepts trust or marks Ready.
 #![cfg(target_os = "macos")]
 
 pub mod account;
@@ -10,6 +12,7 @@ pub mod child;
 pub mod disk;
 pub mod enroll;
 pub mod fsx;
+pub mod helper;
 pub mod hostkey;
 pub mod keys;
 pub mod probe;
