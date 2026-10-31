@@ -43,7 +43,11 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   retirement acknowledgement and report (patch `257f8022…`, commit `f19d0cb5`),
   22,129,816 bytes, SHA-256
   `69933c32aec3b8e22d0e18a2e1793a3c592fb7c2262aac3cca7835918d9f009d`, with no
-  compiler warnings or errors in TerminalX sources.
+  compiler warnings or errors in TerminalX sources; with the read-only
+  retirement record actions (patch `ef880012…`, commit `17011ad4`), 22,129,816
+  bytes, SHA-256
+  `3682708efb6864bd28fa2121a5724f564f64908ac1c108b7b0fe8cb07c58c6ea`, again
+  with no warnings or errors in TerminalX sources.
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those

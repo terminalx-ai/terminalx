@@ -607,8 +607,45 @@ against the helper and the seeder's production profile.
     [offline build](../integrations/lume-bootstrap/OFFLINE-BUILD.md)).
   - Retained under
     `~/.raccoon/task-coordination/pro114-pro117/passes/20261031-retirement/`.
+- **Host view (2026-10-31, later).**
+  - **Owner actions.** The owner serves two read-only actions, version 3
+    only, each returning one record name: `retirementAcknowledgement`
+    (`retirement-acknowledgement.json`) and `retirementReport`
+    (`retirement-report.json`). There is no other path and no write.
+  - **Host check, acknowledgement.** The host accepts the acknowledgement only
+    as exactly the record the owner would write for:
+    - this binding and epoch;
+    - the challenge of the enrollment receipt it reads;
+    - the digest of `{hostKey: {keyReference, publicKey}}` rebuilt from the
+      observation it reads;
+    - that observation's digest;
+    - the acknowledgement digest;
+    - trust and readiness false.
+  - **Host check, report.** It accepts the report only for that
+    acknowledgement, with one of the three stages, `helperReported: true`,
+    and `verified`, trust and readiness all false.
+  - **Status.** `environment.guestAccounts` (and the per-conversation list)
+    adds `retirement` once the owner has observed the host key. It is one of:
+    - `awaitingAcknowledgement`: no acknowledgement could be read. This covers
+      both an owner that has not written one and an owner that cannot be
+      reached; neither is presented as absence.
+    - `acknowledged`: a valid acknowledgement, with no report read.
+    - `helperReported`, with `reportedOutcome` `retired`, `refused` or
+      `outcomeUnknown`.
+    - `invalidAcknowledgement` or `invalidReport`: a record was read but does
+      not match, and it never counts.
+  - **Always false.** Every value carries `verified`, `trustAccepted` and
+    `ready` as false. Reading writes nothing, never retries or removes
+    anything, and never starts an owner or VM: it only connects to a running
+    owner's socket.
+  - **UI.** The Local VM confirmation panel shows one short line for each
+    state. A reported outcome always says TerminalX cannot verify it inside
+    the VM, and a mismatched record is an alert.
+  - **Commit and build.** `17011ad4`. The restricted owner was rebuilt
+    offline as `3682708e…` (patch `ef880012…`). The helper is unchanged, so
+    `4ed24487…` stands. Evidence is under
+    `~/.raccoon/task-coordination/pro114-pro117/passes/20261031-retirement-status/`.
 - **Still open.**
-  - The host does not read the two new owner records yet.
   - A reported retirement is the helper's claim, not host-verified evidence.
   - Removing the seeded files in a real guest needs the held seeding,
     signing and live steps.
