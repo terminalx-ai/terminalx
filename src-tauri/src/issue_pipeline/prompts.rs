@@ -67,15 +67,25 @@ fn list(items: &[String]) -> String {
     }
 }
 
-fn verdict_format(commit: &str) -> String {
+/// How the reviewer answers. `pending` says whether it may still answer that
+/// checks it started are running, rather than give its verdict.
+fn verdict_format(commit: &str, pending: bool) -> String {
+    let minutes = super::engine::REVIEW_CHECKS_MINUTES;
+    let waiting = if pending {
+        format!("\n\nIf checks you started are still running, end your turn with `{{\"commit\": \"{commit}\", \"verdict\": \"pending\", \"reason\": \"what is still running\"}}` in that same kind of block instead of a verdict, and give the verdict when they finish. TerminalX waits up to {minutes} minutes for it.")
+    } else {
+        String::new()
+    };
     format!(
         "End your reply with your verdict in exactly this form:\n\n\
-```{REVIEW_FENCE}\n{{\"commit\": \"{commit}\", \"verdict\": \"changes\", \"securityPass\": \"not_needed\", \"findings\": [{{\"severity\": \"high\", \"title\": \"Short statement of the defect\", \"file\": \"path/from/the/repository/root\", \"line\": 42, \"detail\": \"What goes wrong, and when.\", \"security\": false}}]}}\n```\n\n\
+```{REVIEW_FENCE}\n{{\"commit\": \"{commit}\", \"verdict\": \"changes\", \"securityPass\": \"not_needed\", \"checks\": \"not_run\", \"checksNote\": \"What you ran and how it went, or why nothing ran.\", \"findings\": [{{\"severity\": \"high\", \"title\": \"Short statement of the defect\", \"file\": \"path/from/the/repository/root\", \"line\": 42, \"detail\": \"What goes wrong, and when.\", \"security\": false}}]}}\n```\n\n\
 - `commit` is the commit you actually read (`git rev-parse HEAD`).\n\
 - `verdict` is \"merge\" only if the change is right to merge as it stands; otherwise \"changes\".\n\
 - `severity` is one of critical, high, medium, low, nit. A finding of medium or above blocks the merge, so keep it for a real defect and not for taste.\n\
 - `securityPass` is \"clean\" or \"flagged\" when you did a security pass, and \"not_needed\" when the change gave no reason for one.\n\
-- `findings` lists everything still open at this commit, and is empty when nothing is."
+- `checks` is \"passed\" or \"failed\" when you ran the project's checks on this commit, and \"not_run\" when you judged by reading the code alone or they did not finish; `checksNote` says in a few words what ran, or why nothing did.\n\
+- `findings` lists everything still open at this commit, and is empty when nothing is.{waiting}\n\n\
+Once you give a verdict, this review is over: stop any background commands and watches you started for it."
     )
 }
 
@@ -104,12 +114,12 @@ Pull request: #{pr_number} {pr_url}\n\
 Context: {}\n\
 Commit to review: {commit}\n\
 Base: {base}{issue_text}\n\n\
-This checkout is the pull request's branch at that commit. Read the change with `git diff {base}...{commit}` and as much of the surrounding code as you need. You may run the project's checks. Do not edit, commit, stash or push anything: leave the checkout exactly as you found it.\n\n\
+This checkout is the pull request's branch at that commit. Read the change with `git diff {base}...{commit}` and as much of the surrounding code as you need. You may run the project's checks, and your verdict says whether you did. Do not edit, commit, stash or push anything: leave the checkout exactly as you found it.\n\n\
 Review for correctness first: whether the change does what the issue asks, and for bugs, missed cases, callers it breaks, and tests that do not test what they claim.\n\n\
 {}\n\n{}",
         issue.map(|issue| format!("{} {} ({})", issue.identifier, issue.title, issue.url)).unwrap_or_else(|| "Session work; judge the pull request description and code.".into()),
         security_instruction(request.security_areas),
-        verdict_format(commit),
+        verdict_format(commit, true),
     )
 }
 
@@ -127,12 +137,37 @@ Base: {base}\n\n\
 This checkout is now at that commit.{since} Judge the whole change (`git diff {base}...{commit}`), not only what is new, and say whether each of your earlier findings still stands. As before, leave the checkout exactly as you found it.\n\n\
 {}\n\n{}",
         security_instruction(request.security_areas),
-        verdict_format(commit),
+        verdict_format(commit, true),
     )
 }
 
 pub fn reviewer_reminder(commit: &str, problem: &str) -> String {
-    format!("TerminalX could not use your reply as a verdict: {problem} Reply again for commit {commit}.\n\n{}", verdict_format(commit))
+    format!(
+        "TerminalX could not use your reply as a verdict: {problem} Reply again for commit {commit}. If checks you started are still running, say so with a pending block, as below, rather than a verdict.\n\n{}",
+        verdict_format(commit, true)
+    )
+}
+
+/// The reviewer said its checks were still running, and they have run for
+/// as long as TerminalX waits: its verdict now, on what it has.
+pub fn reviewer_deadline(commit: &str, minutes: u32) -> String {
+    format!(
+        "Your checks for the review of commit {commit} have been running for {minutes} minutes, which is as long as TerminalX waits. Give your verdict now on what you have, and do not reply pending again: if the checks have not finished, set `checks` to \"not_run\" and say why in `checksNote`.\n\n{}",
+        verdict_format(commit, false)
+    )
+}
+
+/// To a conversation still at work when its pipeline ended. `why` is a
+/// sentence saying how it ended.
+pub fn pipeline_ended(why: &str) -> String {
+    format!(
+        "{why} TerminalX will not use another report or verdict from this conversation unless it asks for one again. Stop any background commands and watches you started for this pipeline, and end your turn without starting anything new. TerminalX then stops this tab's agent; the conversation can be resumed later."
+    )
+}
+
+/// Left in the transcript of a conversation whose idle agent TerminalX stopped.
+pub fn agent_released(why: &str) -> String {
+    format!("{why} TerminalX stopped this tab's agent and anything it left running in the background. Your next message resumes the conversation.")
 }
 
 /// The findings, taken back to the author.
@@ -202,7 +237,7 @@ pub fn links_issue(body: &str, issue: &IssueRef) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issue_pipeline::verdict::{author_report, review as read_review, AuthorReport, Decision, LocalChecks, Severity};
+    use crate::issue_pipeline::verdict::{author_report, review as read_review, AuthorReport, Decision, LocalChecks, ReviewChecks, Severity};
 
     fn github() -> IssueRef {
         IssueRef { provider: "github".into(), id: "433".into(), identifier: "#433".into(), title: "Issue sessions: open a pull request".into(), url: "https://github.com/acme/widgets/issues/433".into() }
@@ -229,12 +264,40 @@ mod tests {
         assert_eq!(author_report(&author_brief()), AuthorReport::Done { checks: LocalChecks::Passed, summary: Some("One or two sentences on what changed and why.".into()) });
         assert!(matches!(author_report(&author_reminder()), AuthorReport::Done { .. }));
         let request = ReviewRequest { issue: Some(&github()), issue_body: None, pr_number: 7, pr_url: "https://github.com/acme/widgets/pull/7", commit: "abc1234def", base: "origin/main", security_areas: &[] };
-        for prompt in [review(&request), review_again(&request, Some("0001111222")), reviewer_reminder("abc1234def", "it had no verdict block.")] {
+        for prompt in [review(&request), review_again(&request, Some("0001111222")), reviewer_reminder("abc1234def", "it had no verdict block."), reviewer_deadline("abc1234def", 20)] {
             let verdict = read_review(&prompt, 1, "now").unwrap();
             assert_eq!(verdict.commit, "abc1234def");
             assert_eq!(verdict.decision, Decision::Changes);
             assert_eq!(verdict.findings[0].severity, Severity::High);
+            // Copied as it stands, the example claims no checks that never ran.
+            assert_eq!(verdict.checks, Some(ReviewChecks::NotRun));
+            assert!(prompt.contains("stop any background commands and watches you started for it"));
         }
+    }
+
+    #[test]
+    fn a_reviewer_may_say_its_checks_are_still_running_until_the_deadline() {
+        let request = ReviewRequest { issue: Some(&github()), issue_body: None, pr_number: 7, pr_url: "u", commit: "abc1234def", base: "origin/main", security_areas: &[] };
+        for prompt in [review(&request), review_again(&request, None), reviewer_reminder("abc1234def", "its reply did not end with the review block.")] {
+            assert!(prompt.contains(r#"`{"commit": "abc1234def", "verdict": "pending", "reason": "what is still running"}`"#), "{prompt}");
+            assert!(prompt.contains("TerminalX waits up to 20 minutes for it."));
+        }
+        assert!(reviewer_reminder("abc1234def", "x.").contains("If checks you started are still running, say so with a pending block"));
+        // Past the deadline it is not offered again.
+        let deadline = reviewer_deadline("abc1234def", 20);
+        assert!(deadline.contains("have been running for 20 minutes") && deadline.contains("do not reply pending again"));
+        assert!(!deadline.contains(r#""verdict": "pending""#));
+    }
+
+    #[test]
+    fn a_conversation_is_told_its_pipeline_ended_and_what_becomes_of_its_agent() {
+        let told = pipeline_ended("Pull request #688 was merged at 95fd442afc, so this pipeline is finished.");
+        assert!(told.starts_with("Pull request #688 was merged at 95fd442afc, so this pipeline is finished. TerminalX will not use another report or verdict"));
+        assert!(told.contains("Stop any background commands and watches you started for this pipeline"));
+        // Not a report or a verdict, quoted back or not.
+        assert_eq!(author_report(&told), AuthorReport::Missing);
+        assert!(read_review(&told, 1, "now").is_err());
+        assert!(agent_released("A person stopped this pipeline.").ends_with("Your next message resumes the conversation."));
     }
 
     #[test]

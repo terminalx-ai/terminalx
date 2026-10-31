@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::verdict::{Decision, SecurityPass, Severity, Verdict};
+use super::verdict::{Decision, ReviewChecks, SecurityPass, Severity, Verdict};
 use crate::github::PrSnapshot;
 
 /// How one check on the head commit stands.
@@ -63,6 +63,12 @@ pub enum StopReason {
     ChangesRequested,
     /// The diff called for a security pass and the reviewer did not report one.
     SecurityPassMissing { areas: Vec<String> },
+    /// The reviewer ran the project's checks on the reviewed commit and they
+    /// failed, whatever its verdict says.
+    ReviewChecksFailed { note: Option<String> },
+    /// Reviewed by reading only, and nothing else ran the tests either: no CI,
+    /// and no local check command TerminalX ran.
+    ReviewChecksNotRun,
     ChecksFailed { names: Vec<String> },
     /// Checks that did not finish within the wait limit.
     ChecksStalled { names: Vec<String>, minutes: u32 },
@@ -143,6 +149,11 @@ impl StopReason {
             Self::OpenFindings { count: n, worst } => format!("{} of medium severity or higher {} open (worst: {}).", count(*n, "finding", "findings"), if *n == 1 { "is" } else { "are" }, worst.label()),
             Self::ChangesRequested => "The reviewer asked for changes.".into(),
             Self::SecurityPassMissing { areas } => format!("The change touches {} and the reviewer reported no security pass.", some(areas)),
+            Self::ReviewChecksFailed { note } => match note.as_deref().map(str::trim).filter(|note| !note.is_empty()) {
+                Some(note) => format!("The reviewer's checks failed on the reviewed commit: {}.", note.trim_end_matches('.')),
+                None => "The reviewer's checks failed on the reviewed commit.".into(),
+            },
+            Self::ReviewChecksNotRun => "Reviewed by reading only, tests not run, and this project has no CI to run them. A person merges this one.".into(),
             Self::ChecksFailed { names } => format!("{} failed on the reviewed commit: {}.", if names.len() == 1 { "A check" } else { "Checks" }, some(names)),
             Self::ChecksStalled { names, minutes } => format!("Checks have not finished after {minutes} minutes: {}.", some(names)),
             Self::ChecksUnreadable { workspace: true } => "Reviewed. GitHub does not let the workspace read this commit's checks, so they are read with your own GitHub sign-in when you press Merge.".into(),
@@ -202,6 +213,10 @@ pub struct Facts<'a> {
     pub protected: &'a [ProtectedHit],
     /// Explicit project policy for repositories with no CI.
     pub allow_no_ci: bool,
+    /// Where there is no CI, someone other than the reviewer stands for the
+    /// tests on this head: TerminalX's run of the project's local check
+    /// command passed on it, or a person is merging it.
+    pub checks_vouched: bool,
     /// Checks the project says never gate a merge. They only apply to checks
     /// branch protection does not require.
     pub ignored_checks: &'a [String],
@@ -272,7 +287,7 @@ pub fn decide_with_local(facts: &Facts<'_>, local_only_passed: bool) -> Gate {
         let mut pr = facts.pr.clone();
         pr.checks.clear();
         pr.validation = Some(Vec::new());
-        return decide(&Facts { pr: &pr, allow_no_ci: true, ..*facts });
+        return decide(&Facts { pr: &pr, allow_no_ci: true, checks_vouched: true, ..*facts });
     }
     decide(facts)
 }
@@ -295,6 +310,9 @@ pub fn decide(facts: &Facts<'_>) -> Gate {
     }
     if !facts.security_areas.is_empty() && verdict.security_pass == SecurityPass::NotNeeded {
         return Gate::NeedsYou(StopReason::SecurityPassMissing { areas: facts.security_areas.to_vec() });
+    }
+    if verdict.checks == Some(ReviewChecks::Failed) {
+        return Gate::NeedsYou(StopReason::ReviewChecksFailed { note: verdict.checks_note.clone() });
     }
     if pr.is_draft || pr.merge_state == "DRAFT" {
         return Gate::NeedsYou(StopReason::Draft);
@@ -355,6 +373,11 @@ pub fn decide(facts: &Facts<'_>) -> Gate {
     if facts.cloud {
         return Gate::ReadyToMerge(StopReason::CloudWorkspace);
     }
+    // Past the checks with none reported at all, which only no-CI policy
+    // allows: a review by reading alone is then all the evidence there is.
+    if pr.checks.is_empty() && !facts.checks_vouched && verdict.checks == Some(ReviewChecks::NotRun) {
+        return Gate::ReadyToMerge(StopReason::ReviewChecksNotRun);
+    }
     if !facts.protected.is_empty() {
         return Gate::ReadyToMerge(StopReason::ProtectedCategory { hits: facts.protected.to_vec() });
     }
@@ -410,7 +433,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn merge_verdict(commit: &str) -> Verdict {
-        Verdict { commit: commit.into(), decision: Decision::Merge, security_pass: SecurityPass::NotNeeded, findings: Vec::new(), round: 1, at: "2026-10-12T00:00:00.000Z".into() }
+        Verdict { commit: commit.into(), decision: Decision::Merge, security_pass: SecurityPass::NotNeeded, findings: Vec::new(), checks: Some(ReviewChecks::Passed), checks_note: None, round: 1, at: "2026-10-12T00:00:00.000Z".into() }
     }
 
     fn finding(severity: Severity) -> Finding {
@@ -427,12 +450,13 @@ pub(crate) mod tests {
         protected: Vec<ProtectedHit>,
         ignored_checks: Vec<String>,
         allow_no_ci: bool,
+        checks_vouched: bool,
     }
 
     impl Case {
         /// Everything in order and the switch on: the one case that merges.
         fn clean() -> Self {
-            Self { auto_merge: true, require_person: false, cloud: false, verdict: Some(merge_verdict(HEAD)), pr: clean_pr(), security_areas: Vec::new(), protected: Vec::new(), ignored_checks: Vec::new(), allow_no_ci: false }
+            Self { auto_merge: true, require_person: false, cloud: false, verdict: Some(merge_verdict(HEAD)), pr: clean_pr(), security_areas: Vec::new(), protected: Vec::new(), ignored_checks: Vec::new(), allow_no_ci: false, checks_vouched: false }
         }
 
         fn decide(&self) -> Gate {
@@ -446,6 +470,7 @@ pub(crate) mod tests {
                 protected: &self.protected,
                 ignored_checks: &self.ignored_checks,
                 allow_no_ci: self.allow_no_ci,
+                checks_vouched: self.checks_vouched,
             })
         }
     }
@@ -456,7 +481,7 @@ pub(crate) mod tests {
         let local_decision = |case: &Case| decide_with_local(&Facts {
             auto_merge: case.auto_merge, require_person: case.require_person, cloud: case.cloud,
             verdict: case.verdict.as_ref(), pr: &case.pr, security_areas: &case.security_areas,
-            protected: &case.protected, ignored_checks: &case.ignored_checks, allow_no_ci: false,
+            protected: &case.protected, ignored_checks: &case.ignored_checks, allow_no_ci: false, checks_vouched: false,
         }, true);
         case.pr.checks = vec![check("build", "failure")];
         case.pr.required_checks = Some(vec!["build".into()]);
@@ -464,6 +489,9 @@ pub(crate) mod tests {
         case.pr.required_checks = None;
         assert!(matches!(local_decision(&case), Gate::NeedsYou(StopReason::ChecksFailed { .. })));
         case.pr.required_checks = Some(Vec::new());
+        assert!(matches!(local_decision(&case), Gate::Merge { .. }));
+        // TerminalX's own run of the checks stands for them where the reviewer only read the code.
+        case.verdict.as_mut().unwrap().checks = Some(ReviewChecks::NotRun);
         assert!(matches!(local_decision(&case), Gate::Merge { .. }));
         case.pr.merge_state = "BLOCKED".into();
         assert!(matches!(local_decision(&case), Gate::NeedsYou(StopReason::Blocked)));
@@ -581,6 +609,42 @@ pub(crate) mod tests {
         assert_eq!(case.decide(), Gate::Merge { commit: HEAD.into() });
         case.verdict.as_mut().unwrap().security_pass = SecurityPass::Clean;
         assert_eq!(case.decide(), Gate::Merge { commit: HEAD.into() });
+    }
+
+    #[test]
+    fn checks_the_reviewer_saw_fail_stop_it_and_a_review_by_reading_alone_needs_ci_or_a_person() {
+        let mut case = Case::clean();
+        let verdict = case.verdict.as_mut().unwrap();
+        verdict.checks = Some(ReviewChecks::Failed);
+        verdict.checks_note = Some("2 tests in status::usage fail".into());
+        // A "merge" with failing checks is for a person to judge, whatever CI says.
+        assert_eq!(case.decide(), Gate::NeedsYou(StopReason::ReviewChecksFailed { note: Some("2 tests in status::usage fail".into()) }));
+        assert_eq!(StopReason::ReviewChecksFailed { note: Some("2 tests in status::usage fail".into()) }.describe(), "The reviewer's checks failed on the reviewed commit: 2 tests in status::usage fail.");
+
+        // Not run, with CI to run the tests: CI is the evidence, and it passed.
+        case.verdict.as_mut().unwrap().checks = Some(ReviewChecks::NotRun);
+        assert_eq!(case.decide(), Gate::Merge { commit: HEAD.into() });
+        // Still running, it waits for them as for any review.
+        case.pr.checks = vec![check("build", "in_progress")];
+        assert!(matches!(case.decide(), Gate::Wait(_)));
+        // With no CI at all, reading alone is not enough for the switch: a person merges it.
+        case.pr.checks.clear();
+        case.pr.validation = Some(Vec::new());
+        case.allow_no_ci = true;
+        assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::ReviewChecksNotRun));
+        // Unless TerminalX ran the project's own checks on this head.
+        case.checks_vouched = true;
+        assert_eq!(case.decide(), Gate::Merge { commit: HEAD.into() });
+        case.checks_vouched = false;
+        // A reviewer that ran them, or a verdict stored before reviews said, merges as before.
+        for checks in [Some(ReviewChecks::Passed), None] {
+            case.verdict.as_mut().unwrap().checks = checks;
+            assert_eq!(case.decide(), Gate::Merge { commit: HEAD.into() }, "{checks:?}");
+        }
+        // A cloud workspace says why it stops first; a person merges either way.
+        case.verdict.as_mut().unwrap().checks = Some(ReviewChecks::NotRun);
+        case.cloud = true;
+        assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::CloudWorkspace));
     }
 
     #[test]

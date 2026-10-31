@@ -1179,7 +1179,7 @@ mod tests {
             let verdict = merge_verdict(&pr.head_sha);
             let patterns = if ignored { vec!["optional".into()] } else { Vec::new() };
             let result = gate::decide(&Facts { auto_merge:true, require_person:false, cloud:false, verdict:Some(&verdict), pr:&pr,
-                security_areas:&[], protected:&[], ignored_checks:&patterns, allow_no_ci:false });
+                security_areas:&[], protected:&[], ignored_checks:&patterns, allow_no_ci:false, checks_vouched:false });
             assert_eq!(matches!(result, Gate::Merge { .. }), passes, "{status} {conclusion} {child_states:?}: {result:?}");
         }
     }
@@ -1224,7 +1224,7 @@ mod tests {
                 }, |_, _| Ok(output(true, "[]", ""))).unwrap();
                 let verdict = merge_verdict(&pr.head_sha);
                 let result = gate::decide(&Facts { auto_merge:true, require_person:false, cloud:false, verdict:Some(&verdict), pr:&pr,
-                    security_areas:&[], protected:&[], ignored_checks:&["optional".into()], allow_no_ci:false });
+                    security_areas:&[], protected:&[], ignored_checks:&["optional".into()], allow_no_ci:false, checks_vouched:false });
                 if retry {
                     assert_eq!(result, Gate::NeedsYou(StopReason::ChecksFailed { names: vec!["build".into()] }), "{change}");
                 } else if change == "unverifiable_provider" {

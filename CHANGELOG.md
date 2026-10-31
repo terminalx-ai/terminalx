@@ -108,6 +108,27 @@
   capability; refuse unavailable or mismatched checkouts instead of using the
   blank workspace root. (#656)
 
+### Issue pipelines
+
+- When a pipeline's pull request is merged or closed, or the pipeline is
+  stopped, stop the idle agents of its reviewer and conflict resolver (and,
+  after a merge or close, its author), with the background commands and watches
+  they left running. A reviewer or resolver still in a turn is told the pipeline
+  ended and is stopped when that turn ends; an author in a turn is left alone.
+  Conversations can be resumed. A reply that arrives after the end is noted on
+  the issue page and ignored. (#689)
+- A reviewer can answer that its own checks are still running instead of giving
+  a verdict. TerminalX waits up to 20 minutes, then asks once for a verdict on
+  what it has. (#689)
+- Verdicts say whether the reviewer's checks passed, failed or did not run. The
+  issue page and the pull request comment say so. Failed checks stop the
+  pipeline for a person. A review by reading alone no longer merges a project
+  without CI by itself. (#689)
+- Removing a workspace stops leftover Rust builds and checks still working in
+  it, such as a `cargo check` that outlived rust-analyzer, and lists any other
+  process there by name. Programs detached on purpose (`screen`, `tmux`,
+  `nohup`, tunnels) are never stopped. (#689)
+
 ## 0.2.21
 
 ### Sessions and workspace
