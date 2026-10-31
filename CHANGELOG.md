@@ -17,6 +17,11 @@
 
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
+- Sending a message or worktree note again after the connection dropped no
+  longer gives the agent the prompt twice or adds the note twice. Each draft
+  goes under one id, and a Mac that already has it answers as it did the first
+  time, so the phone reports it sent and clears the box. Older Macs behave as
+  before. (#675)
 
 ### Organizations
 

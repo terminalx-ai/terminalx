@@ -13,6 +13,7 @@ mod mobile;
 use crate::local_runtime::mobile::model;
 mod registry;
 mod relay;
+mod send_ids;
 pub(crate) mod sharing;
 mod wire;
 
