@@ -72,9 +72,15 @@ a Mac with no developer tooling. It comes last, after G and H, and is defined
   ([guest channel contract](LOCAL-VM-GUEST-CHANNEL.md#verified-transport-contract)),
   so a run on it cannot establish G3 or G5.
 - The restricted owner only launches a VM created by TerminalX's own
-  provisioning record, and its executable is not built: the full build lacks 18
-  locked dependency revisions ([offline build](../integrations/lume-bootstrap/OFFLINE-BUILD.md)),
-  and `Artifact::production()` refuses (`src-tauri/src/local_vm/macos_owner_launch.rs:42`).
+  provisioning record.
+  - When this plan was first written, its executable was not built, because
+    the full build lacked 18 locked dependency revisions.
+  - Since then it has been built offline (P6,
+    [offline build](../integrations/lume-bootstrap/OFFLINE-BUILD.md)). It
+    carries only the linker's ad hoc signature and no virtualization
+    entitlement, so it cannot host a VM.
+  - Release builds refuse it: `Artifact::production()`
+    (`src-tauri/src/local_vm/macos_owner_launch.rs:52`).
 - **Run 1** therefore uses the installed pinned Lume to learn G1, G2, G4 and G6
   early. Those are the facts most likely to break the design, and they need no
   restricted build. **Run 2** uses the restricted owner for G3 and G5 and
@@ -139,7 +145,7 @@ Guards that keep it that way:
 
 ## Prerequisites: what exists and what is missing
 
-| # | Input | Needed by | State on 2026-10-30 | Before a runnable experiment exists |
+| # | Input | Needed by | State on 2026-10-30 (P6 and P7 updated through 2026-10-31) | Before a runnable experiment exists |
 | --- | --- | --- | --- | --- |
 | P1 | One Apple macOS 26 IPSW: URL on `updates.cdn-apple.com` or `appldnld.apple.com`, build, SHA-256, bytes | Runs 1, 2 | **Absent.** The catalog compiled into source is `{"version":1,"images":[]}`. Image download is held. | The person approves selecting and downloading one image. Its URL, build, SHA-256, size and selection source are recorded. For Run 2 the same record becomes a reviewed catalog entry, which is a separate source change. |
 | P2 | Pinned Lume 0.6.1 | Run 1 | **Present.** `~/.local/share/lume/lume.app` executable SHA-256 `a369d637…fc904` matches `bootstrap.rs:63`; signed `com.trycua.lume`, team `YCK386LBJ7` | Re-verify the digest at preflight. No reinstall or update. |
@@ -443,8 +449,9 @@ TerminalX downloads and verifies everything else itself after showing sizes,
 and macOS asks for the helper approval in its own Settings UI. **That flow is
 not implemented or validated yet.** Today fresh macOS guest creation is refused
 before anything is downloaded
-([Local Cua tasks](LOCAL-CUA-TASKS.md#execution-and-retained-identity)), and
-the distribution artifacts listed below do not exist.
+([Local Cua tasks](LOCAL-CUA-TASKS.md#execution-and-retained-identity)). None
+of the distribution artifacts listed below exists in its finished form. Some
+exist only as source or local ad hoc builds, as the table records.
 
 ### Build machine versus end user
 
@@ -458,9 +465,9 @@ the distribution artifacts listed below do not exist.
 | Artifact | Finished target | Today |
 | --- | --- | --- |
 | Pinned Lume 0.6.1 for restore | App-managed download into the private `tools/<sha>` cache. The archive (6,112,964 bytes), the executable SHA-256 and the publisher's Developer ID team are checked before use (`bootstrap.rs:54`–`:66`, `:177`). | **Exists** for the current profile |
-| Restricted Lume owner | Built by TerminalX from upstream `3350f504` plus `bootstrap.patch`, signed, delivered by TerminalX and pinned in its catalog | **Absent.** Not built; `Artifact::production()` refuses |
-| Bundled seed daemon | Inside `TerminalX.app`, notarized and registered through `SMAppService` (H1–H3) | **Absent.** Not implemented |
-| Guest helper `terminalx-vm-bootstrap` | Signed, catalog-pinned and seeded offline | **Absent.** Not implemented |
+| Restricted Lume owner | Built by TerminalX from upstream `3350f504` plus `bootstrap.patch`, signed, delivered by TerminalX and pinned in its catalog | **Local offline build only.** Built from that source, most recently `4023c445…` (P6). It carries only the linker's ad hoc signature and no entitlements, so it cannot host a VM. Not signed, catalog-pinned, delivered or run. `Artifact::production()` refuses. |
+| Bundled seed daemon | Inside `TerminalX.app`, notarized and registered through `SMAppService` (H1–H3) | **Absent.** Not implemented. Its packaging (design slice 5) is held for its own review. |
+| Guest helper `terminalx-vm-bootstrap` | Signed, catalog-pinned and seeded offline | **Source and fixture tests only; no helper executable.** Enrollment, the account child, key install and the host-key report are implemented and fixture-tested in `native/vm-bootstrap` (`08d126b3` through `8ef96140`). The crate has no helper binary target yet. Its built artifacts are the validation probe `283ec5a8…` and the seed tool `29bde7fd…`, ad hoc signed (P3, [run sheet](LOCAL-VM-HELPER-RUN-SHEET.md)). Nothing is signed, catalog-pinned or seeded. |
 | macOS 26 restore image | Downloaded by the app from Apple's CDN and checked against a catalog SHA-256 | **Absent.** The catalog is empty |
 | TerminalX release | One normal signed, notarized installer containing or fetching all of the above | **Absent.** No release includes them |
 | Distribution review | Complete | **Open.** It is a release gate. Lume is MIT-licensed, and this path uses no Cua image and no `cua-spacesd`. |
@@ -505,9 +512,9 @@ any of the following:
 
 A Command Line Tools install prompt appearing at any point also fails it.
 
-All of these are future work: G1–G6, H1–H6, every artifact marked absent above,
-a signed and notarized release, the distribution review, a separate fresh Mac
-and its own future approval.
+All of these are future work: G1–G6, H1–H6, every artifact above that is not
+yet in its finished form, a signed and notarized release, the distribution
+review, a separate fresh Mac and its own future approval.
 
 ## Draft approval scope for a future coordinated run
 
@@ -554,8 +561,10 @@ validation build, the restricted artifact digest and the dedicated
 
 ## Outcomes
 
-- **G1–G6 all pass.** Design source slices 1–4 proceed, then slice 5 (the
-  daemon) with H1–H6.
+- **G1–G6 all pass.** Design source slices 1–4 continue against the observed
+  facts, then slice 5 (the daemon) with H1–H6. Slices 1, 2 and 4 and the
+  account child exist only as source, fixtures and local ad hoc builds
+  ([source slices](LOCAL-VM-HELPER-DELIVERY.md#source-slices-after-the-decision)).
 - **G1 fails.** Offline seeding is impossible as designed. Option A returns to
   a decision, with the evidence.
 - **G2 fails.** Enrollment cannot precede Setup Assistant. The chain moves

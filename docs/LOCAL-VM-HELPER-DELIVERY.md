@@ -1,10 +1,39 @@
 # macOS26 signed first-boot helper delivery and enrollment
 
-Design proposal, 2026-10-29, based on PRO-114 checkpoint `7536499c`. It answers
-the closed seam in [the guest channel contract](LOCAL-VM-GUEST-CHANNEL.md#exact-closed-seam-and-next-integration-choice).
-**Nothing here is implemented.** No VM, disk image, restore image, privileged
-component, installed profile, account or credential was created or changed.
-The only experiment used a disposable 64 MB APFS image unrelated to any VM.
+Design proposal, 2026-10-29, based on PRO-114 checkpoint `7536499c` (design
+commit `394fe794`). It answers the closed seam in
+[the guest channel contract](LOCAL-VM-GUEST-CHANNEL.md#exact-closed-seam-and-next-integration-choice).
+
+**When it was proposed (2026-10-29), nothing here was implemented.** No VM,
+disk image, restore image, privileged component, installed profile, account or
+credential was created or changed. The only experiment used a disposable 64 MB
+APFS image unrelated to any VM.
+
+**Since then (2026-10-30 to 2026-10-31), parts are implemented in source.**
+They are recorded in the dated notes below and in
+[source slices](#source-slices-after-the-decision).
+
+These are source, fixture and local-build results only:
+
+- **Local builds, ad hoc signed.** The validation probe and seed tool
+  ([validation plan](LOCAL-VM-HELPER-VALIDATION-PLAN.md#prerequisites-what-exists-and-what-is-missing)
+  P3 and the [run sheet](LOCAL-VM-HELPER-RUN-SHEET.md)) and the restricted Lume
+  owner (P6) were built locally and carry only the linker's ad hoc signature.
+  The guest helper's enrollment, account child, key install and host-key
+  report are implemented and fixture-tested in `native/vm-bootstrap`. They
+  have no production executable.
+- **Nothing is distributed or adopted.** Nothing is Developer ID signed,
+  notarized, catalog-approved, installed, adopted or accepted, or run in a
+  real VM or guest.
+- **Still absent or held.** The restore catalog is still empty. The bundled
+  seed daemon (Option A) is not implemented, and its packaging is held for a
+  separate review.
+- **Refused or false.** Person-only steps refuse in this build
+  ([person approval](#person-approval-for-person-only-actions)). Readiness and
+  acceptance stay false.
+- **Resources used.** No live, privileged or restore-image operation was
+  performed. The only downloads were source repositories for the offline Lume
+  build, and the only disk images were disposable test images.
 
 ## The missing primitive, restated
 
@@ -633,26 +662,39 @@ evidence and pass/fail criteria (G1–G6 there):
    condition documented.
 4. Setup Assistant and first boot leave the seeded items intact.
 5. The restricted owner's real `VZVirtioSocketListener` accepts the connection.
-   It is typechecked only today.
+   It is compiled in the offline build (validation plan P6) but has never run
+   against a real VM.
 6. Disabling the item in Login Items prevents the launch, and the person sees
    the helper attributed to its signing team.
 
 ## Source slices after the decision
 
+Status as of 2026-10-31. "Implemented" means source and fixtures, never a
+signed, installed or live-accepted artifact.
+
 1. Seeder core with descriptor-relative writes and readback, tested against
    disposable APFS images. Non-root fixtures cover layout, no-follow and
    pristine checks; root ownership needs the acceptance run. Implemented in
    `native/vm-bootstrap` (`seed.rs`, `disk.rs`) and fixture-tested on
-   disposable APFS images. The Run 1 tool `terminalx-vm-seed` uses it. Root
-   ownership and slice 4's journal states remain.
+   disposable APFS images (`6aa26b4a`). The Run 1 tool `terminalx-vm-seed`
+   uses it, built ad hoc signed (`29bde7fd…`). Root ownership remains.
 2. Version-2 enrollment in the Swift owner and the Rust helper, with
    cross-language socketpair fixtures for proof, refusal budget, replay and
-   tampered frames. Implemented (wire form above); the listener
-   switch remains.
+   tampered frames. Implemented (wire form above, `08d126b3`). The listener
+   switch is done too: the version-3 owner listener runs it (`373deb08`).
 3. An authenticated `Channel` constructor fed by the session, replacing
    `acquire_authenticated()`, plus the privilege-dropping account child.
+   - **Account child:** implemented (`ecf5fc79`, `3c1018a6`, `76cbf4d6`),
+     with the account confirmation, key grant and host-key report described
+     above.
+   - **`Channel` constructor:** not implemented. `acquire_authenticated()`
+     still refuses (`macos_guest_channel.rs:286`).
 4. Seed journal states in `macos_provision.rs` and the `run` precondition.
-5. Option A packaging, reviewed separately; it is not started by this document.
+   Implemented: `macos_seed.rs` journals the seed beside the provisioning
+   record (`db550455`), and only an exactly seeded guest launches a version-3
+   owner (`e0cf678a`).
+5. Option A packaging, reviewed separately. Not started; it stays held for
+   its own review.
 
 ## Evidence
 
@@ -674,4 +716,7 @@ Apple sources are the installed SDK headers (`SMAppService.h`,
 `vsock(4)` pages, and the
 [background tasks deployment guide](https://support.apple.com/guide/deployment/depdca572563/web).
 No dependency, profile, privileged tool, VM, image or account operation was
-used. Acceptance and PR readiness remain false.
+used for the 2026-10-29 proposal. Later implementation evidence is retained
+under `~/.raccoon/task-coordination/pro114-pro117/passes/20261030-helper-impl/`
+and the dated `20261031-*` directories beside it. Acceptance and PR readiness
+remain false.
