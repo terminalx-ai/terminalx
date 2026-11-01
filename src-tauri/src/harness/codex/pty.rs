@@ -49,6 +49,20 @@ const REPORT_TIMEOUT_SECS: u64 = 10;
 /// request the CLI has already given up on.
 pub const PERMISSION_WAIT: Duration = Duration::from_secs(DECIDING_TIMEOUT_SECS);
 
+/// Worded so `RecoveryKind::classify` reads it as `SignedOut` ("agent is
+/// signed out"), whose banner offers the Codex sign-in shell.
+pub const SIGN_IN_REQUIRED: &str = "The agent is signed out: Codex is showing its sign-in screen, so the prompt was not sent. Sign in, then stop the session and press Up in the composer to recall and send your prompt.";
+
+/// Only used before SessionStart. Inspect the newest full screen, so an old
+/// sign-in menu cleared by the CLI cannot block the composer after login.
+pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
+    let frame = output.windows(4).rposition(|bytes| bytes == b"\x1b[2J").map_or(output, |at| &output[at + 4..]);
+    let text = crate::harness::tui::screen_text(frame).to_ascii_lowercase();
+    (text.contains("signinwithchatgpt")
+        && (text.contains("apikey") || text.contains("devicecode")))
+        .then_some(SIGN_IN_REQUIRED)
+}
+
 fn timeout_for(event: &str) -> u64 {
     if matches!(event, "PermissionRequest" | "PreToolUse") {
         DECIDING_TIMEOUT_SECS
@@ -189,6 +203,17 @@ pub fn pre_tool_decision(allow: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_menu_blocks_but_a_cleared_menu_does_not() {
+        let menu = b"\x1b[2J\x1b[1mSign in with ChatGPT\x1b[0m\r\nSign in with an API key";
+        assert_eq!(blocking_screen(menu), Some(SIGN_IN_REQUIRED));
+        let mut ready = menu.to_vec();
+        ready.extend_from_slice(b"\x1b[2JOpenAI Codex\r\nmodel: gpt-6-astra\r\n> ");
+        assert_eq!(blocking_screen(&ready), None);
+        assert_eq!(blocking_screen(b"OpenAI Codex\r\n> explain API keys"), None);
+        assert_eq!(blocking_screen(b"\x1b[38;5"), None);
+    }
 
     #[cfg(unix)]
     #[test]

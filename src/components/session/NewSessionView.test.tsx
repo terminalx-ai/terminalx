@@ -97,6 +97,49 @@ function renderView(onCreated = vi.fn()) {
 }
 
 describe("new session attachments", () => {
+  it("retains the draft and attachment when fresh login preflight refuses creation, then sends once after login", async () => {
+    let signedIn = false;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_agent_readiness") return { state: signedIn ? "ready" : "signed_out", checkedAt: "2026-10-26T14:00:00Z", version: "1.0.0" };
+      if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
+      if (cmd === "create_session") return created;
+      if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    openDialog.mockResolvedValue(["/tmp/shot.png"]);
+    const { onCreated } = renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this task" } });
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    await screen.findByAltText("shot.png");
+    const start = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(start);
+    await screen.findByText(/Your draft is kept and no session has been created/);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this task");
+    expect(screen.getByAltText("shot.png")).toBeTruthy();
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(0);
+    expect(onCreated).not.toHaveBeenCalled();
+    signedIn = true;
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(1);
+  });
+
+  it("also preserves a quick-chat draft when login is required", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_agent_readiness") return { state: "signed_out", checkedAt: null, version: null };
+    });
+    render(<NewSessionView quick />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this question" } });
+    const ask = screen.getByRole("button", { name: "Ask" });
+    await waitFor(() => expect(ask.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(ask);
+    await screen.findByText(/Your draft is kept and no session has been created/);
+    expect(createQuickChat).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this question");
+  });
+
   it("sends an image picked from the attach button with the first prompt", async () => {
     openDialog.mockResolvedValue(["/tmp/shot.png"]);
     const { onCreated } = renderView();
@@ -202,7 +245,7 @@ describe("starting a quick chat", () => {
     expect(createQuickChat).toHaveBeenCalledWith({ title: "What is a monad?", cwd: null, tab: { harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" } });
     expect(selectSession).toHaveBeenCalledWith("quick-1");
     // No project session was made, and no git was read.
-    expect(invoke.mock.calls.map(([command]) => command)).toEqual([]);
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["check_agent_readiness", "check_agent_readiness"]);
   });
 
   it("can be pointed at a folder first, which is passed as the working directory and not added as a project", async () => {

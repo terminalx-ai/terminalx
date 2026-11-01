@@ -1294,6 +1294,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn captured_output_keeps_structured_status_on_nonzero_exit() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf '{\"loggedIn\":false}'; exit 1"]);
+        let output = capture_within(command, std::time::Duration::from_secs(1)).unwrap();
+        assert!(!output.status.success());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["loggedIn"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bounded_output_deadline_includes_inherited_stdout_and_stderr() {
         for redirect in ["2>/dev/null", ">/dev/null"] {
             let mut command = Command::new("/bin/sh");

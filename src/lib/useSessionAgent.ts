@@ -94,7 +94,11 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   const latest = useRef(controlled);
   latest.current = controlled;
   const chosen = controlled?.value;
-  const harness = harnesses.find((h) => h.id === (chosen ? chosen.harness : prefs.lastAgent)) ?? harnesses[0] ?? null;
+  const preferred = harnesses.find((h) => h.id === (chosen ? chosen.harness : prefs.lastAgent));
+  // A cloud or controlled form owns its choice. For a local start, a missing
+  // default should not hide the agent that is already installed. Derive this
+  // without replacing the saved provider/model preferences during discovery.
+  const harness = (!chosen && here && !preferred?.available ? harnesses.find((h) => h.available) : preferred) ?? preferred ?? harnesses[0] ?? null;
   const catalog = useModels(controlled?.preserveUnavailableModel ? undefined : harness?.id);
   const listed = controlled?.preserveUnavailableModel ? catalog.filter((m) => m.harness === harness?.id) : catalog;
   const picker = usePickerModels(listed, !here, modelClient, harness?.id);

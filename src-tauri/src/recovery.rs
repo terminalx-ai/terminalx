@@ -365,6 +365,17 @@ pub fn sanitize(payload: &mut Payload) {
 mod tests {
     use super::*;
     #[test]
+    fn codex_sign_in_screen_is_a_signed_out_recovery_after_persistence_and_rereading() {
+        let mut payload = Payload::Error { message: crate::harness::codex::pty::SIGN_IN_REQUIRED.into(), fatal: false, detail: None };
+        // The live event and a subsequent transcript read both sanitize.
+        for _ in 0..2 {
+            sanitize(&mut payload);
+            assert_eq!(failure(&payload), Some(RecoveryKind::SignedOut));
+            assert!(matches!(&payload, Payload::Error { message, .. } if message == RecoveryKind::SignedOut.message()));
+        }
+    }
+
+    #[test]
     fn classifications_do_not_echo_diagnostics() {
         for (raw, expected) in [
             ("at capacity token=secret /Users/private", RecoveryKind::Capacity),

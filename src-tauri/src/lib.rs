@@ -554,6 +554,7 @@ pub fn run() {
             commands::set_active_tab,
             commands::delete_session,
             commands::list_harnesses,
+            commands::check_agent_readiness,
             commands::list_skills,
             commands::skill_detail,
             commands::work_status,

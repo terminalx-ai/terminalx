@@ -4468,8 +4468,13 @@ impl SessionManager {
         if let Readiness::Blocked(message) = readiness {
             log::warn!("[{}] the CLI is on a first-run screen: {message}", rt.key());
             rt.turn_open = false;
+            if let Engine::Cli(cli) = &mut rt.engine {
+                cli.awaiting_delivery = None;
+                cli.delivery_sent_at = None;
+                cli.accept_by = None;
+                cli.nudge_by = None;
+            }
             self.apply(rt, Payload::Error { message: message.to_string(), fatal: false, detail: None }, None);
-            self.set_status(rt, TabStatus::Idle);
             if let Some(receipt) = receipt {
                 let _ = receipt.send(Err(format!("{message} The prepared prompt is retained.")));
             }
@@ -4508,10 +4513,11 @@ impl SessionManager {
     fn wait_ready(&self, pane: &str, ready: &tui::Ready, shared: Option<&(crate::local_sharing::WritePermit, String, String, u64)>, mobile: Option<&(crate::local_runtime::mobile::WritePermit, String, String, u64)>) -> Readiness {
         let deadline = Instant::now() + tui::READY_TIMEOUT;
         let blocked = || {
-            if !ready.announces_start() {
-                return None;
-            }
-            self.terminals.read_output(pane).and_then(|out| claude::pty::blocking_screen(&out))
+            self.terminals.read_output(pane).and_then(|out| if ready.announces_start() {
+                claude::pty::blocking_screen(&out)
+            } else {
+                codex::pty::blocking_screen(&out)
+            })
         };
         loop {
             if mobile.is_some_and(|(permit,session,tab,_)| !permit.valid() || permit.check_mode(session,tab).is_err()) {

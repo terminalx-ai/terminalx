@@ -126,8 +126,8 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
             </p>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {store.harnesses.map((harness) => (
-                <Button key={harness.id} size="xs" variant="secondary" title={harness.installHint} onClick={() => void openUrl(harness.installUrl)}>
-                  Get {harness.name} <ExternalLink />
+                <Button key={harness.id} size="xs" variant="secondary" onClick={() => onOpenSettings("agents")}>
+                  Set up {harness.name}
                 </Button>
               ))}
               <Button size="xs" variant="ghost" onClick={() => void refreshHarnesses()}>
