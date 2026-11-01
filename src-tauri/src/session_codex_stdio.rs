@@ -13,7 +13,32 @@ pub(super) fn selected(tab: &TabEntry) -> bool {
     tab.transport == AgentTransport::ExperimentalCodexStdio
 }
 
+/// Whether the installed Codex can serve the app-server connection.
+fn codex_supported() -> bool {
+    let Some(program) = crate::binpath::resolve("codex") else { return false };
+    let mut probe = std::process::Command::new(&program);
+    probe.arg("--version").env("PATH", crate::binpath::login_path());
+    crate::git::output_within(probe, Duration::from_secs(5)).is_ok_and(|version| codex::stdio::supported(&version))
+}
+
 impl SessionManager {
+    /// Native Codex is tried, not required (#644): a tab that has not started
+    /// its thread runs on the terminal engine instead when this Codex is older
+    /// than the app server's minimum, or missing. Decided at its first launch,
+    /// so an update since the tab was made is followed, and under admission
+    /// like the terminal engine's own `--help` probe. Says whether it moved.
+    pub(super) fn codex_stdio_falls_back(&self, rt: &TabRuntime, tab: &TabEntry) -> Result<bool> {
+        let first_launch = selected(tab) && tab.provider_session_id.is_none() && tab.fork_from.is_none()
+            && matches!(rt.engine, Engine::None) && rt.child.is_none();
+        if !first_launch || codex_supported() { return Ok(false); }
+        index::update_tab(&rt.session_id, &rt.tab_id, |tab| {
+            if selected(tab) && tab.provider_session_id.is_none() { tab.transport = AgentTransport::Pty; }
+            Ok(())
+        })?;
+        if let Ok(session) = index::get(&rt.session_id) { self.sink.emit("session_updated", &session); }
+        Ok(true)
+    }
+
     pub(super) fn refuse_codex_stdio_operation(&self, session: &str, tab: &str) -> Result<()> {
         let entry = index::get(session)?;
         anyhow::ensure!(!entry.tab(tab).is_some_and(selected), "This operation is not supported for experimental Codex stdio. Create a new session with the desired settings; no PTY handoff or thread migration is performed.");
