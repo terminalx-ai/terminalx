@@ -10,13 +10,18 @@
 //! every window says the runtime is older than the app, names what it is
 //! waiting for, and offers to restart it now.
 //!
+//! An agent's MCP and language servers are its own helpers, and start again
+//! with it; what its tools started, in a shell, is work (`idle::working`).
+//!
 //! A runtime of this build or later says what stopping it would cut short
 //! (`runtime.work`), and stops only if nothing would, deciding under the lock
 //! that admits work (`runtime.stopAllIfIdle`). One too old to (0.2.22 and
 //! before) is judged by what it shows: its agents' turns, its open terminals,
-//! and the processes running below it, read again just before it is stopped.
-//! It cannot show a prompt it holds, nor one a CLI holds for after its turn,
-//! so nothing may be found under way for [`SETTLE`] before it is replaced.
+//! and what its agents' tools left running, read again just before it is
+//! stopped. It cannot show a prompt it holds, nor one a CLI holds for after
+//! its turn, so nothing may be found under way for [`SETTLE`] before it is
+//! replaced. Replacing it by itself never stops it without asking unless it
+//! agreed to stop: anything that goes wrong before then leaves it running.
 //!
 //! Replacing stops the runtime as Stop All does (`launch::retire`); each
 //! agent picks up its conversation again when its tab next starts, as after
@@ -196,14 +201,16 @@ impl Replacement {
         self.inner.lock().unwrap().stopping = false;
     }
 
-    /// The runtime declined to stop by itself, as work began after it was
-    /// read: nothing was stopped, and the wait goes on from the start.
-    fn declined(&self) {
+    /// The runtime was left running, nothing of it stopped: work began after
+    /// it was read, or `problem` kept it from agreeing to stop. The wait goes
+    /// on from the start.
+    fn declined(&self, epoch: &str, problem: Option<String>) {
         let mut inner = self.inner.lock().unwrap();
         inner.switching = None;
         inner.stopping = false;
         inner.quiet_since = None;
         inner.due = true;
+        if let Some(outdated) = inner.outdated(epoch) { outdated.problem = problem; }
     }
 
     fn failed(&self, epoch: &str, problem: String) {
@@ -283,9 +290,11 @@ pub(crate) fn switch(replacement: &Replacement, host: &impl Host, epoch: &str, f
             host.reattach(epoch);
             Ok(())
         }
-        Err(error) if super::launch::refused(&error, "runtime_busy") || super::launch::refused(&error, "runtime_restarted") => {
+        Err(error) if super::launch::left_running(&error) => {
             log::info!("the older local runtime was left running: {error:#}");
-            replacement.declined();
+            // Work that began, or a runtime replaced meanwhile, is no news.
+            let routine = super::launch::refused(&error, "runtime_busy") || super::launch::refused(&error, "runtime_restarted");
+            replacement.declined(epoch, (!routine).then(|| format!("{error:#}")));
             Ok(())
         }
         Err(error) => {
@@ -337,11 +346,14 @@ pub(crate) struct AppHost<'a>(pub(crate) &'a AppHandle);
 impl Host for AppHost<'_> {
     fn retire(&self, epoch: &str, forced: bool) -> anyhow::Result<()> {
         let state = self.0.state::<AppState>();
-        let runtime = state.runtime().filter(|runtime| runtime.epoch() == epoch).ok_or_else(|| Refused {
-            code: "runtime_restarted".into(), message: "Another runtime was attached meanwhile.".into(),
-        })?;
+        let Some(runtime) = state.runtime().filter(|runtime| runtime.epoch() == epoch) else {
+            let replaced = anyhow::Error::from(Refused { code: "runtime_restarted".into(), message: "Another runtime was attached meanwhile.".into() });
+            return Err(replaced.context(super::launch::LeftRunning("The TerminalX runtime was replaced before it could be stopped; nothing was stopped.")));
+        };
         let home = crate::store::root()?;
-        super::launch::retire(&home, || if forced { runtime.stop_all() } else { stop_if_idle(&runtime) })
+        let stopping = || runtime.stopping();
+        let fallback = if forced { super::launch::Fallback::Forced } else { super::launch::Fallback::Agreed(&stopping) };
+        super::launch::retire(&home, || if forced { runtime.stop_all() } else { stop_if_idle(&runtime) }, fallback)
     }
 
     fn reattach(&self, epoch: &str) {
@@ -380,17 +392,19 @@ fn work(runtime: &Desktop) -> anyhow::Result<Vec<String>> {
     }
     let status = runtime.status()?;
     let shells = runtime.terminals()?.all_shells()?;
-    let table = super::idle::table()?;
+    let table = super::idle::processes()?;
     shown_work(&sessions, &status, &shells, &table)
 }
 
 /// What an older runtime shows of its work (0.2.22 and before): agents in
 /// the middle of a turn (`runningTabs`), every terminal still open
-/// (`runtime.pty.shells`), and any process running below a process it
-/// started, by the process table (`pid ppid` lines): an agent's own tools
-/// and servers, or a terminal's program. Each agent and terminal it starts
-/// is its child, and a settled agent has no process of its own.
-fn shown_work(sessions: &[SessionEntry], status: &Value, shells: &[crate::pty::ShellPane], table: &str) -> anyhow::Result<Vec<String>> {
+/// (`runtime.pty.shells`), and what an agent's tools left running, by the
+/// process table. Each agent and terminal it starts is its child, leading a
+/// process group of its own: a terminal's is a shell, counted with the open
+/// terminals. An agent's helpers are no work (`idle::working`). A group whose
+/// leader has gone is invisible here: such a runtime does not say which
+/// groups are its own.
+fn shown_work(sessions: &[SessionEntry], status: &Value, shells: &[crate::pty::ShellPane], table: &[super::idle::Process]) -> anyhow::Result<Vec<String>> {
     let tabs = status["runningTabs"].as_array().context("The TerminalX runtime did not say what it is running.")?;
     let mut work: Vec<String> = tabs.iter().filter(|tab| matches!(tab["status"].as_str(), Some("in_progress" | "waiting"))).map(|tab| named(sessions, &Work {
         kind: WorkKind::Turn, session_id: tab["sessionId"].as_str().map(str::to_owned), tab_id: tab["tabId"].as_str().map(str::to_owned),
@@ -399,15 +413,9 @@ fn shown_work(sessions: &[SessionEntry], status: &Value, shells: &[crate::pty::S
     work.extend(shells.iter().filter(|shell| !shell.exited).map(|shell| named(sessions, &Work {
         kind: WorkKind::Terminal, session_id: Some(shell.session_id.clone()), tab_id: None, harness: None, title: shell.title.clone(),
     })));
-    let runtime = status["pid"].as_u64().context("The TerminalX runtime did not say its process.")?;
-    let mut parents = std::collections::HashMap::new();
-    for line in table.lines().filter(|line| !line.trim().is_empty()) {
-        let mut fields = line.split_whitespace();
-        let (Some(pid), Some(parent), None) = (fields.next(), fields.next(), fields.next()) else { anyhow::bail!("The process table could not be read.") };
-        parents.insert(pid.parse::<u64>()?, parent.parse::<u64>()?);
-    }
-    let started: std::collections::HashSet<u64> = parents.iter().filter(|(_, parent)| **parent == runtime).map(|(pid, _)| *pid).collect();
-    if parents.values().any(|parent| started.contains(parent)) {
+    let runtime: u32 = status["pid"].as_u64().and_then(|pid| pid.try_into().ok()).context("The TerminalX runtime did not say its process.")?;
+    let agents = table.iter().filter(|process| process.parent == runtime && !super::idle::is_shell(process));
+    if agents.into_iter().any(|agent| super::idle::working(table, agent.pid)) {
         work.push(named(sessions, &Work { kind: WorkKind::Processes, session_id: None, tab_id: None, harness: None, title: None }));
     }
     Ok(work)
@@ -435,8 +443,8 @@ fn named(sessions: &[SessionEntry], work: &Work) -> String {
             Some(title) => format!("The terminal \u{201c}{title}\u{201d}{place}"),
             None => format!("A terminal{place}"),
         },
-        WorkKind::Processes if work.harness.is_some() => format!("Processes {agent}{place} started"),
-        WorkKind::Processes => "Processes started by its agents or terminals".into(),
+        WorkKind::Processes if work.harness.is_some() => format!("Commands {agent}{place} left running"),
+        WorkKind::Processes => "Commands its agents left running, or processes that outlived what started them".into(),
         WorkKind::Pipeline => "An issue pipeline step".into(),
     }
 }
@@ -598,7 +606,8 @@ mod tests {
         let replacement = Replacement::default();
         replacement.attached("old", &build(Some(&older())));
         let busy = Supervisor { replacement: &replacement, steps: RefCell::default(), stop: Box::new(|_| {
-            Err(anyhow::Error::from(Refused { code: "runtime_busy".into(), message: "an agent is mid-turn".into() }).context("The TerminalX runtime has work under way; nothing was stopped."))
+            Err(anyhow::Error::from(Refused { code: "runtime_busy".into(), message: "an agent is mid-turn".into() })
+                .context(super::super::launch::LeftRunning("The TerminalX runtime has work under way; nothing was stopped.")))
         }) };
         assert_eq!(switch(&replacement, &busy, "old", false), Ok(()), "no failure");
         assert_eq!(*busy.steps.borrow(), ["changed: updating", "retire: updating", "changed: outdated"], "never reattached");
@@ -606,6 +615,25 @@ mod tests {
         assert!(!outdated.failed && outdated.problem.is_none());
         assert_eq!(replacement.next_now().as_deref(), Some("old"), "read again at once, and waited for from the start");
         assert!(!replacement.settled("old", Instant::now() + SETTLE));
+    }
+
+    /// #730 review: replacing it by itself, a failure before the runtime
+    /// agreed to stop leaves it running; it is neither stopped nor taken for
+    /// a failed switch, and the reason is shown.
+    #[test]
+    fn a_runtime_left_running_by_a_failure_before_it_agreed_is_waited_for_again() {
+        let replacement = Replacement::default();
+        replacement.attached("old", &build(Some(&older())));
+        let left = Supervisor { replacement: &replacement, steps: RefCell::default(), stop: Box::new(|_| {
+            Err(anyhow::anyhow!("The TerminalX runtime did not answer status within 15 seconds.")
+                .context(super::super::launch::LeftRunning("The TerminalX runtime did not agree to stop; nothing was stopped.")))
+        }) };
+        assert_eq!(switch(&replacement, &left, "old", false), Ok(()));
+        assert_eq!(*left.steps.borrow(), ["changed: updating", "retire: updating", "changed: outdated"], "never reattached");
+        let outdated = replacement.outdated("old").unwrap();
+        assert!(!outdated.failed, "not a failed switch: nothing was stopped");
+        assert!(outdated.problem.as_deref().is_some_and(|problem| problem.contains("did not agree to stop") && problem.contains("15 seconds")), "{outdated:?}");
+        assert_eq!(replacement.next_now().as_deref(), Some("old"), "read again, and waited for from the start");
     }
 
     #[test]
@@ -663,8 +691,8 @@ mod tests {
         assert_eq!(work(WorkKind::ByHand, Some("s1"), Some("t1"), Some("claude"), None), format!("{claude} started by hand in \u{201c}Fix login\u{201d} (Review)"));
         assert_eq!(work(WorkKind::Terminal, Some("s1"), None, None, Some("npm run dev")), "The terminal \u{201c}npm run dev\u{201d} in \u{201c}Fix login\u{201d}");
         assert_eq!(work(WorkKind::Terminal, Some("gone"), None, None, None), "A terminal");
-        assert_eq!(work(WorkKind::Processes, Some("s1"), Some("t2"), Some("codex"), None), format!("Processes {codex} in \u{201c}Fix login\u{201d} started"));
-        assert_eq!(work(WorkKind::Processes, None, None, None, None), "Processes started by its agents or terminals");
+        assert_eq!(work(WorkKind::Processes, Some("s1"), Some("t2"), Some("codex"), None), format!("Commands {codex} in \u{201c}Fix login\u{201d} left running"));
+        assert_eq!(work(WorkKind::Processes, None, None, None, None), "Commands its agents left running, or processes that outlived what started them");
         assert_eq!(work(WorkKind::Pipeline, None, None, None, None), "An issue pipeline step");
     }
 
@@ -678,20 +706,25 @@ mod tests {
             "runningTabs": [{"sessionId": "s1", "tabId": "t1", "harness": "claude", "status": tab_status}]});
         let shell = |exited: bool| crate::pty::ShellPane { id: "s1:1".into(), session_id: "s1".into(), title: Some("npm run dev".into()),
             renamed: false, cwd: "/p".into(), exited, created: "2026-11-01T00:00:00Z".into() };
-        // The runtime (100) started an agent (200) that has no process of its own.
-        let settled = "1 0\n100 1\n200 100\n";
-        assert_eq!(shown_work(&sessions, &status("completed"), &[], settled).unwrap(), Vec::<String>::new(), "a settled agent may be stopped");
-        assert_eq!(shown_work(&sessions, &status("idle"), &[shell(true)], settled).unwrap(), Vec::<String>::new(), "a terminal whose shell exited is not running");
-        assert_eq!(shown_work(&sessions, &status("in_progress"), &[], settled).unwrap(), [format!("{claude} in \u{201c}Fix login\u{201d} (Review), in the middle of a turn")]);
-        assert_eq!(shown_work(&sessions, &status("waiting"), &[shell(false)], settled).unwrap(), [
+        let table = |extra: &str| super::super::idle::parse(&format!("1 1 1 launchd\n100 1 100 terminalx-serve\n\
+            200 100 200 claude\n201 200 200 npm exec @playwright/mcp\n202 201 200 node\n203 200 200 cua\n150 100 150 -zsh\n{extra}")).unwrap();
+        // The runtime (100) runs an agent (200) with its MCP servers, and a terminal's shell (150).
+        let settled = table("");
+        let left = || "Commands its agents left running, or processes that outlived what started them".to_string();
+        assert_eq!(shown_work(&sessions, &status("completed"), &[], &settled).unwrap(), Vec::<String>::new(), "a settled agent and its MCP servers may be stopped");
+        assert_eq!(shown_work(&sessions, &status("idle"), &[shell(true)], &settled).unwrap(), Vec::<String>::new(), "a terminal whose shell exited is not running");
+        assert_eq!(shown_work(&sessions, &status("in_progress"), &[], &settled).unwrap(), [format!("{claude} in \u{201c}Fix login\u{201d} (Review), in the middle of a turn")]);
+        assert_eq!(shown_work(&sessions, &status("waiting"), &[shell(false)], &settled).unwrap(), [
             format!("{claude} in \u{201c}Fix login\u{201d} (Review), in the middle of a turn"),
             "The terminal \u{201c}npm run dev\u{201d} in \u{201c}Fix login\u{201d}".to_string(),
         ]);
-        // The agent started a server of its own below the runtime.
-        assert_eq!(shown_work(&sessions, &status("completed"), &[], "1 0\n100 1\n200 100\n300 200\n").unwrap(), ["Processes started by its agents or terminals"]);
-        assert_eq!(shown_work(&sessions, &status("completed"), &[], "1 0\n100 1\n200 100\n999 1\n").unwrap(), Vec::<String>::new(), "processes not below it are not its");
-        assert!(shown_work(&sessions, &status("idle"), &[], "1 0\n100 x\n").is_err(), "an unreadable table is no reading");
-        assert!(shown_work(&sessions, &json!({"pid": 100}), &[], settled).is_err(), "nor is a status without its tabs");
+        // A command the agent's tool started, still running in its shell.
+        assert_eq!(shown_work(&sessions, &status("completed"), &[], &table("300 200 200 /bin/zsh\n301 300 200 node\n")).unwrap(), [left()]);
+        // #730 review: a server whose shell exited, moved under launchd but still in the agent's group, which Stop All kills.
+        assert_eq!(shown_work(&sessions, &status("completed"), &[], &table("400 1 200 node\n")).unwrap(), [left()]);
+        assert_eq!(shown_work(&sessions, &status("completed"), &[], &table("999 1 999 node\n152 150 150 vim\n")).unwrap(), Vec::<String>::new(),
+            "processes not the runtime's are not its work, and a terminal's program counts with its terminal");
+        assert!(shown_work(&sessions, &json!({"pid": 100}), &[], &settled).is_err(), "a status without its tabs is no reading");
     }
 
     impl Replacement {

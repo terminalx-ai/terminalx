@@ -431,7 +431,9 @@ fn a_runtime_says_its_build_and_turns_and_a_retired_one_is_replaced_by_the_next_
     assert!(turn(&status).is_some_and(|status| status != "in_progress" && status != "waiting"), "nothing mid-turn: {status}");
 
     let pid = status["pid"].as_u64().unwrap();
-    launch::retire(&world.data, || client.stop_all()).unwrap();
+    // As the desktop replacing it by itself does: stopped without asking only once it agreed to stop.
+    let stopping = || client.liveness(raccoon_lib::local_runtime::client::QUICK_TIMEOUT).is_ok_and(|liveness| liveness["localRuntime"]["stopping"] == true);
+    launch::retire(&world.data, || client.stop_all(), launch::Fallback::Agreed(&stopping)).unwrap();
     // It has let go of its socket; the process itself may take a moment more.
     common::agent::wait_until("the retired runtime to exit", || (!alive(pid)).then_some(()));
     launch_installed(&world, &source);

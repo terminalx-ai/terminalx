@@ -177,6 +177,12 @@ impl Desktop {
 
     pub fn stop_all(&self) -> Result<()> { self.client.stop_all() }
 
+    /// Whether the owner has agreed to stop: it refuses any new work (#730).
+    /// `false` when it does not say, as when it does not answer.
+    pub fn stopping(&self) -> bool {
+        self.client.liveness(QUICK_TIMEOUT).is_ok_and(|liveness| liveness["localRuntime"]["stopping"] == true)
+    }
+
     /// What stopping the owner now would cut short, as it says (#730).
     /// `None` from an owner too old to say: TerminalX 0.2.22 and before.
     pub fn work(&self) -> Result<Option<Vec<crate::session::retire::Work>>> {

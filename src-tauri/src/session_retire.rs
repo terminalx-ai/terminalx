@@ -2,10 +2,12 @@
 //!
 //! A desktop newer than this runtime replaces it with its own, and does so by
 //! itself only when nothing would be cut short. That is the runtime's own
-//! idle rule (`SessionManager::idle_process_roots`, `local_runtime::idle`):
-//! only a managed agent that has settled, with no process of its own running,
-//! may be stopped without asking. Everything else is named here, so the
-//! desktop can wait for it or say what restarting now would stop.
+//! idle rule (`SessionManager::idle_process_roots`), but for an agent's own
+//! helpers: only a managed agent that has settled, running nothing its tools
+//! started (`local_runtime::idle::working`), may be stopped without asking.
+//! Its MCP and language servers start again with it, as it picks up its
+//! conversation. Everything else is named here, so the desktop can wait for
+//! it or say what restarting now would stop.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +41,7 @@ pub enum WorkKind {
     ByHand,
     /// A terminal whose shell or program is running.
     Terminal,
-    /// Processes an agent started, or that outlived what started them.
+    /// Processes an agent's tools started, or that outlived what started them.
     Processes,
     /// An issue pipeline step under way, or waiting on checks.
     Pipeline,
@@ -57,9 +59,9 @@ impl Work {
 
 impl SessionManager {
     /// Everything stopping this runtime now would cut short; empty when only
-    /// settled managed agents run, each of which picks up its conversation
-    /// again when its tab next starts. Checks the process table, as the idle
-    /// exit's last check does.
+    /// settled managed agents run, with nothing their tools started, each of
+    /// which picks up its conversation again when its tab next starts. Reads
+    /// the process table for what each agent runs.
     pub(crate) fn retire_work(&self) -> Vec<Work> {
         let mut work = Vec::new();
         // The agent each settled CLI pane, or headless agent process, belongs to.
@@ -119,16 +121,17 @@ impl SessionManager {
                 title: shell.and_then(|shell| shell.title),
             });
         }
-        let pids: Vec<u32> = roots.iter().map(|(pid, _)| *pid).collect();
         // Groups that outlived what started them, including closed or replaced panes.
         if self.terminals.owned_groups().iter().any(|group| !led.contains(group)) || !self.session_stop_pids.lock().unwrap().is_empty() {
             work.push(Work::unnamed(WorkKind::Processes));
         }
-        match crate::local_runtime::idle::busy(&pids) {
-            Ok(busy) => work.extend(roots.into_iter().filter(|(pid, _)| busy.contains(pid)).map(|(_, agent)| agent)),
-            Err(error) => {
-                log::warn!("read the process table for the runtime's work: {error:#}");
-                work.push(Work::unnamed(WorkKind::Processes));
+        if !roots.is_empty() {
+            match crate::local_runtime::idle::processes() {
+                Ok(table) => work.extend(roots.into_iter().filter(|(pid, _)| crate::local_runtime::idle::working(&table, *pid)).map(|(_, agent)| agent)),
+                Err(error) => {
+                    log::warn!("read the process table for the runtime's work: {error:#}");
+                    work.push(Work::unnamed(WorkKind::Processes));
+                }
             }
         }
         if crate::issue_pipeline::engine::holding() != 0 { work.push(Work::unnamed(WorkKind::Pipeline)); }
