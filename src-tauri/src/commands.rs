@@ -2419,6 +2419,14 @@ pub async fn resend_unsent(state: State<'_, AppState>, session_id: String, tab_i
     tauri::async_runtime::spawn_blocking(move || m.resend_unsent(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
+/// "Send again" on a message the agent dropped unanswered, taking another
+/// prompt in its place (#722): sent as a new message, as it was sent.
+#[tauri::command]
+pub async fn resend_message(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64) -> CmdResult<SendOutcome> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.resend_message(&session_id, &tab_id, seq).map_err(err)).await.map_err(err)?
+}
+
 /// Press Enter in a new session for the handoff left in its input (#662).
 #[tauri::command]
 pub async fn submit_waiting_prompt(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64) -> CmdResult<bool> {

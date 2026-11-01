@@ -2,10 +2,10 @@ import { memo, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, RefreshCw, Send, Shrink, Users, X } from "@/icons";
+import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, Keyboard, Pencil, RefreshCw, Send, Shrink, Users, X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
-import type { Turn, WorkItem } from "@/lib/transcript";
+import type { Delivery, Turn, WorkItem } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { MessageTime } from "./MessageTime";
 import { Markdown } from "./Markdown";
@@ -28,6 +28,7 @@ export const TurnBlock = memo(function TurnBlock({
   working,
   streamingTool,
   onSendQueuedNow,
+  onSendAgain,
 }: {
   turn: Turn;
   sessionId: string;
@@ -37,6 +38,8 @@ export const TurnBlock = memo(function TurnBlock({
   streamingTool?: StreamBlock;
   /** Send a message queued behind the running turn now; absent where that cannot be done (a cloud session). */
   onSendQueuedNow?: (seq: number) => void;
+  /** Send a message the agent dropped unanswered again, as a new message (#722); absent where that cannot be done. */
+  onSendAgain?: (seq: number) => void;
 }) {
   const prefs = usePrefs();
   const [expanded, setExpanded] = useState(false);
@@ -52,7 +55,7 @@ export const TurnBlock = memo(function TurnBlock({
   return (
     // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
     <div className="transcript-turn flow-root" data-turn={turn.key}>
-      {turn.prompt && <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" />}
+      {turn.prompt && <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" onSendAgain={onSendAgain} />}
 
       {foldable ? (
         <div className="mb-3">
@@ -66,15 +69,15 @@ export const TurnBlock = memo(function TurnBlock({
           </button>
           {expanded && (
             <div className="ml-1 mt-1 border-l border-hairline pl-2">
-              {turn.work.map((w) => (outsideFold(w) ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} />))}
+              {turn.work.map((w) => (outsideFold(w) ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} />))}
             </div>
           )}
-          {turn.work.map((w) => (outsideFold(w) ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} /> : null))}
+          {turn.work.map((w) => (outsideFold(w) ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} /> : null))}
         </div>
       ) : (
         <div className="mb-3 space-y-0.5">
           {turn.work.map((w) => (
-            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} />
+            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} />
           ))}
         </div>
       )}
@@ -177,7 +180,7 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void }) {
+function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void }) {
   switch (item.kind) {
     case "text":
       return <div className="mb-3"><Markdown text={item.text} linkContext={linkContext} /><MessageTime ts={item.messageTs} /></div>;
@@ -188,20 +191,23 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
     case "tool_group":
       return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
     case "message":
-      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" />;
+      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} />;
     case "queued":
       return (
-        <div className="my-3 flex items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
-          <Clock className="size-3.5 shrink-0" />
-          {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-          <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={item.text} context={linkContext} /><MessageTime ts={item.messageTs} /></div>
-          {onSendQueuedNow && (
-            <WithTooltip label="Interrupt the agent and send this now">
-              <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
-                <Send /> Send now
-              </Button>
-            </WithTooltip>
-          )}
+        <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
+          <div className="flex items-center gap-2">
+            <Clock className="size-3.5 shrink-0" />
+            {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
+            <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={item.text} context={linkContext} /><MessageTime ts={item.messageTs} /></div>
+            {onSendQueuedNow && !item.inputOccupied && (
+              <WithTooltip label="Interrupt the agent and send this now">
+                <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
+                  <Send /> Send now
+                </Button>
+              </WithTooltip>
+            )}
+          </div>
+          {item.inputOccupied && <InputOccupiedNote />}
         </div>
       );
     case "status":
@@ -252,6 +258,19 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
   }
 }
 
+/**
+ * Why a message has not been typed yet (#722): the agent's input box holds something else, and typing would send
+ * the two as one prompt. It goes in once the box is empty.
+ */
+function InputOccupiedNote() {
+  return (
+    <p className="mt-2 flex items-start gap-1.5 text-xs text-warning" data-testid="input-occupied">
+      <Keyboard className="mt-0.5 size-3.5 shrink-0" />
+      <span>Waiting: the agent&apos;s input box already has text in it. Send or clear that text in the terminal, and this message goes in after it.</span>
+    </p>
+  );
+}
+
 /** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */
 /**
  * A message the reader has just sent, before the runtime has it (#727): it is
@@ -275,11 +294,13 @@ function ReaderMessage({
   cwd,
   linkContext,
   className,
+  onSendAgain,
 }: {
-  message: { messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[] };
+  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[] } & Delivery;
   cwd?: string;
   linkContext?: { sessionId: string; cwd: string };
   className: string;
+  onSendAgain?: (seq: number) => void;
 }) {
   const layout = usePrefs().transcriptLayout;
   return (
@@ -306,8 +327,29 @@ function ReaderMessage({
           </div>
         ) : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
-        <div><LinkedText text={message.text} context={linkContext} /></div>
+        <div className={cn(message.replaced && "text-muted-foreground")}><LinkedText text={message.text} context={linkContext} /></div>
         <MessageTime ts={message.messageTs} />
+        {message.sent !== undefined && (
+          <details className="mt-2 text-xs text-muted-foreground" data-testid="prompt-changed">
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded focus-visible:outline focus-visible:outline-2">
+              <Pencil className="size-3.5 shrink-0" />
+              Changed on the way: this is what the agent received. Show what was sent
+            </summary>
+            <div className="mt-1.5 border-l border-hairline pl-2 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={message.sent} context={linkContext} /></div>
+          </details>
+        )}
+        {message.inputOccupied && <InputOccupiedNote />}
+        {message.replaced && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-replaced">
+            <CircleAlert className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1">Not answered: the agent dropped this turn before replying, and took a later prompt in its place.</span>
+            {onSendAgain && message.seq !== undefined && (
+              <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendAgain(message.seq!)}>
+                <Send /> Send again
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -63,6 +63,41 @@ pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
         .then_some(SIGN_IN_REQUIRED)
 }
 
+/// What Codex's input box holds, read from the screen it has drawn (#722).
+///
+/// Codex 0.166 draws the box at the foot of the screen: a row starting with
+/// `›`, the rows the text wraps onto indented under it, then a blank row and
+/// the footer that names the model. Prompts it took are echoed higher up with
+/// the same glyph, so the box is the last such row. An empty box shows a
+/// suggestion drawn faint (`Ask Codex to do anything`); anything drawn at
+/// normal weight is in it.
+///
+/// A box with no blank row under it before the screen ends is not one this
+/// can tell from the footer, and is taken as unseen rather than waited on.
+pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
+    use crate::harness::tui::Composer;
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
+    let cell = |row: u16, col: u16| screen.cell(row, col).map_or("", |cell| cell.contents());
+    let blank = |row: u16| (0..cols).all(|col| cell(row, col).trim().is_empty());
+    let Some(first) = (0..rows).rev().find(|row| cell(*row, 0) == "›" && cell(*row, 1).trim().is_empty()) else { return Composer::Unseen };
+    let Some(end) = (first + 1..rows).find(|row| blank(*row)) else { return Composer::Unseen };
+    let mut words = Vec::new();
+    for row in first..end {
+        let mut line = String::new();
+        for col in u16::from(row == first)..cols {
+            let Some(cell) = screen.cell(row, col) else { continue };
+            line.push_str(if cell.dim() || !cell.has_contents() { " " } else { cell.contents() });
+        }
+        words.extend(line.split(char::is_whitespace).filter(|word| !word.is_empty()).map(str::to_owned));
+    }
+    if words.is_empty() {
+        Composer::Empty
+    } else {
+        Composer::Holds(words.join(" "))
+    }
+}
+
 fn timeout_for(event: &str) -> u64 {
     if matches!(event, "PermissionRequest" | "PreToolUse") {
         DECIDING_TIMEOUT_SECS
@@ -203,6 +238,28 @@ pub fn pre_tool_decision(allow: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::tui::Composer;
+
+    fn drawn(output: &[u8]) -> vt100::Parser {
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(40).unwrap(), std::num::NonZeroU16::new(110).unwrap(), 0);
+        parser.process(output);
+        parser
+    }
+
+    /// Codex 0.166.0, recorded in a 110 by 40 pty: idle with its suggestion
+    /// in the box, and holding a prompt wrapped over three rows (#722).
+    #[test]
+    fn codexs_input_box_is_read_from_the_screen_it_drew() {
+        assert_eq!(composer(drawn(include_bytes!("fixtures/composer_idle.bin")).screen()), Composer::Empty, "the suggestion is drawn faint");
+        let Composer::Holds(text) = composer(drawn(include_bytes!("fixtures/composer_holding.bin")).screen()) else { panic!("the prompt is in the box") };
+        assert!(text.starts_with("This is a long prompt") && text.ends_with("create a proper issue with expected behavior"), "every wrapped row, not the footer: {text}");
+        // No blank row between the box and the end of the screen: the footer
+        // cannot be told from the box, so it is not read as the box.
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(4).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+        parser.process("\x1b[3;1H› typed\r\n  GPT-6 xhigh".as_bytes());
+        assert_eq!(composer(parser.screen()), Composer::Unseen);
+        assert_eq!(composer(drawn(b"").screen()), Composer::Unseen);
+    }
 
     #[test]
     fn login_menu_blocks_but_a_cleared_menu_does_not() {

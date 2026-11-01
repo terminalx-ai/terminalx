@@ -143,6 +143,18 @@ struct CliLaunch {
     restart: Option<unsent::Restart>,
 }
 
+/// What the CLI's input box allowed, once a prompt could be typed into it.
+enum InputWait {
+    /// Type now. Says, for the diagnostics, what the box was: `empty`;
+    /// `unseen`, with no box on screen to read; or `cleared`, empty after
+    /// holding something the prompt waited behind.
+    Type(&'static str),
+    /// Whoever sent it may no longer write to this tab.
+    Revoked,
+    /// The CLI it was for has gone, or been replaced.
+    Gone,
+}
+
 /// How the wait for a pane's CLI to listen ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Readiness {
@@ -213,6 +225,65 @@ struct Echoed {
     seq: u64,
     overtaken: bool,
     continuation: bool,
+    /// The record is not the prompt as sent: the prompt is inside it (#722).
+    changed: bool,
+}
+
+/// How many of the prompts a transcript recorded are kept to tell a
+/// replaced one by. A replacement follows the prompt it replaces at once.
+const RECORDED_PROMPTS: usize = 32;
+
+/// The prompts the transcript has recorded since this launch began reading
+/// it, by where each stands in the conversation (#722).
+#[derive(Debug, Default)]
+struct RecordedPrompts(std::collections::VecDeque<RecordedPrompt>);
+
+#[derive(Debug)]
+struct RecordedPrompt {
+    lineage: tui::Lineage,
+    /// The chat's `user_message` for it.
+    seq: u64,
+    text: String,
+    /// The agent did work after it: took it up, if not answered it yet.
+    worked_on: bool,
+}
+
+impl RecordedPrompts {
+    /// The prompt one recorded at `lineage` took the place of: an earlier one
+    /// that follows the same record, and that the agent did no work on.
+    /// Claude Code records that when it drops a turn before answering it,
+    /// puts its prompt back in the input box, and is then sent another.
+    /// A prompt the agent worked on is not one; a later prompt that follows
+    /// the same record is the reader rewinding the conversation, which is
+    /// theirs to do. Nor is the first record of a conversation, which follows
+    /// nothing.
+    ///
+    /// Taken out once found: it was replaced once, and a later prompt that
+    /// follows the same record again is a rewind past both.
+    fn replaced_by(&mut self, lineage: &tui::Lineage) -> Option<RecordedPrompt> {
+        lineage.parent.as_ref()?;
+        let at = self.0.iter().rposition(|prompt| prompt.lineage.uuid != lineage.uuid && prompt.lineage.parent == lineage.parent && !prompt.worked_on)?;
+        self.0.remove(at)
+    }
+
+    fn record(&mut self, lineage: tui::Lineage, seq: u64, text: String) {
+        if self.0.len() == RECORDED_PROMPTS {
+            self.0.pop_front();
+        }
+        self.0.push_back(RecordedPrompt { lineage, seq, text, worked_on: false });
+    }
+
+    /// The agent did something after the newest prompt.
+    fn worked_on(&mut self) {
+        if let Some(newest) = self.0.back_mut() {
+            newest.worked_on = true;
+        }
+    }
+}
+
+/// Whether two prompts say the same, however the CLI wrapped or spaced them.
+fn same_words(a: &str, b: &str) -> bool {
+    a.split_whitespace().eq(b.split_whitespace())
 }
 
 /// How long a composer prompt waits for its echo once no turn is running.
@@ -315,7 +386,20 @@ impl ComposerEcho {
     }
 
     fn echoed(&self) -> Echoed {
-        Echoed { queued: self.queued, seq: self.seq, overtaken: self.overtaken, continuation: self.continuation }
+        Echoed { queued: self.queued, seq: self.seq, overtaken: self.overtaken, continuation: self.continuation, changed: false }
+    }
+
+    /// Whether this prompt is inside `recorded`, a longer prompt the CLI
+    /// recorded: its words, in order and unbroken, among the record's
+    /// (#722). Only a prompt whose Enter was written, and with no images to
+    /// label, can be; a command the app typed never is.
+    fn within(&self, recorded: &str) -> bool {
+        if !self.submitted || self.command || self.image_count > 0 {
+            return false;
+        }
+        let sent: Vec<&str> = self.text.split_whitespace().collect();
+        let recorded: Vec<&str> = recorded.split_whitespace().collect();
+        !sent.is_empty() && recorded.len() > sent.len() && recorded.windows(sent.len()).any(|window| window == sent.as_slice())
     }
 
     fn matches(&self, echoed: &str) -> bool {
@@ -399,6 +483,19 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
     let echoed = pending[at].echoed();
     pending.drain(..=at);
     Some(echoed)
+}
+
+/// A composer prompt the CLI recorded inside a longer prompt (#722): typed
+/// into an input box that held something, and sent with it. It reached the
+/// agent there, and nowhere else will; the record is what the chat shows for
+/// it, as changed. Only that prompt is taken: the ones ahead of it may be
+/// on their way still.
+fn consume_composer_echo_within(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> Option<Echoed> {
+    let Payload::UserMessage { text, .. } = payload else { return None };
+    let at = pending.iter().position(|prompt| prompt.within(text))?;
+    let mut prompt = pending.remove(at).expect("the matched echo exists");
+    prompt.confirm_delivery();
+    Some(Echoed { changed: true, ..prompt.echoed() })
 }
 
 /// Codex 0.153.4 joins pending prompts with newlines when Escape delivers
@@ -534,6 +631,9 @@ pub struct CliTab {
     echoed: std::collections::VecDeque<ComposerEcho>,
     /// Composer identities still awaiting acceptance from the provider's queue.
     held: Vec<u64>,
+    /// The prompts the transcript has recorded, to tell one that took the
+    /// place of another by (#722).
+    prompts: RecordedPrompts,
     /// A Send now interrupt already written, awaiting provider acceptance.
     /// Kept as pending work for lifecycle admission; never a resend plan.
     resend_after_abort: Option<u64>,
@@ -2304,7 +2404,19 @@ impl SessionManager {
         outcome
     }
 
-    fn send_admitted(&self, _admission: &crate::issue_pipeline::admission::Admitted,
+    /// Every send, from wherever it came, passes here. One the tab took is a
+    /// message its agent now has, which an issue pipeline stopped on its
+    /// answer is waiting for (#725).
+    fn send_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
+        session_id: &str, tab_id: &str, prompt: PromptText,
+        images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
+    ) -> Result<SendOutcome> {
+        let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt)?;
+        self.observer.answered(session_id, tab_id);
+        Ok(outcome)
+    }
+
+    fn deliver_admitted(&self, _admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, prompt: PromptText,
         images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
@@ -3040,6 +3152,8 @@ impl SessionManager {
         if rt.pending.is_empty() && !matches!(rt.engine, Engine::Cli(_)) {
             self.set_status(&mut rt, TabStatus::InProgress);
         }
+        drop(rt);
+        self.observer.answered(session_id, tab_id);
         Ok(())
     }
 
@@ -3058,6 +3172,8 @@ impl SessionManager {
             _ => bail!("that agent does not ask questions this way"),
         }
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
+        drop(rt);
+        self.observer.answered(session_id, tab_id);
         Ok(())
     }
 
@@ -3769,6 +3885,7 @@ impl SessionManager {
             nudges_left: 0,
             entered_at: None,
             held: Vec::new(),
+            prompts: RecordedPrompts::default(),
             resend_after_abort: None,
             codex_interrupt_hooks_owed: 0,
             codex_prompt_starts_turn: false,
@@ -4154,17 +4271,17 @@ impl SessionManager {
     }
 
     fn pump_read_guarded(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &tui::Tail, records: Vec<tui::Record>, application: Option<MutexGuard<'_, ()>>) {
-        let mark = records.iter().rev().find_map(|(_, mark, _)| *mark);
+        let mark = records.iter().rev().find_map(|(_, mark, _, _)| *mark);
         // Keep the preceding record's boundary for a command immediately after
         // a completed turn, even when both arrive in one tail read.
         let mut preceding_mark = None;
-        let payloads: Vec<_> = records.into_iter().flat_map(|(payloads, mark, ts)| {
+        let payloads: Vec<_> = records.into_iter().flat_map(|(payloads, mark, ts, lineage)| {
             let before = preceding_mark;
             if mark.is_some() { preceding_mark = mark; }
             // Marks with no payload still carry ordering: in particular an
             // abort followed by a continuation in this very same read.
-            let boundary = mark.map(|mark| (None, ts.clone(), before, Some(mark)));
-            boundary.into_iter().chain(payloads.into_iter().map(move |payload| (Some(payload), ts.clone(), before, None)))
+            let boundary = mark.map(|mark| (None, ts.clone(), before, Some(mark), None));
+            boundary.into_iter().chain(payloads.into_iter().map(move |payload| (Some(payload), ts.clone(), before, None, lineage.clone())))
         }).collect();
         if payloads.is_empty() && mark.is_none() {
             return;
@@ -4186,7 +4303,7 @@ impl SessionManager {
             _ => Vec::new(),
         };
         self.queued_prompts_unsent(&mut rt, &unsent);
-        for (payload, ts, preceding_mark, record_mark) in payloads {
+        for (payload, ts, preceding_mark, record_mark, lineage) in payloads {
             rt.source_timestamp = Some(ts);
             if let Some(mark) = record_mark {
                 if matches!(&rt.engine, Engine::Cli(p) if p.harness == CliKind::Codex) {
@@ -4234,25 +4351,59 @@ impl SessionManager {
                 continue;
             }
             let Some(payload) = payload else { continue };
+            // Counted before anything can skip it: a reply the `Stop` hook
+            // already drew is still work on the prompt before it.
+            if let (Payload::AssistantText { .. } | Payload::Reasoning { .. } | Payload::ToolCallStarted { .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
+                p.prompts.worked_on();
+            }
             let provider_prompt_starts_turn = if matches!(payload, Payload::UserMessage { .. }) {
                 match &mut rt.engine {
                     Engine::Cli(p) => std::mem::take(&mut p.codex_prompt_starts_turn),
                     _ => false,
                 }
             } else { false };
+            // Where a prompt stands in the conversation, for the prompts
+            // after it to be told by (#722).
+            let prompt = match (&payload, lineage) {
+                (Payload::UserMessage { text, .. }, Some(lineage)) => Some((lineage, text.clone())),
+                _ => None,
+            };
+            // A prompt in the place of one the agent dropped unanswered: the
+            // chat's message for that one, and what it said.
+            let replaced = match (&prompt, &mut rt.engine) {
+                (Some((lineage, _)), Engine::Cli(p)) => p.prompts.replaced_by(lineage).map(|dropped| (dropped.seq, dropped.text)),
+                _ => None,
+            };
+            if let (Some((dropped, said)), Some((lineage, text))) = (&replaced, &prompt) {
+                if same_words(said, text) {
+                    // The same message sent again, from the input box the
+                    // agent had put it back in: it is still the one message.
+                    self.prompt_sent_again(&mut rt, *dropped, text);
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        p.prompts.record(lineage.clone(), *dropped, text.clone());
+                    }
+                    continue;
+                }
+                self.publish(&mut rt, Payload::PromptReplaced { prompt_seq: *dropped }, None);
+            }
             // A prompt sent from the composer was published when it was sent;
             // the transcript's copy of it would be the same message twice.
             // Anything else the transcript calls a prompt was typed into the
-            // terminal, and this is the only record of it (#250).
+            // terminal, and this is the only record of it (#250). One typed
+            // into an input box that held something reached the agent inside
+            // the prompt recorded here, which the chat shows for it (#722).
             let echoed = match &mut rt.engine {
                 Engine::Cli(p) => {
-                    let echoed = if p.harness == CliKind::Codex {
+                    let echoed: Vec<Echoed> = if p.harness == CliKind::Codex {
                         consume_codex_queue_echo(&mut p.echoed, &payload)
                     } else {
-                        consume_composer_echo(&mut p.echoed, &payload).into_iter().collect()
+                        consume_composer_echo(&mut p.echoed, &payload).or_else(|| consume_composer_echo_within(&mut p.echoed, &payload)).into_iter().collect()
                     };
                     if !echoed.is_empty() {
                         forget_taken(p);
+                    }
+                    if let (Some((lineage, text)), Some(echo)) = (&prompt, echoed.first()) {
+                        p.prompts.record(lineage.clone(), echo.seq, text.clone());
                     }
                     echoed
                 }
@@ -4274,6 +4425,10 @@ impl SessionManager {
                     if matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery == Some(echo.seq)) {
                         self.delivery_confirmed(&mut rt);
                     }
+                    // What the agent received, in place of what was sent.
+                    if let (true, Payload::UserMessage { text, .. }) = (echo.changed, &payload) {
+                        self.publish(&mut rt, Payload::PromptChanged { prompt_seq: echo.seq, text: text.clone() }, None);
+                    }
                     // Its waiter may have stopped waiting: a handoff the reader
                     // sent with Enter after the dialog said it was in the input.
                     if echo.continuation {
@@ -4285,7 +4440,9 @@ impl SessionManager {
                     // that lets `Stop` close it, and this record is that prompt.
                     // So is one the CLI took after work it did first (#540), or
                     // the first accepted message after Codex's task_started.
-                    let starts_turn = echo.overtaken || (echo.queued && (!rt.turn_open || (index == 0 && provider_prompt_starts_turn) || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed())));
+                    // So is one that took the place of a prompt the agent
+                    // dropped (#722): it is what the agent is answering now.
+                    let starts_turn = echo.overtaken || (index == 0 && replaced.is_some()) || (echo.queued && (!rt.turn_open || (index == 0 && provider_prompt_starts_turn) || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed())));
                     if starts_turn {
                         if !rt.turn_open {
                             if let Payload::UserMessage { text, .. } = &payload {
@@ -4370,6 +4527,11 @@ impl SessionManager {
                 self.record_activity(&rt, TabStatus::Completed, store::activity::Source::Replay);
             }
             self.apply(&mut rt, payload, None);
+            // A prompt typed in the terminal: the message just published.
+            let published = rt.seq;
+            if let (Some((lineage, text)), Engine::Cli(p)) = (prompt, &mut rt.engine) {
+                p.prompts.record(lineage, published, text);
+            }
         }
         rt.source_timestamp = None;
         // No hook closes the turn of a CLI the reader started by hand (#437),
@@ -4418,6 +4580,22 @@ impl SessionManager {
         drop(rt);
         drop(application);
         self.judge_reported_mode(rt_arc, tail);
+    }
+
+    /// The agent took up again the message at `seq`, which it had dropped
+    /// unanswered and put back in its input box (#722): sent from there as
+    /// it was. It is the message the chat already has, now the start of the
+    /// agent's turn, not a second one.
+    fn prompt_sent_again(&self, rt: &mut TabRuntime, seq: u64, text: &str) {
+        self.delivery_confirmed(rt);
+        if !rt.turn_open {
+            rt.prompt_taken(text, "transcript_prompt_sent_again");
+            self.publish(rt, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: Some(seq), started_by: None, initiating_prompt: None }, None);
+        }
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.turn_tail.opened();
+        }
+        self.set_status(rt, TabStatus::InProgress);
     }
 
     /// Wait, briefly, for the transcript to deliver the reply the `Stop` hook
@@ -4625,7 +4803,9 @@ impl SessionManager {
                     }
                 }
             };
-            let _held = ticket.take();
+            // Let go of only while waiting on the input box, so an earlier
+            // prompt's Enter can still be written again (`enter_again`).
+            let mut held = Some(ticket.take());
             // A CLI the reader started by hand shares its pane with the shell
             // it was started from (#437). Once it has exited or been
             // suspended, anything typed here is typed at that shell, and the
@@ -4654,6 +4834,20 @@ impl SessionManager {
                     return;
                 }
             }
+            // Nothing is typed into an input box that holds something: the
+            // Enter would send that and this prompt as one (#722).
+            let revoked = || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
+            let input = match manager.wait_for_empty_input(&rt_arc, &pane, seq, queued, &ticket, &mut held, revoked, &stage) {
+                InputWait::Type(input) => input,
+                InputWait::Revoked => {
+                    let mut rt = rt_arc.lock().unwrap();
+                    if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    manager.refuse_continuation(&mut rt, receipt);
+                    return;
+                }
+                InputWait::Gone => return,
+            };
             let mut admitted_to_writer = false;
             let result = (|| -> Result<()> {
                 let mut sharing = (shared.is_some() || mobile.is_some()).then(|| manager.sharing.lock().unwrap());
@@ -4678,7 +4872,6 @@ impl SessionManager {
                 let _owner_attachment = owner_attachment.as_ref().map(|attachment| attachment.enter()).transpose()?;
                 admitted_to_writer = true;
                 still_there()?;
-                terminals.write(&pane, tui::CLEAR_LINE)?;
                 for path in &attachments {
                     terminals.write(&pane, &tui::attachment_bytes(path))?;
                 }
@@ -4690,7 +4883,7 @@ impl SessionManager {
                 let body = tui::body_bytes(&text);
                 still_there()?;
                 terminals.write(&pane, &body)?;
-                stage("body_written", serde_json::json!({ "bytes": body.len(), "attachments": attachments.len() }));
+                stage("body_written", serde_json::json!({ "bytes": body.len(), "attachments": attachments.len(), "input": input }));
                 let (read, read_after) = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
                 if read == tui::PasteRead::Unread {
                     log::warn!("[{pane}] the CLI has not read the prompt; submitting anyway and watching for acceptance");
@@ -4858,13 +5051,8 @@ impl SessionManager {
             })
         };
         loop {
-            if mobile.is_some_and(|(permit,session,tab,_)| !permit.valid() || permit.check_mode(session,tab).is_err()) {
+            if self.delivery_revoked(shared, mobile) {
                 return Readiness::Cancelled;
-            }
-            if let Some((permit, session, tab, _)) = shared {
-                if self.sharing.lock().unwrap().sessions.get(session).is_none_or(|share| !share.permit_current(permit, tab, chrono::Utc::now().timestamp_millis())) {
-                    return Readiness::Cancelled;
-                }
             }
             if ready.settled() {
                 return Readiness::Ready;
@@ -4886,6 +5074,115 @@ impl SessionManager {
                 return Readiness::Ready;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Whether whoever sent a prompt through a share or a phone may no longer
+    /// write to the tab it was sent to. The host's own prompts never are.
+    fn delivery_revoked(&self, shared: Option<&(crate::local_sharing::WritePermit, String, String, u64)>, mobile: Option<&(crate::local_runtime::mobile::WritePermit, String, String, u64)>) -> bool {
+        if mobile.is_some_and(|(permit, session, tab, _)| !permit.valid() || permit.check_mode(session, tab).is_err()) {
+            return true;
+        }
+        shared.is_some_and(|(permit, session, tab, _)| {
+            self.sharing.lock().unwrap().sessions.get(session).is_none_or(|share| !share.permit_current(permit, tab, chrono::Utc::now().timestamp_millis()))
+        })
+    }
+
+    /// Wait, before typing a prompt into `pane`, until its CLI's input box
+    /// is empty (#722).
+    ///
+    /// The box can hold what the reader typed in the terminal view, or a
+    /// prompt Claude Code put back there when it dropped a turn before
+    /// answering it. Typing then would send that text and this prompt as one,
+    /// so nothing is typed while it is there, however long that is: the
+    /// chat says the message is waiting and why, and it goes in once the
+    /// reader has sent or cleared what is in the box. Its echo does not age
+    /// meanwhile, and the pane is let go of between looks, so an earlier
+    /// prompt's Enter can still be written again; a later prompt still
+    /// waits its turn behind this one.
+    ///
+    /// A box that cannot be seen is typed into: a CLI whose box this cannot
+    /// read must not stop taking prompts. One that held something and is
+    /// then hidden (a picker opened over it) is waited on. One that holds
+    /// something only for a moment, a CLI still drawing it empty after
+    /// taking the prompt before, is waited out without a word.
+    #[allow(clippy::too_many_arguments)]
+    fn wait_for_empty_input<'t>(
+        &self,
+        rt_arc: &Arc<Mutex<TabRuntime>>,
+        pane: &str,
+        seq: Option<u64>,
+        queued: bool,
+        ticket: &'t Ticket,
+        held: &mut Option<MutexGuard<'t, ()>>,
+        revoked: impl Fn() -> bool,
+        stage: &dyn Fn(&str, serde_json::Value),
+    ) -> InputWait {
+        let (kind, ready) = match &rt_arc.lock().unwrap().engine {
+            Engine::Cli(p) => (p.harness, p.ready.clone()),
+            _ => return InputWait::Type("unseen"),
+        };
+        let reader = match kind {
+            CliKind::Claude => claude::pty::composer,
+            CliKind::Codex => codex::pty::composer,
+        };
+        // When the box was first seen holding something, and whether the
+        // prompt has been said to be waiting on it since.
+        let mut held_since: Option<Instant> = None;
+        let mut waiting = false;
+        let outcome = loop {
+            match self.terminals.screen(pane, reader).unwrap_or(tui::Composer::Unseen) {
+                tui::Composer::Empty => break InputWait::Type(if held_since.is_some() { "cleared" } else { "empty" }),
+                tui::Composer::Unseen if held_since.is_none() => break InputWait::Type("unseen"),
+                tui::Composer::Unseen => {}
+                tui::Composer::Holds(held_text) => {
+                    let since = *held_since.get_or_insert_with(Instant::now);
+                    if !waiting && since.elapsed() >= tui::INPUT_SETTLE {
+                        waiting = true;
+                        // How much, never what: the diagnostics hold no prompt text.
+                        stage("input_occupied", serde_json::json!({ "chars": held_text.chars().count() }));
+                        self.input_occupied(&mut rt_arc.lock().unwrap(), seq, queued, true);
+                    }
+                }
+            }
+            if revoked() {
+                break InputWait::Revoked;
+            }
+            {
+                let mut rt = rt_arc.lock().unwrap();
+                let same = matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, &ready));
+                if !same || !self.terminals.is_running(pane) || self.left_the_terminal(&rt).is_some() {
+                    break InputWait::Gone;
+                }
+                if let (Some(seq), Engine::Cli(p)) = (seq, &mut rt.engine) {
+                    if let Some(echo) = p.echoed.iter_mut().find(|echo| echo.seq == seq) {
+                        echo.sent_at = Instant::now();
+                    }
+                }
+            }
+            *held = None;
+            std::thread::sleep(tui::INPUT_POLL);
+            *held = Some(ticket.take());
+        };
+        if waiting {
+            self.input_occupied(&mut rt_arc.lock().unwrap(), seq, queued, false);
+        }
+        outcome
+    }
+
+    /// Say that the prompt published under `seq` is waiting on what is in
+    /// the CLI's input box, or no longer is. One sent to an idle CLI has the
+    /// tab waiting on the reader meanwhile, not working.
+    fn input_occupied(&self, rt: &mut TabRuntime, seq: Option<u64>, queued: bool, occupied: bool) {
+        let Some(prompt_seq) = seq else { return };
+        self.publish(rt, Payload::InputOccupied { prompt_seq, occupied }, None);
+        if queued {
+            return;
+        }
+        if occupied {
+            self.set_status(rt, TabStatus::Waiting);
+        } else if rt.status == TabStatus::Waiting && rt.recovery.is_none() && rt.pending.is_empty() {
+            self.set_status(rt, if rt.turn_open { TabStatus::InProgress } else { TabStatus::Idle });
         }
     }
 
@@ -5119,6 +5416,11 @@ impl SessionManager {
                 drop(rt);
                 if frame.event == "UserPromptSubmit" {
                     self.observer.automation_running(&frame.session, &frame.tab);
+                    // Typed into the CLI's own terminal, a prompt reaches
+                    // nothing but this hook. One the CLI started itself is no answer.
+                    if source == claude::transcript::PromptSource::Reader {
+                        self.observer.answered(&frame.session, &frame.tab);
+                    }
                 }
             }
             // The CLI is asking in its own TUI, which means our permission
@@ -5719,7 +6021,7 @@ mod tests {
             projected.push(composer);
 
             let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
-            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false, continuation: false }));
+            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false, continuation: false, changed: false }));
         }
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");

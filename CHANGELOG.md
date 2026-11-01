@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Issue pipelines
+
+- Answering the author of a pipeline at **Needs you** puts it back to
+  **Working** at once, and the Issues list chip changes with the session for
+  GitHub and Linear issues alike. Before, it kept saying **Needs you** until
+  the author's turn ended, often for minutes. This applies to stops the author
+  can act on: the work not done, failed checks, a pull request that could not
+  be opened, a turn that stopped short, and conflicts with the base branch.
+  Sending a message, answering a question or a permission request, or typing
+  into the agent's own terminal all count, and so does a message that was
+  queued behind the turn. If the turn still isn't done, the pipeline goes back
+  to **Needs you**. A required review, a closed pull request and other stops
+  that wait on someone else stay at **Needs you** until they are checked again.
+  (#725)
+
+### Sessions and tabs
+
+- Open the session you click. A session with no tabs open was swapped for
+  another session in the same folder that had tabs, a quick chat or another
+  project's included, so it could not be opened, and neither could its history
+  or its closed tabs. It now stays selected and shows its own page: its closed
+  tabs, newest first, each with Reopen to resume that conversation in this
+  session, plus New tab and Reopen closed tab. Opening a session no longer
+  starts a shell in it by itself; opening a checkout from the command palette
+  still does. (#721)
+- Keep a row of tabs to real siblings: with a branch's sessions shown as tabs,
+  a row holds the sessions of the same project and branch only, as the sidebar
+  lists them, never a quick chat or another project's session that runs in the
+  same folder. A session on that branch with no tab open has nothing in the
+  row of tabs to click, so it keeps a sidebar row of its own under the
+  branch's, and a browser page another session opened in the folder no longer
+  hides its page until it is picked. (#721)
+- Offer Undo when closing a session's last running tab. The notice says its
+  agent stopped, and Undo reopens the tab on the same conversation. (#721)
+
 ### Chat
 
 - Show a sent message at once. Pressing Send puts the message in the chat,
@@ -13,6 +48,24 @@
   of being rebuilt for each one, and only the turns in and near the view are
   drawn, so a message in a conversation of thousands of events appears as fast
   as in a short one. (#727)
+- Never type a message into an agent's input box that already holds text. The
+  app used to clear the box with Ctrl+U, which deletes only the row the cursor
+  is on: when Claude Code had put a dropped prompt back in its box, the prompt
+  lost its last wrapped row and the rest was sent with the next message glued
+  to it. The app now reads the box from the agent's screen (Claude Code and
+  Codex), and a message waits while the box holds something, saying so in the
+  chat, until that text is sent or cleared in the terminal. (#722)
+- Show a prompt Claude Code dropped before answering as not answered, with Send
+  again, when it takes another prompt in its place; one sent again from its
+  input box stays the one message. A message the agent received inside a longer
+  prompt is shown once, as received, with what was sent behind it, and its
+  queued bubble clears. (#722)
+- Cut more credentials from the redacted detail line that a refused sign-in or
+  an agent that exits early shows in the chat: `key: value` and JSON forms,
+  escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's
+  secret-looking value, including one that runs on over lines. Errors such as
+  `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
+  readable. (#717)
 
 ### Background sessions
 
@@ -29,6 +82,20 @@
   runtime received the send and how long it waited, when the agent took the
   prompt, and when the window showed it, so a slow send can be traced to the
   step that took the time. (#727)
+
+### Command line
+
+- `terminalx worktrees delete` no longer deletes sessions it never named. Without
+  `--yes`, or with `--dry-run`, it lists every session it would delete, marking
+  sessions of another project, quick chats and archived ones, with the tabs
+  still running in them and the git state, and removes nothing. `--sessions
+  ID,…` names the sessions you were shown: if the worktree holds any other set,
+  nothing is removed and the sessions that differ are named, as in the desktop
+  dialog. The result gives each deleted session's title and project, not only
+  its id. `terminalx sessions list --worktree` lists what the delete would take,
+  `worktrees list` gives each worktree's sessions, and `sessions list
+  --project` now finds a session that names its project through a symlink.
+  (#719)
 
 ## 0.2.22
 

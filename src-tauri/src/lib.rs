@@ -133,6 +133,7 @@ mod terminal_perf;
 mod work_claims;
 mod workspaces;
 mod worktree_cleanup;
+mod worktree_control;
 
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
@@ -591,6 +592,7 @@ pub fn run() {
             commands::send_message,
             commands::report_send_shown,
             commands::resend_unsent,
+            commands::resend_message,
             commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,

@@ -83,6 +83,7 @@ export function Chat({
   footer,
   onSendQueuedNow,
   sending = null,
+  onSendAgain,
 }: {
   sessionId: string;
   transcript: Transcript;
@@ -104,6 +105,8 @@ export function Chat({
   onSendQueuedNow?: (seq: number) => void;
   /** A message sent from the composer that the runtime has not recorded yet: drawn last, as sending (#727). */
   sending?: { text: string; images: { url: string; name?: string }[]; pressedAt: number } | null;
+  /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
+  onSendAgain?: (seq: number) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -313,6 +316,7 @@ export function Chat({
                 streamingTool={isLast && live ? streamingTool : undefined}
                 // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
+                onSendAgain={live ? onSendAgain : undefined}
               />
             );
           })}

@@ -36,7 +36,8 @@ function log(seed: number, length: number): AgentEvent[] {
   };
   const kinds = [
     "prompt", "prompt", "queued", "text", "text", "reasoning", "tool", "tool", "done", "done", "edits", "end", "end",
-    "taken", "absorbed", "subagent", "subagent_done", "subagent_call", "ask", "question", "decided", "compacted", "summary",
+    "taken", "absorbed", "occupied", "replaced", "changed",
+    "subagent", "subagent_done", "subagent_call", "ask", "question", "decided", "compacted", "summary",
     "started", "lifecycle", "status", "restarted", "error", "retry", "limit", "usage", "request", "tasks", "command",
   ] as const;
   while (events.length < length) {
@@ -79,6 +80,16 @@ function log(seed: number, length: number): AgentEvent[] {
         break;
       case "absorbed":
         if (messages.length) push({ type: "prompt_absorbed", promptSeq: pick(messages) });
+        break;
+      // What became of a message on its way to the agent (#722), wherever it is drawn by then.
+      case "occupied":
+        if (messages.length) push({ type: "input_occupied", promptSeq: pick(messages), occupied: next() < 0.6 });
+        break;
+      case "replaced":
+        if (messages.length) push({ type: "prompt_replaced", promptSeq: pick(messages) });
+        break;
+      case "changed":
+        if (messages.length) push({ type: "prompt_changed", promptSeq: pick(messages), text: `received ${events.length}` });
         break;
       case "subagent": {
         const id = `agent${events.length}`;

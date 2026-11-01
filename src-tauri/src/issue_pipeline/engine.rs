@@ -227,6 +227,37 @@ fn ending_of(pipeline: &Pipeline) -> Option<Ending> {
     ending_at(pipeline.state, pipeline.reason.as_ref())
 }
 
+/// The note of a pipeline whose author a person answered.
+const ANSWERED: &str = "Answered; waiting for the author session to report.";
+
+/// Whether a person answering the author can be what a stop waits for:
+/// something the author's own work settles, at a stage whose next author turn
+/// is listened to. A stop on GitHub (a required review, a closed pull
+/// request, branch protection), on the reviewer or on a person's decision
+/// waits for someone else, and is only looked at again.
+fn answerable(pipeline: &Pipeline) -> bool {
+    if matches!(pipeline.stage, Stage::Review | Stage::Resolve) {
+        return false;
+    }
+    match &pipeline.reason {
+        Some(
+            StopReason::AuthorNotDone { .. }
+            | StopReason::LocalChecksFailed
+            | StopReason::NoChangesMade
+            | StopReason::UncommittedChanges { .. }
+            | StopReason::NothingToReview
+            | StopReason::WorkspaceMoved { .. }
+            | StopReason::ChecksFailed { .. }
+            | StopReason::Conflicts
+            | StopReason::Behind,
+        ) => true,
+        Some(StopReason::SessionStopped { role, .. }) => role == Role::Author.label(),
+        // A pull request that could not be opened: a refused push, GitHub unreachable.
+        Some(StopReason::Failed { .. }) => pipeline.stage == Stage::PullRequest,
+        _ => false,
+    }
+}
+
 /// Whether the reviewer said its checks were running, and has had as long
 /// as it is given, without being asked for its verdict since.
 fn review_overdue(pipeline: &Pipeline, now: DateTime<Utc>) -> bool {
@@ -347,6 +378,8 @@ impl Step<'_> {
         self.p.state = state;
         self.p.reason = reason;
         self.p.note = Some(note);
+        // Wherever it stands now, it got there after the answer: settled.
+        self.p.answered = None;
     }
 
     fn needs_you(&mut self, reason: StopReason) {
@@ -436,8 +469,9 @@ impl Step<'_> {
 
         // A pull request that could not be opened (uncommitted files, a
         // refused push) is tried again when the author next says it is done:
-        // that is usually the turn in which it put the cause right.
-        if self.p.stage == Stage::PullRequest && self.p.state == State::NeedsYou {
+        // that is usually the turn in which it put the cause right, often
+        // one a person's answer started.
+        if self.p.stage == Stage::PullRequest && (self.p.state == State::NeedsYou || self.p.answered.is_some()) {
             return match report {
                 AuthorReport::Done { checks, .. } if checks != LocalChecks::Failed => self.open_pull_request(),
                 _ => Ok(()),
@@ -499,6 +533,35 @@ impl Step<'_> {
         self.host.send(&to, &prompt)?;
         self.record("reminder", format!("Asked the {} session again: {}", role.label(), otherwise.describe())).session_id = Some(to.session_id);
         Ok(())
+    }
+
+    // ---- a person answered the author ---------------------------------------
+
+    /// A person answered an author the pipeline is stopped on, and the
+    /// author is at work on the answer: the pipeline is working again now,
+    /// not when that turn ends (#725). Nothing else changes: the turn's end
+    /// is still what decides, as it would have for the stop.
+    fn take_answer(&mut self) {
+        if self.p.state != State::NeedsYou || !answerable(&self.p) || !self.host.agent_busy(&self.p.author) {
+            return;
+        }
+        let Some(reason) = self.p.reason.clone() else { return };
+        self.settle(State::Working, None, ANSWERED);
+        self.p.answered = Some(reason);
+        let author = self.p.author.session_id.clone();
+        self.record("answered", "A person answered the author session; its next report settles the pipeline.").session_id = Some(author);
+    }
+
+    /// The turn a person's answer started ended without settling anything
+    /// (an author still not done with a pull request it could not open, a
+    /// head the gate left as it was): stopped for the same reason again.
+    fn answer_unsettled(&mut self) {
+        if self.p.state != State::Working {
+            return;
+        }
+        if let Some(reason) = self.p.answered.take() {
+            self.needs_you(reason);
+        }
     }
 
     // ---- the end, for the conversations that took part ----------------------
@@ -1487,6 +1550,7 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         state: State::Working,
         reason: None,
         note: Some("The author session is working on the branch.".into()),
+        answered: None,
         pr: None,
         round: 0,
         max_rounds: settings.max_rounds,
@@ -1537,7 +1601,10 @@ pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_mes
             // Stopped or not, its turn ending releases the checkout it holds.
             Role::Resolver => step.resolver_turn(message)?,
             _ if ended.is_some() || step.p.stopped => {}
-            Role::Author => step.author_turn(message)?,
+            Role::Author => {
+                step.author_turn(message)?;
+                step.answer_unsettled();
+            }
             Role::Reviewer => step.reviewer_turn(message)?,
         }
         match ended {
@@ -1545,7 +1612,37 @@ pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_mes
             None => Ok(()),
         }
     });
-    if let Err(error) = result {
+    match result {
+        // A message sent while the turn ran was waiting for its end, and the
+        // next turn has already started on it: that turn is the answer, and
+        // nothing after this would say so.
+        Ok(after) if role == Role::Author => answer_if_stopped(host, &after),
+        Ok(_) => {}
+        Err(error) => log::warn!("issue pipeline {}: {error:#}", pipeline.id),
+    }
+}
+
+/// A person sent a session a message, or answered its question or
+/// permission request. For the author of a pipeline stopped on something
+/// only its work can settle, that is the answer the stop waits for: the
+/// pipeline is working again at once, as the session is, and the end of the
+/// turn it started decides again (#725). Anyone else's answer, and an answer
+/// to any other stop (a required review, a closed pull request), changes nothing.
+pub fn answered(host: &dyn Host, session_id: &str, tab_id: &str) {
+    if let Some((pipeline, Role::Author)) = taking_part(session_id, tab_id) {
+        answer_if_stopped(host, &pipeline);
+    }
+}
+
+fn answer_if_stopped(host: &dyn Host, pipeline: &Pipeline) {
+    // Most messages reach an author nothing is stopped on.
+    if pipeline.state != State::NeedsYou || !answerable(pipeline) {
+        return;
+    }
+    if let Err(error) = run(host, &pipeline.id, false, OnError::Report, |step| {
+        step.take_answer();
+        Ok(())
+    }) {
         log::warn!("issue pipeline {}: {error:#}", pipeline.id);
     }
 }
@@ -1566,7 +1663,9 @@ pub fn turn_failed(host: &dyn Host, session_id: &str, tab_id: &str, detail: &str
     };
     let result = run(host, &pipeline.id, role == Role::Resolver, OnError::NeedsYou, |step| {
         let waiting_on_it = match role {
-            Role::Author => matches!(step.p.stage, Stage::Work | Stage::Address),
+            // At any stage, once a person answered it: the stop it was
+            // answered out of is not looked at again until its turn ends.
+            Role::Author => matches!(step.p.stage, Stage::Work | Stage::Address) || step.p.answered.is_some(),
             Role::Reviewer => step.p.stage == Stage::Review,
             Role::Resolver => step.p.stage == Stage::Resolve,
         };
@@ -1816,6 +1915,14 @@ pub fn poll(host: &dyn Host) {
         // GitHub being unreachable for a pass changes nothing and is tried again.
         let look = |step: &mut Step<'_>| {
             if review_overdue(&step.p, step.host.now()) { return step.look_at_overdue_review(); }
+            // The author is at work on a person's answer: its turn's end
+            // decides again. Until then only a merge or a close made
+            // meanwhile is noticed, or the stop it was answered out of would
+            // be put back halfway through that turn. One whose turn's end was
+            // never heard is looked at as before once it sits idle.
+            if step.p.answered.is_some() && step.host.agent_busy(&step.p.author) {
+                return if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) };
+            }
             if step.watch_conflicts()? { return Ok(()); }
             if step.p.stage == Stage::Merge { step.evaluate(Merger::Pipeline) }
             else if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) }
@@ -1860,10 +1967,12 @@ pub fn recover(host: &dyn Host) {
     };
     recover_reservations(host, &pipelines);
 
-    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.stage != Stage::Merge && pipeline.resolution.is_none() && !pipeline.checking_locally) {
+    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && (pipeline.stage != Stage::Merge || pipeline.answered.is_some()) && pipeline.resolution.is_none() && !pipeline.checking_locally) {
         let result = run(host, &pipeline.id, false, OnError::NeedsYou, |step| {
             let closed = "TerminalX was closed before it finished.";
             let reason = match step.p.stage {
+                // The turn a person's answer started, at whatever stage it was answered.
+                _ if step.p.answered.is_some() => StopReason::SessionStopped { role: Role::Author.label().into(), detail: closed.into() },
                 Stage::Work | Stage::Address => StopReason::SessionStopped { role: Role::Author.label().into(), detail: closed.into() },
                 Stage::Resolve => { step.p.resolution = None; StopReason::SessionStopped { role: Role::Resolver.label().into(), detail: closed.into() } },
                 Stage::Review => StopReason::SessionStopped { role: Role::Reviewer.label().into(), detail: closed.into() },
@@ -1894,7 +2003,9 @@ pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
     let ended = |session: &SessionRef| interrupted.iter().any(|(session_id, tab_id)| *session_id == session.session_id && *tab_id == session.tab_id);
     let restarted = "The workspace's runtime restarted during its turn.";
     for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.resolution.is_none() && !pipeline.checking_locally) {
+        let answered = pipeline.answered.is_some();
         let waits_on = match pipeline.stage {
+            _ if answered => Some(pipeline.author.clone()),
             Stage::Work | Stage::Address => Some(pipeline.author.clone()),
             Stage::Review => pipeline.reviewer.clone(),
             Stage::Resolve => pipeline.resolver.clone(),
@@ -1908,6 +2019,7 @@ pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
             continue;
         }
         let reason = match pipeline.stage {
+            _ if answered && ended(&pipeline.author) => StopReason::SessionStopped { role: Role::Author.label().into(), detail: restarted.into() },
             Stage::Work | Stage::Address if ended(&pipeline.author) => StopReason::SessionStopped { role: Role::Author.label().into(), detail: restarted.into() },
             Stage::Review if pipeline.reviewer.as_ref().is_some_and(ended) => StopReason::SessionStopped { role: Role::Reviewer.label().into(), detail: restarted.into() },
             Stage::Resolve => StopReason::SessionStopped { role: Role::Resolver.label().into(), detail: restarted.into() },

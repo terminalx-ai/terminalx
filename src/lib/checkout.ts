@@ -30,6 +30,26 @@ export function checkoutLabel(checkout: Pick<Workspace, "branch" | "head">): str
 }
 
 /**
+ * The branch a conversation works on, as the sidebar names it. A chat's is
+ * the branch of the repo it is linked to. A worktree has its branch to
+ * itself, so it is what is checked out there now (its agent may have
+ * switched it, or left it on a bare commit). A conversation in the project's
+ * own checkout shares it, so its branch is the one its agent last worked on
+ * (or started on), not wherever another conversation has since switched it.
+ * A removed workspace's is the branch it had.
+ */
+export function conversationBranch(session: SessionEntry, chatsPath: string | null, workspaces: Record<string, Workspace[]>): string | null {
+  if (chatsPath != null && canon(session.projectPath) === canon(chatsPath)) return session.link?.branch ?? null;
+  if (session.worktreeRemoved) return session.removedWorkspace?.branch ?? null;
+  if (session.worktreeName) {
+    const own = worktreeCheckout(session, workspaces);
+    return (own && checkoutLabel(own)) ?? session.branch ?? session.worktreeName;
+  }
+  const checkout = (workspaces[session.projectPath] ?? []).find((workspace) => canon(workspace.path) === canon(session.cwd));
+  return session.link?.branch ?? session.branch ?? checkout?.branch ?? null;
+}
+
+/**
  * Whether the work on a checkout's branch is in the default branch. The
  * listing says `merged` only for a squash or rebase merge: a branch merged
  * with a merge commit reads `clean`, as does a new one with nothing of its

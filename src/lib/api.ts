@@ -1806,10 +1806,11 @@ export interface SendOutcome {
 
 /**
  * Where a continuation's delivery has got to, as the tab tells it (#662):
+ * waiting on an input box that holds something else (input_occupied, #722),
  * typed, its Enter written, written again (nudged), held back because the
  * agent is not reading its input (stalled), and taken (delivered).
  */
-export type DeliveryStage = "body_written" | "submit_written" | "nudged" | "stalled" | "delivered";
+export type DeliveryStage = "input_occupied" | "body_written" | "submit_written" | "nudged" | "stalled" | "delivered";
 
 /**
  * Follow the deliveries of continuations into one tab. Resolves to the
@@ -1859,6 +1860,7 @@ export const agent = {
     invoke<void>("report_send_shown", { sessionId, tabId, seq, timings }),
   /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
   resendUnsent: (sessionId: string, tabId: string) => invoke<SendOutcome>("resend_unsent", { sessionId, tabId }),
+  resendMessage: (sessionId: string, tabId: string, seq: number) => invoke<SendOutcome>("resend_message", { sessionId, tabId, seq }),
   /** Press Enter in the tab's agent for the continuation `seq` left in its input. False when it is no longer waiting there. */
   submitWaiting: (sessionId: string, tabId: string, seq: number) => invoke<boolean>("submit_waiting_prompt", { sessionId, tabId, seq }),
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */

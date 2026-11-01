@@ -114,36 +114,152 @@ fn plain_text(text: &str) -> String {
     out
 }
 
+/// The words that make a name a credential's: `password`, `api_key`,
+/// `refresh_token`, `Set-Cookie`, `OPENAI_API_KEY`.
+pub(crate) const CREDENTIAL_WORDS: &str = "token|secret|password|passwd|passphrase|api[_-]?key|apikey|credential|auth|cookie|private[_-]?key";
+
+/// The words a bare `key:` label has to end in to count: `Unauthorized:` or
+/// `auth.json:` is an error's own words, `password:` is not.
+pub(crate) const CREDENTIAL_ENDS: &str = "token|secret|password|passwd|passphrase|api[_-]?key|apikey|credentials?|auth|authorization|cookie|private[_-]?key";
+
 /// Cut from one line what must not reach a chat: credentials, addresses, a
-/// URL's userinfo, path and query, and the account folder in a path.
+/// URL's userinfo, path and query, and the account folder in a path. Run
+/// until nothing more is cut: what one rule leaves (`[email]`, `~`) can make
+/// the next label read as the start of a phrase, so the result read back is
+/// the same result.
 pub(crate) fn redact(line: &str) -> String {
+    let mut line = line.to_string();
+    for _ in 0..4 {
+        let next = redact_once(&line);
+        if next == line {
+            break;
+        }
+        line = next;
+    }
+    line
+}
+
+/// What `redact_once` cuts with, in order: `before`, bare labels, `after`,
+/// then long opaque runs.
+struct Rules {
+    before: [(regex::Regex, &'static str); 7],
+    label: regex::Regex,
+    after: [(regex::Regex, &'static str); 2],
+    opaque: regex::Regex,
+}
+
+fn redact_once(line: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
-    static PATTERNS: OnceLock<[(Regex, &'static str); 5]> = OnceLock::new();
-    static OPAQUE: OnceLock<Regex> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
+    static RULES: OnceLock<Rules> = OnceLock::new();
+    let rules = RULES.get_or_init(|| {
         let pattern = |text: &str| Regex::new(text).expect("valid pattern");
-        [
-            // Scheme and host only.
-            (pattern(r#"(?i)\b([a-z][a-z0-9+.-]*)://(?:[^\s/@()<>"']*@)?([^\s/?#()<>"']+)[^\s()<>"']*"#), "$1://$2"),
-            (pattern(r"(?i)\b(bearer|basic)\s+[^\s,;]+"), "$1 [redacted]"),
-            (pattern(r#"(?i)\b([a-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|apikey|credential|auth|cookie)[a-z0-9_.-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s,;]+)"#), "$1=[redacted]"),
-            (pattern(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[email]"),
-            (pattern(r"(?i)(?:/Users|/home)/[^/\s]+|/root\b|\b[a-z]:\\Users\\[^\\\s]+"), "~"),
-        ]
+        let (words, ends) = (CREDENTIAL_WORDS, CREDENTIAL_ENDS);
+        // A value: escaped JSON's `\"…\"`; quoted, escaped quotes and all; an
+        // object or a list, two levels deep and with its strings, whole; one
+        // of those left open, as a line cut short leaves it, to the end of
+        // the line; an auth scheme and its credential (`Bearer abc`,
+        // `` `Bearer abc` ``), or the `[redacted]` the Bearer rule left; or
+        // bare, up to a space, a comma or a semicolon.
+        let string = r#""(?:[^"\\]|\\.)*""#;
+        let escaped = r#"\\"(?:[^"\\]|\\[^"])*\\""#;
+        let quoted = format!(r"{string}|'(?:[^'\\]|\\.)*'");
+        let nested = format!(r#"\{{(?:{string}|[^{{}}"]|\{{(?:{string}|[^{{}}"])*\}})*\}}|\[(?:{string}|[^\[\]"]|\[(?:{string}|[^\[\]"])*\])*\]"#);
+        let open = r#"\\?["'{\[].*"#;
+        let bare = r#"[^\s,;{\["'][^\s,;]*"#;
+        let schemed = format!(r"[`<(]?(?:bearer|basic|token|digest|negotiate|oauth|apikey|ssws|ntlm)\s+(?:\[redacted\][`>)]?|{bare})");
+        let value = format!("{escaped}|{quoted}|{nested}|{open}|{schemed}|{bare}");
+        // A cookie's `name=value` pairs, a value quoted or left open.
+        let cookie_value = format!(r#"(?:{string}|["'].*|[^\s,;"']*)"#);
+        let cookie = format!(r#"[^\s,;"'=]+(?:={cookie_value})?(?:;\s*[^\s,;"'=]+={cookie_value})*"#);
+        // A flag's value that looks like a secret, with a digit or a mark in
+        // it: `--password hunter2`, not `--with-api-key or`.
+        let mark = "0-9_+/=@#$%^&*!~.";
+        let secretish = format!(r#"(?:[{mark}][^\s,;]*|[^\s,;{{\["'{mark}-][^\s,;{mark}]*[{mark}][^\s,;]*)"#);
+        Rules {
+            before: [
+                // Scheme and host only.
+                (pattern(r#"(?i)\b([a-z][a-z0-9+.-]*)://(?:[^\s/@()<>"']*@)?([^\s/?#()<>"']+)[^\s()<>"']*"#), "$1://$2"),
+                // A Bearer or Basic credential wherever it is, the quote or
+                // the backslash that ends it left in place.
+                (pattern(r#"(?i)\b(bearer|basic)\s+[^\s,;"'`\\]+"#), "$1 [redacted]"),
+                // An `Authorization` value is a scheme, whatever it is, and
+                // the credential after it.
+                (pattern(&format!(r#"(?i)(["']?)\b((?:proxy-)?authorization)(["']?\s*[=:]\s*)({escaped}|{quoted}|{nested}|{open}|[`<(]?[a-z][a-z0-9._~+/-]*\s+(?:\[redacted\][`>)]?|{bare})|{bare})"#)), "$1$2$3[redacted]"),
+                // A cookie is secret whole: every `name=value` pair of it.
+                (pattern(&format!(r#"(?i)(["']?)\b((?:set-)?cookie)(["']?\s*[=:]\s*)({escaped}|{quoted}|{nested}|{open}|{schemed}|{cookie})"#)), "$1$2$3[redacted]"),
+                // A quoted key is a key, never prose: any name with a
+                // credential word in it, `"key": "value"`, `"key" = "value"`,
+                // `"key" => "value"` and escaped JSON's `\"key\":\"value\"`.
+                (pattern(&format!(r#"(?i)(\\?["'])([a-z0-9_.-]*(?:{words})[a-z0-9_.-]*)(\\?["']\s*(?:=>|[:=])\s*)({value})"#)), "$1$2$3[redacted]"),
+                // `key=value` and `key => value`, for any name with a
+                // credential word in it.
+                (pattern(&format!(r"(?i)\b([a-z0-9_.-]*(?:{words})[a-z0-9_.-]*)(\s*=>?\s*)({value})")), "$1$2[redacted]"),
+                // `--password hunter2`, a flag and its value.
+                (pattern(&format!(r#"(?i)(\s|^)(--?[a-z0-9_-]*(?:{words})[a-z0-9_-]*)(\s+)({quoted}|["'].*|{secretish})"#)), "$1$2$3[redacted]"),
+            ],
+            // `key: value`, cut only where a phrase starts (`cut_labels`).
+            label: pattern(&format!(r"(?i)\b([a-z0-9_.-]*(?:{ends}))(\s*:\s*)({value})")),
+            after: [
+                (pattern(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[email]"),
+                (pattern(r"(?i)(?:/Users|/home)/[^/\s]+|/root\b|\b[a-z]:\\Users\\[^\\\s]+"), "~"),
+            ],
+            // A long run of letters and digits together is a token, a key or an id.
+            opaque: pattern(r"[A-Za-z0-9_\-+=.]{24,}"),
+        }
     });
     let mut line = line.to_string();
-    for (pattern, replacement) in patterns {
+    for (pattern, replacement) in &rules.before {
         line = pattern.replace_all(&line, *replacement).into_owned();
     }
-    // A long run of letters and digits together is a token, a key or an id.
-    let opaque = OPAQUE.get_or_init(|| Regex::new(r"[A-Za-z0-9_\-+=.]{24,}").expect("valid pattern"));
-    opaque
+    line = cut_labels(&rules.label, &line);
+    for (pattern, replacement) in &rules.after {
+        line = pattern.replace_all(&line, *replacement).into_owned();
+    }
+    rules
+        .opaque
         .replace_all(&line, |found: &regex::Captures| {
             let text = &found[0];
             if text.bytes().any(|b| b.is_ascii_digit()) && text.bytes().any(|b| b.is_ascii_alphabetic()) { "[redacted]".to_string() } else { text.to_string() }
         })
         .into_owned()
+}
+
+/// Cut `key: value` where a phrase starts: at the start of the line, after a
+/// mark (`refused: password: hunter2`, `[redacted] secret: s3`) or after a
+/// colon and a space; not after a word (`Failed to refresh token: 401
+/// Unauthorized`) or a path's `::` (`codex_core::auth: Failed to refresh`).
+/// The text before is read, not taken, so a value just cut still starts the
+/// next phrase; and a label passed over is passed over by its key only, so
+/// one in its value (`refresh token: id_token: …`) is still read.
+fn cut_labels(label: &regex::Regex, line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let (mut kept, mut from) = (0, 0);
+    while from < line.len() {
+        let Some(found) = label.captures_at(line, from) else { break };
+        let (whole, key) = (found.get(0).expect("the match"), found.get(1).expect("the key"));
+        if starts_a_phrase(&line[..whole.start()]) {
+            out.push_str(&line[kept..whole.start()]);
+            out.push_str(key.as_str());
+            out.push_str(&found[2]);
+            out.push_str("[redacted]");
+            kept = whole.end();
+            from = whole.end();
+        } else {
+            from = key.end();
+        }
+    }
+    out.push_str(&line[kept..]);
+    out
+}
+
+fn starts_a_phrase(before: &str) -> bool {
+    let trimmed = before.trim_end();
+    match trimmed.chars().next_back() {
+        None => true,
+        Some(':') => trimmed.len() < before.len(),
+        Some(c) => !(c.is_ascii_alphanumeric() || "_.-".contains(c)),
+    }
 }
 
 /// Whether an agent's own words say its provider refused its sign-in (#667):
@@ -599,7 +715,97 @@ mod lifecycle_tests {
         for secret in ["ada@example.com", "eyJ", "sk-proj", "'x y'", "user:pw", "backend-api", "s3cret", "/Users/ada", "/home/ada", "0a1b2c3d4e5f"] {
             assert!(!cut.contains(secret), "{secret} in {cut}");
         }
-        assert!(cut.starts_with("401 for [email]: Authorization: Bearer [redacted] api_key=[redacted] OPENAI_API_KEY=[redacted] at https://chatgpt.com in ~/.codex and ~/x, id [redacted]"), "{cut}");
+        assert!(cut.starts_with("401 for [email]: Authorization: [redacted] api_key=[redacted] OPENAI_API_KEY=[redacted] at https://chatgpt.com in ~/.codex and ~/x, id [redacted]"), "{cut}");
+        // Short secrets, said as `key: value` or JSON, go too.
+        for (said, shown) in [
+            ("refused: password: hunter2", "refused: password: [redacted]"),
+            (r#"{"refresh_token": "abc", "error": "invalid_grant"}"#, r#"{"refresh_token": [redacted], "error": "invalid_grant"}"#),
+            (r#"{"password":"x"}"#, r#"{"password":[redacted]}"#),
+            (r#"{"token": "ab\"cd"}"#, r#"{"token": [redacted]}"#),
+            (r#"{"credentials": {"access_token": "x"}, "error": "e"}"#, r#"{"credentials": [redacted], "error": "e"}"#),
+            (r#""private_key": "-----BEGIN""#, r#""private_key": [redacted]"#),
+            ("proxy said Bearer abc", "proxy said Bearer [redacted]"),
+            ("X-Api-Key: abc", "X-Api-Key: [redacted]"),
+            ("session_cookie: abc", "session_cookie: [redacted]"),
+            ("token=abc}def", "token=[redacted]"),
+            // A quoted key is a key wherever its credential word is, escaped
+            // JSON's among them.
+            (r#"{"secret_key": "hunter2"}"#, r#"{"secret_key": [redacted]}"#),
+            (r#"{"secretAccessKey": "x", "tokenValue": "y", "password_value": "z"}"#, r#"{"secretAccessKey": [redacted], "tokenValue": [redacted], "password_value": [redacted]}"#),
+            (r#"{"passphrase": "hunter2"}"#, r#"{"passphrase": [redacted]}"#),
+            (r#"body: "{\"password\":\"hunter2\"}""#, r#"body: "{\"password\":[redacted]}""#),
+            (r#""password" = "hunter2X""#, r#""password" = [redacted]"#),
+            (r#"'password'="Token hunter2X""#, "'password'=[redacted]"),
+            // An `Authorization` value goes with its scheme, whatever the
+            // scheme, as a `key=value` with a scheme does.
+            ("Authorization: Token abc123", "Authorization: [redacted]"),
+            ("Authorization: OAuth abc123", "Authorization: [redacted]"),
+            ("Authorization: SSWS abc123, next", "Authorization: [redacted], next"),
+            ("Authorization=Bearer abc123", "Authorization=[redacted]"),
+            ("{Authorization=Bearer abc123, user=ada}", "{Authorization=[redacted], user=ada}"),
+            ("auth_header=Basic dXNlcjpwYXNz", "auth_header=[redacted]"),
+            ("secret=`Bearer abc`", "secret=[redacted]"),
+            (r#"token: \"Bearer abc\""#, "token: [redacted]"),
+            ("password=<Basic dXNlcjpwYXNz>", "password=[redacted]"),
+            // A cookie, every pair of it, whatever shape its value has.
+            ("Cookie: lang=en; sid=s3cr3t", "Cookie: [redacted]"),
+            (r#"Cookie: sid="abc"; lang=en"#, "Cookie: [redacted]"),
+            (r#"Cookie: sid="abc"#, "Cookie: [redacted]"),
+            ("Set-Cookie: sid=abc; Path=/; HttpOnly", "Set-Cookie: [redacted]; HttpOnly"),
+            ("Cookie=Bearer abc", "Cookie=[redacted]"),
+            (r#"cookie={"sid":"abc"}"#, "cookie=[redacted]"),
+            (r#"Cookie=["abc"]"#, "Cookie=[redacted]"),
+            (r#"cookie=\"sid=abc\""#, "cookie=[redacted]"),
+            // What one rule leaves makes the next label a phrase's start.
+            ("login for ada@example.com password: hunter2", "login for [email] password: [redacted]"),
+            // A value just cut starts the next phrase; a label passed over
+            // still lets one in its value be read.
+            (r#"token: "abc" secret: hunter2"#, "token: [redacted] secret: [redacted]"),
+            (r#"Failed to refresh token: id_token: {hunter2X"}"#, "Failed to refresh token: id_token: [redacted]"),
+            // `=>`, and an escaped quote left open.
+            (r#"{"token" => "abc"}"#, r#"{"token" => [redacted]}"#),
+            (r#"{\"api_key\":\"Bearer abc123"#, r#"{\"api_key\":[redacted]"#),
+            (r#"Cookie=\"abc123"#, "Cookie=[redacted]"),
+            (r"token=\'Bearer abc\'", "token=[redacted]"),
+            // The Bearer rule leaves a quote that closes a value in place.
+            (r#""Authorization": "Bearer $MY_TOKEN"). Only variables listed"#, r#""Authorization": [redacted]). Only variables listed"#),
+            // A flag and its value.
+            ("Command failed: codex login --password hunter2 --verbose", "Command failed: codex login --password [redacted] --verbose"),
+            // An object or a list goes whole, strings and all, and one left
+            // open, or a quote left open, goes to the end of the line.
+            (r#"token={"value":"abc123"} then"#, "token=[redacted] then"),
+            (r#"token={"v":"a}b"} then"#, "token=[redacted] then"),
+            ("secret=[1, 2, 3] then", "secret=[redacted] then"),
+            (r#""tokens": 1, "token": ["a b", "c"]"#, r#""tokens": [redacted], "token": [redacted]"#),
+            (r#"auth: {"user": "x", "pw": {"v": "y"}}"#, "auth: [redacted]"),
+            (r#"auth: {"user": "x", "pw": "y""#, "auth: [redacted]"),
+            (r#"refused: password: "hunter2"#, "refused: password: [redacted]"),
+            (r#"{"refresh_token": "abc\""#, r#"{"refresh_token": [redacted]"#),
+            ("token='abc def", "token=[redacted]"),
+            (r#"Cookie: "sid=abc"#, "Cookie: [redacted]"),
+        ] {
+            assert_eq!(detail(said).as_deref(), Some(shown), "{said}");
+            assert_eq!(detail(shown).as_deref(), Some(shown), "read back: {shown}");
+        }
+        // An error's own words stay: a label that only starts with a
+        // credential word, and one inside a phrase, as Codex's own
+        // `Failed to refresh token: ` and `failed to load auth: ` are.
+        for said in [
+            "token refresh failed: invalid_grant",
+            r#"HTTP 401 Unauthorized: {"error":{"message":"Your token has been revoked"}}"#,
+            "failed to read ~/.codex/auth.json: No such file or directory",
+            "Failed to authenticate: API Error: 401",
+            "apiKeyHelper: command not found",
+            "Failed to refresh token: 401 Unauthorized",
+            r#"Failed to refresh token: {"error":"invalid_grant","error_description":"refresh token revoked"}"#,
+            "failed to load auth: No such file or directory",
+            "ERROR codex_core::auth: Failed to refresh token: refresh_token_reused",
+            // A flag that takes no value keeps the word after it.
+            "Choose one login credential source: --with-api-key or --with-access-token.",
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 100000 > 64000"}}"#,
+        ] {
+            assert_eq!(detail(said).as_deref(), Some(said), "{said}");
+        }
         // Bounded, and the same when read back (as `sanitize` does).
         let long = detail(&"word ".repeat(200)).unwrap();
         assert_eq!(long.chars().count(), DETAIL_CHARS);

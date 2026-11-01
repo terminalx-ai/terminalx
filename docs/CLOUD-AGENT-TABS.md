@@ -272,10 +272,15 @@ account/read failed during TUI bootstrap: account/read failed: workspace routing
   out, then its `Stop` hook) also ends the turn with `authFailed: true`.
 - **Said.** The turn's end (and a launch error, such as a Codex too old for
   `--no-daemon`) carries `detail`: the last line, plain text, with tokens,
-  `key=value` secrets, addresses, URL paths and queries and home folders cut
+  secrets said as `key=value`, `--key value`, `key: value` or JSON's
+  `"key": "value"` (escaped JSON too), cookies, an `Authorization` value
+  with its scheme, addresses, URL paths and queries and home folders cut
   out, at most 240 characters (`recovery::detail`, applied again by
-  `sanitize`). The chat shows it under the allowlisted message. Mid-turn
-  provider text never becomes a `detail`.
+  `sanitize`). A bare `key:` label counts only where a phrase starts and
+  when it ends in a credential word, so `Unauthorized:`, `auth.json:` and
+  Codex's own `Failed to refresh token:` stay readable; a quoted key counts
+  wherever its credential word is. The chat shows it under the allowlisted
+  message. Mid-turn provider text never becomes a `detail`.
 - **Reported.** A turn that ends with `authFailed` on a session launched with
   an organization grant calls `cloud_grants::reject_launch`, which marks the
   grant refused and wakes the grant loop. The loop sends, before its next
@@ -286,14 +291,26 @@ account/read failed during TUI bootstrap: account/read failed: workspace routing
   { "v": 1, "provider": "codex", "credentialId": "…", "grantId": "…", "version": 3, "epoch": 7, "reason": "provider-refused" }
   ```
 
-  The server forces a refresh and either issues a grant of a new version or
-  epoch, or marks the credential `sign-in-required` and stops issuing grants
-  for it. A transient failure is sent again on a later turn; a 404 (a server
-  from before) is not. While the login stands refused, by the runtime's mark
-  or the server's `sign-in-required`, the loop fetches at least every 30 s,
-  and a launch for that agent first asks the loop for a sync and waits up to
-  5 s for it, so a login signed in again reaches the same tab without a new
-  session or a workspace restart.
+  The report is a hint read from the agent's own output, never proof. The
+  server checks it with the provider by forcing a refresh, and answers in
+  the grant list, not in its reply: a grant of a new version or epoch for a
+  login that works, or the credential marked `sign-in-required`, with no
+  grant, for one that does not. Either ends the runtime's mark, as does a
+  turn that works on that grant. A 2xx only says the server has the report:
+  the same grant, still connected, means the check has not settled (it is
+  queued, or the refresh failed transiently, which keeps the stored login),
+  and the mark stays. The runtime does not report that grant again, so the
+  mark then lasts until the server's own next refresh, a sign-in again or a
+  turn that works. A server that cannot take the report now (rate-limited,
+  or down) answers 429 or 5xx instead, and the report goes again on a later
+  turn, as any transient failure to send does; a 404 (a server from before)
+  is not sent again. The reply is a JSON object (`{}` will do): an empty 2xx
+  reads as a transient failure, and the report is sent again. While the
+  login stands refused, by the runtime's mark or the server's
+  `sign-in-required`, the loop fetches at least every 30 s, and a launch for
+  that agent first asks the loop for a sync and waits up to 5 s for it, so a
+  login signed in again reaches the same tab without a new session or a
+  workspace restart.
 
 A grant or configuration sync that changes this answer for any provider (the
 first sync after a start or resume, a login removed or connected again, a key

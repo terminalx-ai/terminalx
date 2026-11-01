@@ -22,9 +22,6 @@ use crate::events::Payload;
 
 // ------------------------------------------------------------------ keystrokes
 
-/// Clears whatever is in the CLI's composer (Ctrl+U) before a prompt lands, so
-/// a half-typed line in the terminal view is not glued to the front of it.
-pub const CLEAR_LINE: &[u8] = b"\x15";
 pub const BRACKETED_PASTE_START: &str = "\x1b[200~";
 pub const BRACKETED_PASTE_END: &str = "\x1b[201~";
 /// Interrupt: both TUIs read a bare Escape as "stop what you are doing".
@@ -121,6 +118,33 @@ pub const NUDGES: u32 = 2;
 /// lost with nothing on screen to say so (#662). Past this the Enter goes
 /// anyway and the nudges are the fallback.
 pub const PASTE_DRAW_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// What a CLI's input box holds, as its screen shows it (#722).
+///
+/// Nothing is typed into an input box that holds something: the paste would
+/// join it, and the Enter after it would send the two as one prompt. The app
+/// used to clear the box first with Ctrl+U, which deletes only back to the
+/// start of the row the cursor is on. A prompt the CLI had put back in the
+/// box lost its last wrapped row that way, and the rest went with the next
+/// message glued to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Composer {
+    /// Nothing in it: what is typed now is the whole prompt.
+    Empty,
+    /// Something the app is not typing now, its words as drawn: what the
+    /// reader typed in the terminal, or a prompt the CLI put back there.
+    Holds(String),
+    /// The box is not on screen (a picker or dialog is in its place), or
+    /// this CLI's box cannot be read.
+    Unseen,
+}
+
+/// How often an input box that holds something is looked at again.
+pub const INPUT_POLL: Duration = Duration::from_millis(250);
+/// How long an input box may go on holding something before the prompt to be
+/// typed into it is said to be waiting. A CLI that has just taken the prompt
+/// before it is still drawing its box empty.
+pub const INPUT_SETTLE: Duration = Duration::from_secs(1);
 
 /// Whether the CLI read what was written into its pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,12 +342,105 @@ const LAST_WORDS_CHARS: usize = crate::recovery::DETAIL_CHARS;
 /// How far back to look: an exit message is the last thing printed.
 const LAST_WORDS_TAIL_BYTES: usize = 64 * 1024;
 
+/// Whether `line` ends on a credential's label with its value still to come:
+/// `Password:`, `"refresh_token":`, `token=`, `--password`, or an
+/// `Authorization` and its scheme.
+fn ends_on_a_label(line: &str) -> bool {
+    static LABEL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    LABEL
+        .get_or_init(|| {
+            let words = crate::recovery::CREDENTIAL_WORDS;
+            regex::Regex::new(&format!(r#"(?i)(?:\b[a-z0-9_.-]*(?:{words})[a-z0-9_.-]*["']?\s*(?:=>|[:=])|(?:^|\s)--?[a-z0-9_-]*(?:{words})[a-z0-9_-]*|\b(?:proxy-)?authorization["']?\s*[:=]\s*[a-z][a-z0-9._~+/-]*)\s*$"#)).expect("valid pattern")
+        })
+        .is_match(line)
+}
+
+/// Whether a credential's value on `line` opens a quote, an object or a
+/// list that the line does not close: a value that runs on into the next.
+/// Only separators `recovery::redact` cuts count, so a line merged on is
+/// cut as its own line would be; each character is read once.
+fn leaves_a_value_open(line: &str) -> bool {
+    static SEPARATOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let separator = SEPARATOR.get_or_init(|| {
+        let (words, ends) = (crate::recovery::CREDENTIAL_WORDS, crate::recovery::CREDENTIAL_ENDS);
+        regex::Regex::new(&format!(
+            r#"(?i)(?:\\?["'][a-z0-9_.-]*(?:{words})[a-z0-9_.-]*\\?["']\s*(?:=>|[:=])|\b[a-z0-9_.-]*(?:{words})[a-z0-9_.-]*\s*=>?|(?:^|[^\sa-z0-9_.:-]\s*|:\s+)\b[a-z0-9_.-]*(?:{ends})\s*:|\b(?:proxy-)?authorization["']?\s*[:=]|\b(?:set-)?cookie["']?\s*[:=])\s*"#
+        ))
+        .expect("valid pattern")
+    });
+    // Where the last value read ended: a separator inside it is its text.
+    let mut scanned = 0;
+    for found in separator.find_iter(line) {
+        if found.end() <= scanned {
+            continue;
+        }
+        let at = found.end();
+        let value = &line[at..];
+        if let Some(rest) = value.strip_prefix("\\\"") {
+            match rest.find("\\\"") {
+                Some(close) => scanned = at + 2 + close + 2,
+                None => return true,
+            }
+            continue;
+        }
+        let mut chars = value.char_indices().peekable();
+        let (mut quote, mut depth) = match chars.next() {
+            Some((_, c @ ('"' | '\''))) => (Some(c), 0usize),
+            Some((_, '{' | '[')) => (None, 1),
+            _ => continue,
+        };
+        let mut escaped = false;
+        let mut closed = None;
+        while let Some((index, c)) = chars.next() {
+            match quote {
+                Some(_) if escaped => escaped = false,
+                Some(_) if c == '\\' => escaped = true,
+                // An apostrophe inside a word (`You've`) closes nothing.
+                Some(open) if c == open && !(open == '\'' && chars.peek().is_some_and(|&(_, next)| next.is_alphanumeric() || next == '_')) => {
+                    quote = None;
+                    if depth == 0 {
+                        closed = Some(index + c.len_utf8());
+                        break;
+                    }
+                }
+                Some(_) => {}
+                None => match c {
+                    '"' | '\'' => quote = Some(c),
+                    '{' | '[' => depth += 1,
+                    '}' | ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            closed = Some(index + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+        match closed {
+            Some(end) => scanned = at + end,
+            None => return true,
+        }
+    }
+    false
+}
+
+/// A PEM armor line, `-----BEGIN PRIVATE KEY-----`: a key's value going on.
+fn is_armor(line: &str) -> bool {
+    static ARMOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    ARMOR.get_or_init(|| regex::Regex::new(r"^-----(?:BEGIN|END) [A-Z0-9 ]+-----$").expect("valid pattern")).is_match(line)
+}
+
+/// How many lines on a value left open may run to and still be read as one.
+const OPEN_VALUE_LINES: usize = 16;
+
 /// The last lines a CLI printed, as plain text: what it said as it exited
 /// when it went before it ever got going (#663), such as Claude Code's "No
 /// conversation found with session ID". Terminal controls are dropped, and a
 /// cursor moved right or to a column stands for the spaces a TUI draws that
-/// way. Redacted for the chat (`recovery::redact`), then cut to at most
-/// `LAST_WORDS_CHARS`. `None` when it printed nothing to read.
+/// way. Redacted for the chat (`recovery::redact`, line by line), then cut
+/// to at most `LAST_WORDS_CHARS`. `None` when it printed nothing to read.
 pub fn last_words(output: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(&output[output.len().saturating_sub(LAST_WORDS_TAIL_BYTES)..]);
     let mut lines = vec![String::new()];
@@ -364,10 +481,54 @@ pub fn last_words(output: &[u8]) -> Option<String> {
         }
     }
     let lines: Vec<String> = lines.iter().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|line| !line.is_empty()).collect();
-    let said = lines[lines.len().saturating_sub(LAST_WORDS_LINES)..].join(" ");
+    // A line that ends on a credential's label (`Password:`, `token=`,
+    // `--password`, `Authorization: Bearer`) reads on into the next one,
+    // where its value is; one whose value opens a quote, an object or a list
+    // reads on to the line that closes it. Each is then one line, for the
+    // window and for the redaction. A value that never closes takes the
+    // lines of one word after it, as a wrapped token, a key's base64 or a
+    // tail goes on, and leaves the first line of words, where the reason is.
+    let mut read: Vec<String> = Vec::new();
+    let mut next = 0;
+    while next < lines.len() {
+        let mut line = lines[next].clone();
+        next += 1;
+        loop {
+            if next < lines.len() && ends_on_a_label(&line) {
+                line = format!("{line} {}", lines[next]);
+                next += 1;
+            } else if leaves_a_value_open(&line) {
+                let mut joined = line.clone();
+                let closed = lines[next..].iter().take(OPEN_VALUE_LINES).position(|more| {
+                    joined.push(' ');
+                    joined.push_str(more);
+                    !leaves_a_value_open(&joined)
+                });
+                let Some(at) = closed else {
+                    while next < lines.len() && (!lines[next].contains(char::is_whitespace) || is_armor(&lines[next])) {
+                        line.push(' ');
+                        line.push_str(&lines[next]);
+                        next += 1;
+                    }
+                    break;
+                };
+                line = joined;
+                next += at + 1;
+            } else {
+                break;
+            }
+        }
+        read.push(line);
+    }
+    let lines = read;
     // Redacted as an agent's own words always are (#667), and whole, before
     // any of it is cut: a credential or a path cut in two is no longer
-    // recognisable as one, and its fragment would get through.
+    // recognisable as one, and its fragment would get through. Line by
+    // line first, as `recovery::redact` reads it: a quote one line leaves
+    // open does not take the next lines, where the reason usually is. Then
+    // joined, for anything else that runs from one line into the next;
+    // what the first pass cut stays as it was.
+    let said = lines[lines.len().saturating_sub(LAST_WORDS_LINES)..].iter().map(|line| crate::recovery::redact(line)).collect::<Vec<_>>().join(" ");
     let said = crate::recovery::redact(&said);
     let said = said.trim();
     if said.is_empty() {
@@ -492,7 +653,7 @@ impl Streamer {
     #[cfg(test)]
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Payload> {
         let mut out = Vec::new();
-        for (payloads, mark, _) in self.push_records(chunk) {
+        for (payloads, mark, _, _) in self.push_records(chunk) {
             out.extend(payloads);
             if mark.is_some() {
                 self.mark = mark;
@@ -522,14 +683,15 @@ impl Streamer {
                         }
                     };
                     if !out.is_empty() || mark.is_some() {
+                        let record = serde_json::from_str::<serde_json::Value>(line).ok();
                         // Both supported transcript formats use an RFC3339 timestamp.
                         // Missing historical time stays unknown, never the import time.
-                        let ts = serde_json::from_str::<serde_json::Value>(line)
-                            .ok()
+                        let ts = record
+                            .as_ref()
                             .and_then(|record| record["timestamp"].as_str().map(str::to_owned))
                             .filter(|ts| chrono::DateTime::parse_from_rfc3339(ts).is_ok())
                             .unwrap_or_default();
-                        records.push((out, mark, ts));
+                        records.push((out, mark, ts, record.as_ref().and_then(Lineage::of)));
                     }
                 }
             }
@@ -538,8 +700,31 @@ impl Streamer {
     }
 }
 
-/// One transcript record: its payloads, turn mark, and source time (empty if unknown).
-pub type Record = (Vec<Payload>, Option<TurnMark>, String);
+/// One transcript record: its payloads, turn mark, source time (empty if
+/// unknown), and where it stands in its conversation.
+pub type Record = (Vec<Payload>, Option<TurnMark>, String, Option<Lineage>);
+
+/// Where a record stands in its conversation: its own id, and the id of the
+/// record it follows.
+///
+/// Claude Code chains each record to the one before it (`parentUuid`). When
+/// it drops a turn before answering it, it puts the prompt back in its input
+/// box, and the next prompt it records follows the same record the dropped
+/// one did (#722): a prompt with the same parent as an earlier one took that
+/// one's place. Codex records carry neither id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lineage {
+    pub uuid: String,
+    /// `None` for the first record of a conversation.
+    pub parent: Option<String>,
+}
+
+impl Lineage {
+    fn of(record: &serde_json::Value) -> Option<Self> {
+        let uuid = record["uuid"].as_str().filter(|uuid| !uuid.is_empty())?;
+        Some(Self { uuid: uuid.to_string(), parent: record["parentUuid"].as_str().map(str::to_owned) })
+    }
+}
 
 /// How long a `Stop` hook waits for the transcript to catch up with the reply
 /// the hook is already holding. Well inside the hook's own 10 s.
@@ -1001,7 +1186,19 @@ mod tests {
     fn records_keep_source_timestamps_and_never_invent_missing_history() {
         let mut stream = Streamer::at(0, echo);
         let records = stream.push_records(b"{\"timestamp\":\"2026-10-22T23:59:00Z\"}\n{\"timestamp\":\"invalid\"}\n{}\n");
-        assert_eq!(records.iter().map(|(_, _, ts)| ts.as_str()).collect::<Vec<_>>(), ["2026-10-22T23:59:00Z", "", ""]);
+        assert_eq!(records.iter().map(|(_, _, ts, _)| ts.as_str()).collect::<Vec<_>>(), ["2026-10-22T23:59:00Z", "", ""]);
+    }
+
+    /// Claude Code chains each record to the one before it; Codex's records
+    /// name neither (#722).
+    #[test]
+    fn records_say_where_they_stand_in_their_conversation() {
+        let mut stream = Streamer::at(0, echo);
+        let records = stream.push_records(
+            b"{\"uuid\":\"u2\",\"parentUuid\":\"u1\"}\n{\"uuid\":\"u1\",\"parentUuid\":null}\n{\"type\":\"event_msg\"}\n{\"uuid\":\"\"}\n",
+        );
+        let lineage = |uuid: &str, parent: Option<&str>| Some(Lineage { uuid: uuid.into(), parent: parent.map(String::from) });
+        assert_eq!(records.into_iter().map(|(_, _, _, lineage)| lineage).collect::<Vec<_>>(), [lineage("u2", Some("u1")), lineage("u1", None), None, None]);
     }
 
     #[test]
@@ -1173,6 +1370,73 @@ mod tests {
         for fragment in ["Df2", "As3", "Op4", "sk-ant"] {
             assert!(!said.contains(fragment), "{fragment} reached the chat: {said}");
         }
+    }
+
+    /// A value one line leaves open is cut to the end of that line only: the
+    /// lines after it, with the reason, still reach the chat.
+    #[test]
+    fn a_quote_left_open_takes_its_own_line_not_the_reason_after_it() {
+        let said = last_words(b"auth: \"chatgpt\r\nError: Failed to refresh token: 401 Unauthorized\r\nPlease run codex login\r\n").unwrap();
+        assert_eq!(said, "auth: [redacted] Error: Failed to refresh token: 401 Unauthorized Please run codex login");
+    }
+
+    /// A value on the line after its label is cut all the same, and the
+    /// two count as one line of the window.
+    #[test]
+    fn a_secret_on_the_line_after_its_label_is_redacted() {
+        assert_eq!(last_words(b"Password:\r\nhunter2\r\n").as_deref(), Some("Password: [redacted]"));
+        assert_eq!(last_words(b"proxy refused Authorization: Bearer\r\nabc123\r\n").as_deref(), Some("proxy refused Authorization: [redacted]"));
+        assert_eq!(last_words(b"login --password\r\nhunter2\r\n").as_deref(), Some("login --password [redacted]"));
+        assert_eq!(last_words(b"a\r\nb\r\nc\r\nPassword:\r\nhunter2\r\n").as_deref(), Some("b c Password: [redacted]"));
+        // A flag that takes no value keeps the line after it whole.
+        assert_eq!(
+            last_words(b"usage: codex login --with-api-key\r\nError: stdin is not a terminal\r\n").as_deref(),
+            Some("usage: codex login --with-api-key Error: stdin is not a terminal")
+        );
+    }
+
+    /// A value that runs on over lines goes whole, up to the line that
+    /// closes it, and the reason after it stays.
+    #[test]
+    fn a_value_that_runs_over_lines_goes_whole() {
+        assert_eq!(last_words(b"password: \"hunter\r\n2 more\" and the reason\r\n").as_deref(), Some("password: [redacted] and the reason"));
+        assert_eq!(last_words(b"token=\"hunter\r\n2abc\" rest\r\n").as_deref(), Some("token=[redacted] rest"));
+        assert_eq!(
+            last_words(b"{\"refresh_token\": \"abc\r\ndef\", \"error\": \"invalid_grant\"}\r\n").as_deref(),
+            Some(r#"{"refresh_token": [redacted], "error": "invalid_grant"}"#)
+        );
+        assert_eq!(last_words(b"token: {\"a\": 1,\r\n\"b\": 2} then the reason\r\n").as_deref(), Some("token: [redacted] then the reason"));
+        // One that never closes takes the one-word lines after it, however
+        // many, and leaves the reason.
+        assert_eq!(last_words(b"password: \"hunter\r\n2more\r\n").as_deref(), Some("password: [redacted]"));
+        let key: Vec<u8> = ["private_key: \"-----BEGIN PRIVATE KEY-----\r\n".to_string()]
+            .into_iter()
+            .chain((0..20).map(|n| format!("MIIEv{n}QIBADANBgkqhkiG9w0BAQEFAASC\r\n")))
+            .chain(["Error: key rejected\r\n".to_string()])
+            .collect::<String>()
+            .into_bytes();
+        assert_eq!(last_words(&key).as_deref(), Some("private_key: [redacted] Error: key rejected"));
+        // A key's armor on the line after its label goes too.
+        let armored = b"private_key: \"\r\n-----BEGIN PRIVATE KEY-----\r\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\r\n-----END PRIVATE KEY-----\r\nError: key rejected\r\n";
+        assert_eq!(last_words(armored).as_deref(), Some("private_key: [redacted] Error: key rejected"));
+        // An escaped quote wraps as a plain one does.
+        assert_eq!(last_words(b"body: \"{\\\"password\\\":\\\"hunter\r\n2abc\\\"}\" rest\r\n").as_deref(), Some(r#"body: "{\"password\":[redacted]}" rest"#));
+        // A value closed on the next line leaves the label after it a
+        // phrase's start.
+        assert_eq!(last_words(b"auth: \"x\r\nx\" password: hunter2X\r\n").as_deref(), Some("auth: [redacted] password: [redacted]"));
+        // Only a value `redact` cuts runs on: an error's own `Unauthorized:`
+        // does not take the line after it, whose label is still cut.
+        assert_eq!(last_words(b"HTTP 401 Unauthorized: \"x\r\npassword: hunter2\"\r\n").as_deref(), Some("HTTP 401 Unauthorized: \"x password: [redacted]"));
+        // An apostrophe in the reason closes nothing.
+        assert_eq!(last_words(b"auth: 'chatgpt\r\nError: You've hit your usage limit\r\n").as_deref(), Some("auth: [redacted] Error: You've hit your usage limit"));
+        // A scheme of any name, its credential on the next line.
+        assert_eq!(last_words(b"proxy refused Authorization: Bot\r\nabc123\r\n").as_deref(), Some("proxy refused Authorization: [redacted]"));
+        // An address before the label, cut first, does not let the open
+        // quote take the reason either.
+        assert_eq!(
+            last_words(b"signed in as ada@example.com auth: \"chatgpt\r\nError: Failed to refresh token: 401 Unauthorized\r\nPlease run codex login\r\n").as_deref(),
+            Some("signed in as [email] auth: [redacted] Error: Failed to refresh token: 401 Unauthorized Please run codex login")
+        );
     }
 
     #[test]

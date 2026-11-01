@@ -671,12 +671,25 @@ impl ControlService {
     fn sessions_list(&self, params: Value) -> Result<Value, ControlError> {
         let mut sessions = index::load().map_err(ControlError::internal)?;
         let quick = params.get("quick").and_then(Value::as_bool).unwrap_or(false);
+        // Every session in the worktree, by the rule `worktrees delete` uses:
+        // whatever project it belongs to, quick chats included. `--project`
+        // only says whose worktree it is.
+        if optional_string(&params, "worktree").is_some() {
+            if quick {
+                return Err(ControlError::invalid("--worktree lists every session in the worktree, quick chats included; it cannot be combined with --quick."));
+            }
+            let (project, worktree) = resolve_worktree(&params)?;
+            let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
+        }
         if let Some(selector) = optional_string(&params, "project") {
             if quick {
                 return Err(ControlError::invalid("--quick and --project are mutually exclusive: a quick chat has no project."));
             }
             let project = resolve_project(&selector)?;
-            sessions.retain(|s| s.project() == Some(project.path.as_str()));
+            // A session may name its project through a symlink or another
+            // spelling of the same folder.
+            sessions.retain(|s| s.project().is_some_and(|path| crate::worktree_control::same_folder(path, &project.path)));
         }
         if quick {
             sessions.retain(SessionEntry::is_quick);
@@ -973,39 +986,82 @@ impl ControlService {
         )
     }
 
+    /// Each worktree with the sessions that deleting it would delete, by the
+    /// rule the delete uses. The main checkout, which cannot be deleted, has
+    /// only their count: it holds every session that runs in the project
+    /// itself.
     fn worktrees_list(&self, params: Value) -> Result<Value, ControlError> {
         let projects = selected_projects(optional_string(&params, "project"))?;
+        let sessions = index::load().map_err(ControlError::internal)?;
         let mut groups = Vec::new();
         for project in projects {
             let worktrees = crate::workspaces::list(Path::new(&project.path))
                 .map_err(ControlError::internal)?;
-            groups.push(json!({"project": project, "worktrees": worktrees}));
+            let mut listed = Vec::with_capacity(worktrees.len());
+            for worktree in worktrees {
+                let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+                let mut value = serde_json::to_value(&worktree).map_err(ControlError::internal)?;
+                value["sessionCount"] = json!(held.len());
+                if !worktree.is_main {
+                    value["sessions"] = json!(crate::worktree_control::summaries(&held, &project.path));
+                }
+                listed.push(value);
+            }
+            groups.push(json!({"project": project, "worktrees": listed}));
         }
         Ok(json!({"projects": groups}))
     }
 
+    /// `worktrees delete`. Without `--yes`, or with `--dry-run`, it says what
+    /// would go and removes nothing. `--sessions` names the sessions the
+    /// caller was shown; as with the desktop dialog, nothing is removed
+    /// unless they are exactly the ones there (#719).
     fn worktree_delete(&self, params: Value) -> Result<Value, ControlError> {
-        if !params
-            .get("confirmed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(ControlError::new(
-                "confirmation_required",
-                "Worktree deletion requires --yes.",
-                Some("Inspect worktrees list, then repeat with --yes only when deletion is intended.".into()),
-            ));
+        let confirmed = params.get("confirmed").and_then(Value::as_bool).unwrap_or(false);
+        let dry_run = params.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
+        if confirmed && dry_run {
+            return Err(ControlError::invalid("--dry-run removes nothing; it cannot be combined with --yes."));
         }
+        let named = named_session_ids(&params)?;
         let (project, worktree) = resolve_worktree(&params)?;
         if worktree.is_main {
             return Err(ControlError::invalid(
                 "A project's main checkout cannot be deleted.",
             ));
         }
+        let held_now = || crate::session_ops::sessions_in_workspace(Path::new(&worktree.path)).map_err(ControlError::internal);
+        let check_named = |named: &[String], held: &[SessionEntry]| {
+            crate::worktree_control::named_sessions(named, held, &project.path).map_err(|error| sessions_changed(error, &worktree.path))
+        };
+        if !confirmed {
+            let held = held_now()?;
+            if let Some(named) = &named {
+                check_named(named, &held)?;
+            }
+            let preview = self.worktree_delete_preview(&project, worktree.clone(), &held);
+            if dry_run {
+                return serde_json::to_value(preview).map_err(ControlError::internal);
+            }
+            let force = if preview.needs_force { ", adding --force only if losing the work listed is intended" } else { "" };
+            return Err(ControlError::new(
+                "confirmation_required",
+                format!("Worktree deletion requires --yes. Nothing was removed.\n{}", preview.describe()),
+                Some(format!(
+                    "Check what is listed, then repeat with --yes --sessions {} to delete exactly these sessions{force}. --dry-run --json shows the same as JSON.",
+                    preview.sessions_flag()
+                )),
+            ));
+        }
         // The removal fences the worktree from its stop to its end, so nothing
         // starts there meanwhile, and no other tab's prompt waits for it
-        // (#727). A failed stop cannot be discarded by a CLI caller either.
+        // (#727). The sessions named with `--sessions` are checked against
+        // the worktree again behind that fence, after the stop. A failed stop
+        // cannot be discarded by a CLI caller either.
         self.manager.accepting_work().map_err(ControlError::internal)?;
+        let expected = match &named {
+            Some(named) => Some(check_named(named, &held_now()?)?),
+            None => None,
+        };
         let stop = |session: &crate::store::index::SessionEntry| {
             self.manager.stop_session_confirmed(session).map_err(|error| format!("{error:#}"))
         };
@@ -1021,10 +1077,11 @@ impl ControlService {
             path: &worktree.path,
             sessions: crate::session_ops::SessionsFate::Delete,
             delete_branch: false,
-            // The CLI shows nothing first, so its `--force` covers whatever
-            // is there, and it names no sessions to compare with.
+            // The preview carries no digest to confirm, so `--force` covers
+            // whatever git state is there. The sessions are checked when the
+            // caller names them with `--sessions`.
             confirmation: if force { crate::session_ops::Confirmation::Forced } else { crate::session_ops::Confirmation::Single },
-            expected_sessions: None,
+            expected_sessions: expected.as_deref(),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
             guard: None,
@@ -1032,6 +1089,8 @@ impl ControlService {
         let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(|error| {
             if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {
                 ControlError::new("needs_force", error, Some("Nothing was removed. Repeat with --force only if losing this work is intended.".into()))
+            } else if error.starts_with(crate::session_ops::SESSIONS_CHANGED) {
+                sessions_changed(error, &worktree.path)
             } else {
                 ControlError::internal(error)
             }
@@ -1042,8 +1101,31 @@ impl ControlService {
             desktop.browser.forget_workspace(&browser_key);
         }
         let (entries, removal, strays) = (removed.sessions, removed.removal, removed.strays);
-        let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
+        let removed = crate::worktree_control::summaries(&entries, &project.path);
         Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch, "strayProcesses": strays}))
+    }
+
+    /// What deleting `worktree` would do: the sessions it holds, with what
+    /// each still runs, and its git state checked as the delete checks it.
+    fn worktree_delete_preview(&self, project: &Project, worktree: crate::workspaces::Workspace, held: &[SessionEntry]) -> crate::worktree_control::DeletePreview {
+        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
+        let terminals = self.manager.terminals();
+        let sessions = held
+            .iter()
+            .map(|session| {
+                let mut named = crate::worktree_control::WorktreeSession::of(session, &project.path);
+                named.running_tabs = session
+                    .tabs
+                    .iter()
+                    .filter(|tab| self.manager.is_running(&session.id, &tab.id) || terminals.is_running(&tab.pane_id()))
+                    .map(|tab| crate::worktree_control::RunningTab { id: tab.id.clone(), harness: tab.harness.clone(), title: tab.title.clone() })
+                    .collect();
+                named.running_shells = terminals.session_pane_ids(&session.id, &[]).iter().filter(|pane| terminals.is_running(pane)).count();
+                named
+            })
+            .collect();
+        crate::worktree_control::DeletePreview::new(&project.path, worktree, sessions, landed)
     }
 
     fn issues_list(&self, params: Value) -> Result<Value, ControlError> {
@@ -1533,6 +1615,36 @@ fn workspace_error(error: crate::session_ops::WorkspaceError) -> ControlError {
     }
 }
 
+/// `--sessions`: the sessions the caller was shown in the worktree, by id or
+/// the start of one. `None` when it named none, which is not the same as an
+/// empty list: that says the worktree holds no sessions.
+fn named_session_ids(params: &Value) -> Result<Option<Vec<String>>, ControlError> {
+    let refused = || ControlError::invalid("sessions must be a list of session ids.");
+    match params.get("sessions") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut ids = Vec::with_capacity(items.len());
+            for item in items {
+                let id = item.as_str().ok_or_else(refused)?.trim();
+                if !id.is_empty() {
+                    ids.push(id.to_string());
+                }
+            }
+            Ok(Some(ids))
+        }
+        Some(_) => Err(refused()),
+    }
+}
+
+/// The sessions in the worktree are not the ones the caller named.
+fn sessions_changed(message: String, worktree: &str) -> ControlError {
+    ControlError::new(
+        "sessions_changed",
+        message,
+        Some(format!("Nothing was removed. Check terminalx sessions list --worktree {worktree}, then name exactly the sessions it lists with --sessions.")),
+    )
+}
+
 fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspaces::Workspace), ControlError> {
     let selector = required_string(params, "worktree")?;
     let projects = selected_projects(optional_string(params, "project"))?;
@@ -1630,6 +1742,138 @@ mod tests {
         // A quick chat is shown and renamed like any session.
         assert_eq!(service.execute("sessions.show", json!({"session": quick.id}), "r5").unwrap()["kind"], "quick");
         assert_eq!(service.execute("sessions.rename", json!({"session": quick.id, "title": "Renamed"}), "r6").unwrap()["session"]["title"], "Renamed");
+    }
+
+    fn git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        crate::git::run(p, &["init", "-q", "-b", "main"]).unwrap();
+        crate::git::run(p, &["config", "user.email", "t@example.com"]).unwrap();
+        crate::git::run(p, &["config", "user.name", "T"]).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\n").unwrap();
+        crate::git::run(p, &["add", "."]).unwrap();
+        crate::git::run(p, &["commit", "-q", "-m", "init"]).unwrap();
+        dir
+    }
+
+    fn ids(sessions: &Value) -> std::collections::BTreeSet<String> {
+        sessions.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// #719: a session of another project and a quick chat run in the
+    /// worktree. `sessions list --project` does not show them, so everything
+    /// that leads up to deleting the worktree must.
+    #[test]
+    fn every_session_a_worktree_delete_would_take_is_listed_previewed_and_named_first() {
+        let _home = crate::store::temp_home();
+        let (repo, elsewhere) = (git_repo(), tempfile::tempdir().unwrap());
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let other = projects::add(elsewhere.path().to_str().unwrap()).unwrap();
+        let own = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "title": "zero-comparison", "useWorktree": true, "tab": {"harness": "claude"},
+        })).unwrap()).unwrap();
+        let (cwd, name) = (own.cwd.clone(), own.worktree_name.clone().unwrap());
+        let foreign = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": other.path, "title": "Another project's", "useWorktree": false, "cwd": cwd,
+        })).unwrap()).unwrap();
+        let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            title: Some("Quick look".into()), cwd: Some(cwd.clone()), tab: None,
+        }).unwrap();
+        let everyone: std::collections::BTreeSet<String> = [&own, &foreign, &quick].iter().map(|s| s.id.clone()).collect();
+        let (service, _sink) = headless_service();
+
+        // The project's own list leaves two of them out; the worktree's has all three.
+        let of_project = service.execute("sessions.list", json!({"project": project.path}), "r1").unwrap();
+        assert_eq!(ids(&of_project["sessions"]), std::collections::BTreeSet::from([own.id.clone()]));
+        let in_worktree = service.execute("sessions.list", json!({"worktree": name, "project": project.name}), "r2").unwrap();
+        assert_eq!(ids(&in_worktree["sessions"]), everyone);
+        assert_eq!(in_worktree["worktree"], cwd.as_str());
+        assert_eq!(service.execute("sessions.list", json!({"worktree": name, "quick": true}), "r3").unwrap_err().code, "invalid_arguments");
+
+        // `worktrees list` counts and names them; the main checkout has a count only.
+        let listed = service.execute("worktrees.list", json!({"project": project.path}), "r4").unwrap();
+        let worktrees = listed["projects"][0]["worktrees"].as_array().unwrap();
+        let entry = worktrees.iter().find(|w| w["path"] == cwd.as_str()).unwrap();
+        assert_eq!(entry["sessionCount"], 3);
+        assert_eq!(ids(&entry["sessions"]), everyone);
+        let belongs = |id: &str| entry["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap()["belongsTo"].clone();
+        assert_eq!((belongs(&own.id), belongs(&foreign.id), belongs(&quick.id)), (json!("thisProject"), json!("anotherProject"), json!("quickChat")));
+        let main = worktrees.iter().find(|w| w["isMain"] == true).unwrap();
+        assert!(main.get("sessionCount").is_some() && main.get("sessions").is_none());
+
+        let untouched = || {
+            assert!(Path::new(&cwd).is_dir(), "the worktree stays");
+            let left: std::collections::BTreeSet<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+            assert!(everyone.is_subset(&left), "every session stays");
+        };
+
+        // Without --yes: what would go is named, and nothing goes.
+        let refused = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name}), "r5").unwrap_err();
+        assert_eq!(refused.code, "confirmation_required");
+        for expected in ["zero-comparison", "\"Another project's\" (another project: ", "\"Quick look\" (a quick chat, no project)", "would delete 3 sessions"] {
+            assert!(refused.message.contains(expected), "{expected}: {}", refused.message);
+        }
+        let recovery = refused.recovery.unwrap();
+        assert!(everyone.iter().all(|id| recovery.contains(id.as_str())), "the recovery names the sessions to pass: {recovery}");
+        untouched();
+
+        // --dry-run: the same, as data.
+        let preview = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name, "dryRun": true}), "r6").unwrap();
+        assert_eq!(preview["dryRun"], true);
+        assert_eq!(ids(&preview["sessions"]), everyone);
+        assert_eq!(preview["needsForce"], true, "no remote, so it cannot be verified as merged");
+        assert!(preview["landed"]["losses"].as_array().is_some_and(|losses| !losses.is_empty()));
+        assert_eq!(service.execute("worktrees.delete", json!({"worktree": name, "dryRun": true, "confirmed": true}), "r7").unwrap_err().code, "invalid_arguments");
+        untouched();
+
+        // --sessions that leave one out: nothing goes, and the missing one is named.
+        let partial = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "force": true, "sessions": [own.id, quick.id],
+        }), "r8").unwrap_err();
+        assert_eq!(partial.code, "sessions_changed");
+        let (missing, _) = partial.message.split_once("It holds:").unwrap();
+        assert!(missing.contains(&foreign.id) && missing.contains("Another project's"), "{}", partial.message);
+        assert!(!missing.contains(&own.id), "{}", partial.message);
+        untouched();
+
+        // Named exactly (one by the start of its id: UUIDv7 ids share their first
+        // characters, the time they were made), it goes, and the result says what went.
+        let deleted = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "force": true, "sessions": [own.id, quick.id, &foreign.id[..30]],
+        }), "r9").unwrap();
+        assert!(!Path::new(&cwd).exists());
+        let removed = deleted["removedSessions"].as_array().unwrap();
+        assert_eq!(ids(&deleted["removedSessions"]), everyone);
+        let of = |id: &str| removed.iter().find(|s| s["id"] == id).unwrap().clone();
+        assert_eq!((of(&own.id)["title"].clone(), of(&own.id)["project"].clone()), (json!("zero-comparison"), json!(project.path)));
+        assert_eq!((of(&foreign.id)["title"].clone(), of(&foreign.id)["project"].clone()), (json!("Another project's"), json!(other.path)));
+        assert_eq!((of(&quick.id)["title"].clone(), of(&quick.id)["project"].clone()), (json!("Quick look"), Value::Null));
+        assert!(index::load().unwrap().iter().all(|s| !everyone.contains(&s.id)));
+    }
+
+    /// #719: a session that names its project through a symlink is one of
+    /// the project's sessions.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_lists_a_session_that_names_it_through_a_symlink() {
+        let _home = crate::store::temp_home();
+        let (dir, links) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let link = links.path().join("project");
+        std::os::unix::fs::symlink(&project.path, &link).unwrap();
+        let spelled = format!("{}/", link.to_string_lossy());
+        index::update_session(&session.id, |entry| { entry.project_path = spelled.clone(); Ok(()) }).unwrap();
+        let (service, _sink) = headless_service();
+        for selector in [project.path.as_str(), project.name.as_str()] {
+            let listed = service.execute("sessions.list", json!({"project": selector}), "r").unwrap();
+            assert_eq!(ids(&listed["sessions"]), std::collections::BTreeSet::from([session.id.clone()]), "{selector}");
+        }
+        // Another folder is still another project.
+        let unrelated = projects::add(links.path().to_str().unwrap()).unwrap();
+        assert!(ids(&service.execute("sessions.list", json!({"project": unrelated.path}), "r").unwrap()["sessions"]).is_empty());
     }
 
     #[test]
