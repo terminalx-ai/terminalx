@@ -224,7 +224,10 @@ function load(): Prefs {
     // Before #700 every save of a cloud project's pipeline wrote both launch
     // switches, `false` unless turned on: that `false` was no choice, so it is
     // forgotten once and the switch follows where each session starts.
-    if (!(Number(parsed.cloudIssuePipelinesVersion) >= CLOUD_ISSUE_PIPELINES_VERSION)) {
+    // An older build keeps the version it does not know (it spreads what it
+    // read), so a switch it saves as off afterwards reads as Off, never as no choice.
+    const pipelinesVersion = Number(parsed.cloudIssuePipelinesVersion) || 0;
+    if (pipelinesVersion < CLOUD_ISSUE_PIPELINES_VERSION) {
       for (const settings of Object.values(prefs.cloudIssuePipelines as Record<string, IssuePipelineSettings>)) {
         for (const key of ["autoMerge", "resolveConflicts"] as const) {
           if (settings[key] !== false) continue;
@@ -233,7 +236,8 @@ function load(): Prefs {
         }
       }
     }
-    prefs.cloudIssuePipelinesVersion = CLOUD_ISSUE_PIPELINES_VERSION;
+    // Never lowered: a newer build's migrations are not run again after a downgrade.
+    prefs.cloudIssuePipelinesVersion = Math.max(pipelinesVersion, CLOUD_ISSUE_PIPELINES_VERSION);
     // Shortcuts saved under an older version's action ids, once. A newer version's are left as they are.
     const version = shortcutsVersionOf(parsed.shortcutsVersion);
     if (version < SHORTCUTS_VERSION) {

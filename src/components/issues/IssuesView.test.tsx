@@ -587,6 +587,21 @@ describe("the pipeline an issue session starts", () => {
     await start();
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
   });
+
+  // Its launch switches are hidden behind its pipeline's: what they default to must not come back unseen.
+  it("starts an issue again with conflict resolution as its pipeline has it, not as an issue's start defaults it", async () => {
+    pipelineStore.pipelines = [pipelineOf(issues[0], { autoMerge: false, resolveConflicts: false, state: "needsYou", note: "The author session stopped before it finished." })];
+    // As the app answers for an issue in a project that chose nothing: both on.
+    startPipeline.mockImplementation(async (_sessionId: string, _tabId: string, autoMerge: boolean | null) => ({ pipeline: pipelineOf(issues[0], { autoMerge: !!autoMerge, resolveConflicts: true }), authorBrief: BRIEF }));
+    await open();
+    // The one switch shown is the pipeline's own, on its panel.
+    const shown = screen.getByRole("switch", { name: "Resolve conflicts automatically" });
+    expect(screen.getByTestId("issue-pipeline").contains(shown)).toBe(true);
+    expect(shown.getAttribute("aria-checked")).toBe("false");
+    await start();
+    expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", false);
+    expect(resolveChoices()).toEqual([{ id: "pipeline-1", value: false }]);
+  });
 });
 
 describe("an issue its merge closed", () => {

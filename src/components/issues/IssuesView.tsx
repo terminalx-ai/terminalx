@@ -452,6 +452,10 @@ export function IssuesView({
       const key = `${projectPath}\n${issue.provider}\n${issue.id}`;
       const read = thread.current?.key === key ? thread.current.thread : null;
       let prompt = read ? issuePrompt(issue, read) : await issuePromptWithComments(projectPath, issue);
+      // Once the issue has a pipeline its switches are that pipeline's, on its
+      // panel, and the start's own are not shown: a session started on it again
+      // takes what the pipeline holds, not the defaults behind the hidden ones.
+      const launch = pipeline ? { autoMerge: pipeline.autoMerge, resolveConflicts: pipeline.resolveConflicts ?? false } : pipelineLaunch.value;
       if (cloud) {
         // In one of the project's workspaces: the runtime starts the session and carries it on (its pipeline).
         const plan = planCloudStart(cloud.project);
@@ -469,7 +473,7 @@ export function IssuesView({
             mode,
             prompt,
             useWorktree: true,
-            pipeline: pipelineLaunch.value,
+            pipeline: launch,
             pipelineSettings: pipelineDefaults,
             title: `${issue.identifier} ${issue.title}`.slice(0, 80),
             issue: {
@@ -504,8 +508,8 @@ export function IssuesView({
       // its work over. A session it cannot serve still starts, as it always did.
       if (pipelineOffered) {
         try {
-          const started = await startPipeline(s.id, s.tabs[0].id, (pipeline?.autoMerge ?? pipelineLaunch.value.autoMerge) && !pipelineDefaults.requirePerson);
-          if ((started.pipeline.resolveConflicts ?? false) !== pipelineLaunch.value.resolveConflicts) await setPipelineResolveConflicts(started.pipeline.id, pipelineLaunch.value.resolveConflicts);
+          const started = await startPipeline(s.id, s.tabs[0].id, launch.autoMerge && !pipelineDefaults.requirePerson);
+          if ((started.pipeline.resolveConflicts ?? false) !== launch.resolveConflicts) await setPipelineResolveConflicts(started.pipeline.id, launch.resolveConflicts);
           prompt = `${prompt}\n\n${started.authorBrief}`;
         } catch (e) {
           console.error("issue pipeline did not start", e);
@@ -521,7 +525,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, pipelineDefaults, pipeline?.autoMerge, pipelineLaunch.value, work.byIssue]);
+  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, pipelineDefaults, pipeline, pipelineLaunch.value, work.byIssue]);
 
   const emptyReason = useMemo(() => {
     if (!projectPath) return "Add a project to see its issues.";

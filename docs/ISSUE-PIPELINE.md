@@ -284,10 +284,14 @@ on and other sessions with it off. **All sessions** and **Off** are the
 project's own choice, and every new session starts there. A project that turns
 a switch off keeps it off for its issue sessions too. Versions before #700
 saved both switches as `false` whenever any pipeline setting was saved, so a
-stored `false` from then was no choice. It is read once as **From issues**
-(`projects.json` gains a `version`; a cloud project's settings, kept in the
-app's preferences, are migrated the same way). A switch saved as on keeps
-meaning **All sessions**.
+stored `false` from then was no choice. It is read once as **From issues**,
+and a switch saved as on keeps meaning **All sessions**. That the migration
+ran is recorded in `projects-migrations.json` beside `projects.json`. An older
+version rewrites `projects.json` whole on any save but never touches that
+file, so whatever an older version saves afterwards reads as **Off**, which
+never merges by itself, and not as no choice. A cloud project's settings,
+kept in the app's preferences, are migrated the same way; an older version
+keeps that marker when it saves them.
 
 A session on the project's own checkout (not a worktree) has no branch to open
 a pull request from, so it gets no pipeline.

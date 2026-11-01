@@ -284,3 +284,14 @@ describe("cloud pipeline switches saved before they were a choice", () => {
     expect(write).not.toHaveBeenCalled();
   });
 });
+
+describe("cloud pipeline switches saved by a newer version", () => {
+  it("are left as they are, and the newer version is not lowered", async () => {
+    const off = { enabled: true, resolveConflicts: false, requirePerson: false, maxRounds: 3, mergeMethod: "merge", protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [] };
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ cloudIssuePipelinesVersion: 2, cloudIssuePipelines: { "cloud:o:a": off } }));
+    const { getPrefs, setPrefs } = await import("./prefs");
+    expect(getPrefs().cloudIssuePipelines["cloud:o:a"].resolveConflicts).toBe(false);
+    setPrefs({ sounds: false });
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).cloudIssuePipelinesVersion).toBe(2);
+  });
+});

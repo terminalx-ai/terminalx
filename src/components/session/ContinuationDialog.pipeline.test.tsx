@@ -14,6 +14,10 @@ vi.mock("@/lib/sessions", () => ({
   addTab: mocks.add,
 }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn() }));
+// The app's pipeline list holds none of these pipelines, so the switches start
+// at the project's choice (on) and are turned off by hand. Continuing with a
+// pipeline the list holds starts at its switches: ContinuationDialog.issue.test.tsx.
+vi.mock("@/lib/issuePipeline", async (original) => ({ ...await original<typeof import("@/lib/issuePipeline")>(), useIssuePipelines: () => [] }));
 vi.mock("@/lib/models", async (original) => ({
   ...await original<typeof import("@/lib/models")>(), loadModels: vi.fn(async () => {}), refreshModels: vi.fn(),
   useModels: () => [{ harness: "claude", id: "opus", label: "Opus", efforts: ["high"], defaultEffort: "high", isDefault: true, acceptsImages: true }],

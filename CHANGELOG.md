@@ -161,7 +161,9 @@
   **Issue pipeline…** settings, each default is now **From issues**, **All
   sessions** or **Off**, and a project set to Off keeps its issue sessions off.
   A switch an older version saved as off whenever another setting was saved is
-  read as **From issues**. (#700)
+  read once as **From issues**; one an older version saves after that reads as
+  Off. Continuing a session keeps its pipeline's switches as they are, and
+  starting an issue again takes the switches its pipeline holds. (#700)
 - When a pipeline's pull request is merged or closed, or the pipeline is
   stopped, stop the idle agents of its reviewer and conflict resolver (and,
   after a merge or close, its author), with the background commands and watches

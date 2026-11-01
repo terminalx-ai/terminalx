@@ -268,12 +268,9 @@ pub fn move_branch_label(path: &str, from: &str, to: &str) -> Result<Project> {
     Ok(out)
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectsFile {
-    /// What the file was last written by; absent before `PROJECTS_VERSION` 1.
-    #[serde(default)]
-    version: u32,
     #[serde(default)]
     projects: Vec<Project>,
     #[serde(default)]
@@ -287,22 +284,66 @@ fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("projects.json"))
 }
 
+/// How far `projects.json` has been migrated, kept in a file of its own. A
+/// build from before #700 rewrites `projects.json` whole on any save, dropping
+/// fields it does not know and writing both switches as `false`, but never
+/// touches this file: what such a build writes afterwards reads as Off, which
+/// never merges by itself, and not as no choice.
+fn migrations_path() -> Result<PathBuf> {
+    Ok(super::root()?.join("projects-migrations.json"))
+}
+
+/// A marker that cannot be read counts as current: migrating again would
+/// forget an Off chosen since.
+fn migrated_version() -> Result<u32> {
+    let path = migrations_path()?;
+    Ok(match super::read_json::<serde_json::Value>(&path) {
+        Ok(None) => 0,
+        Ok(Some(marker)) => marker["version"].as_u64().map_or(PROJECTS_VERSION, |version| u32::try_from(version).unwrap_or(u32::MAX)),
+        Err(error) => {
+            log::warn!("read {}: {error:#}", path.display());
+            PROJECTS_VERSION
+        }
+    })
+}
+
 fn load() -> Result<ProjectsFile> {
-    let mut f: ProjectsFile = super::read_json(&file_path()?)?.unwrap_or_default();
-    if f.version < 1 {
-        for project in &mut f.projects {
-            if let Some(settings) = project.issue_pipeline.as_mut() {
-                settings.forget_unchosen_switches();
-            }
-            // As `update` keeps it: every default is stored as nothing.
-            if project.issue_pipeline.as_ref() == Some(&IssuePipelineSettings::default()) {
-                project.issue_pipeline = None;
-            }
+    let f: ProjectsFile = super::read_json(&file_path()?)?.unwrap_or_default();
+    if migrated_version()? >= PROJECTS_VERSION {
+        return Ok(f);
+    }
+    Ok(migrate(f))
+}
+
+/// Forget the switches a build from before #700 saved as `false`, once, and
+/// answer with the file as it then stands on disk. The marker is written
+/// first: should the file then fail to be written, its `false`s stay and read
+/// as Off. Should the marker fail, nothing is forgotten until it can be written.
+fn migrate(f: ProjectsFile) -> ProjectsFile {
+    let mut migrated = f.clone();
+    for project in &mut migrated.projects {
+        if let Some(settings) = project.issue_pipeline.as_mut() {
+            settings.forget_unchosen_switches();
+        }
+        // As `update` keeps it: every default is stored as nothing.
+        if project.issue_pipeline.as_ref() == Some(&IssuePipelineSettings::default()) {
+            project.issue_pipeline = None;
         }
     }
-    // Written as this version by the next save; never as an older one than a newer build wrote.
-    f.version = f.version.max(PROJECTS_VERSION);
-    Ok(f)
+    if let Err(error) = migrations_path().and_then(|path| super::write_json(&path, &serde_json::json!({ "version": PROJECTS_VERSION }))) {
+        log::warn!("mark projects.json migrated: {error:#}");
+        return f;
+    }
+    if migrated.projects == f.projects {
+        return migrated;
+    }
+    match save(&migrated) {
+        Ok(()) => migrated,
+        Err(error) => {
+            log::warn!("migrate projects.json: {error:#}");
+            f
+        }
+    }
 }
 
 fn save(f: &ProjectsFile) -> Result<()> {
@@ -539,14 +580,41 @@ mod tests {
         assert_eq!((kept.auto_merge, kept.resolve_conflicts, kept.max_rounds), (None, None, 5));
         assert_eq!(list().unwrap().0.iter().find(|p| p.name == "idle").unwrap().issue_pipeline, None);
         assert_eq!(issue_pipeline_settings(&path(&merging)).unwrap().auto_merge, Some(true));
+        // Done on disk at once, and marked done beside the file rather than in it.
+        let on_disk = std::fs::read_to_string(file_path().unwrap()).unwrap();
+        assert!(!on_disk.contains("\"autoMerge\": false") && !on_disk.contains("\"resolveConflicts\": false"), "{on_disk}");
+        assert!(!on_disk.contains("version"));
+        let marker: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(migrations_path().unwrap()).unwrap()).unwrap();
+        assert_eq!(marker["version"], PROJECTS_VERSION);
 
-        // A choice made since is kept, the next save marks the file, and nothing is read again as unchosen.
+        // A choice made since is kept.
         let off = IssuePipelineSettings { auto_merge: Some(false), resolve_conflicts: Some(false), ..kept };
         update(&path(&busy), ProjectPatch { issue_pipeline: Some(off.clone()), ..Default::default() }).unwrap();
-        let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file_path().unwrap()).unwrap()).unwrap();
-        assert_eq!(written["version"], PROJECTS_VERSION);
         assert_eq!(issue_pipeline_settings(&path(&busy)).unwrap(), off);
         assert!(!issue_pipeline_settings(&path(&busy)).unwrap().auto_merge_at_start(true));
+
+        // An older build saving afterwards (selecting a project is enough) writes
+        // the file whole again, both switches `false` and no marker of its own:
+        // that reads as Off, which never merges by itself, not as no choice.
+        std::fs::write(file_path().unwrap(), serde_json::to_string(&file).unwrap()).unwrap();
+        let rewritten = issue_pipeline_settings(&path(&busy)).unwrap();
+        assert_eq!((rewritten.auto_merge, rewritten.resolve_conflicts), (Some(false), Some(false)));
+        assert!(!rewritten.auto_merge_at_start(true) && !rewritten.resolve_conflicts_at_start(true));
+
+        // A marker that cannot be read is no reason to migrate again.
+        std::fs::write(migrations_path().unwrap(), "{broken").unwrap();
+        assert_eq!(issue_pipeline_settings(&path(&idle)).unwrap().auto_merge, Some(false));
+    }
+
+    #[test]
+    fn a_new_store_is_marked_migrated_and_never_forgets_a_choice() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        assert!(migrations_path().unwrap().exists());
+        let off = IssuePipelineSettings { auto_merge: Some(false), ..Default::default() };
+        update(&project.path, ProjectPatch { issue_pipeline: Some(off.clone()), ..Default::default() }).unwrap();
+        assert_eq!(issue_pipeline_settings(&project.path).unwrap(), off);
     }
 
     #[test]
