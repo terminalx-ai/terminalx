@@ -33,6 +33,37 @@ describe("a workspace's tabs", () => {
     expect(workspaceSessions(all, all[4]).map((s) => s.id)).toEqual(["q"]);
   });
 
+  // #721: an empty session was taken over by whichever session in the same folder had tabs, a quick chat or another project's included.
+  it("are listed only for sessions of the same project and branch, never a quick chat or another project in the folder", () => {
+    const toolquant = "/code/june/toolquant";
+    const empty = session("empty", { projectPath: toolquant, cwd: toolquant, branch: "main" });
+    const quick = session("quick", { kind: "quick", projectPath: "/home/me/.raccoon/quick/quick", cwd: toolquant });
+    const elsewhere = session("elsewhere", { projectPath: "/code/june", cwd: toolquant });
+    const sibling = session("sibling", { projectPath: toolquant, cwd: toolquant, branch: "main" });
+    const all = [quick, elsewhere, empty, sibling];
+    expect(workspaceSessions(all, empty).map((s) => s.id)).toEqual(["empty", "sibling"]);
+    expect(workspaceSessions(all, quick).map((s) => s.id)).toEqual(["quick"]);
+    expect(workspaceSessions(all, elsewhere).map((s) => s.id)).toEqual(["elsewhere"]);
+  });
+
+  it("part conversations in a project's own checkout that work on different branches, as the sidebar does", () => {
+    const onMain = session("on-main", { branch: "main" });
+    const onFix = session("on-fix", { branch: "fix/login" });
+    // One that has not said where it works is on whatever the checkout has: main, by the workspace listing.
+    const unsaid = session("unsaid");
+    const workspaces = { "/repo": [{ path: "/repo", name: "repo", branch: "main", isMain: true }] } as unknown as Parameters<typeof workspaceSessions>[3];
+    const all = [onMain, onFix, unsaid];
+    expect(workspaceSessions(all, onMain, null, workspaces).map((s) => s.id)).toEqual(["on-main", "unsaid"]);
+    expect(workspaceSessions(all, onFix, null, workspaces).map((s) => s.id)).toEqual(["on-fix"]);
+    // Before the listing says, it is on "No branch": a row of its own, as the sidebar lists it, never in every branch's row.
+    expect(workspaceSessions(all, unsaid).map((s) => s.id)).toEqual(["unsaid"]);
+    expect(workspaceSessions(all, onMain).map((s) => s.id)).toEqual(["on-main"]);
+    // A worktree's sessions share its branch, whatever each last recorded.
+    const wt = (id: string, branch: string) => session(id, { cwd: "/repo/wt", worktreeName: "wt", branch });
+    const worktree = { "/repo": [{ path: "/repo/wt", name: "wt", branch: "topic", isMain: false }] } as unknown as Parameters<typeof workspaceSessions>[3];
+    expect(workspaceSessions([wt("w1", "topic"), wt("w2", "old-name")], wt("w1", "topic"), null, worktree).map((s) => s.id)).toEqual(["w1", "w2"]);
+  });
+
   it("list a chat with the checkout it is linked to, and a chat with no link on its own, never every chat together", () => {
     const chats = "/home/me/Chats";
     const chat = (id: string, link: SessionEntry["link"]) => session(id, { projectPath: chats, cwd: chats, link });
@@ -41,12 +72,16 @@ describe("a workspace's tabs", () => {
     const unlinked = chat("loose", null);
     expect(workspaceKey(linked, chats)).toBe("/repo");
     expect(workspaceKey(unlinked, chats)).toBe("chat:loose");
-    const all = [session("main"), linked, chat("again", { path: "/repo" }), other, unlinked, chat("loose2", null)];
-    expect(workspaceSessions(all, linked, chats).map((s) => s.id)).toEqual(["main", "hi", "again"]);
-    expect(workspaceSessions(all, session("main"), chats).map((s) => s.id)).toEqual(["main", "hi", "again"]);
+    // The checkout is on main, as the workspace listing says; a chat linked with no branch is on "No branch", as in the sidebar.
+    const workspaces = { "/repo": [{ path: "/repo", name: "repo", branch: "main", isMain: true }] } as unknown as Parameters<typeof workspaceSessions>[3];
+    const all = [session("main"), linked, chat("again", { path: "/repo", branch: "main" }), chat("unsaid", { path: "/repo" }), other, unlinked, chat("loose2", null)];
+    expect(workspaceSessions(all, linked, chats, workspaces).map((s) => s.id)).toEqual(["main", "hi", "again"]);
+    expect(workspaceSessions(all, session("main"), chats, workspaces).map((s) => s.id)).toEqual(["main", "hi", "again"]);
+    expect(workspaceSessions(all, all[3], chats, workspaces).map((s) => s.id)).toEqual(["unsaid"]);
     expect(workspaceSessions(all, unlinked, chats).map((s) => s.id)).toEqual(["loose"]);
-    // Without the chats folder known, the chats share their folder as any sessions do.
-    expect(workspaceSessions(all, linked).map((s) => s.id)).toEqual(["hi", "again", "other", "loose", "loose2"]);
+    // Without the chats folder known, the chats share their folder as any sessions do, by the branch each names.
+    expect(workspaceSessions(all, linked).map((s) => s.id)).toEqual(["hi", "again"]);
+    expect(workspaceSessions(all, other).map((s) => s.id)).toEqual(["unsaid", "other", "loose", "loose2"]);
   });
 });
 

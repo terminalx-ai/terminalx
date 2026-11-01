@@ -25,14 +25,24 @@ const RUNTIME_RESTARTED_NOTICE = "The workspace runtime restarted";
  */
 const COMPACTION_SUMMARY_OPENING = "This session is being continued from a previous conversation that ran out of context.";
 
+/** What became of a message of the reader's on its way to the agent (#722). */
+export interface Delivery {
+  /** Not typed yet: the agent's input box holds something else. */
+  inputOccupied?: boolean;
+  /** The agent dropped its turn before answering it, and took another prompt in its place. */
+  replaced?: boolean;
+  /** What was sent, when the agent received something else; `text` is then what it received. */
+  sent?: string;
+}
+
 export type WorkItem =
   | { kind: "tool"; call: ToolCall; key: string }
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number; messageTs?: string }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | { kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] }
+  | ({ kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
-  | { kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] }
+  | ({ kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
   | { kind: "status"; text: string; initiatingPrompt?: string; key: string; seq: number }
   /** `detail`: the agent's (or its launch's) own words under the error (#667). */
   | { kind: "error"; text: string; detail?: string; key: string; seq: number }
@@ -46,7 +56,7 @@ export interface Turn {
   seq: number;
   /** Time of the event that opened this turn, even without a prompt or completion. */
   ts: string;
-  prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number };
+  prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number } & Delivery;
   work: WorkItem[];
   finalText?: string;
   /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
@@ -146,7 +156,19 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   const found = pullQueued(turns, seq);
   if (!found) return undefined;
   const { item, turn } = found;
-  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq }, from: turn };
+  const { inputOccupied, replaced, sent } = item;
+  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, sent }, from: turn };
+}
+
+/** The reader's message published under `seq`, wherever it is drawn now: a turn's prompt, or a note in a turn's work. */
+function findMessage(turns: Turn[], seq: number): Delivery & { text: string } | undefined {
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const turn = turns[index];
+    if (turn.prompt?.seq === seq) return turn.prompt;
+    const item = turn.work.find((work) => (work.kind === "queued" || work.kind === "message") && work.seq === seq);
+    if (item && (item.kind === "queued" || item.kind === "message")) return item;
+  }
+  return undefined;
 }
 
 /**
@@ -305,6 +327,26 @@ export function buildTranscript(events: AgentEvent[], live: boolean, options: { 
         // its answer to it.
         if (current && !current.completed) current.work.push(message);
         else turn.work.splice(at, 0, message);
+        break;
+      }
+      case "input_occupied": {
+        const message = findMessage(turns, payload.promptSeq);
+        if (message) message.inputOccupied = payload.occupied || undefined;
+        break;
+      }
+      case "prompt_replaced": {
+        // Drawn where it was, never answered: what the agent took in its place has a message of its own.
+        const message = findMessage(turns, payload.promptSeq);
+        if (message) message.replaced = true;
+        break;
+      }
+      case "prompt_changed": {
+        // One message, showing what the agent received; what was sent stays with it.
+        const message = findMessage(turns, payload.promptSeq);
+        if (message) {
+          message.sent ??= message.text;
+          message.text = withoutHarnessBlocks(visibleUserText(payload.text));
+        }
         break;
       }
       case "assistant_text": {

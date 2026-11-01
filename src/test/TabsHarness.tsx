@@ -45,7 +45,7 @@ export function TabsHarness({ readOnlyReason, hideSingle }: { readOnlyReason?: s
     <TooltipProvider>
       <WorkspaceTabStrip session={session} selected={selected} readOnlyReason={readOnlyReason} hideSingle={hideSingle} trailing={<TabActions key={session.id} session={session} selected={selected} />} />
       <div role="tree" aria-label="Sidebar">
-        {workspaceSessions(store.sessions, session, store.chatsPath).map((member) => (
+        {workspaceSessions(store.sessions, session, store.chatsPath, store.workspaces).map((member) => (
           <SessionNode key={member.id} session={member} selected={member.id === session.id} expanded onToggle={() => undefined} tabViews={{}} mobileDriven={new Set()} harnessNames={harnessNames} />
         ))}
       </div>

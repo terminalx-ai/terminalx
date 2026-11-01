@@ -1,12 +1,13 @@
 import { useMemo } from "react";
 import { activateBrowserPage, closeBrowserPage, getBrowserState, pagesFor, useBrowser } from "@/lib/browser";
+import { lastRunning, offerCloseUndo } from "@/lib/closeUndo";
 import type { BrowserPage, TabLayout, TabState } from "@/lib/api";
 import { getPrefs, usePrefs } from "@/lib/prefs";
 import { getSessionStore, openWelcome, removeTab, selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { followedSelection, isTerminalTab, tabLabel, tabPaneId } from "@/lib/tabFront";
 import { closeTerminal, getTerminalState, setActiveTerminal, useTerminals, type SelectedSessionTab, type TerminalPane } from "@/lib/terminal";
 import { NO_LAYOUT, branchSessionsAsTabs, followedLayout, getTabState, layoutOf, rememberClosed, saveTabLayout, settleLayout, sortByLayout, tabKey, useTabState, workspaceKey, workspaceSessions } from "@/lib/tabLayouts";
-import type { SessionEntry, TabEntry, TabStatus } from "@/types/session";
+import type { SessionEntry, TabEntry, TabStatus, Workspace } from "@/types/session";
 
 interface PeerBase {
   id: string;
@@ -94,9 +95,9 @@ export interface TabRow {
  * branch's sessions as tabs); otherwise only the open session's own tabs,
  * and the sidebar lists the others.
  */
-function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: string | null, shared: boolean, saved: TabState, panes: readonly TerminalPane[], agents: Readonly<Record<string, string>>, pages: BrowserPage[]): TabRow {
+function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: string | null, workspaces: Record<string, Workspace[]>, shared: boolean, saved: TabState, panes: readonly TerminalPane[], agents: Readonly<Record<string, string>>, pages: BrowserPage[]): TabRow {
   const workspace = workspaceKey(session, chatsPath);
-  const sessions = shared ? workspaceSessions(all, session, chatsPath) : [session];
+  const sessions = shared ? workspaceSessions(all, session, chatsPath, workspaces) : [session];
   const layout = followedLayout(layoutOf(saved, workspace), sessions);
   return { session, sessions, workspace, layout, tabs: workspaceTabs(sessions, panes, pagesFor(pages, session.cwd), layout, agents) };
 }
@@ -104,19 +105,19 @@ function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: s
 /** A session's workspace row as the stores have it now, outside React. */
 export function workspaceRow(session: SessionEntry): TabRow {
   const { panes, agents } = getTerminalState();
-  const { sessions, chatsPath } = getSessionStore();
-  return rowOf(session, sessions, chatsPath, branchSessionsAsTabs(getPrefs()), getTabState(), panes, agents, getBrowserState().pages);
+  const { sessions, chatsPath, workspaces } = getSessionStore();
+  return rowOf(session, sessions, chatsPath, workspaces, branchSessionsAsTabs(getPrefs()), getTabState(), panes, agents, getBrowserState().pages);
 }
 
 /** A session's workspace row, kept up to date: what the strip, the tab shortcuts and the tab menus all act on. */
 export function useTabRow(session: SessionEntry): TabRow {
-  const { sessions, chatsPath } = useSessionStore();
+  const { sessions, chatsPath, workspaces } = useSessionStore();
   const { panes, agents } = useTerminals();
   // The store's state, not its list of pages: a new state is what says the pages changed.
   const browser = useBrowser();
   const saved = useTabState();
   const shared = branchSessionsAsTabs(usePrefs());
-  return useMemo(() => rowOf(session, sessions, chatsPath, shared, saved, panes, agents, browser.pages), [session, sessions, chatsPath, shared, panes, agents, browser, saved]);
+  return useMemo(() => rowOf(session, sessions, chatsPath, workspaces, shared, saved, panes, agents, browser.pages), [session, sessions, chatsPath, workspaces, shared, panes, agents, browser, saved]);
 }
 
 /** One session's tabs, in the order its workspace's layout gives them. */
@@ -200,6 +201,25 @@ export function noteClosed(sessionId: string, closing: readonly PeerTab[]) {
   saveTabLayout(workspace, settleLayout(layout, tabs.filter((tab) => !gone.has(tab.key)).map((tab) => tab.key), (key) => gone.has(key)));
 }
 
+/** The agent tabs among `tabs`, with their sessions. */
+export function agentTabsOf(tabs: readonly PeerTab[]): { sessionId: string; tab: TabEntry }[] {
+  return tabs.flatMap((tab) => (tab.kind === "agent" ? [{ sessionId: tab.sessionId, tab: tab.tab }] : []));
+}
+
+/** What closing these agent tabs would offer Undo for: the ones that stop the last agent their session has running. */
+export function offersUndo(agents: readonly { sessionId: string; tab: TabEntry }[]): Map<string, TabEntry[]> {
+  return agents.length ? lastRunning(getSessionStore().sessions, agents) : new Map();
+}
+
+/** Offer Undo for what closed: a tab still in its session (its close failed) has nothing to undo. */
+export function offerUndoFor(undo: Map<string, TabEntry[]>) {
+  for (const [sessionId, tabs] of undo) {
+    const open = new Set(getSessionStore().sessions.find((session) => session.id === sessionId)?.tabs.map((tab) => tab.id) ?? []);
+    const closed = tabs.filter((tab) => !open.has(tab.id));
+    if (closed.length) offerCloseUndo(sessionId, closed);
+  }
+}
+
 /**
  * Close one tab of `tabs`, the row it is listed in, from the session
  * `sessionId` that row belongs to (the open session, for a workspace's row).
@@ -210,6 +230,8 @@ export async function closePeer(sessionId: string, tab: PeerTab, tabs: PeerTab[]
   const index = tabs.findIndex((candidate) => candidate.kind === tab.kind && candidate.id === tab.id);
   const remaining = tabs.filter((_, i) => i !== index);
   const next = remaining[Math.min(Math.max(index, 0), remaining.length - 1)];
+  // Read before it closes: whether this stops the last agent its session has running.
+  const undo = offersUndo(agentTabsOf([tab]));
   noteClosed(sessionId, [tab]);
   if (selected?.kind === tab.kind && selected.id === tab.id && next) {
     const target = sessionOfPeer(sessionId, next);
@@ -218,6 +240,7 @@ export async function closePeer(sessionId: string, tab: PeerTab, tabs: PeerTab[]
     activatePeer(target, next);
   }
   await endPeer(sessionId, tab);
+  offerUndoFor(undo);
   const current = getSessionStore().sessions.find((session) => session.id === sessionId);
   if (current && getSessionStore().selectedSessionId === sessionId && !workspaceRow(current).tabs.length) openWelcome(sessionId);
 }

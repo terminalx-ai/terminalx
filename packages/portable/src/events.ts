@@ -144,6 +144,12 @@ export type Payload =
     }
   /** The agent took the queued `user_message` at `promptSeq` while its turn was still running (#551). */
   | { type: "prompt_absorbed"; promptSeq: number }
+  /** The `user_message` at `promptSeq` waits to be typed: the agent's input box holds something else (#722). `occupied: false` once it went in. */
+  | { type: "input_occupied"; promptSeq: number; occupied: boolean }
+  /** The agent dropped the turn of the `user_message` at `promptSeq` before answering it, and took another prompt in its place (#722). */
+  | { type: "prompt_replaced"; promptSeq: number }
+  /** The agent recorded the `user_message` at `promptSeq` as `text`, not as it was sent (#722). */
+  | { type: "prompt_changed"; promptSeq: number; text: string }
   | { type: "assistant_text"; block?: BlockRef; text: string }
   | { type: "reasoning"; block?: BlockRef; text: string }
   | ({ type: "delta" } & Delta)
