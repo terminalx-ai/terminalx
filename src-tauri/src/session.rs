@@ -2144,6 +2144,10 @@ impl SessionManager {
         if prompt.mobile.is_some() && (rt.turn_open || !rt.pending.is_empty()) {
             return Err(crate::local_runtime::mobile::Busy.into());
         }
+        if self.codex_stdio_falls_back(&rt, &tab)? {
+            entry = index::get(session_id)?;
+            tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        }
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
         if codex_stdio::selected(&tab) {
@@ -3196,13 +3200,18 @@ impl SessionManager {
         let _admission = crate::issue_pipeline::admission::lock();
         self.accepting_work()?;
         let rt_arc = self.runtime(session_id, tab_id)?;
-        let entry = index::get(session_id)?;
-        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        let mut entry = index::get(session_id)?;
+        let mut tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         // A tab that is a terminal is opened as one: its shell, and no agent.
         // So is one whose hand-started agent is no longer being followed.
         let following = matches!(&rt_arc.lock().unwrap().engine, Engine::Cli(p) if p.by_hand.is_some());
         if tab.is_terminal() || (tab.by_hand() && !following) {
             return self.shell_for(session_id, tab_id);
+        }
+        // Started like any Codex tab when native Codex cannot serve it.
+        if self.codex_stdio_falls_back(&rt_arc.lock().unwrap(), &tab)? {
+            entry = index::get(session_id)?;
+            tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         }
         if codex_stdio::selected(&tab) || pty_first(&tab.harness).is_none() {
             return Ok(());

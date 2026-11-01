@@ -2315,6 +2315,18 @@ export interface WorkStatusSettings {
   shareWithTeam: boolean;
 }
 
+/** Settings → Experimental: features that are on only when turned on. */
+export interface ExperimentalSettings {
+  /** New Codex sessions connect to Codex's app server instead of its terminal, where it can serve them (#644). */
+  nativeCodex: boolean;
+}
+
+/** Read when a tab is made: a change applies to new sessions, not to existing ones. */
+export const experimental = {
+  settings: () => invoke<ExperimentalSettings>("experimental_settings"),
+  setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
+};
+
 export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;
   canManage: boolean;

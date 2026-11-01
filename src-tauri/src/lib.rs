@@ -689,6 +689,8 @@ pub fn run() {
             commands::work_claims_set_cloud,
             commands::work_status_settings,
             commands::set_work_status_settings,
+            commands::experimental_settings,
+            commands::set_experimental_settings,
             commands::organization_work_status,
             commands::set_organization_work_status,
             commands::session_link_issue,

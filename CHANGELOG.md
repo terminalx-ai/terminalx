@@ -108,6 +108,12 @@
   that Codex never took because it failed or was stopped first is offered back
   with **Resend last prompt**, after a restart too, and is never sent again on
   its own. (#644)
+- Add Settings → Experimental with a **Native Codex** switch, off by default. When
+  it is on, new Codex sessions and tabs started from the app or the `terminalx`
+  command line connect to Codex directly, for reliable compaction status. Sessions
+  from issues, automations, Ask every time and cloud workspaces keep the terminal.
+  A tab whose Codex is older than 0.164.0 when it first starts switches to the
+  terminal and sends as usual, with no error. Existing sessions are unchanged. (#644)
 
 ### Status bar
 

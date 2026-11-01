@@ -18,7 +18,8 @@ pub(super) fn observed_full_pipe() {
 fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
-        "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart"] {
+        "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
+        "native-fallback-send", "native-fallback-start", "native-supported-start"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -477,12 +478,77 @@ fn rt_bound(manager: &SessionManager) -> bool {
     manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().stdio_compaction.is_some()
 }
 
+/// Stands in for Codex at a tab's first launch: says the version it is told
+/// to, offers `--no-daemon` like a terminal-capable Codex, and records how it
+/// was started each time.
+const FIRST_LAUNCH_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+printf '%s\n' "$*" >> "$here/launches"
+case "$1" in
+  --version) cat "$here/version"; exit 0 ;;
+  --help) printf '%s\n' "Usage: codex [OPTIONS]" "      --no-daemon  Keep this session to itself"; exit 0 ;;
+  app-server) exit 0 ;;
+esac
+exec sleep 10
+"#;
+
+/// Native Codex is tried, not required (#644): a tab that has not started its
+/// thread runs on the terminal engine when this Codex is older than the app
+/// server's minimum, decided when it is first shown or sent to, with no error.
+fn first_launch_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    // The terminal engine's home mirrors the reader's Codex home: a stand-in's.
+    std::env::set_var("CODEX_HOME", root.join("user-codex"));
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), FIRST_LAUNCH_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("version"), if case == "native-supported-start" { "codex-cli 0.166.0\n" } else { "codex-cli 0.163.0\n" }).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    if case == "native-fallback-send" {
+        manager.send("stdio-owner", "tab", "hello".into(), Vec::new()).unwrap();
+    } else {
+        manager.ensure_started("stdio-owner", "tab").unwrap();
+    }
+    let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default();
+    let transport = index::get("stdio-owner").unwrap().tab("tab").unwrap().transport;
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    if case == "native-supported-start" {
+        assert_eq!(transport, AgentTransport::ExperimentalCodexStdio);
+        assert!(matches!(rt.lock().unwrap().engine, Engine::None), "showing the tab starts nothing");
+        assert_eq!(launches().lines().collect::<Vec<_>>(), ["--version"]);
+        return;
+    }
+    assert_eq!(transport, AgentTransport::Pty, "{case}: an older Codex runs on the terminal engine");
+    assert!(matches!(rt.lock().unwrap().engine, Engine::Cli(_)), "{case}: started as a terminal tab");
+    let until = Instant::now() + WAIT;
+    while !launches().lines().any(|line| line.starts_with("--no-daemon")) {
+        assert!(Instant::now() < until, "{case}: the terminal Codex was not launched: {:?}", launches());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let events: Vec<AgentEvent> = store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap_or_default();
+    assert!(!events.iter().any(|event| matches!(event.payload, Payload::Error { .. })), "{case}: {:?}", events.iter().map(|event| &event.payload).collect::<Vec<_>>());
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
     if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
     if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
+    if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({

@@ -113,8 +113,15 @@ its title without changing its worktree name.
 
 Local project and quick-chat creation accept `--experimental-codex-stdio` with
 `--agent codex`. This opt-in requires Codex CLI 0.164.0 or newer and selects its
-experimental app-server stdio API. Ordinary creation continues to use the PTY engine. This is
-an experimental integration, not a production-supported replacement.
+experimental app-server stdio API. This is an experimental integration, not a
+production-supported replacement.
+
+Without the flag, creation follows the app's Settings → Experimental → **Native
+Codex** switch (off by default): when it is on, a new Codex session or tab started
+from the app or with `terminalx sessions create --agent codex` uses this connection,
+except sessions started from an issue, automations, and the Ask every time mode,
+which keep the PTY engine. Otherwise ordinary creation uses the PTY engine.
+Cloud workspace sessions keep the PTY engine for now.
 
 The transport choice is persisted. Opening the view never starts or resumes it;
 existing PTY sessions cannot be migrated into this mode. After the app restarts,
@@ -130,7 +137,8 @@ Continue in New Session can hand off to an experimental tab: delivery is confirm
 once Codex starts the turn for the handoff. If Codex fails or is stopped before
 then, the handoff, like any prompt Codex never took, is reported as not delivered
 and offered back with "Resend last prompt"; nothing is sent again by itself.
-Opening the tab's terminal view in the app moves it to Codex'sown terminal interface on the same thread, for good: the chat keeps its history,
+Opening the tab's terminal view in the app moves it to Codex's own terminal
+interface on the same thread, for good: the chat keeps its history,
 and from then on the tab is an ordinary PTY Codex tab. A new model or effort
 applies from the next turn. A new permission mode (other than Ask every time) is taken between turns:
 the connection stops and the next message resumes the thread under that mode.
@@ -138,8 +146,9 @@ the connection stops and the next message resumes the thread under that mode.
 Confirmed compaction events update the existing chat indicator. If the connection
 ends, retained status records loss of continuity; it does not invent completion
 or replay a prompt. Stop confirms reader and process cleanup, retaining ownership
-on a timeout so it can be retried. A Codex older than 0.164.0 sends no prompt and
-does not fall back to a different engine.
+on a timeout so it can be retried. If the installed Codex is older than 0.164.0
+(or missing) when a tab first starts, before it has a thread, the tab switches to
+the PTY engine and continues there; the message is sent as usual, with no error.
 
 ### Start a quick chat (no project)
 
