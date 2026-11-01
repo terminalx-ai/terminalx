@@ -21,6 +21,27 @@
   hides its page until it is picked. (#721)
 - Offer Undo when closing a session's last running tab. The notice says its
   agent stopped, and Undo reopens the tab on the same conversation. (#721)
+### Chat
+
+- Cut more credentials from the redacted detail line that a refused sign-in or
+  an agent that exits early shows in the chat: `key: value` and JSON forms,
+  escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's
+  secret-looking value, including one that runs on over lines. Errors such as
+  `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
+  readable. (#717)
+### Command line
+
+- `terminalx worktrees delete` no longer deletes sessions it never named. Without
+  `--yes`, or with `--dry-run`, it lists every session it would delete, marking
+  sessions of another project, quick chats and archived ones, with the tabs
+  still running in them and the git state, and removes nothing. `--sessions
+  ID,…` names the sessions you were shown: if the worktree holds any other set,
+  nothing is removed and the sessions that differ are named, as in the desktop
+  dialog. The result gives each deleted session's title and project, not only
+  its id. `terminalx sessions list --worktree` lists what the delete would take,
+  `worktrees list` gives each worktree's sessions, and `sessions list
+  --project` now finds a session that names its project through a symlink.
+  (#719)
 
 ## 0.2.22
 
@@ -34,6 +55,13 @@
   window whose terminal output alone dropped recovers without affecting others.
   The notice stays quiet for short gaps and asks for action only when retrying
   cannot help or has not helped for minutes. (#643)
+- Keep the live connection up when a window falls behind. A terminal that
+  cannot keep up is redrawn from its scrollback on its own, while the others
+  in the window keep streaming. Events the window missed are read again,
+  without reconnecting. Each window's terminal connection now carries terminal
+  output only. Every lost connection is now logged: which connection, why, how
+  long it was down and how many attempts it took to reconnect. The log is
+  `desktop.log`, beside `runtime.log` in `~/Library/Logs`. (#716)
 - Stop agents nobody is using. An agent the app started that has had nothing to
   do for an hour (Settings → Agents: 30 minutes to a day, or never) is stopped
   with its MCP servers, and its next message starts it again on the same

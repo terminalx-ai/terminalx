@@ -37,18 +37,23 @@ pub trait EventSink: Send + Sync {
     /// Backend consumers of PTY output (mobile and remote clients). Desktop
     /// xterms already receive raw channels and must not receive this again.
     fn emit_pty(&self, id: &str, bytes: &[u8]) {
-        use base64::Engine as _;
-        let payload = crate::pty::PtyData {
-            id: id.to_string(),
-            data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        };
-        if let Ok(raw) = serde_json::value::to_raw_value(&payload) {
+        if let Some(raw) = pty_payload(id, bytes) {
             self.emit_raw("pty_data", raw);
         }
     }
     /// Call `handler` with the JSON payload of every later `event`.
     fn listen(&self, event: &str, handler: Handler) -> ListenerId;
     fn unlisten(&self, id: ListenerId);
+}
+
+/// A `pty_data` event's payload: the pane and its bytes as base64.
+fn pty_payload(id: &str, bytes: &[u8]) -> Option<Box<RawValue>> {
+    use base64::Engine as _;
+    let payload = crate::pty::PtyData {
+        id: id.to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    };
+    serde_json::value::to_raw_value(&payload).ok()
 }
 
 impl<'a> dyn EventSink + 'a {
@@ -200,20 +205,43 @@ pub struct BroadcastSink {
     next_id: AtomicU64,
     listeners: Mutex<Listeners>,
     tx: tokio::sync::broadcast::Sender<Published>,
+    /// The same events without terminal output (#716). Every pane's output
+    /// is an event on `tx`, so a subscriber there that only wants the app's
+    /// events still has to keep pace with every busy terminal, and falls
+    /// behind whenever a few of them print at once.
+    app: tokio::sync::broadcast::Sender<Published>,
 }
 
 impl BroadcastSink {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(capacity.max(1));
-        Self { next_id: AtomicU64::new(1), listeners: Mutex::new(HashMap::new()), tx }
+        let (app, _) = tokio::sync::broadcast::channel(capacity.max(1));
+        Self { next_id: AtomicU64::new(1), listeners: Mutex::new(HashMap::new()), tx, app }
     }
 
+    /// Every event, terminal output (`pty_data`) included.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Published> {
         self.tx.subscribe()
+    }
+
+    /// Every event but terminal output, which views take over their own taps.
+    pub fn subscribe_app(&self) -> tokio::sync::broadcast::Receiver<Published> {
+        self.app.subscribe()
     }
 }
 
 impl EventSink for BroadcastSink {
+    /// Encoded only when something will read it: a listener, or a subscriber
+    /// to every event. Otherwise every byte every pane prints was turned into
+    /// base64 for nobody.
+    fn emit_pty(&self, id: &str, bytes: &[u8]) {
+        let heard = self.tx.receiver_count() > 0
+            || self.listeners.lock().unwrap().get("pty_data").is_some_and(|registered| !registered.is_empty());
+        if let Some(raw) = pty_payload(id, bytes).filter(|_| heard) {
+            self.emit_raw("pty_data", raw);
+        }
+    }
+
     fn emit_raw(&self, event: &str, payload: Box<RawValue>) {
         let payload: Arc<str> = Arc::from(payload.get());
         // Handlers are called outside the lock so one may listen or unlisten.
@@ -227,7 +255,11 @@ impl EventSink for BroadcastSink {
         for handler in handlers {
             handler(&payload);
         }
-        let _ = self.tx.send(Published { event: Arc::from(event), payload });
+        let published = Published { event: Arc::from(event), payload };
+        if event != "pty_data" {
+            let _ = self.app.send(published.clone());
+        }
+        let _ = self.tx.send(published);
     }
 
     fn listen(&self, event: &str, handler: Handler) -> ListenerId {
@@ -289,6 +321,37 @@ mod tests {
         assert_eq!(&*event.event, "pty_data");
         let data: crate::pty::PtyData = serde_json::from_str(&event.payload).unwrap();
         assert_eq!(data.data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn app_event_subscribers_never_see_terminal_output_or_fall_behind_on_it() {
+        let sink = BroadcastSink::new(4);
+        let mut app = sink.subscribe_app();
+        let dyn_sink: &dyn EventSink = &sink;
+        dyn_sink.emit("session_updated", &serde_json::json!({ "id": "first" }));
+        // Far more output than the channel holds: none of it counts here.
+        let mut all = sink.subscribe();
+        for _ in 0..64 {
+            sink.emit_pty("pane", b"output");
+        }
+        dyn_sink.emit("session_updated", &serde_json::json!({ "id": "second" }));
+        assert_eq!(&*app.try_recv().unwrap().payload, r#"{"id":"first"}"#);
+        assert_eq!(&*app.try_recv().unwrap().payload, r#"{"id":"second"}"#);
+        assert!(app.try_recv().is_err());
+        assert!(matches!(all.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))), "every event still reaches `subscribe`");
+    }
+
+    #[test]
+    fn terminal_output_nobody_reads_is_never_encoded() {
+        let sink = BroadcastSink::new(4);
+        let mut app = sink.subscribe_app();
+        sink.emit_pty("pane", b"unread");
+        assert!(app.try_recv().is_err());
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let seen = heard.clone();
+        sink.listen("pty_data", Box::new(move |payload| seen.lock().unwrap().push(payload.to_string())));
+        sink.emit_pty("pane", b"read");
+        assert_eq!(*heard.lock().unwrap(), vec![r#"{"id":"pane","data":"cmVhZA=="}"#.to_string()]);
     }
 
     #[test]

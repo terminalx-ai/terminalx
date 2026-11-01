@@ -97,6 +97,8 @@ export interface TerminalInstance {
   release?: () => void;
   /** Attach again over a new connection, the screen redrawn from the backend's scrollback. */
   reattach?: () => void;
+  /** Whether it is attached now under `token`, the name of one attachment of its pane's output. */
+  attachedAs?: (token: string) => boolean;
   /** May be rebuilt from the backend's bounded scrollback without ending the process. */
   restorable?: boolean;
 }
@@ -219,6 +221,21 @@ export function reattachLocalTerminals() {
   }
 }
 
+/**
+ * One of this window's terminals fell too far behind its pane, and the
+ * backend stopped sending it output (#716). Nothing else on the window's
+ * connection was touched. On screen it attaches again in place and is
+ * redrawn from the pane's scrollback; off screen it is let go, and the next
+ * view to show it builds it afresh from that same scrollback. Word of an
+ * attachment that has since been replaced changes nothing.
+ */
+export function catchUpLaggedView(id: string, token: string) {
+  const inst = instances.get(id);
+  if (!inst?.attachedAs?.(token)) return;
+  if (inst.el.isConnected) inst.reattach?.();
+  else disposeInstance(id);
+}
+
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
@@ -295,6 +312,7 @@ async function register() {
     await listen<string>("pty_closed", (e) => forgetPane(e.payload));
     await listen<PaneAgent>("pane_agent", (e) => notePaneAgent(e.payload));
     await listen("local_runtime_reattached", () => void resyncPanes().catch(() => {}));
+    await listen<{ id: string; token: string }>("pty_view_lagged", (e) => catchUpLaggedView(e.payload.id, e.payload.token));
   } catch {
     /* outside a webview */
   }

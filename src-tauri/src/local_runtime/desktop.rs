@@ -36,11 +36,11 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 fn next() -> u64 { SEQUENCE.fetch_add(1, Ordering::Relaxed) }
 
 /// A connection that ended by itself, or an attachment dropped on purpose
-/// while the app goes on running (the sharing fence).
+/// while the app goes on running (the sharing fence), and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Lost {
-    Events { generation: u64 },
-    View { generation: u64, window: String },
+    Events { generation: u64, reason: String },
+    View { generation: u64, window: String, reason: String },
 }
 
 pub type Watch = Arc<dyn Fn(Lost) + Send + Sync>;
@@ -69,7 +69,7 @@ impl Desktop {
 
     pub fn connect_watched(client: Arc<Client>, sink: Arc<dyn EventSink>, watch: Option<Watch>) -> Result<Self> {
         let generation = next();
-        let lost = watch.clone().map(|watch| -> super::bridge::Lost { Box::new(move || watch(Lost::Events { generation })) });
+        let lost = watch.clone().map(|watch| -> super::bridge::Lost { Box::new(move |reason| watch(Lost::Events { generation, reason })) });
         let events = Bridge::connect(&client, sink.clone(), lost)?;
         Ok(Self { client, events, sink, watch, generation, windows: Arc::default() })
     }
@@ -126,7 +126,9 @@ impl Desktop {
     /// attaches again with a new lease; on quit it has been halted first.
     pub fn disconnect(&self) {
         self.close();
-        if let Some(watch) = &self.watch { watch(Lost::Events { generation: self.generation }); }
+        if let Some(watch) = &self.watch {
+            watch(Lost::Events { generation: self.generation, reason: "the desktop let the attachment go".into() });
+        }
     }
 
     pub fn attachment(&self) -> Result<AttachmentIdentity> { self.events.attachment() }
@@ -204,7 +206,7 @@ impl Desktop {
         let id = next();
         let windows = Arc::downgrade(&self.windows);
         let (watch, generation, label) = (self.watch.clone(), self.generation, window.to_owned());
-        let lost: super::bridge::Lost = Box::new(move || {
+        let lost: super::bridge::Lost = Box::new(move |reason| {
             let Some(windows) = Weak::upgrade(&windows) else { return };
             let dead = {
                 let mut windows = windows.lock().unwrap();
@@ -214,9 +216,9 @@ impl Desktop {
             drop(dead);
             // Reported even when an attach already replaced it: views attached
             // over the dead one still have to move to the new one.
-            if let Some(watch) = watch { watch(Lost::View { generation, window: label }); }
+            if let Some(watch) = watch { watch(Lost::View { generation, window: label, reason }); }
         });
-        Ok((id, Bridge::connect_views(&self.client, self.sink.clone(), Some(lost))?))
+        Ok((id, Bridge::connect_views(&self.client, self.sink.clone(), window, Some(lost))?))
     }
 
     pub fn attach(&self, window: &str, id: &str, token: &str, tap: Tap) -> Result<()> {
