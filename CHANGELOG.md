@@ -159,6 +159,20 @@
 
 ### Issue pipelines
 
+- Start a session from a GitHub or Linear issue with **Resolve conflicts
+  automatically** and **Merge when green** on: from the Issues page, an issue
+  picked in New Session, the command palette, and `terminalx sessions create
+  --issue` without `--auto-merge` or `--no-auto-merge`. Each launch can still
+  turn either off. Merge stays off where a person does the merge, where the
+  pipeline is off or unavailable, and in a cloud workspace. A merge still needs
+  the reviewed commit with its checks passed, and protected categories still
+  hold it. Other sessions start with both off, as before. In a project's
+  **Issue pipeline…** settings, each default is now **From issues**, **All
+  sessions** or **Off**, and a project set to Off keeps its issue sessions off.
+  A switch an older version saved as off whenever another setting was saved is
+  read once as **From issues**; one an older version saves after that reads as
+  Off. Continuing a session keeps its pipeline's switches as they are, and
+  starting an issue again takes the switches its pipeline holds. (#700)
 - When a pipeline's pull request is merged or closed, or the pipeline is
   stopped, stop the idle agents of its reviewer and conflict resolver (and,
   after a merge or close, its author), with the background commands and watches
