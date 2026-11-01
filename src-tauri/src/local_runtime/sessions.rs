@@ -169,6 +169,11 @@ impl Sessions {
         self.tab("ensureStarted", session, tab, json!({}))
     }
 
+    /// The window showed the tab (`SessionManager::start_on_open`).
+    pub fn start_on_open(&self, session: &str, tab: &str) -> Result<()> {
+        self.tab("ensureStarted", session, tab, json!({"opened": true}))
+    }
+
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
         self.tab("send", session, tab, json!({"text":text,"images":images}))
     }

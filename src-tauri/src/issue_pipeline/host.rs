@@ -237,26 +237,11 @@ impl Host for LocalHost {
         matches!(status, Some(index::TabStatus::InProgress | index::TabStatus::Waiting)) || !self.manager.pipeline_idle(&who.session_id, &who.tab_id)
     }
 
+    /// A terminal, or an agent a person started in one by hand, is theirs and
+    /// never stopped; an idle one is stopped at once, however briefly it has
+    /// been idle, and opening its tab later does not start it again.
     fn stop_agent(&self, who: &SessionRef, note: &str) -> Result<AgentStop> {
-        let Ok(session) = index::get(&who.session_id) else { return Ok(AgentStop::NotRunning) };
-        let Some(tab) = session.tab(&who.tab_id) else { return Ok(AgentStop::NotRunning) };
-        // A terminal, or an agent a person started in one by hand, is theirs.
-        if tab.is_terminal() || tab.by_hand() {
-            return Ok(AgentStop::NotRunning);
-        }
-        // Held from the look to the stop: a prompt sent meanwhile is not cut off.
-        let _admission = super::admission::lock();
-        if !self.manager.is_running(&who.session_id, &who.tab_id) {
-            return Ok(AgentStop::NotRunning);
-        }
-        if self.agent_busy(who) {
-            return Ok(AgentStop::Busy);
-        }
-        if let Err(error) = self.manager.publish_external(&who.session_id, &who.tab_id, crate::events::Payload::Status { text: note.to_string() }) {
-            log::warn!("note in {}:{} before stopping its agent: {error:#}", who.session_id, who.tab_id);
-        }
-        self.manager.stop(&who.session_id, &who.tab_id)?;
-        Ok(AgentStop::Stopped)
+        self.manager.stop_if_idle(&who.session_id, &who.tab_id, note, std::time::Duration::ZERO)
     }
 
     /// An independent conversation in the owning session, with no fork or

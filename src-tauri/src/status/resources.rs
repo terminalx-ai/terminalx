@@ -37,6 +37,10 @@ pub enum KillRule {
     None,
     Idle,
     Confirm,
+    /// A tab's agent that sits idle, started by the app: once confirmed it is
+    /// stopped as its tab's own Stop would, and its conversation is kept for
+    /// its next message to resume (#696).
+    Stop,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -260,8 +264,10 @@ fn bound_pane(pane: &PaneInfo, sessions: &[index::SessionEntry], project_names: 
             cpu_percent: aggregate.map(|sample| sample.cpu_percent),
             rss_bytes: aggregate.map(|sample| sample.rss_bytes),
             child_count: aggregate.map(|sample| sample.child_count),
-            // Agent or shell, the pane is its tab's: closing the tab is what ends it.
-            kill_rule: KillRule::None,
+            // The pane is its tab's: a shell, or an agent at work or started
+            // by hand, is ended there. An idle agent the app started can be
+            // stopped from here too, and resumes on its next message.
+            kill_rule: if agent && !tab.by_hand() && matches!(tab.status, index::TabStatus::Idle | index::TabStatus::Completed) { KillRule::Stop } else { KillRule::None },
         };
     }
     if let Some(tab_id) = pane.id.strip_prefix("tab:") {
@@ -414,21 +420,40 @@ impl ResourceStore {
         Ok(snapshot)
     }
 
-    pub fn kill(&self, terminals: &Terminals, pane_id: &str, confirmed: bool) -> Result<KillResult> {
+    /// End one listed process. An idle tab agent ([`KillRule::Stop`]) is
+    /// stopped by `stop_agent` (its session and tab), which looks again and
+    /// leaves one that started working.
+    pub fn kill(&self, terminals: &Terminals, pane_id: &str, confirmed: bool, stop_agent: &dyn Fn(&str, &str) -> Result<crate::session::AgentStop>) -> Result<KillResult> {
         let snapshot = self.sample(terminals)?;
         let process = snapshot.processes.iter().find(|process| process.pane_id == pane_id).context("that process is no longer running")?;
-        if process.kill_rule == KillRule::None {
-            bail!("An agent bound to a tab cannot be stopped here; close its tab instead.");
-        }
-        if process.kill_rule == KillRule::Confirm && !confirmed {
-            let subject = process.session_title.as_deref().unwrap_or(&process.tab_title);
-            return Ok(KillResult {
-                killed: false,
-                confirmation: Some(format!("Kill {subject}? Its running command, unfinished work, and terminal output will be lost.")),
-            });
+        if let Some(answer) = settle_kill(process, confirmed, stop_agent)? {
+            return Ok(answer);
         }
         terminals.kill_and_wait(pane_id, std::time::Duration::from_secs(3));
         Ok(KillResult { killed: true, confirmation: None })
+    }
+}
+
+/// What a kill of `process` comes to short of ending its pane: a refusal, a
+/// question to confirm, or an idle agent stopped by `stop_agent`. `None`
+/// when the pane is to be ended.
+fn settle_kill(process: &ProcSample, confirmed: bool, stop_agent: &dyn Fn(&str, &str) -> Result<crate::session::AgentStop>) -> Result<Option<KillResult>> {
+    use crate::session::AgentStop;
+    let subject = process.session_title.as_deref().unwrap_or(&process.tab_title);
+    let asked = |question: String| Ok(Some(KillResult { killed: false, confirmation: Some(question) }));
+    match process.kill_rule {
+        KillRule::None if process.kind == "agent" => bail!("The agent in {subject} is working, or was started by hand in its terminal. Stop it from its tab."),
+        KillRule::None => bail!("A terminal bound to a tab is closed with its tab."),
+        KillRule::Stop if !confirmed => asked(format!("Stop the agent in {subject}? Its conversation is kept, and your next message starts it again. Anything it left running in the background stops with it.")),
+        KillRule::Stop => {
+            let (Some(session_id), Some(tab_id)) = (process.session_id.as_deref(), process.tab_id.as_deref()) else { bail!("{subject} no longer has its tab.") };
+            match stop_agent(session_id, tab_id)? {
+                AgentStop::Stopped | AgentStop::NotRunning => Ok(Some(KillResult { killed: true, confirmation: None })),
+                AgentStop::Busy => bail!("The agent in {subject} started working, so it was left running."),
+            }
+        }
+        KillRule::Confirm if !confirmed => asked(format!("Kill {subject}? Its running command, unfinished work, and terminal output will be lost.")),
+        KillRule::Confirm | KillRule::Idle => Ok(None),
     }
 }
 
@@ -481,27 +506,77 @@ mod tests {
         assert!(!source.contains(&spawn));
     }
 
+    /// A tab's agent is stopped here only while it sits idle (#696): one at
+    /// work or waiting on an answer is the reader's to stop from its tab.
     #[test]
-    fn bound_agents_never_have_a_kill_rule() {
+    fn only_an_idle_bound_agent_can_be_stopped() {
         let pane = PaneInfo { id: "tab:t1".into(), pid: Some(400), running: true, cwd: "/work".into() };
-        let tab = index::TabEntry { transport: Default::default(),
-            id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
-            permission_mode: "auto".into(), provider_session_id: None, status: index::TabStatus::Idle,
-            created: String::new(), modified: String::new(), context_used: None, context_max: None,
-            fork_from: None, continuation: None, unknown: Default::default(),
-            follow: Default::default(),
+        let rule = |status: index::TabStatus| {
+            let tab = index::TabEntry { transport: Default::default(),
+                id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+                permission_mode: "auto".into(), provider_session_id: None, status,
+                created: String::new(), modified: String::new(), context_used: None, context_max: None,
+                fork_from: None, continuation: None, parked: false, unknown: Default::default(),
+                follow: Default::default(),
+            };
+            let session = index::SessionEntry {
+                id: "s1".into(), project_path: "/work".into(), cwd: "/work".into(), worktree_name: None,
+                kind: crate::store::index::SessionKind::Project,
+                branch: None, base_ref: None, worktree_base: None, worktree_removed: false, removed_workspace: None, issue: None, issue_work: Default::default(), automation: None,
+                title: "Safe session".into(),
+                created: String::new(), modified: String::new(), archived: false, pinned: false, tabs: vec![tab],
+                active_tab: Some("t1".into()), unknown: Default::default(),
+                link: None,
+            };
+            bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default())).kill_rule
         };
-        let session = index::SessionEntry {
-            id: "s1".into(), project_path: "/work".into(), cwd: "/work".into(), worktree_name: None,
-            kind: crate::store::index::SessionKind::Project,
-            branch: None, base_ref: None, worktree_base: None, worktree_removed: false, removed_workspace: None, issue: None, issue_work: Default::default(), automation: None,
-            title: "Safe session".into(),
-            created: String::new(), modified: String::new(), archived: false, pinned: false, tabs: vec![tab],
-            active_tab: Some("t1".into()), unknown: Default::default(),
-            link: None,
+        assert_eq!(rule(index::TabStatus::Idle), KillRule::Stop);
+        assert_eq!(rule(index::TabStatus::Completed), KillRule::Stop);
+        assert_eq!(rule(index::TabStatus::InProgress), KillRule::None);
+        assert_eq!(rule(index::TabStatus::Waiting), KillRule::None);
+    }
+
+    fn sampled(kill_rule: KillRule, kind: &str) -> ProcSample {
+        ProcSample {
+            pane_id: "tab:t1".into(), tab_id: Some("t1".into()), tab_title: "Claude Code".into(), session_id: Some("s1".into()), session_title: Some("Review #590".into()),
+            project_path: None, project_name: None, cwd: "/work".into(), kind: kind.into(), harness: None, orphaned: false, pid: Some(400),
+            cpu_percent: None, rss_bytes: None, child_count: None, kill_rule,
+        }
+    }
+
+    /// An idle agent is asked about first, then stopped through its session
+    /// (never by killing its pane), and one that started working is left.
+    #[test]
+    fn an_idle_agent_is_stopped_through_its_session_once_confirmed() {
+        use crate::session::AgentStop;
+        let asked = std::cell::RefCell::new(Vec::new());
+        let stop = |answer: AgentStop| {
+            let asked = &asked;
+            move |session: &str, tab: &str| {
+                asked.borrow_mut().push((session.to_string(), tab.to_string()));
+                Ok(answer)
+            }
         };
-        let process = bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default()));
-        assert_eq!(process.kill_rule, KillRule::None);
+        let process = sampled(KillRule::Stop, "agent");
+
+        let question = settle_kill(&process, false, &stop(AgentStop::Stopped)).unwrap().unwrap();
+        assert!(!question.killed);
+        assert!(question.confirmation.unwrap().starts_with("Stop the agent in Review #590? Its conversation is kept"));
+        assert!(asked.borrow().is_empty(), "nothing is stopped before it is confirmed");
+
+        let done = settle_kill(&process, true, &stop(AgentStop::Stopped)).unwrap().unwrap();
+        assert!(done.killed);
+        assert_eq!(asked.borrow().as_slice(), [("s1".to_string(), "t1".to_string())]);
+
+        let busy = settle_kill(&process, true, &stop(AgentStop::Busy)).unwrap_err();
+        assert!(busy.to_string().contains("started working"), "{busy}");
+
+        // One at work, or started by hand, is not this popover's to stop.
+        let working = settle_kill(&sampled(KillRule::None, "agent"), true, &stop(AgentStop::Stopped)).unwrap_err();
+        assert!(working.to_string().contains("Stop it from its tab"), "{working}");
+        assert_eq!(asked.borrow().len(), 2);
+        // A shell's pane is still ended directly once confirmed.
+        assert!(settle_kill(&sampled(KillRule::Confirm, "shell"), true, &stop(AgentStop::Stopped)).unwrap().is_none());
     }
 
     /// A tab is what its terminal holds now (#437): the pane of a tab whose
@@ -529,7 +604,7 @@ mod tests {
             let sample = sample(pane);
             (sample.kind, sample.tab_id, sample.tab_title, sample.harness, sample.kill_rule)
         };
-        assert_eq!(seen("tab:app"), ("agent".into(), Some("app".into()), "Codex".into(), Some("codex".into()), KillRule::None));
+        assert_eq!(seen("tab:app"), ("agent".into(), Some("app".into()), "Codex".into(), Some("codex".into()), KillRule::Stop));
         // Not called by the conversation it last held, and not an agent to count.
         assert_eq!(seen("tab:exited"), ("shell".into(), Some("exited".into()), "Terminal 2".into(), None, KillRule::None));
         assert_eq!(seen("s1:shell"), ("agent".into(), Some("typed".into()), "Codex".into(), Some("codex".into()), KillRule::None));

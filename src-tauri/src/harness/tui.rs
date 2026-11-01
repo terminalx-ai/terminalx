@@ -424,6 +424,9 @@ pub type Marker = fn(&str, &HashSet<String>, &mut Vec<Payload>) -> Option<TurnMa
 /// until its newline has arrived.
 pub struct Streamer {
     offset: u64,
+    /// Where it started reading this file: what came before is not this
+    /// CLI's, or is history.
+    began: u64,
     partial: Vec<u8>,
     decode: Decoder,
     /// Records the app has already logged under another id. A forked Claude
@@ -444,6 +447,7 @@ impl Streamer {
     pub fn skipping(offset: u64, decode: Decoder, skip: HashSet<String>) -> Self {
         Self {
             offset,
+            began: offset,
             partial: Vec::new(),
             decode,
             skip,
@@ -476,6 +480,11 @@ impl Streamer {
 
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Where it started reading its file.
+    pub fn began(&self) -> u64 {
+        self.began
     }
 
     /// Feed the bytes read after `offset()`. Complete lines are decoded; the
@@ -593,6 +602,23 @@ impl Tail {
     /// How far into the file the tail has read.
     pub fn offset(&self) -> u64 {
         self.stream.lock().unwrap().offset()
+    }
+
+    /// The file followed now, and where in it reading began: the records
+    /// before that are not the CLI's own, or are history. A retarget or a
+    /// `follow` changes both; a reader keeping up with what the CLI writes
+    /// (`claude::background::Watch`) moves when they do. Taken path first,
+    /// as `retarget` takes them, so the pair is one tail's.
+    pub fn reading(&self) -> (PathBuf, u64) {
+        let path = self.path.lock().unwrap();
+        let began = self.stream.lock().unwrap().began();
+        (path.clone(), began)
+    }
+
+    /// The records the tail drops as already logged elsewhere: a fork's copy
+    /// of its parent conversation, under the parent's uuids.
+    pub fn carried(&self) -> HashSet<String> {
+        self.stream.lock().unwrap().carried().clone()
     }
 
     /// Point at `path` and read on from `offset`, whatever was being

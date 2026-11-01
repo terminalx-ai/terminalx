@@ -136,7 +136,7 @@ impl SessionManager {
             anyhow::ensure!(!rt.turn_open, "Wait for Codex to finish this turn, or interrupt it, before opening its terminal.");
             running
         };
-        if running { self.stop_codex_stdio(&rt_arc)?; }
+        if running { self.stop_codex_stdio(&rt_arc, false)?; }
         index::update_tab(session_id, tab_id, |tab| { tab.transport = AgentTransport::Pty; Ok(()) })?;
         if let Ok(session) = index::get(session_id) { self.sink.emit("session_updated", &session); }
         Ok(())
@@ -506,7 +506,7 @@ impl SessionManager {
         }
     }
 
-    pub(super) fn stop_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>) -> Result<()> {
+    pub(super) fn stop_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>, keep_unread: bool) -> Result<()> {
         let (launch, unsent) = {
             let mut rt = rt_arc.lock().unwrap();
             anyhow::ensure!(!rt.stop_in_flight, "Stop is already in progress");
@@ -561,7 +561,7 @@ impl SessionManager {
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
         if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent); }
-        else { self.set_status(&mut rt, TabStatus::Idle); }
+        else if !(keep_unread && rt.status == TabStatus::Completed) { self.set_status(&mut rt, TabStatus::Idle); }
         Ok(())
     }
 

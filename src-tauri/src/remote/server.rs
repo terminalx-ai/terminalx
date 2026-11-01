@@ -2236,7 +2236,11 @@ impl WorkspaceRpc {
         let busy: HashSet<(String, String)> = tabs.iter().filter(|tab| tab.process == "running").map(|tab| (tab.session_id.clone(), tab.tab_id.clone())).chain(turns.iter().cloned()).collect();
         let running = |session: &str, tab: &str| busy.contains(&(session.to_string(), tab.to_string())) || self.sessions.as_ref().is_some_and(|manager| manager.is_running(session, tab));
         let live = |sessions: &[SessionEntry]| crate::worktree_cleanup::Live { turns: turns.clone(), ..crate::worktree_cleanup::Live::observe(&self.terminals, sessions, &running) };
-        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh }))
+        let stop_agents = |entry: &SessionEntry| match self.sessions.as_ref() {
+            Some(manager) => manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}")),
+            None => Ok(()),
+        };
+        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents) }))
     }
 
     /// `cleanup/1`: every worktree of the workspace's repositories with
@@ -2264,7 +2268,11 @@ impl WorkspaceRpc {
 
     /// `cleanup/1`: remove the named worktrees. Each is inspected again here,
     /// on the machine that holds it, and left alone unless it is still what
-    /// its token stands for. Nothing running is stopped.
+    /// its token stands for. Nothing running is stopped to make a worktree
+    /// removable; only a worktree already gone has its sessions' agents
+    /// stopped before they are filed under the project (`reconcile`, #696).
+    /// Admission is held throughout, as on the desktop, so no prompt starts
+    /// an agent between that stop and the filing.
     ///
     /// While it runs the caller, and nobody else, is sent `cleanup.progress`
     /// notifications: each worktree as it starts, the step it is on, and what
@@ -2282,7 +2290,12 @@ impl WorkspaceRpc {
         let p: Params = parse(params)?;
         let before = index::load().map_err(RpcError::internal)?;
         let report = |progress: &Progress| peer.notify("cleanup.progress", json!(OfRun { run: &p.client_request_id, progress }));
-        let results = self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items, Watch { report: Some(&report), stop: None }))?;
+        // `stop_agents_confirmed`'s caller holds admission across the stop and
+        // the filing that follows it.
+        let results = {
+            let _admission = crate::issue_pipeline::admission::lock();
+            self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items, Watch { report: Some(&report), stop: None }))?
+        };
         // What the runtime still holds for sessions that were deleted with
         // their worktree, as after `session.delete`.
         let deleted: HashSet<String> = results.iter().flat_map(|done| done.sessions_deleted.iter().cloned()).collect();

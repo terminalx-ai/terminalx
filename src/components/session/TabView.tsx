@@ -172,9 +172,11 @@ export function TabView({
   // A PTY-first tab is its CLI, so opening the tab starts it. Idempotent, and
   // the pane it lands in is adopted from the backend's own event.
   // Again when what is in its terminal changes: a tab that became a terminal is given its shell.
+  // Shown in its chat, an archived or removed-workspace session's agent, or one stopped for sitting idle, waits for
+  // its next message instead (#696); a terminal view needs its CLI whatever it is.
   const front = tab.front ?? "agent";
   useEffect(() => {
-    if (active && ptyFirst) void startTabAgent(session, tab);
+    if (active && ptyFirst) void startTabAgent(session, tab, { opened: tabViewIn(views.views, tab) !== "terminal" });
   }, [active, ptyFirst, session.id, tab.id, front]);
 
   // The face picked for what was in the terminal before does not stand for what is there now. Neither

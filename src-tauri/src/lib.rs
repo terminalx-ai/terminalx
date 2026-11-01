@@ -86,6 +86,7 @@ mod pr_associations;
 mod github_identity;
 mod harness;
 pub mod hooks;
+mod idle_agents;
 #[cfg(feature = "desktop")]
 mod issue_control;
 #[cfg(feature = "desktop")]
@@ -690,6 +691,8 @@ pub fn run() {
             commands::work_claims_set_cloud,
             commands::work_status_settings,
             commands::set_work_status_settings,
+            commands::agent_settings,
+            commands::set_agent_idle_stop_minutes,
             commands::experimental_settings,
             commands::set_experimental_settings,
             commands::organization_work_status,

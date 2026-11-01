@@ -12,6 +12,28 @@
   window whose terminal output alone dropped recovers without affecting others.
   The notice stays quiet for short gaps and asks for action only when retrying
   cannot help or has not helped for minutes. (#643)
+- Stop agents nobody is using. An agent the app started that has had nothing to
+  do for an hour (Settings → Agents: 30 minutes to a day, or never) is stopped
+  with its MCP servers, and its next message starts it again on the same
+  conversation; a reply nobody has read stays unread. An agent keeps running
+  while it is at work, waits for an answer, or waits on something it started:
+  a command, monitor or agent it ran in the background and has not heard back
+  from, a wakeup or cron job it scheduled, or a process one of its commands
+  left running. So does one started by hand in a terminal.
+  Agents in archived sessions, or whose workspace was removed, stop after 10
+  idle minutes, and opening such a session, or a tab whose agent was stopped
+  this way, no longer starts its agent. App resources can stop an idle agent,
+  after asking. (#696)
+- Set the conversations of removed workspaces apart from live work: each
+  project, and the chat list, folds them under "Removed workspaces", which
+  opens while it holds the open conversation. They stay readable and
+  resumable. Finishing a clean-up whose worktree was already gone stops the
+  agents of its sessions first. (#696)
+- End the MCP servers Claude Code starts while TerminalX reads its slash
+  commands and models. Each was left running under launchd; one Mac had thirty,
+  about 1 GB. (#696)
+- Merged workspaces of this repository are no longer kept for the CLI launcher
+  the build leaves in `src-tauri/binaries`. (#696)
 ### Relay
 
 - Poll the account service for pairing grants and revocations once every 30

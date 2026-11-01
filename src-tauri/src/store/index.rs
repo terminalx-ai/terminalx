@@ -221,6 +221,11 @@ pub struct TabEntry {
     /// again rather than leave the agent without it (#663).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<u64>,
+    /// Its agent was stopped because nothing was using it (#696): showing
+    /// the tab does not start it again, its next prompt does. Kept here so
+    /// a runtime that starts again knows it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parked: bool,
     #[serde(flatten, default)]
     pub follow: Follow,
     #[serde(flatten, default)]
@@ -783,6 +788,18 @@ pub fn update_session<R>(session_id: &str, f: impl FnOnce(&mut SessionEntry) -> 
     })
 }
 
+/// Mark a tab's agent as stopped for sitting idle, or as in use again
+/// ([`TabEntry::parked`]). Neither is something done in the session, so
+/// neither changes when it was last modified.
+pub fn set_parked(session_id: &str, tab_id: &str, parked: bool) -> Result<()> {
+    update(|sessions| {
+        if let Some(tab) = sessions.iter_mut().find(|session| session.id == session_id).and_then(|session| session.tab_mut(tab_id)) {
+            tab.parked = parked;
+        }
+        Ok(())
+    })
+}
+
 pub fn update_tab<R>(session_id: &str, tab_id: &str, f: impl FnOnce(&mut TabEntry) -> Result<R>) -> Result<R> {
     update_session(session_id, |s| {
         let t = s.tab_mut(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -1292,7 +1309,7 @@ mod tests {
             modified: "now".into(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None,
+            fork_from: None, continuation: None, parked: false,
             follow: Follow::default(),
             unknown: BTreeMap::new(),
         });

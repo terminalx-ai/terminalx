@@ -3,6 +3,7 @@
 //! here are what both halves share, plus the one-shot control line the slash
 //! command listing sends to a short-lived headless child (`commands.rs`).
 
+pub mod background;
 pub mod by_hand;
 pub mod commands;
 pub mod mapper;
@@ -70,21 +71,72 @@ pub fn initialize_line(request_id: &str) -> String {
 /// what those add passes `--safe-mode` in `extra`.
 pub fn ask_initialize(cwd: &Path, extra: &[&str]) -> Result<Value> {
     let program = crate::binpath::resolve("claude").ok_or_else(|| anyhow!("Claude Code is not installed"))?;
-    let mut child = Command::new(program)
+    probe(&program, cwd, extra)
+}
+
+/// How long a probe and what it started are given to leave on SIGTERM
+/// before SIGKILL.
+const PROBE_EXIT: Duration = Duration::from_secs(2);
+
+fn probe(program: &Path, cwd: &Path, extra: &[&str]) -> Result<Value> {
+    let mut command = Command::new(program);
+    command
         .args(["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"])
         .args(extra)
         .current_dir(cwd)
         .env("PATH", crate::binpath::login_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn claude for its initialize reply")?;
+        .stderr(Stdio::null());
+    // A group of its own, so the MCP servers it starts on the way end with
+    // it (#696). Killed alone, the CLI left them to launchd in the app's own
+    // group, a gigabyte of servers that nothing would ever stop.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().context("spawn claude for its initialize reply")?;
     let reply = initialize_reply(&mut child);
-    // Whatever happened above, the child does not outlive the question.
+    // Whatever happened above, neither the child nor anything it started
+    // outlives the question.
+    end_probe(&mut child);
+    reply
+}
+
+/// SIGTERM to the probe's whole group, so the CLI can stop its servers as it
+/// leaves; SIGKILL to whatever is still there after [`PROBE_EXIT`]. The leader
+/// is reaped while it is waited on: a zombie still counts as the group's.
+#[cfg(unix)]
+fn end_probe(child: &mut Child) {
+    let group = -(child.id() as i32);
+    let gone = || {
+        // SAFETY: signal 0 only asks whether the probe's own group is there.
+        unsafe { libc::kill(group, 0) != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
+    };
+    // SAFETY: the group was made for this child at spawn and is its own.
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    let deadline = std::time::Instant::now() + PROBE_EXIT;
+    loop {
+        let reaped = matches!(child.try_wait(), Ok(Some(_)));
+        if reaped && gone() {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: as above; a group that has emptied meanwhile answers ESRCH.
+    unsafe { libc::kill(group, libc::SIGKILL) };
     let _ = child.kill();
     let _ = child.wait();
-    reply
+}
+
+#[cfg(not(unix))]
+fn end_probe(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn initialize_reply(child: &mut Child) -> Result<Value> {
@@ -110,6 +162,31 @@ fn initialize_reply(child: &mut Child) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The leak #696 found: a probe's MCP servers outlived it, under launchd.
+    /// A stand-in CLI starts a "server" that ignores SIGTERM, as a busy one
+    /// may, answers `initialize`, and stays up; once the answer is in, the
+    /// server is gone too.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_ends_the_servers_its_cli_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("claude");
+        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"raccoon-init","response":{"commands":[]}}}"#;
+        std::fs::write(&cli, format!("#!/bin/sh\nsh -c 'trap \"\" TERM; exec sleep 300' &\necho $! > server.pid\nread line\nprintf '%s\\n' '{reply}'\nexec cat\n")).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let answer = probe(&cli, dir.path(), &[]).unwrap();
+        assert_eq!(answer["response"]["request_id"], "raccoon-init");
+        let server: u32 = std::fs::read_to_string(dir.path().join("server.pid")).unwrap().trim().parse().unwrap();
+        // Killed, and then reaped by whoever it was handed to.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::harness::host::is_alive(server) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!crate::harness::host::is_alive(server), "the server the probe's CLI started is still running");
+    }
 
     #[test]
     fn unknown_modes_fall_back_to_asking() {

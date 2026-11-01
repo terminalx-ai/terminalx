@@ -155,7 +155,7 @@ impl Fixture {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None,
+            fork_from: None, continuation: None, parked: false,
             follow: Default::default(),
             unknown: BTreeMap::new(),
         };
@@ -201,7 +201,7 @@ impl Fixture {
 
     fn with_host<R>(&self, f: impl FnOnce(&Host<'_>) -> R) -> R {
         let live = |_: &[SessionEntry]| self.live.lock().unwrap().clone();
-        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh })
+        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None })
     }
 
     fn sweep_scope(&self, scope: &Scope, minutes: i64) -> Vec<Status> {

@@ -7,3 +7,10 @@
 src-tauri/gen/schemas/
 # Copied out of node_modules by scripts/ensure-agent-browser.mjs.
 src-tauri/binaries/agent-browser-*
+# The native CLI launcher src-tauri/build.rs compiles on every build, and the
+# scratch it publishes from (#696).
+src-tauri/binaries/terminalx-*
+src-tauri/binaries/.terminalx-*
+# The folder rustc links that launcher in, left behind when a build is killed
+# mid-link.
+src-tauri/binaries/rustc*/
