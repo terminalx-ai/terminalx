@@ -131,7 +131,10 @@ objc2-speech = { version = "0.3", default-features = false, features = ["std", "
 transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"], optional = true }
 
 [profile.dev]
-incremental = true
+# Keep local builds and per-worktree caches from consuming tens of GB each.
+incremental = false
+# Preserve file/line backtraces without full type and variable debug data.
+debug = "line-tables-only"
 opt-level = 1
 
 [profile.dev.package."*"]
