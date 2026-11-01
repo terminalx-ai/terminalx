@@ -55,8 +55,11 @@ impl SessionManager {
         Ok(true)
     }
 
+    /// `receipt`: a continuation's sender, told once Codex takes the prompt's
+    /// turn, or why it never did. Nothing is replayed into a later turn.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn send_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry,
-        prompt: PromptText, images: Vec<ImageRef>, wire_images: Vec<(String, String)>) -> Result<SendOutcome> {
+        prompt: PromptText, images: Vec<ImageRef>, wire_images: Vec<(String, String)>, receipt: Option<DeliveryReceipt>) -> Result<SendOutcome> {
         let tab = entry.tab(&rt.tab_id).context("tab not found")?;
         // A phone's prompt names who it is from ahead of the request itself;
         // the request alone says whether it is a command.
@@ -64,9 +67,11 @@ impl SessionManager {
         let manual = request.trim() == "/compact";
         anyhow::ensure!(!request.trim_start().starts_with('/') || manual, "Only /compact is supported in experimental Codex stdio");
         anyhow::ensure!(!manual || images.is_empty(), "Compaction does not accept images");
+        anyhow::ensure!(!manual || receipt.is_none(), "A continuation cannot be a compaction");
         anyhow::ensure!(tab.harness == "codex", "Experimental stdio requires Codex");
         anyhow::ensure!(!rt.turn_open && rt.pending.is_empty(), "Experimental Codex is busy; wait or interrupt before sending again");
         Stdio::validate_mode(&tab.permission_mode)?;
+        self.reclaim_ended_codex_stdio(rt);
         if !matches!(rt.engine, Engine::CodexStdio(_)) {
             anyhow::ensure!(matches!(rt.engine, Engine::None) && rt.child.is_none(), "Another engine owns this tab");
             anyhow::ensure!(tab.fork_from.is_none(), "Experimental Codex cannot fork a thread. Create a new experimental session.");
@@ -85,6 +90,15 @@ impl SessionManager {
             session: rt.session_id.clone(), tab: rt.tab_id.clone(),
             seq: events.first().map(|event| event.seq), mobile: prompt.mobile, shared: prompt.shared_connection,
         });
+        // As for the PTY engine: the brief this tab was opened with, which
+        // "Resend last prompt" prefers while Codex has not answered it. Only
+        // the desktop's Continue in New Session sends one, with no permits.
+        if let (Some(receipt), Some(event)) = (receipt, events.first()) {
+            if let Err(error) = index::update_tab(&rt.session_id, &rt.tab_id, |t| { t.continuation = Some(event.seq); Ok(()) }) {
+                log::warn!("record the continuation prompt of {}: {error:#}", rt.key());
+            }
+            rt.stdio_receipt = Some((event.seq, receipt));
+        }
         rt.open_turn();
         rt.turn_started_at = Some(Instant::now());
         self.set_status(rt, TabStatus::InProgress);
@@ -306,6 +320,9 @@ impl SessionManager {
                     anyhow::ensure!(matches!(self.publish_compaction_locked(rt, &token, evidence, confirmed)?, compaction::Publication::Committed(_)), "Compaction publication uncertain");
                 }
                 StdioAction::Emit(payload) => self.apply(rt, payload, None),
+                StdioAction::Accepted => {
+                    if let Some((_, receipt)) = rt.stdio_receipt.take() { let _ = receipt.send(Ok(())); }
+                }
                 StdioAction::CompactEnded => {
                     rt.turn_open = false;
                     self.cancel_asks(rt);
@@ -327,17 +344,32 @@ impl SessionManager {
             Some(stderr) if !stderr.trim().is_empty() => format!("{said}\n{stderr}"),
             _ => said.clone(),
         }));
+        // A closed pipe and the write it broke both report one failure; only
+        // the stderr read at the close can say more: a refused sign-in.
+        if matches!(&rt.engine, Engine::CodexStdio(engine) if engine.failed()) && !exit.as_ref().is_some_and(|exit| exit.sign_in_refused) { return; }
+        let unaccepted = matches!(&rt.engine, Engine::CodexStdio(engine) if engine.unaccepted());
         rt.stdio_writer = None;
         rt.stdio_authority = None;
         if let Engine::CodexStdio(engine) = &mut rt.engine { engine.fail(); }
         self.cancel_asks(rt);
         self.codex_stdio_loss(rt, CompactionLoss::Disconnected);
+        if let Some((_, receipt)) = rt.stdio_receipt.take() {
+            let _ = receipt.send(Err(format!("The new session opened, but Codex did not receive its continuation prompt: {}. The prepared prompt is retained.", said.trim_end_matches('.'))));
+        }
         match exit {
             Some(exit) if exit.sign_in_refused && rt.turn_open => self.fail_open_turn(rt, &exit),
             Some(exit) if exit.sign_in_refused => {
                 self.apply(rt, Payload::Error { message: RecoveryKind::SignedOut.message().into(), fatal: false, detail: exit.detail }, None);
                 self.sign_in_refused(rt);
                 self.needs_recovery(rt, RecoveryKind::SignedOut);
+            }
+            // Codex never took the prompt: it is the reader's to send again
+            // ("Resend last prompt"), and its turn never ran.
+            exit if unaccepted && rt.turn_open => {
+                let detail = exit.and_then(|exit| exit.detail).or_else(|| recovery::detail(&said));
+                self.apply(rt, Payload::Error { message: format!("Codex did not receive this prompt: {}", said.trim_end_matches('.')), fatal: false, detail }, None);
+                self.close_open_turn(rt, TurnStatus::Aborted, None);
+                self.needs_recovery(rt, RecoveryKind::Unsent);
             }
             exit => {
                 let message = format!("Experimental Codex connection failed: {said}. Stop this session, then send again to resume it; input will not be replayed.");
@@ -359,16 +391,21 @@ impl SessionManager {
     }
 
     pub(super) fn stop_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>) -> Result<()> {
-        let launch = {
+        let (launch, unsent) = {
             let mut rt = rt_arc.lock().unwrap();
             anyhow::ensure!(!rt.stop_in_flight, "Stop is already in progress");
+            // Stopped before Codex took the prompt: never received, so offered
+            // back like any prompt a CLI never took. Decided now: the reader's
+            // drain closes the turn before the exit below is confirmed.
+            let turn_open = rt.turn_open;
             let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner changed") };
+            let unsent = turn_open && !engine.is_manual_compact() && engine.unaccepted();
             engine.exited = true;
             let launch = engine.launch.clone();
             rt.stop_in_flight = true; rt.stopping = true;
             rt.stdio_writer = None;
             self.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
-            launch
+            (launch, unsent)
         };
         let deadline = Instant::now() + RESTART_WAIT;
         let mut signalled = None;
@@ -398,14 +435,40 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         self.cancel_asks(&mut rt);
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
+        if let Some((_, receipt)) = rt.stdio_receipt.take() {
+            let _ = receipt.send(Err("The new session was stopped before Codex received its continuation prompt. The prepared prompt is retained.".into()));
+        }
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
         rt.child = None; rt.child_pid = None; rt.stdio_compaction = None; rt.stdio_authority = None;
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
-        self.set_status(&mut rt, TabStatus::Idle);
+        if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent); }
+        else { self.set_status(&mut rt, TabStatus::Idle); }
         Ok(())
     }
+
+    /// A connection that ended on its own (a failed start, a closed pipe)
+    /// with nothing left running is let go here, so the next send, "Resend
+    /// last prompt" among them, starts or resumes afresh without a Stop. A
+    /// child still alive keeps its engine until Stop confirms its exit.
+    fn reclaim_ended_codex_stdio(&self, rt: &mut TabRuntime) {
+        let ended = matches!(&rt.engine, Engine::CodexStdio(e) if e.exited || e.blocked);
+        let gone = rt.child.as_ref().is_none_or(|child| child.terminal_receipt().is_some() && !crate::harness::host::group_or_process_alive(child.pid));
+        if !ended || !gone || rt.stdio_starting || rt.stopping { return; }
+        rt.stdio_writer = None; rt.stdio_receipt = None; rt.stdio_authority = None; rt.stdio_compaction = None;
+        rt.child = None; rt.child_pid = None;
+        rt.engine = Engine::None;
+    }
+}
+
+/// What an experimental tab's history means when it is opened with no
+/// connection: a prompt whose turn Codex never started (its `turn_started` is
+/// what `unsent::said_in` counts as the agent answering) was never received,
+/// and is offered back rather than called a lost connection.
+pub(super) fn recovery_on_open(tab: &TabEntry, log: &Path, kind: RecoveryKind) -> RecoveryKind {
+    if kind != RecoveryKind::Disconnected { return kind; }
+    if unsent::said_in(log, tab.follow.conversation.as_deref()).since.is_empty() { kind } else { RecoveryKind::Unsent }
 }
 
 /// A phone's or a share's prompt, as `type_prompt` holds a PTY one: what the
