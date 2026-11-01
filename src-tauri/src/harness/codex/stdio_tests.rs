@@ -3,7 +3,7 @@
 //! rust-v0.164.0 core/compact.rs and compact_remote_v2_installation.rs.
 use super::*;
 
-fn client() -> Stdio { Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into()) }
+fn client() -> Stdio { Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), None) }
 
 fn wire(actions: &[Action]) -> Vec<Value> {
     actions.iter().filter_map(|a| match a { Action::Write(line) => Some(serde_json::from_str(&line.line).unwrap()), _ => None }).collect()
@@ -40,6 +40,42 @@ fn the_real_thread_is_bound_before_the_first_prompt_write() {
     assert_eq!(requests[0]["method"], "turn/start");
     assert_eq!(requests[0]["params"]["threadId"], "thread");
     assert_eq!(requests[0]["params"]["input"][0]["text"], "hello");
+}
+
+#[test]
+fn a_known_thread_is_resumed_without_its_turns_before_the_first_prompt() {
+    let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
+    let start = wire(&client.start("hello again".into(), vec![]).unwrap());
+    let initialized = wire(&client.handle(&json!({"id": start[0]["id"], "result": {}}).to_string()).unwrap());
+    assert_eq!(initialized[1]["method"], "thread/resume");
+    let params = &initialized[1]["params"];
+    assert_eq!((&params["threadId"], &params["excludeTurns"]), (&json!("thread"), &json!(true)));
+    assert_eq!((&params["approvalPolicy"], &params["sandbox"], &params["cwd"]), (&json!("on-request"), &json!("workspace-write"), &json!("/tmp/terminalx-stdio-contract")));
+    let actions = client.handle(&json!({"id": initialized[1]["id"], "result": {"thread": {"id":"thread"}}}).to_string()).unwrap();
+    assert!(matches!(actions.first(), Some(Action::ThreadReady(id)) if id == "thread"));
+    let requests = wire(&actions);
+    assert_eq!(requests[0]["method"], "turn/start");
+    assert_eq!(requests[0]["params"]["input"][0]["text"], "hello again");
+}
+
+#[test]
+fn a_resume_answered_with_another_thread_sends_no_prompt() {
+    let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
+    client.start("hello again".into(), vec![]).unwrap();
+    client.handle(r#"{"id":1,"result":{}}"#).unwrap();
+    let error = client.handle(r#"{"id":2,"result":{"thread":{"id":"other"}}}"#).unwrap_err();
+    assert!(error.to_string().contains("different thread"), "{error:#}");
+    assert!(client.thread.is_none() && !client.ready);
+}
+
+#[test]
+fn codex_releases_from_the_verified_minimum_are_supported() {
+    for version in ["codex-cli 0.164.0", "codex-cli 0.166.0\n", "codex-cli 0.167.0-alpha.2", "codex-cli 1.0.0"] {
+        assert!(supported(version), "{version}");
+    }
+    for version in ["codex-cli 0.163.9", "codex-cli 0.99.0", "codex 0.166.0", "codex-cli", "codex-cli 0.166", ""] {
+        assert!(!supported(version), "{version}");
+    }
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! Default-off experimental owner. One runtime gate orders protocol dispatch,
 //! final writes, indexed thread identity and the existing compaction event log.
-//! No PTY tail, second subscription, reconnect/resume, or prompt replay.
+//! No PTY tail, second subscription, automatic reconnect, or prompt replay: a
+//! tab whose connection ended resumes its thread only for the next explicit send.
 use super::*;
 use std::time::Duration;
 use crate::harness::codex::owned_transport::{Observation, TurnOutcome};
@@ -29,7 +30,7 @@ impl SessionManager {
         Stdio::validate_mode(&tab.permission_mode)?;
         if !matches!(rt.engine, Engine::CodexStdio(_)) {
             anyhow::ensure!(matches!(rt.engine, Engine::None) && rt.child.is_none(), "Another engine owns this tab");
-            anyhow::ensure!(tab.provider_session_id.is_none() && tab.fork_from.is_none(), "This experimental connection ended. Create a new experimental session; existing threads are never resumed automatically.");
+            anyhow::ensure!(tab.fork_from.is_none(), "Experimental Codex cannot fork a thread. Create a new experimental session.");
             self.start_codex_stdio(rt, rt_arc, entry, tab)?;
         }
         let manual = prompt.agent.trim() == "/compact";
@@ -51,7 +52,7 @@ impl SessionManager {
 
     fn start_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {
         self.accepting_work()?;
-        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone());
+        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone(), tab.provider_session_id.clone());
         let launch = engine.launch.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         rt.engine = Engine::CodexStdio(engine);
@@ -112,7 +113,7 @@ impl SessionManager {
         let mut probe = std::process::Command::new(&program);
         probe.arg("--version").env("PATH", crate::binpath::login_path());
         let version = crate::git::output_within(probe, Duration::from_secs(5)).map_err(|_| anyhow!("Could not verify experimental Codex stdio version. No prompt was sent."))?;
-        anyhow::ensure!(version.trim() == format!("codex-cli {}", codex::stdio::VERSION), "Experimental stdio requires verified Codex {} (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::VERSION, version.trim());
+        anyhow::ensure!(codex::stdio::supported(&version), "Experimental stdio requires Codex {} or newer (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::MIN_VERSION, version.trim());
         current()?;
         let env = vec![
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
@@ -200,8 +201,9 @@ impl SessionManager {
                 StdioAction::ThreadReady(id) => {
                     let Engine::CodexStdio(engine) = &rt.engine else { bail!("Codex owner was replaced") };
                     let identity = compaction::Identity::Stdio { launch: engine.launch.clone(), epoch: rt.child.as_ref().context("Codex child missing")?.epoch };
+                    // A resumed thread keeps the identity it was indexed under.
                     let tab = index::update_tab(&rt.session_id, &rt.tab_id, |tab| {
-                        anyhow::ensure!(selected(tab) && tab.provider_session_id.is_none(), "Codex thread identity already assigned");
+                        anyhow::ensure!(selected(tab) && tab.provider_session_id.as_ref().is_none_or(|known| *known == id), "Codex thread identity changed");
                         tab.provider_session_id = Some(id.clone()); Ok(tab.clone())
                     })?;
                     let scope = CompactionScope { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), provider: "codex".into(), thread_id: id, conversation_id: tab.follow.conversation, subagent_id: None };
@@ -254,7 +256,7 @@ impl SessionManager {
                 self.needs_recovery(rt, RecoveryKind::SignedOut);
             }
             exit => {
-                let message = format!("Experimental Codex connection failed: {said}. Stop this session before starting a new one; input will not be replayed.");
+                let message = format!("Experimental Codex connection failed: {said}. Stop this session, then send again to resume it; input will not be replayed.");
                 self.apply(rt, Payload::Error { message, fatal: false, detail: exit.and_then(|exit| exit.detail) }, None);
                 self.needs_recovery(rt, RecoveryKind::Disconnected);
             }

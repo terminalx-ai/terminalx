@@ -88,6 +88,10 @@
   owned-stdio connection for explicitly created new Codex sessions, with confirmed
   compaction start/completion events and retained interruption status. Existing
   PTY sessions keep their current behavior. (#644)
+- Experimental Codex sessions continue after the app restarts, after Stop or
+  after a lost connection: the next message resumes the same Codex thread, with
+  nothing replayed, and **Retry safely** works for them. They accept Codex 0.164.0
+  or newer instead of exactly 0.164.0. (#644)
 
 ### Status bar
 

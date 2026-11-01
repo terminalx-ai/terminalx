@@ -1,6 +1,8 @@
 //! Explicitly experimental, single-owner stdio protocol. No process or store I/O.
-//! Contracts/emitter ordering are pinned to Codex 0.164.0. The session manager
-//! fences every action by the exact child launch and is the only final writer.
+//! Contracts/emitter ordering were verified on Codex 0.164.0; later releases
+//! only add optional fields to the stable v2 surface used here (checked through
+//! 0.166.0). The session manager fences every action by the exact child launch
+//! and is the only final writer.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -10,7 +12,7 @@ use serde_json::{json, Value};
 use crate::events::*;
 use super::owned_transport::{self, Observation};
 
-pub const VERSION: &str = "0.164.0";
+pub const MIN_VERSION: &str = "0.164.0";
 const MAX_PENDING: usize = 32;
 const MAX_ASKS: usize = 64;
 
@@ -66,6 +68,19 @@ pub struct Stdio {
     mode: String,
     /// Only the initial, explicitly submitted local input. Never replayed.
     first: Option<(String, Vec<(String, String)>)>,
+    /// The tab's earlier thread, continued with `thread/resume` instead of a
+    /// new `thread/start`. Its turns are not requested back.
+    resume: Option<String>,
+}
+
+/// Whether `codex --version` reports MIN_VERSION or a later release.
+pub(crate) fn supported(version: &str) -> bool {
+    let release = |text: &str| -> Option<(u64, u64, u64)> {
+        let mut parts = text.split(|c: char| !c.is_ascii_digit()).filter(|part| !part.is_empty()).map(str::parse);
+        Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
+    };
+    let Some(found) = version.trim().strip_prefix("codex-cli ").and_then(release) else { return false };
+    release(MIN_VERSION).is_some_and(|min| found >= min)
 }
 
 impl Stdio {
@@ -75,10 +90,10 @@ impl Stdio {
         Ok(())
     }
 
-    pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String) -> Self {
+    pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
         Self { launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
-            seen_text: HashSet::new(), cwd, model, effort, mode, first: None }
+            seen_text: HashSet::new(), cwd, model, effort, mode, first: None, resume }
     }
 
     fn request(&mut self, method: &str, params: Value, kind: Request) -> Result<Action> {
@@ -202,12 +217,22 @@ impl Stdio {
                 Request::Initialize => {
                     let (approval, sandbox) = super::stance(&self.mode);
                     let approval = if approval == super::pty::BYPASS { "never" } else { approval };
+                    let mut params = json!({"cwd": self.cwd, "model": if self.model.is_empty() { None } else { Some(&self.model) }, "approvalPolicy": approval, "sandbox": sandbox});
+                    let method = match &self.resume {
+                        Some(thread) => {
+                            params["threadId"] = json!(thread);
+                            params["excludeTurns"] = json!(true);
+                            "thread/resume"
+                        }
+                        None => "thread/start",
+                    };
                     Ok(vec![Action::Write(Outbound::connection(json!({"method":"initialized"}).to_string())),
-                        self.request("thread/start", json!({"cwd": self.cwd, "model": if self.model.is_empty() { None } else { Some(&self.model) }, "approvalPolicy": approval, "sandbox": sandbox}), Request::Thread)?])
+                        self.request(method, params, Request::Thread)?])
                 }
                 Request::Thread => {
                     let id = required(&result["thread"], "id")?;
                     ensure!(self.thread.is_none(), "Codex changed thread during initialization");
+                    ensure!(self.resume.as_ref().is_none_or(|thread| *thread == id), "Codex resumed a different thread");
                     self.thread = Some(id.clone());
                     self.ready = true;
                     let mut actions = vec![Action::ThreadReady(id)];
