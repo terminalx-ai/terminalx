@@ -31,11 +31,15 @@ struct Observer {
     rt: Mutex<std::sync::Weak<Mutex<TabRuntime>>>,
     completed: Mutex<Vec<(String, String, Option<String>)>>,
     interrupts: std::sync::atomic::AtomicUsize,
+    answered: Mutex<Vec<(String, String)>>,
 }
 
 impl SessionObserver for Observer {
     fn interrupted(&self, _key: &str) {
         self.interrupts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn answered(&self, session: &str, tab: &str) {
+        self.answered.lock().unwrap().push((session.into(), tab.into()));
     }
     fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
@@ -2362,4 +2366,48 @@ fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     let failed = rig.manager.wait_view(SESSION, TAB);
     assert_eq!((failed.status, failed.asks, failed.recovery), (TabStatus::Waiting, false, Some(RecoveryKind::Failed)));
     assert!(rig.manager.pending_permissions().is_empty());
+}
+
+/// What an issue pipeline stopped on its author's answer hears (#725): a
+/// prompt the reader typed into the CLI's own terminal, and a permission the
+/// reader answered. A turn the CLI starts itself, and an event it has only
+/// been offered, are nobody's answer.
+#[test]
+fn the_observer_hears_the_readers_prompts_and_answers_and_not_the_clis_own_turns() {
+    let rig = Rig::new();
+    let heard = || rig.observer.answered.lock().unwrap().clone();
+    let tab = (SESSION.to_string(), TAB.to_string());
+    rig.hook("UserPromptSubmit", json!({ "prompt": "Use the billing_plans table.", "source": "user" }));
+    assert_eq!(heard(), std::slice::from_ref(&tab));
+    rig.hook("Stop", json!({ "last_assistant_message": "Done." }));
+    // Before Claude Code named its source, every prompt was the reader's.
+    rig.hook("UserPromptSubmit", json!({ "prompt": "And the owner column." }));
+    rig.hook("Stop", json!({}));
+    assert_eq!(heard(), [tab.clone(), tab.clone()]);
+    for source in ["loop_wakeup", "schedule_wakeup", "system", "poll_event"] {
+        rig.hook("UserPromptSubmit", json!({ "prompt": "<task-notification>", "source": source }));
+        assert_eq!(heard().len(), 2, "{source}");
+    }
+    drop(rig);
+
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let manager = rig.manager.clone();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: json!({"cwd": "/workspace/app", "tool_name": "Bash", "tool_input": {"cmd": "git commit -am notes"}}),
+    };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    assert!(rig.observer.answered.lock().unwrap().is_empty(), "being asked is not being answered");
+    rig.manager.respond_permission(SESSION, TAB, &request, "allow").unwrap();
+    worker.join().unwrap();
+    assert_eq!(*rig.observer.answered.lock().unwrap(), [(SESSION.to_string(), TAB.to_string())]);
+    // A request no longer open is refused, and answers nothing.
+    assert!(rig.manager.respond_permission(SESSION, TAB, &request, "allow").is_err());
+    assert_eq!(rig.observer.answered.lock().unwrap().len(), 1);
 }

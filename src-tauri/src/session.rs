@@ -2152,7 +2152,19 @@ impl SessionManager {
         self.send_admitted(&admission, session_id, tab_id, prompt, images, receipt)
     }
 
-    fn send_admitted(&self, _admission: &std::sync::MutexGuard<'static, ()>,
+    /// Every send, from wherever it came, passes here. One the tab took is a
+    /// message its agent now has, which an issue pipeline stopped on its
+    /// answer is waiting for (#725).
+    fn send_admitted(&self, admission: &std::sync::MutexGuard<'static, ()>,
+        session_id: &str, tab_id: &str, prompt: PromptText,
+        images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
+    ) -> Result<SendOutcome> {
+        let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt)?;
+        self.observer.answered(session_id, tab_id);
+        Ok(outcome)
+    }
+
+    fn deliver_admitted(&self, _admission: &std::sync::MutexGuard<'static, ()>,
         session_id: &str, tab_id: &str, prompt: PromptText,
         images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
@@ -2877,6 +2889,8 @@ impl SessionManager {
         if rt.pending.is_empty() && !matches!(rt.engine, Engine::Cli(_)) {
             self.set_status(&mut rt, TabStatus::InProgress);
         }
+        drop(rt);
+        self.observer.answered(session_id, tab_id);
         Ok(())
     }
 
@@ -2895,6 +2909,8 @@ impl SessionManager {
             _ => bail!("that agent does not ask questions this way"),
         }
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
+        drop(rt);
+        self.observer.answered(session_id, tab_id);
         Ok(())
     }
 
@@ -4953,6 +4969,11 @@ impl SessionManager {
                 drop(rt);
                 if frame.event == "UserPromptSubmit" {
                     self.observer.automation_running(&frame.session, &frame.tab);
+                    // Typed into the CLI's own terminal, a prompt reaches
+                    // nothing but this hook. One the CLI started itself is no answer.
+                    if source == claude::transcript::PromptSource::Reader {
+                        self.observer.answered(&frame.session, &frame.tab);
+                    }
                 }
             }
             // The CLI is asking in its own TUI, which means our permission

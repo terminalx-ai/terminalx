@@ -186,6 +186,7 @@ mod tests {
             state: State::ReadyToMerge,
             reason: Some(StopReason::CloudWorkspace),
             note: None,
+            answered: None,
             pr: Some(PrLink { number: 7, url: "https://github.com/acme/widgets/pull/7".into(), base: "main".into() }),
             round: 1,
             max_rounds: 3,

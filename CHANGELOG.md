@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Issue pipelines
+
+- Answering the author of a pipeline at **Needs you** puts it back to
+  **Working** at once, and the Issues list chip changes with the session for
+  GitHub and Linear issues alike. Before, it kept saying **Needs you** until
+  the author's turn ended, often for minutes. This applies to stops the author
+  can act on: the work not done, failed checks, a pull request that could not
+  be opened, a turn that stopped short, and conflicts with the base branch.
+  Sending a message, answering a question or a permission request, or typing
+  into the agent's own terminal all count, and so does a message that was
+  queued behind the turn. If the turn still isn't done, the pipeline goes back
+  to **Needs you**. A required review, a closed pull request and other stops
+  that wait on someone else stay at **Needs you** until they are checked again.
+  (#725)
+
 ## 0.2.22
 
 ### Background sessions
