@@ -220,6 +220,8 @@ export async function enterTerminalView(session: SessionEntry, tab: TabEntry, pl
   set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
   try {
     if (isPtyFirst(tab.harness)) {
+      // Only here, never when the tab is merely shown: the move is for good.
+      if (tab.transport === "experimentalCodexStdio") await agent.tabToTerminal(session.id, tab.id);
       await startTabAgent(session, tab);
       // The toggle can be the first thing that happens to a tab in this
       // window, so the pane may still need claiming.

@@ -468,6 +468,25 @@ describe("terminal view metadata lifetime", () => {
     window.hook.unmount();
   });
 
+  it("moves an experimental Codex tab to Codex's terminal when its terminal view is opened, and not when it is shown", async () => {
+    const window = await populated();
+    const calls: string[] = [];
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "tab_to_terminal" || command === "ensure_tab_started") { calls.push(command); return null; }
+      if (command === "tab_pane") { calls.push(command); return window.info; }
+      return backend(command, args);
+    });
+    const experimental = { ...session.tabs[0], transport: "experimentalCodexStdio" as const };
+    await window.tabViews.startTabAgent(session, experimental);
+    expect(calls).toEqual(["ensure_tab_started", "tab_pane"]);
+    calls.length = 0;
+    await window.tabViews.enterTerminalView(session, experimental);
+    expect(calls).toEqual(["tab_to_terminal", "ensure_tab_started", "tab_pane", "tab_pane"]);
+    window.hook.rerender();
+    expect(window.hook.result.current.views.first).toBe("terminal");
+    window.hook.unmount();
+  });
+
   it("does not restore a start error or switching state after the tab is removed", async () => {
     const window = await populated();
     let reject!: (error: Error) => void;

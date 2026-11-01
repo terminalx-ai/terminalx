@@ -16,7 +16,7 @@ pub(super) fn observed_full_pipe() {
 
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings"] {
+    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -116,6 +116,9 @@ fn resume_fixture(case: &str) {
     if case == "settings" {
         return settings_fixture(&manager, &bin, &received);
     }
+    if case == "to-terminal" {
+        return to_terminal_fixture(&manager);
+    }
     if case == "resume-thread" {
         assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
         assert_eq!(received[3]["params"]["input"][0]["text"], "carry on");
@@ -176,6 +179,28 @@ fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::V
     manager.stop("stdio-owner", "tab").unwrap();
 }
 
+/// Opening the terminal view hands the thread to Codex's own terminal: never
+/// mid-turn, only once the connection has exited, and for good.
+fn to_terminal_fixture(manager: &SessionManager) {
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let chat = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
+        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. })).count();
+    let before = chat();
+    rt.lock().unwrap().turn_open = true;
+    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
+    assert!(refused.to_string().contains("finish this turn"), "{refused:#}");
+    assert!(matches!(rt.lock().unwrap().engine, Engine::CodexStdio(_)));
+    rt.lock().unwrap().turn_open = false;
+    let child = rt.lock().unwrap().child.clone().expect("a running connection");
+    manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
+    assert!(child.terminal_receipt().is_some(), "the connection exits before the tab changes engine");
+    assert!(matches!(rt.lock().unwrap().engine, Engine::None) && rt.lock().unwrap().child.is_none());
+    let tab = index::get("stdio-owner").unwrap().tab("tab").unwrap().clone();
+    assert_eq!((tab.transport, tab.provider_session_id.as_deref()), (AgentTransport::Pty, Some("thread-1")));
+    manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
+    assert_eq!(chat(), before, "the move adds nothing to the chat");
+}
+
 fn rt_bound(manager: &SessionManager) -> bool {
     manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().stdio_compaction.is_some()
 }
@@ -183,7 +208,7 @@ fn rt_bound(manager: &SessionManager) -> bool {
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
-    if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings") { return resume_fixture(&case); }
+    if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({

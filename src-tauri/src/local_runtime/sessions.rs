@@ -225,4 +225,8 @@ impl Sessions {
     pub fn handoff(&self, session: &str, tab: &str) -> Result<HandoffInfo> {
         self.tab("handoff", session, tab, json!({}))
     }
+
+    pub fn to_terminal(&self, session: &str, tab: &str) -> Result<()> {
+        self.tab("toTerminal", session, tab, json!({}))
+    }
 }
