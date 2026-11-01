@@ -417,6 +417,15 @@ impl ControlService {
                 if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
                     return crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal);
                 }
+                if command == "runtime.liveness" {
+                    // What a desktop needs to find and watch this owner, and
+                    // nothing that waits on a session, tab, terminal or share:
+                    // a probe of a wedged owner must not become one more
+                    // request held up behind it (#661).
+                    let mut liveness = json!({ "pid": std::process::id(), "socket": self.endpoint.socket, "localRuntime": lifetime.status() });
+                    if let Some(kind) = &self.runtime_kind { liveness["runtimeKind"] = json!(kind); }
+                    return Ok(liveness);
+                }
                 let result = lifetime.command(command, params)?;
                 if command == "runtime.stopAll" {
                     if let Err(error) = self.manager.stop_all_confirmed() {

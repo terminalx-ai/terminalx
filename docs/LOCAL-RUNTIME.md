@@ -654,10 +654,98 @@ in-flight writes before acknowledging. Pruning checks snapshots outside the
 registry and removes only matching objects. Shared force-stop can therefore
 invalidate a mobile tab while holding its sharing attachment without cycling
 against a mobile check, close, device revoke or account clear. The bounded mixed
-lease subprocess regression exercises these four interleavings.
+lease subprocess regression exercises these four interleavings. Desktop input
+and a mobile driver claim serialize on that pane's own gate, never the registry:
+no terminal write happens under the registry lock (#661).
 
 The macOS CLI sidecar is a generated native launcher. Its signature stays in
 the executable across updater extraction, while it `exec`s the sibling desktop
 binary's `terminalx` command with unchanged arguments, environment, working
 directory and streams. It does not own sessions or add another runtime process.
 See `docs/RELEASING.md` for archive signature validation.
+
+## A terminal that stops reading input (#661)
+
+On 2026-10-29 one Claude Code pane stopped reading its input after a 6.3 KB
+handoff paste. A PTY master accepts about 1 KB of unread input (1022 bytes on
+macOS) and a blocking write past that waits for good. The desktop's write to
+that pane held the mobile registry lock while it waited, so 58 hook, control,
+retention and worker threads queued behind it. The app's synchronous commands
+then waited up to 120 seconds each on the main thread, and every relaunch
+attached to the same wedged runtime. Its log went to `/dev/null`. The guarantees
+below keep one such pane from taking anything else down.
+
+- **Every write is bounded.** Each PTY master is non-blocking. A write waits
+  for room with `poll`. It fails with `InputStalled` after `pty::INPUT_STALL`
+  (10 s) without progress, or after `pty::INPUT_DEADLINE` (30 s) in all,
+  however slowly the program reads. `InputStalled` says how many bytes got
+  through. Bytes are never written after the call returns. While a pane stays
+  stalled, its next writes fail at once rather than each waiting out the limit.
+  The reader waits on `poll` instead of a blocking `read`. Prompt delivery,
+  nudge and interrupt keys, mobile input and the remote server's input threads
+  all use this one write.
+- **Desktop typing is queued, not dropped.** `runtime.pty.write` hands its
+  bytes to the pane's queue (`local_runtime::typing`) and returns. One thread
+  per pane delivers them in order, in pieces of up to 64 KB. While the program
+  is not reading, it tries again every 250 ms, taking the pane's gate for one
+  attempt at a time. A paste into a shell busy with a command therefore arrives
+  whole once the command ends, as in any terminal. Queued typing goes only to
+  the process it was typed at. Past 1 MB of unread typing, more is refused
+  whole. A mobile driver claiming the pane discards what is still waiting.
+- **No terminal write under the mobile registry.** Desktop input and mobile
+  driver claims serialize on the pane's own gate. Some writes still happen
+  under narrower locks, now bounded by the limits above:
+  - the Enter and Escape that must stay atomic with a tab's state, under that
+    tab's lock;
+  - a shared or mobile prompt's writes and its two paste waits of up to 10 s
+    each, under the sharing lock;
+  - mobile input, under its device grant.
+- **Bounded socket threads.** One launch handles at most 256 hook and control
+  frames at once, across its own and the published socket. Past that, a frame
+  is answered by a single refusal thread. A control request gets `busy`. A hook
+  gets nothing to act on, so a deciding hook fails closed, plus the reason for
+  its CLI's hook log.
+- **The window never waits on the runtime.** Every Tauri command that calls the
+  runtime runs in `spawn_blocking`. That includes the share dialog's status and
+  changes and the mobile-driver list each window loads. Reads the window shows,
+  and quick controls, give up after `client::QUICK_TIMEOUT` (15 s) with
+  `Unresponsive`. The quick calls are status, pane, queue, read marks,
+  permissions, interrupt, terminal input, resize, lists, share status and the
+  quit-time fences. Long operations keep 120 s. Quitting lets go of a runtime
+  the watchdog found not responding before fencing sharing, so it does not
+  wait on one either.
+- **Watchdog and restart.** The owner's loop records each completed pass.
+  `runtime.liveness` reports the age of the last pass as
+  `localRuntime.loopAgeMs`. It reads nothing but the owner's lifetime state,
+  so it answers while sessions, tabs and shares are held up, and a probe never
+  takes a request place that stays taken. Owners too old for it are asked for
+  `status`. Every 5 seconds the desktop probes. A runtime is flagged
+  unresponsive after two failed probes in a row. A probe fails when the owner
+  does not answer in time, refuses as `busy`, or its loop has not finished a
+  pass for 120 seconds. The loop shares the sharing and tab locks with prompt
+  delivery, which can hold them for about a minute at most, so 120 seconds is
+  never reached by delivery that is still working. Only an open attachment is
+  probed. Once it closes, the supervisor's attempts to attach again (#643) say
+  instead: one that times out or meets `busy` counts as not responding, so a
+  window opened onto a wedged runtime offers the restart without having
+  attached. A successful attach clears the finding. The status the window reads
+  shows `unresponsive` in place of connected or reconnecting, because
+  reconnecting reaches the same wedged process. A change is announced with
+  `local_runtime_state`, like the supervisor's own changes.
+- **Restart.** The notice reads "TerminalX runtime is not responding" and
+  offers **Restart runtime**, never Reconnect. `local_runtime_restart` takes the
+  launch lock and finds the process listening on `run/hooks.sock`. It continues
+  only if that process runs `runtime/<hash>/terminalx-serve` from this home. It
+  sends SIGTERM to the runtime's process group, then SIGKILL after 3 seconds,
+  and then ends the sessions of the terminals the runtime started. Then it
+  drops the old attachment and asks the supervisor to attach now. Discovery
+  starts a fresh runtime, and windows re-attach their terminals in place, as
+  after any reconnect, without reloading. Agents resume their conversations
+  from the provider transcripts. The restart names the epoch the window saw,
+  and it acts only while the runtime is still found not responding. A second
+  window's late click therefore stops nothing: not the replacement, and not
+  the old runtime while the replacement is still being attached.
+- **Runtime log.** A desktop-launched runtime gets `--log-file
+  ~/Library/Logs/<identifier>/runtime.log`. Its stdout and stderr point there
+  too, so panics are kept. At 8 MB the log moves to `runtime.log.1` and a new
+  file starts.

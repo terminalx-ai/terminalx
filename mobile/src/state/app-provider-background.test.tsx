@@ -12,7 +12,11 @@ const fake = vi.hoisted(() => ({
   connected: null as null | (() => void),
   calls: [] as string[],
   resumable: true,
+  network: null as null | ((state: unknown) => void),
+  networks: [] as unknown[],
+  unwatched: 0,
 }));
+vi.mock("@react-native-community/netinfo", () => ({ default: { addEventListener: (listener: (state: unknown) => void) => { fake.network = listener; return () => { fake.unwatched++; }; } } }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: { getItem: async (key: string) => fake.storage.get(key) ?? null, setItem: async (key: string, value: string) => void fake.storage.set(key, value), removeItem: async (key: string) => void fake.storage.delete(key) } }));
 vi.mock("expo-secure-store", () => ({ WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1, getItemAsync: async (key: string) => fake.storage.get(`secure:${key}`) ?? null, setItemAsync: async (key: string, value: string) => void fake.storage.set(`secure:${key}`, value), deleteItemAsync: async (key: string) => void fake.storage.delete(`secure:${key}`) }));
 vi.mock("react-native", () => ({
@@ -32,6 +36,7 @@ vi.mock("../transport/connection", () => ({
     restart() { fake.calls.push("restart"); }
     background() { fake.calls.push("background"); }
     foreground() { fake.calls.push("foreground"); return fake.resumable; }
+    networkChanged(network: unknown) { fake.networks.push(network); }
     onStage(listener: (stage: string, attempt: number) => void) { fake.stage = listener; return () => undefined; }
     onConnected(listener: () => void) { fake.connected = listener; return () => undefined; }
     onLog() { return () => undefined; }
@@ -60,6 +65,8 @@ beforeEach(async () => {
   fake.calls = [];
   fake.resumable = true;
   fake.removed = 0;
+  fake.networks = [];
+  fake.unwatched = 0;
   await savePairedHost(HOST, { v: 1, deviceToken: "token" });
   root = createRoot(document.createElement("div"));
   await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
@@ -119,4 +126,19 @@ it("does nothing with no Mac chosen", async () => {
   fake.calls = [];
   await appState("active");
   expect(fake.calls).toEqual([]);
+});
+
+// #666: a phone that changes network races its paths again.
+it("tells the connection when the phone's network changes, and stops listening on unmount", async () => {
+  await act(async () => fake.network!({ type: "unknown", isConnected: null, details: null }));
+  await act(async () => fake.network!({ type: "wifi", isConnected: true, details: { ipAddress: "192.168.0.5" } }));
+  await act(async () => fake.network!({ type: "cellular", isConnected: true, details: { cellularGeneration: "5g" } }));
+  // The OS not knowing yet is not a network.
+  expect(fake.networks).toEqual([
+    { key: "wifi:192.168.0.5", online: true, label: "wifi" },
+    { key: "cellular:", online: true, label: "cellular" },
+  ]);
+  await act(async () => root.unmount());
+  expect(fake.unwatched).toBe(1);
+  root = createRoot(document.createElement("div"));
 });

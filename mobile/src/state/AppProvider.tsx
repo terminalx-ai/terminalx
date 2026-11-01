@@ -1,6 +1,7 @@
 import { forgetConversationState } from "./conversation-state";
 import { clearTranscriptCaches } from "../data/transcript-cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import NetInfo from "@react-native-community/netinfo";
 import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
 import { beginSignIn, finishSignIn, readSession, refreshStoredSession, signOut as revokeCloudSession } from "../auth/native";
@@ -15,6 +16,7 @@ import { extractPairingNameFromUrl, parsePairingCodeOrThrow } from "../pairing/p
 import { readHostCredential, readHosts, removeHost, setHostNames, type StoredHost } from "../store/hosts";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
+import { phoneNetwork } from "../transport/network";
 
 interface AppContextValue {
   ready: boolean;
@@ -184,7 +186,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     setError(null);
     if (activeHostRef.current?.id === host.id) {
       if (connectionStageRef.current === "connected") void refreshSessions();
-      else if (!["connecting", "reconnecting"].includes(connectionStageRef.current)) connection.restart();
+      else if (!["connecting", "reconnecting"].includes(connectionStageRef.current)) connection.restart("the computer was chosen again");
       return true;
     }
     try {
@@ -299,10 +301,16 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
       if (!activeHostRef.current) return;
       // Not a return from the background it knew of (the first activation): as before, connect if not connected.
-      if (!connection.foreground() && connectionStage !== "connected") connection.restart();
+      if (!connection.foreground() && connectionStage !== "connected") connection.restart("the app became active");
     });
     return () => subscription.remove();
   }, [connection, connectionStage, refreshCloudSession, session]);
+
+  // Changing networks races the paths again, rather than waiting for a dead one to time out (#666).
+  useEffect(() => NetInfo.addEventListener((state) => {
+    const network = phoneNetwork(state);
+    if (network) connection.networkChanged(network);
+  }), [connection]);
 
   const signIn = useCallback(async () => {
     setError(null);
@@ -406,7 +414,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const reconnectHost = useCallback(async (hostId: string) => {
     setError(null);
     if (activeHostRef.current?.id === hostId) {
-      connection.restart();
+      connection.restart("reconnect was chosen");
       return;
     }
     const host = (await readHosts()).find((item) => item.id === hostId);

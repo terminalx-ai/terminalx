@@ -43,3 +43,6 @@ mobile/scripts/__pycache__/
 # Native CLI launcher generated for the selected Tauri target
 /src-tauri/binaries/terminalx-*
 /src-tauri/binaries/.terminalx-*
+# rustc links it in a scratch dir beside it, which stays behind when the build is
+# killed mid-link and then reads as uncommitted work
+/src-tauri/binaries/rustc*/

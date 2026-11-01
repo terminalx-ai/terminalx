@@ -871,6 +871,7 @@ impl PairingManager {
                                     direct_auth_id: Uuid::new_v4().simple().to_string(),
                                 },
                                 None,
+                                None,
                             )
                             .await
                     }
@@ -893,10 +894,14 @@ impl PairingManager {
         connection: ConnectionOpen,
     ) -> Result<()> {
         if keypair.host_id() != relay_host_id {
-            bail!("relay connection named a different host key");
+            return Err(anyhow!("relay connection named a different host key")
+                .context(diagnostics::Stage::PhoneAttach));
         }
         let expected_device = connection.relay_device_id.clone();
-        let socket = relay::open_data_socket(&cell_url, generation, &connection).await?;
+        let socket = relay::open_data_socket(&cell_url, generation, &connection)
+            .await
+            .context(diagnostics::Stage::PhoneAttach)?;
+        self.record_relay_diagnostic(diagnostics::Event::PhoneAttached, 0, None);
         // The plaintext relay hello is sent to the phone only. The host data
         // leg starts with the phone's E2EE hello after its one auth frame.
         let context = PairingConnectionContext::Relay {
@@ -904,15 +909,26 @@ impl PairingManager {
             credential_kind: connection.kind,
             basis_conn_id: connection.conn_id,
         };
-        self.handle_e2ee_socket(socket, context, Some(expected_device))
+        let logged_in = AtomicBool::new(false);
+        self.handle_e2ee_socket(socket, context, Some(expected_device), Some(&logged_in))
             .await
+            .with_context(|| {
+                if logged_in.load(Ordering::SeqCst) {
+                    diagnostics::Stage::PhoneSession
+                } else {
+                    diagnostics::Stage::PhoneHandshake
+                }
+            })
     }
 
+    /// A relay leg passes `logged_in`, which is set, and recorded in the
+    /// relay diagnostics, once the device has logged in.
     async fn handle_e2ee_socket<S>(
-        &self,
+        self: &Arc<Self>,
         mut socket: WebSocketStream<S>,
         connection: PairingConnectionContext,
         expected_device_id: Option<String>,
+        logged_in: Option<&AtomicBool>,
     ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -953,15 +969,25 @@ impl PairingManager {
             .ok()
             .flatten()
             .map(|mirror| mirror.binding_generation);
+        let mark_logged_in = || {
+            if let Some(logged_in) = logged_in {
+                logged_in.store(true, Ordering::SeqCst);
+                self.record_relay_diagnostic(diagnostics::Event::PhoneAuthenticated, 0, None);
+            }
+        };
         if let Some((session_id, link_id)) = self.share_for_token(&auth.device_token, expected_device_id.as_deref()) {
             let authenticated = serde_json::json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
             send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+            mark_logged_in();
             return self.share_socket(socket, session, session_id, link_id).await;
         }
         let device = self
             .registry
             .find_by_token(&auth.device_token, generation)?
-            .ok_or_else(|| anyhow!("paired-device credential was refused"))?;
+            .ok_or_else(|| {
+                anyhow!(diagnostics::Category::Authentication)
+                    .context("paired-device credential was refused")
+            })?;
         // Session invitations are process-local and must never subscribe to
         // the mobile runtime's host-wide broadcasts, even via a disk entry.
         if device.scope == DeviceScope::Session {
@@ -971,7 +997,8 @@ impl PairingManager {
             .as_deref()
             .is_some_and(|id| id != device.id)
         {
-            bail!("relay invite was used by a different device credential");
+            return Err(anyhow!(diagnostics::Category::Authentication)
+                .context("relay invite was used by a different device credential"));
         }
         self.registry
             .touch(&device.id, &session.client_public_key_b64)?;
@@ -988,11 +1015,13 @@ impl PairingManager {
             "transcriptHashB64": session.transcript_hash_b64,
         });
         send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+        mark_logged_in();
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-        let mobile_connection = Arc::new(mobile::MobileConnection::new(
-            self, &device, self.mobile.clone(),
-            outbound_tx, wire_transport,
-        )?);
+        let mobile_connection = Arc::new(
+            mobile::MobileConnection::open(self, &device, outbound_tx, wire_transport)
+                .await
+                .context(diagnostics::Category::LocalRuntime)?,
+        );
         let mut reassembly = wire::Reassembly::default();
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.connections
@@ -1016,7 +1045,7 @@ impl PairingManager {
                         mobile_connection.close(self);
                         return Ok(());
                     };
-                    mobile_connection.check(self)?;
+                    mobile_connection.check_off_runtime(self).await?;
                     send_message(&mut socket, &mut session, &outgoing, mobile_connection.wire()).await?;
                 }
                 incoming = socket.next() => {
@@ -1051,7 +1080,7 @@ impl PairingManager {
                         Message::Pong(_) | Message::Frame(_) => continue,
                     };
                     let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                    mobile_connection.check(self)?;
+                    mobile_connection.check_off_runtime(self).await?;
                     let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
                     // Revalidate after asynchronous work: queued replies must not
                     // disclose session data after revocation or account replacement.
@@ -1059,7 +1088,7 @@ impl PairingManager {
                     // its acknowledgement contains no session data.
                     let forgot_self = request["method"] == "pairing.forget"
                         && response["ok"] == true;
-                    if !forgot_self { mobile_connection.check(self)?; }
+                    if !forgot_self { mobile_connection.check_off_runtime(self).await?; }
                     send_message(&mut socket, &mut session, &response, mobile_connection.wire()).await?;
                 }
             }
@@ -1067,7 +1096,7 @@ impl PairingManager {
     }
 
     async fn rpc_response(
-        &self,
+        self: &Arc<Self>,
         request: &serde_json::Value,
         device: &DeviceEntry,
         connection: &PairingConnectionContext,
@@ -1105,9 +1134,17 @@ impl PairingManager {
                 self.revoke_device(&device.id).await.map(|_| serde_json::json!({ "forgotten": true }))
             }
             method if allowed_method(device.scope, method) => {
-                match mobile::dispatch(self, mobile_connection, request, device).await {
-                    Some(result) => result,
-                    None => return static_rpc_response(request, device.scope),
+                // Not abandoned on a timeout: a late `session.send` would still run.
+                let dispatched = mobile::off_runtime({
+                    let (manager, connection) = (self.clone(), mobile_connection.clone());
+                    let (request, device) = (request.clone(), device.clone());
+                    move || Ok(mobile::dispatch(&manager, &connection, &request, &device))
+                })
+                .await;
+                match dispatched {
+                    Ok(Some(result)) => result,
+                    Ok(None) => return static_rpc_response(request, device.scope),
+                    Err(error) => Err(error),
                 }
             }
             _ => return static_rpc_response(request, device.scope),
