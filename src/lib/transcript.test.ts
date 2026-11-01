@@ -702,3 +702,76 @@ describe("scoped compaction projection (#644)", () => {
     expect(operations(t)[0].summary).toBe("Kept context");
   });
 });
+
+// #722: a queued message typed into an input box that held the previous prompt, as Claude Code put it back there.
+describe("a message on its way to the agent", () => {
+  const FIRST = "…so I want you to understand this scenario and create a proper issue with expected behavior";
+  const QUEUED = "and same is happening when I am clicking any of the old sessions related that toolquant.";
+  const SPLICED = `…so I want you to ${QUEUED}`;
+  const said = (t: ReturnType<typeof buildTranscript>) =>
+    t.turns.flatMap((turn) => [
+      ...(turn.prompt ? [turn.prompt.text] : []),
+      ...turn.work.flatMap((item) => (item.kind === "message" || item.kind === "queued" ? [item.text] : [])),
+    ]);
+
+  it("shows the prompt the agent received once, the dropped one as replaced, and no queued message left", () => {
+    const first = ev({ type: "user_message", text: FIRST, queued: false });
+    const queued = ev({ type: "user_message", text: QUEUED, queued: true });
+    const t = buildTranscript([
+      first,
+      queued,
+      ev({ type: "prompt_replaced", promptSeq: first.seq }),
+      ev({ type: "prompt_changed", promptSeq: queued.seq, text: SPLICED }),
+      ev({ type: "turn_started", promptSeq: queued.seq }),
+      ev({ type: "assistant_text", text: "Filed it." }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+    ], false);
+    expect(said(t)).toEqual([FIRST, SPLICED]);
+    expect(t.turns[0].prompt).toMatchObject({ text: FIRST, replaced: true, seq: first.seq });
+    expect(t.turns[0].prompt?.sent).toBeUndefined();
+    expect(t.turns[1].prompt).toMatchObject({ text: SPLICED, sent: QUEUED, seq: queued.seq });
+    expect(t.turns[1].prompt?.replaced).toBeUndefined();
+    expect(t.turns.some((turn) => turn.work.some((item) => item.kind === "queued"))).toBe(false);
+  });
+
+  it("shows a prompt that took the place of a dropped one as its own message, and the dropped one as never answered", () => {
+    const first = ev({ type: "user_message", text: "deploy to staging", queued: false });
+    const t = buildTranscript([
+      first,
+      ev({ type: "prompt_replaced", promptSeq: first.seq }),
+      // Typed into the terminal instead: the transcript's record is its only message.
+      ev({ type: "user_message", text: "deploy to production", queued: false }),
+      ev({ type: "assistant_text", text: "Deploying to production." }),
+    ], true);
+    expect(said(t)).toEqual(["deploy to staging", "deploy to production"]);
+    expect(t.turns[0].prompt?.replaced).toBe(true);
+    expect(t.turns[0].work).toEqual([]);
+    expect(t.turns[1].prompt?.replaced).toBeUndefined();
+  });
+
+  it("clears a queued message the agent took inside a longer prompt mid-turn, showing what it received", () => {
+    const queued = ev({ type: "user_message", text: "also check the tests", queued: true });
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "fix the build", queued: false }),
+      queued,
+      ev({ type: "prompt_changed", promptSeq: queued.seq, text: "half typed also check the tests" }),
+      ev({ type: "prompt_absorbed", promptSeq: queued.seq }),
+      ev({ type: "assistant_text", text: "Checking." }),
+    ], true);
+    expect(t.turns).toHaveLength(1);
+    expect(t.turns[0].work.filter((item) => item.kind === "queued")).toEqual([]);
+    expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "message", text: "half typed also check the tests", sent: "also check the tests", seq: queued.seq }));
+  });
+
+  it("says a message is waiting on the agent's input box until it goes in, wherever it is drawn", () => {
+    const prompt = ev({ type: "user_message", text: "run it", queued: false });
+    const queued = ev({ type: "user_message", text: "and then lint", queued: true });
+    const waiting = [prompt, queued, ev({ type: "input_occupied", promptSeq: prompt.seq, occupied: true }), ev({ type: "input_occupied", promptSeq: queued.seq, occupied: true })];
+    let t = buildTranscript(waiting, true);
+    expect(t.turns[0].prompt?.inputOccupied).toBe(true);
+    expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "queued", seq: queued.seq, inputOccupied: true }));
+    t = buildTranscript([...waiting, ev({ type: "input_occupied", promptSeq: prompt.seq, occupied: false }), ev({ type: "input_occupied", promptSeq: queued.seq, occupied: false })], true);
+    expect(t.turns[0].prompt?.inputOccupied).toBeUndefined();
+    expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "queued", seq: queued.seq, inputOccupied: undefined }));
+  });
+});

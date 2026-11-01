@@ -264,6 +264,21 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // A message the agent dropped unanswered (#722) goes again as a new message, as it was sent, images and all.
+  // Like a recovery, it is sent through the backend: a failure must not land in the composer's draft.
+  const sendAgain = useCallback(
+    (seq: number) => {
+      if (blockedRef.current || !backend.resendMessage) return;
+      setError(null);
+      backend.resendMessage(tab.id, seq).then((out) => {
+        setStopped(false);
+        for (const ev of out.events) applyEvent(ev);
+        if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
+      }, (e) => setError(safeError(e)));
+    },
+    [backend, tab.id],
+  );
+
   // The provider interrupts and delivers its own queue; acceptance updates the transcript.
   const sendQueuedNow = useCallback(
     (seq: number) => {
@@ -493,6 +508,7 @@ export function TabView({
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
+      onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       footer={
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.

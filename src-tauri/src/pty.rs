@@ -170,6 +170,12 @@ struct Pane {
     /// How much of the scrollback this pane's own program printed. The rest
     /// came before it: what the pane's last program left (`respawn`).
     printed: Arc<AtomicU64>,
+    /// The screen the pane's program has drawn, kept as it draws, for a pane
+    /// opened on a command (an agent's CLI). Its raw output is no use for
+    /// this: a TUI redraws only the cells that changed, so what one row
+    /// shows now can have been drawn long before the scrollback's window
+    /// (#722).
+    screen: Option<Arc<Mutex<vt100::Parser>>>,
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
@@ -471,6 +477,11 @@ fn wait_for_view(slot: &TapSlot, exited: &AtomicBool) {
     }
 }
 
+/// A pane's rows or columns as the screen model takes them: never none.
+fn screen_size(n: u16) -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(n).unwrap_or(std::num::NonZeroU16::MIN)
+}
+
 fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
     push_scrollback(&mut scrollback.lock().unwrap(), bytes);
 }
@@ -601,6 +612,11 @@ impl Terminals {
         let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
         append_scrollback(&scrollback, &printed);
         let own = Arc::new(AtomicU64::new(0));
+        let screen = command.is_some().then(|| {
+            let mut parser = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
+            parser.process(&printed);
+            Arc::new(Mutex::new(parser))
+        });
         let tap = self.tap_slot(id);
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
@@ -613,6 +629,7 @@ impl Terminals {
             let last_output = last_output.clone();
             let scrollback = scrollback.clone();
             let own = own.clone();
+            let screen = screen.clone();
             let emitted = self.emitted.clone();
             let tap = tap.clone();
             let exited = exited.clone();
@@ -651,6 +668,9 @@ impl Terminals {
                         // or from its tap.
                         let mut views = tap.0.lock().unwrap();
                         append_own_output(&scrollback, &own, acc);
+                        if let Some(screen) = &screen {
+                            screen.lock().unwrap_or_else(|e| e.into_inner()).process(acc);
+                        }
                         views.0.retain_mut(|view| {
                             let received = (view.tap)(acc);
                             if received {
@@ -730,7 +750,7 @@ impl Terminals {
             room,
             stalled: false,
         }));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, cwd: cwd.to_string(), created: crate::store::index::now() });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, cwd: cwd.to_string(), created: crate::store::index::now() });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -940,7 +960,19 @@ impl Terminals {
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
         let panes = self.panes.lock().unwrap();
         let pane = panes.get(id).context("no such terminal")?;
-        pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))
+        pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
+        if let Some(screen) = &pane.screen {
+            screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(rows), screen_size(cols));
+        }
+        Ok(())
+    }
+
+    /// Read the screen pane `id`'s program has drawn, as it stands now.
+    /// `None` for a pane that keeps none: a shell tab, or no such pane.
+    pub fn screen<R>(&self, id: &str, read: impl FnOnce(&vt100::Screen) -> R) -> Option<R> {
+        let screen = self.panes.lock().unwrap().get(id)?.screen.clone()?;
+        let parser = screen.lock().unwrap_or_else(|e| e.into_inner());
+        Some(read(parser.screen()))
     }
 
     pub(crate) fn size(&self, id: &str) -> Result<(u16, u16)> {

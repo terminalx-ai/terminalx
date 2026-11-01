@@ -188,3 +188,42 @@ it("lists the files a finished turn changed, folding the rest, and hides them wh
   rerender(<TooltipProvider><TurnBlock turn={{ ...value }} sessionId="s" cwd="/repo" stream={[]} working={false} /></TooltipProvider>);
   expect(screen.queryByTestId("turn-changes")).toBeNull();
 });
+
+// #722: what became of a message on its way to the agent.
+describe("a message on its way to the agent", () => {
+  it("marks a dropped prompt as never answered and offers to send it again", () => {
+    const value = turn([]);
+    value.prompt!.replaced = true;
+    const onSendAgain = vi.fn();
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onSendAgain={onSendAgain} />);
+    expect(screen.getByTestId("prompt-replaced").textContent).toContain("Not answered");
+    fireEvent.click(screen.getByRole("button", { name: "Send again" }));
+    expect(onSendAgain).toHaveBeenCalledWith(1);
+    cleanup();
+    // Where it cannot be sent again (a cloud tab, a viewer), it still says so.
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByTestId("prompt-replaced")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
+  });
+
+  it("shows what the agent received once, with what was sent behind it", () => {
+    const value = turn([]);
+    value.prompt!.text = "so I want you to and same is happening";
+    value.prompt!.sent = "and same is happening";
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getAllByTestId("reader-message")).toHaveLength(1);
+    const changed = screen.getByTestId("prompt-changed");
+    expect(changed.textContent).toContain("Changed on the way");
+    expect(changed.querySelector("div")?.textContent).toBe("and same is happening");
+    expect(screen.queryByTestId("prompt-replaced")).toBeNull();
+  });
+
+  it("says why a queued message has not gone in, and offers no Send now meanwhile", () => {
+    const value = turn([]);
+    value.work = [{ kind: "queued", key: "q2", seq: 2, text: "and then lint", inputOccupied: true }];
+    render(<TooltipProvider><TurnBlock turn={value} sessionId="s" stream={[]} working onSendQueuedNow={vi.fn()} /></TooltipProvider>);
+    expect(screen.getByTestId("queued-message").textContent).toContain("and then lint");
+    expect(screen.getByTestId("input-occupied").textContent).toContain("input box already has text in it");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+  });
+});
