@@ -19,7 +19,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
-        "native-fallback-send", "native-fallback-start", "native-supported-start"] {
+        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -481,6 +481,135 @@ fn rt_bound(manager: &SessionManager) -> bool {
 /// Stands in for Codex at a tab's first launch: says the version it is told
 /// to, offers `--no-daemon` like a terminal-capable Codex, and records how it
 /// was started each time.
+/// A cloud workspace's grant snapshot and configuration for the
+/// `cloud-launch` case, as `cloud_grants` and `cloud_config` would give a
+/// terminal launch: a credential file, a variable, one to clear, a route with
+/// its own model and provider, and developer instructions.
+pub(super) fn cloud_stand_in() -> Option<(crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig)> {
+    if std::env::var(CASE).as_deref() != Ok("cloud-launch") { return None; }
+    let mut grant = crate::cloud_grants::LaunchGrant::default();
+    grant.env = vec![("CODEX_API_KEY".into(), Some("grant-secret".into())), ("OPENAI_API_KEY".into(), None)];
+    grant.route = Some(crate::cloud_grants::RouteLaunch { model: Some("routed-model".into()), codex_args: " -c 'model_provider=\"route\"'".into(), ..Default::default() });
+    grant.codex_auth = Some(Some(store::root().unwrap().join("grant-auth.json")));
+    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: " -c 'developer_instructions=\"brief\"'".into() };
+    Some((grant, config))
+}
+
+#[test]
+fn shell_quoted_launch_arguments_come_back_as_the_words_a_shell_would_pass() {
+    // How `cloud_config` and `cloud_grants` quote for a terminal launch.
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let instructions = "developer_instructions=\"Be brief.\nIt's fine.\"";
+    let server = "mcp_servers.docs={ url = \"https://example.test/mcp\", env_vars = [\"MCP_HEADER_SECRET_0\"] }";
+    let text = format!(" -c {} -c {}", quote(instructions), quote(server));
+    assert_eq!(shell_words(&text), ["-c", instructions, "-c", server]);
+    assert!(shell_words("").is_empty());
+    assert_eq!(shell_words(r#"a  ''  "b \"c\"" d\ e"#), ["a", "", "b \"c\"", "d e"]);
+}
+
+#[test]
+fn a_cloud_launch_takes_the_route_configuration_and_credential_like_a_terminal_one() {
+    let mut grant = crate::cloud_grants::LaunchGrant::default();
+    grant.env = vec![("CODEX_API_KEY".into(), Some("grant-secret".into())), ("OPENAI_API_KEY".into(), None)];
+    grant.route = Some(crate::cloud_grants::RouteLaunch { model: Some("routed-model".into()), codex_args: " -c 'model_provider=\"route\"'".into(), notice: Some("The route is not answering".into()), ..Default::default() });
+    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: " -c 'developer_instructions=\"brief\"'".into() };
+    let native = native_launch(&grant, &config, " -c 'mcp_servers.computer={}'");
+    assert_eq!(native.args, ["-c", "model_provider=\"route\"", "-c", "developer_instructions=\"brief\"", "-c", "mcp_servers.computer={}", "app-server", "--listen", "stdio://"]);
+    // The grant's variables come last, so a credential always wins.
+    assert_eq!(native.env, [("NODE_ENV".to_string(), "test".to_string()), ("CODEX_API_KEY".to_string(), "grant-secret".to_string())]);
+    assert_eq!(native.unset, ["OPENAI_API_KEY"]);
+    assert_eq!((native.model.as_deref(), native.notice.as_deref()), (Some("routed-model"), Some("The route is not answering")));
+
+    // Outside a workspace: the app server and nothing else.
+    let local = native_launch(&Default::default(), &Default::default(), "");
+    assert_eq!(local.args, ["app-server", "--listen", "stdio://"]);
+    assert!(local.env.is_empty() && local.unset.is_empty() && local.model.is_none());
+}
+
+/// Stands in for Codex in a cloud workspace: records the arguments and the
+/// variables it was started with, starts a thread and plays one turn.
+const CLOUD_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+printf '%s\n' "$@" > "$here/argv"
+printf 'CODEX_HOME=%s\nCODEX_API_KEY=%s\nNODE_ENV=%s\nOPENAI_API_KEY=%s\n' "${CODEX_HOME-}" "${CODEX_API_KEY-}" "${NODE_ENV-}" "${OPENAI_API_KEY-unset}" > "$here/env"
+while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ;;
+  esac
+done
+"#;
+
+/// Native Codex in a cloud workspace (#644): started with the workspace's
+/// route, configuration and credential in a hook-free home, the variable the
+/// grant clears cleared, and the route's model; its thread is then picked up
+/// by the terminal engine when the reader opens the terminal view.
+fn cloud_launch_fixture() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    std::env::set_var("CODEX_HOME", root.join("user-codex"));
+    std::env::set_var("OPENAI_API_KEY", "inherited");
+    std::fs::write(root.join("grant-auth.json"), "{\"workspace\":true}").unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), CLOUD_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    manager.send("stdio-owner", "tab", "hello".into(), Vec::new()).unwrap();
+    let events = || -> Vec<AgentEvent> { store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap_or_default() };
+    let until = Instant::now() + WAIT;
+    while !events().iter().any(|event| matches!(event.payload, Payload::TurnCompleted { .. })) {
+        assert!(Instant::now() < until, "no turn: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let argv: Vec<String> = std::fs::read_to_string(bin.join("argv")).unwrap().lines().map(str::to_owned).collect();
+    assert_eq!(argv, ["-c", "model_provider=\"route\"", "-c", "developer_instructions=\"brief\"", "app-server", "--listen", "stdio://"]);
+    let native = root.join("codex-native");
+    let env = std::fs::read_to_string(bin.join("env")).unwrap();
+    assert_eq!(env.lines().collect::<Vec<_>>(), [format!("CODEX_HOME={}", native.display()).as_str(), "CODEX_API_KEY=grant-secret", "NODE_ENV=test", "OPENAI_API_KEY=unset"]);
+    assert_eq!(std::fs::read_link(native.join("auth.json")).unwrap(), root.join("grant-auth.json"), "the workspace's credential");
+    let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(native.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(hooks, json!({"hooks": {}}), "no Raccoon hook runs for an app-server session");
+    let received: Vec<serde_json::Value> = std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let started = received.iter().find(|frame| frame["method"] == "thread/start").expect("thread/start");
+    assert_eq!(started["params"]["model"], "routed-model", "the route's model, not the tab's");
+
+    // The terminal view: Codex's own terminal resumes the thread, whose rollout
+    // the app server kept in the native home.
+    let day = native.join("sessions/2026/11/01");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(day.join("rollout-2026-11-01T00-00-00-thread-1.jsonl"), "{}\n").unwrap();
+    std::fs::write(bin.join("codex"), FIRST_LAUNCH_CODEX).unwrap();
+    std::fs::write(bin.join("version"), "codex-cli 0.166.0\n").unwrap();
+    manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
+    manager.ensure_started("stdio-owner", "tab").unwrap();
+    assert!(root.join("codex/sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl").is_file(), "adopted into the terminal engine's home");
+    let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default();
+    let until = Instant::now() + WAIT;
+    while !launches().lines().any(|line| line.starts_with("--no-daemon") && line.contains("resume thread-1")) {
+        assert!(Instant::now() < until, "the terminal Codex did not resume the thread: {:?}", launches());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
 const FIRST_LAUNCH_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 printf '%s\n' "$*" >> "$here/launches"
@@ -549,6 +678,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
+    if case == "cloud-launch" { return cloud_launch_fixture(); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({
@@ -668,7 +798,7 @@ fn child_fixture() {
         r#"printf '%s\n' '{"method":"thread/status/changed","params":{"threadId":"unbound"}}'"#
     };
     let args = vec!["-c".into(), script.into()];
-    let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[] }, sink).unwrap();
+    let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[], unset: &[] }, sink).unwrap();
     rt.child_pid = Some(child.pid); rt.child = Some(child.clone());
     drop(rt);
     observed.recv_timeout(WAIT).unwrap();

@@ -127,7 +127,9 @@ pub(crate) fn prefer_native_codex(tab: &mut NewTab, background: bool) {
     if crate::store::settings::load().experimental.native_codex { native_codex(tab, background) }
 }
 
-fn native_codex(tab: &mut NewTab, background: bool) {
+/// The rules alone, for a request that carries the preference itself: a cloud
+/// workspace's `session.create` / `session.addTab` from the desktop.
+pub(crate) fn native_codex(tab: &mut NewTab, background: bool) {
     let mode = index::permission_mode_or_default(tab.permission_mode.as_deref());
     if tab.harness == "codex" && !background && crate::harness::codex::stdio::Stdio::validate_mode(&mode).is_ok() {
         tab.transport = index::AgentTransport::ExperimentalCodexStdio;

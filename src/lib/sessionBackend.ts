@@ -163,6 +163,12 @@ export interface SessionBackend {
   /** Cloud only: what a tab's terminal view attaches to. */
   agentTerminal?: AgentTerminalTarget;
   /**
+   * Cloud only (#644): move a native Codex tab to Codex's own terminal on the
+   * same thread, for good, and start it, as opening its terminal view does on
+   * a Mac. Refused mid-turn and to anyone who may not start its terminal.
+   */
+  toTerminal?(tabId: string): Promise<void>;
+  /**
    * Cloud only (PRO-22): the slash commands the composer of `tab` offers,
    * from the runtime, which lists a plain driver only what it will accept
    * from them (PRO-88). Null when nothing can list them (a view-only reader,
@@ -426,6 +432,11 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     stop: async (tabId) => {
       guard();
       await stopCloudAgent(scope, tabId, client);
+    },
+    toTerminal: async (tabId) => {
+      guard();
+      if (!client) throw new Error("A tab moves to its terminal once the workspace is connected.");
+      await client.moveAgentTabToTerminal(ctx.sessionId, tabId);
     },
     respondPermission: (tabId, requestId, optionId) => {
       if (approveBlockedReason) return Promise.reject(new Error(approveBlockedReason));
