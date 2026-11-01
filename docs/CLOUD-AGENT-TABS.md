@@ -272,10 +272,15 @@ account/read failed during TUI bootstrap: account/read failed: workspace routing
   out, then its `Stop` hook) also ends the turn with `authFailed: true`.
 - **Said.** The turn's end (and a launch error, such as a Codex too old for
   `--no-daemon`) carries `detail`: the last line, plain text, with tokens,
-  `key=value` secrets, addresses, URL paths and queries and home folders cut
+  secrets said as `key=value`, `--key value`, `key: value` or JSON's
+  `"key": "value"` (escaped JSON too), cookies, an `Authorization` value
+  with its scheme, addresses, URL paths and queries and home folders cut
   out, at most 240 characters (`recovery::detail`, applied again by
-  `sanitize`). The chat shows it under the allowlisted message. Mid-turn
-  provider text never becomes a `detail`.
+  `sanitize`). A bare `key:` label counts only where a phrase starts and
+  when it ends in a credential word, so `Unauthorized:`, `auth.json:` and
+  Codex's own `Failed to refresh token:` stay readable; a quoted key counts
+  wherever its credential word is. The chat shows it under the allowlisted
+  message. Mid-turn provider text never becomes a `detail`.
 - **Reported.** A turn that ends with `authFailed` on a session launched with
   an organization grant calls `cloud_grants::reject_launch`, which marks the
   grant refused and wakes the grant loop. The loop sends, before its next

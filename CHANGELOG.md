@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Chat
+
+- Cut more credentials from the redacted detail line that a refused sign-in or
+  an agent that exits early shows in the chat: `key: value` and JSON forms,
+  escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's
+  secret-looking value, including one that runs on over lines. Errors such as
+  `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
+  readable. (#717)
+
 ## 0.2.22
 
 ### Background sessions
