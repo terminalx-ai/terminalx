@@ -40,13 +40,26 @@ reviewer has an active or queued turn. Dirty workspaces stop for a person.
 
 A fresh resolver conversation reserves the checkout. App prompt admission and
 managed agents' tool hooks refuse another conversation while it is reserved.
-The resolver merges the pinned base commit, preserving both sides' intent,
-runs project checks, and makes one merge commit. TerminalX verifies the exact
-parents and unchanged remote head before a normal, never forced, push. A changed
-remote, unexpected commit, failed check, ambiguous resolution, or exhausted
-`maxResolutions` stops at **Needs you**. Direct external Git writes cannot be
-prevented; their changed heads invalidate verification. A restart discards an
-unfinished resolution/check result and asks for inspection before continuing.
+The resolver merges the pinned base commit, preserving both sides' intent, and
+commits the merge as soon as no conflict is left, before running project
+checks; a fix the checks need is amended into that one merge commit, which
+keeps its parents. A run stopped during its checks, which can take many
+minutes, so leaves one local merge commit rather than a half-merged checkout.
+TerminalX verifies the exact parents and unchanged remote head before a normal,
+never forced, push. A changed remote, unexpected commit, failed check, ambiguous
+resolution, or exhausted `maxResolutions` stops at **Needs you**. Direct
+external Git writes cannot be prevented; their changed heads invalidate
+verification. A restart discards an unfinished resolution/check result and asks
+for inspection before continuing.
+
+When the resolver's turn ends without a pushed result and the checkout still
+holds the merge it was asked for, uncommitted (HEAD at the original head, the
+pinned base being merged), TerminalX runs `git merge --abort` and records it,
+so the base's changes are not left in the checkout looking like the branch's
+own uncommitted work (#736). A merge the resolver committed is left as it is.
+So is the checkout of a stopped pipeline, and of a resolver a person
+interrupted, for them to inspect. While the resolver works, the pipeline keeps
+reading the pull request: merged or closed meanwhile, the pipeline ends there.
 
 Every changed head gets an independent review and fresh checks. Prior findings
 and security verdicts remain recorded until that review explicitly replaces
@@ -220,9 +233,12 @@ its conversations are released. An idle agent is stopped, together with the
 background commands and watches it left running, which could otherwise wake it
 for as long as they run; a note in its transcript says why, and its next
 message resumes the conversation. A reviewer or conflict resolver still in a
-turn is told the pipeline ended, and its agent is stopped when that turn ends;
-one part way through its merge is not told to stop, so it cannot leave the
-checkout half merged. Stop releases the reviewer and the conflict resolver; a
+turn is told the pipeline ended, and its agent is stopped when that turn ends.
+A resolver part way through its merge when the pull request was merged or
+closed is told to stop at once without committing, since that merge would
+never be pushed; the merge it leaves unfinished is aborted when its turn ends.
+One whose pipeline was stopped is not told, and finishes its merge. Stop
+releases the reviewer and the conflict resolver; a
 merge or close releases the author too, but only an idle one: an author in a
 turn is someone's own follow-up, and is neither told nor stopped. A reply that
 comes after the end is noted in the record and ignored.

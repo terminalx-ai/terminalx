@@ -172,6 +172,19 @@ fn verify_resolution(cwd: &Path, resolution: &super::Resolution, head: &str, bra
         Ok(())
 }
 
+/// Abort the merge a resolution asked for if it is still there unfinished:
+/// HEAD is the original head, and the pinned base is being merged into it. A
+/// merge the resolver committed, or anything else, is left as it is.
+fn abort_unfinished_merge(cwd: &Path, resolution: &super::Resolution) -> Result<bool> {
+    let head = crate::git::run(cwd, &["rev-parse", "HEAD"])?.trim().to_string();
+    let merging = crate::git::run(cwd, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok().map(|merging| merging.trim().to_string());
+    if head != resolution.head || merging.as_deref() != Some(resolution.base_commit.as_str()) {
+        return Ok(false);
+    }
+    crate::git::abort_merge(cwd, &resolution.base_commit)?;
+    Ok(true)
+}
+
 fn remote_head(cwd: &Path, branch: &str) -> Result<Option<String>> {
     let reference = format!("refs/heads/{branch}");
     let mut command = std::process::Command::new("git");
@@ -285,6 +298,10 @@ impl Host for LocalHost {
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
         verify_resolution(cwd, resolution, head, branch)
+    }
+
+    fn abort_unfinished_merge(&self, cwd: &Path, resolution: &super::Resolution) -> Result<bool> {
+        abort_unfinished_merge(cwd, resolution)
     }
 
     fn defer_local_check(&self, pipeline_id: &str) -> bool {
@@ -500,6 +517,46 @@ mod tests {
         git(root, &["add", "extra.txt"]);
         git(root, &["commit", "-qm", "another writer"]);
         assert!(verify_resolution(root, &resolution, &git(root, &["rev-parse", "HEAD"]), "raccoon/433-work").is_err());
+    }
+
+    #[test]
+    fn only_the_resolutions_own_unfinished_merge_is_aborted() {
+        let dir = repository();
+        let root = dir.path();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(root, &["push", "-q", "origin", "main"]);
+        std::fs::write(root.join("README.md"), "branch intent\n").unwrap();
+        git(root, &["commit", "-qam", "branch"]);
+        push(root).unwrap();
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("README.md"), "base intent\n").unwrap();
+        std::fs::write(root.join("base.txt"), "only on main\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        git(root, &["push", "-q", "origin", "main"]);
+        git(root, &["checkout", "-q", "raccoon/433-work"]);
+        let resolution = resolution_needed(root, "raccoon/433-work", "main", false).unwrap().unwrap();
+        let merge = || std::process::Command::new("git").current_dir(root).args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-commit", &resolution.base_commit]).output().unwrap();
+        assert!(!abort_unfinished_merge(root, &resolution).unwrap(), "no merge was started");
+
+        assert!(!merge().status.success());
+        let other = super::super::Resolution { base_commit: resolution.head.clone(), ..resolution.clone() };
+        assert!(!abort_unfinished_merge(root, &other).unwrap(), "not the merge this resolution asked for");
+        assert!(abort_unfinished_merge(root, &resolution).unwrap());
+        assert_eq!(git(root, &["rev-parse", "HEAD"]), resolution.head);
+        assert!(workspace(root).unwrap().dirty.is_empty(), "nothing of the base is left in the checkout");
+        assert!(!root.join("base.txt").exists());
+
+        // A merge the resolver committed is its result, never aborted.
+        assert!(!merge().status.success());
+        std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-qm", "preserve both intents"]);
+        let committed = git(root, &["rev-parse", "HEAD"]);
+        assert!(!abort_unfinished_merge(root, &resolution).unwrap());
+        assert_eq!(git(root, &["rev-parse", "HEAD"]), committed);
     }
 
     #[test]

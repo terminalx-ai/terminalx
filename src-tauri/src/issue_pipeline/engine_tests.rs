@@ -76,6 +76,10 @@ struct World {
     busy: BTreeSet<String>,
     /// Agents TerminalX stopped, with the note left in each transcript.
     stopped_agents: Vec<(String, String)>,
+    /// The checkout holds the resolver's merge, not committed.
+    unfinished_merge: bool,
+    /// Unfinished merges TerminalX aborted.
+    aborted: u32,
 }
 
 struct FakeHost(Mutex<World>);
@@ -144,6 +148,8 @@ impl FakeHost {
             running: BTreeSet::new(),
             busy: BTreeSet::new(),
             stopped_agents: Vec::new(),
+            unfinished_merge: false,
+            aborted: 0,
         }))
     }
 
@@ -278,6 +284,15 @@ impl Host for FakeHost {
         if resolution.remote_head != world.pr.as_ref().map(|pr| pr.head_sha.clone()) { bail!("Someone pushed during resolution"); }
         if head == resolution.head { bail!("No merge commit was made"); }
         Ok(())
+    }
+    fn abort_unfinished_merge(&self, _cwd: &Path, _resolution: &super::Resolution) -> Result<bool> {
+        let mut world = self.world();
+        if !world.unfinished_merge {
+            return Ok(false);
+        }
+        world.unfinished_merge = false;
+        world.aborted += 1;
+        Ok(true)
     }
 
     fn workspace(&self, _cwd: &Path) -> Result<Workspace> {
@@ -2408,16 +2423,115 @@ fn resolver_termination_releases_a_stopped_pipelines_checkout() {
         assert_eq!(run.poll().stage, Stage::Resolve);
         act(&run.host, &run.id, Action::Stop).unwrap();
         assert!(run.pipeline().resolution.is_some(), "Stop cannot release a still-running resolver");
+        run.host.world().unfinished_merge = true;
         turn_failed(&run.host, "resolver", "t1", engine::turn_failure(interrupted));
         let stopped = run.pipeline();
         assert!(stopped.stopped);
         assert_eq!(stopped.state, State::Stopped);
         assert!(stopped.resolution.is_none());
         assert!(stopped.events.iter().any(|event| event.kind == "resolutionStopped"));
+        // A stopped pipeline's checkout is the person's to inspect, as it is.
+        assert_eq!(run.host.world().aborted, 0);
         assert!(super::admission::check("author", "t1").is_ok());
         assert!(run.merges().is_empty());
         assert!(run.host.world().pushes.is_empty());
     }
+}
+
+/// At the resolve stage, with the conflict found after the review began.
+fn resolving(run: &Run) {
+    run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    {
+        let mut world = run.host.world();
+        world.conflict = true;
+        world.pr.as_mut().unwrap().merge_state = "DIRTY".into();
+    }
+    assert_eq!(run.poll().stage, Stage::Resolve);
+}
+
+#[test]
+fn a_resolver_that_ends_without_committing_its_merge_leaves_no_half_merged_checkout() {
+    let blocked = "```terminalx-status\n{\"status\":\"blocked\",\"checks\":\"none\",\"reason\":\"The remote moved\"}\n```".to_string();
+    for (case, report) in [("blocked", blocked), ("done", done("Merged the base.")), ("silent", "I could not finish.".to_string())] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        // It merged the base and stopped before the commit.
+        run.host.world().unfinished_merge = true;
+        turn_completed(&run.host, "resolver", "t1", Some(&report));
+        let pipeline = run.pipeline();
+        assert_eq!(pipeline.state, State::NeedsYou, "{case}");
+        assert!(pipeline.resolution.is_none(), "{case}");
+        assert_eq!(run.host.world().aborted, 1, "{case}");
+        let event = pipeline.events.iter().find(|event| event.kind == "resolutionAborted").unwrap_or_else(|| panic!("{case}"));
+        assert!(event.message.contains("its merge of main at base-mo") && event.message.contains("TerminalX aborted it"), "{case}: {}", event.message);
+        assert_eq!(event.commit.as_deref(), Some(C1));
+        if case == "done" {
+            assert!(matches!(&pipeline.reason, Some(StopReason::Failed { message, .. }) if message.contains("without committing it")), "{:?}", pipeline.reason);
+        }
+        assert_eq!(run.host.world().pushes, [C1], "{case}: nothing new is pushed");
+        assert!(super::admission::check("author", "t1").is_ok());
+    }
+
+    // A merge it committed is its result: verified and pushed, never aborted.
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    run.host.commit(C2);
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Merged the base.")));
+    assert_eq!(run.host.world().pushes, [C1, C2]);
+    assert_eq!(run.host.world().aborted, 0);
+    assert!(!run.kinds().iter().any(|kind| kind == "resolutionAborted"));
+}
+
+#[test]
+fn a_pull_request_merged_during_resolution_stops_the_resolver_at_once_and_its_merge_is_aborted() {
+    for ends in ["completed", "failed"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        let resolver = SessionRef { session_id: "resolver".into(), tab_id: "t1".into() };
+        run.host.agent(&resolver, true);
+        run.host.world().unfinished_merge = true;
+        // Merged by someone else while the resolver runs its checks.
+        run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+        let merged = run.poll();
+        assert_eq!(merged.state, State::Merged, "{ends}: {:?}", merged.note);
+        assert!(merged.resolution.is_some(), "{ends}: the resolver holds the checkout until its turn ends");
+        let told = run.host.prompts_to("resolver");
+        assert_eq!(told.len(), 2, "{ends}: the resolution, then the end");
+        assert!(told[1].contains("will never be pushed") && told[1].contains("do not commit the merge"), "{ends}");
+        assert_eq!(run.host.world().aborted, 0, "{ends}: never under a turn that is still running");
+
+        run.host.agent(&resolver, false);
+        match ends {
+            "completed" => turn_completed(&run.host, "resolver", "t1", Some("Stopped, as asked.")),
+            _ => turn_failed(&run.host, "resolver", "t1", engine::turn_failure(true)),
+        }
+        let after = run.pipeline();
+        assert_eq!(after.state, State::Merged, "{ends}: the merge stands");
+        assert!(after.resolution.is_none(), "{ends}");
+        assert_eq!(run.host.world().aborted, 1, "{ends}");
+        assert!(after.events.iter().any(|event| event.kind == "resolutionAborted"), "{ends}");
+        if ends == "completed" {
+            assert_eq!(run.host.stopped_agents(), [key(&resolver)]);
+        }
+        assert_eq!(run.host.world().pushes, [C1], "{ends}");
+        assert!(run.merges().is_empty(), "{ends}: merged elsewhere, not by the pipeline");
+    }
+}
+
+#[test]
+fn a_resolver_a_person_stopped_is_left_to_finish_its_merge() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    let resolver = SessionRef { session_id: "resolver".into(), tab_id: "t1".into() };
+    run.host.agent(&resolver, true);
+    act(&run.host, &run.id, Action::Stop).unwrap();
+    assert_eq!(run.host.prompts_to("resolver").len(), 1, "not told to stop part way through its merge");
+    run.host.world().unfinished_merge = true;
+    run.host.agent(&resolver, false);
+    turn_completed(&run.host, "resolver", "t1", Some("I could not finish."));
+    assert_eq!(run.host.world().aborted, 0, "a stopped pipeline's checkout is the person's to inspect");
+    assert!(run.pipeline().resolution.is_none());
 }
 
 #[test]

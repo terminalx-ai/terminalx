@@ -548,6 +548,164 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
     WorkStatus { is_repo: true, dirty, branch, upstream, ahead, behind, default_branch: default, ahead_of_base, head: head_commit(cwd) }
 }
 
+// ------------------------------------------------------- an unfinished merge
+
+/// A `git merge` that stopped before its commit (`MERGE_HEAD` is set). Every
+/// file it brought in is uncommitted until then, so a list of uncommitted
+/// files alone shows the other side's changes as this branch's own work
+/// (#736). This says which is which.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnfinishedMerge {
+    /// The commit being merged in.
+    pub merge_head: String,
+    /// What is being merged, as `git merge` was given it: a branch name, or
+    /// the commit's short id.
+    pub name: String,
+    /// Conflicts not resolved yet: the file still has conflict markers, or is
+    /// binary, which Git cannot mark.
+    pub conflicted: Vec<String>,
+    /// Uncommitted and not what Git merged by itself: resolved or edited by
+    /// hand, or untracked. Aborting the merge loses these.
+    pub changed_here: Vec<String>,
+    /// Uncommitted only because the merge brought them in, exactly as Git
+    /// merged them. What is merged in still has these changes.
+    pub incoming: Vec<String>,
+}
+
+/// The merge in progress in the checkout at `cwd`, if there is one.
+pub fn unfinished_merge(cwd: &Path) -> Option<UnfinishedMerge> {
+    let merge_head = run(cwd, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok()?.trim().to_string();
+    let head = head_commit(cwd)?;
+    let untracked = listed_paths(cwd, &["ls-files", "-z", "--others", "--exclude-standard", "--"])?;
+    let mut changed = listed_paths(cwd, &["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"])?;
+    changed.extend(untracked.iter().cloned());
+    let unmerged = listed_paths(cwd, &["diff", "--name-only", "-z", "--diff-filter=U", "--"])?;
+    // Without what Git merged by itself, every file counts as changed here:
+    // over-warning is the safe side.
+    let differs = merged_tree(cwd, &head, &merge_head)
+        .and_then(|tree| listed_paths(cwd, &["diff", "--name-only", "-z", "--no-renames", &tree, "--"]))
+        .map(|mut differs| {
+            differs.extend(untracked);
+            differs
+        })
+        .unwrap_or_else(|| changed.clone());
+    let mut merge = UnfinishedMerge { name: merge_name(cwd, &merge_head), merge_head, conflicted: Vec::new(), changed_here: Vec::new(), incoming: Vec::new() };
+    for path in changed.into_iter().chain(unmerged.iter().cloned()).collect::<std::collections::BTreeSet<_>>() {
+        if unmerged.contains(&path) && still_conflicted(&cwd.join(&path)) {
+            merge.conflicted.push(path);
+        } else if unmerged.contains(&path) || differs.contains(&path) {
+            merge.changed_here.push(path);
+        } else {
+            merge.incoming.push(path);
+        }
+    }
+    Some(merge)
+}
+
+/// The paths a NUL-separated listing names; `None` when it cannot be read.
+fn listed_paths(cwd: &Path, args: &[&str]) -> Option<std::collections::BTreeSet<String>> {
+    run(cwd, args).ok().map(|out| out.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect())
+}
+
+/// The tree Git makes by merging `theirs` into `ours` by itself, conflicts
+/// written out with markers. `merge-tree` writes it to the object store; the
+/// same two commits always make the same objects, so asking again adds none.
+/// The Changes panel asks every few seconds, so the answer is kept for each
+/// checkout and pair of commits.
+fn merged_tree(cwd: &Path, ours: &str, theirs: &str) -> Option<String> {
+    type Key = (PathBuf, String, String);
+    static MERGED: std::sync::Mutex<Vec<(Key, String)>> = std::sync::Mutex::new(Vec::new());
+    let key = (cwd.to_path_buf(), ours.to_string(), theirs.to_string());
+    if let Some((_, tree)) = MERGED.lock().unwrap_or_else(|error| error.into_inner()).iter().find(|(known, _)| *known == key) {
+        return Some(tree.clone());
+    }
+    let out = git().current_dir(cwd).args(["merge-tree", "--write-tree", "--no-messages", ours, theirs]).output().ok()?;
+    // 0: merged cleanly, 1: with conflicts. Either way the tree comes first.
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        return None;
+    }
+    let tree = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+    if !is_tree_id(&tree) {
+        return None;
+    }
+    let mut merged = MERGED.lock().unwrap_or_else(|error| error.into_inner());
+    if merged.len() >= 16 {
+        merged.remove(0);
+    }
+    merged.push((key, tree.clone()));
+    Some(tree)
+}
+
+/// A conflicted file is resolved once its markers are gone, staged or not.
+/// One that is binary, too large to read, or unreadable stays conflicted.
+fn still_conflicted(path: &Path) -> bool {
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    match std::fs::metadata(path) {
+        // Deleted on one side and kept or not on the other: the checkout
+        // holds the choice either way.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Ok(meta) if meta.is_file() && meta.len() <= LIMIT => match std::fs::read(path) {
+            Ok(bytes) if !bytes[..bytes.len().min(8000)].contains(&0) => {
+                String::from_utf8_lossy(&bytes).lines().any(|line| line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>"))
+            }
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+/// What a merge was given, from the first line of its message (`Merge branch
+/// 'main'`, `Merge remote-tracking branch 'origin/main'`, `Merge commit
+/// '995514cb…'`). The commit's short id when that names no branch.
+fn merge_name(cwd: &Path, merge_head: &str) -> String {
+    let short = merge_head.chars().take(7).collect::<String>();
+    let message = run(cwd, &["rev-parse", "--git-path", "MERGE_MSG"]).ok().and_then(|path| {
+        let path = PathBuf::from(path.trim());
+        std::fs::read_to_string(if path.is_absolute() { path } else { cwd.join(path) }).ok()
+    });
+    let quoted = message.as_deref().and_then(|message| message.lines().next()).and_then(|line| {
+        let start = line.find('\'')? + 1;
+        let end = start + line[start..].find('\'')?;
+        Some(line[start..end].to_string())
+    });
+    match quoted {
+        Some(name) if !name.is_empty() && !is_tree_id(&name) => name,
+        _ => short,
+    }
+}
+
+/// Refuse unless the merge in progress is still the merge of `merge_head`:
+/// what is acted on is what the person was shown.
+fn expect_merge(cwd: &Path, merge_head: &str) -> Result<()> {
+    match run(cwd, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]) {
+        Ok(current) if current.trim() == merge_head => Ok(()),
+        Ok(current) => bail!("A different merge is in progress now ({}). Look at the changes again.", current.trim().chars().take(7).collect::<String>()),
+        Err(_) => bail!("No merge is in progress any more."),
+    }
+}
+
+/// Abort the merge of `merge_head`: the checkout goes back to HEAD, and what
+/// was resolved or changed by hand in it is gone.
+pub fn abort_merge(cwd: &Path, merge_head: &str) -> Result<()> {
+    expect_merge(cwd, merge_head)?;
+    run(cwd, &["merge", "--abort"]).map(|_| ())
+}
+
+/// Make the commit of the merge of `merge_head`, with Git's own message.
+/// Everything in the checkout is staged first, as a commit from the Repo
+/// panel does. Refused while a conflict is not resolved.
+pub fn commit_merge(cwd: &Path, merge_head: &str) -> Result<String> {
+    expect_merge(cwd, merge_head)?;
+    let merge = unfinished_merge(cwd).ok_or_else(|| anyhow!("No merge is in progress any more."))?;
+    if !merge.conflicted.is_empty() {
+        bail!("Resolve the conflicts in {} first.", merge.conflicted.join(", "));
+    }
+    run(cwd, &["add", "-A", "--", "."])?;
+    run(cwd, &["commit", "--no-edit"])?;
+    Ok(head_commit(cwd).unwrap_or_default())
+}
+
 // ---------------------------------------------------------------- worktrees
 
 pub fn worktree_root(project: &Path) -> PathBuf {
@@ -1948,5 +2106,82 @@ mod tests {
         assert_eq!(log[0].subject, "second");
         assert_eq!(log[0].body, "body here");
         assert!(log[1].parent.is_none());
+    }
+
+    /// `main` and `work` both change files from one commit: `incoming.txt`
+    /// only on `main`, `both.txt` on both but on different lines, and
+    /// `conflict.txt` and `resolved.txt` on the same line. `work` is checked out.
+    fn diverged() -> tempfile::TempDir {
+        let dir = repo();
+        let p = dir.path();
+        let commit = |files: &[(&str, &str)], message: &str| {
+            for (name, text) in files {
+                std::fs::write(p.join(name), text).unwrap();
+            }
+            run(p, &["add", "."]).unwrap();
+            run(p, &["commit", "-q", "-m", message]).unwrap();
+        };
+        commit(&[("both.txt", "1\n2\n3\n4\n5\n"), ("conflict.txt", "x\n"), ("resolved.txt", "x\n")], "shared");
+        run(p, &["checkout", "-q", "-b", "work"]).unwrap();
+        commit(&[("both.txt", "one\n2\n3\n4\n5\n"), ("conflict.txt", "work\n"), ("resolved.txt", "work\n")], "work");
+        run(p, &["checkout", "-q", "main"]).unwrap();
+        commit(&[("incoming.txt", "new\n"), ("both.txt", "1\n2\n3\n4\nfive\n"), ("conflict.txt", "main\n"), ("resolved.txt", "main\n")], "main");
+        run(p, &["checkout", "-q", "work"]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_unfinished_merge_tells_what_came_in_from_what_was_changed_here() {
+        let dir = diverged();
+        let p = dir.path();
+        assert!(unfinished_merge(p).is_none());
+        let work = head_commit(p).unwrap();
+        let main = run(p, &["rev-parse", "main"]).unwrap().trim().to_string();
+        assert!(run(p, &["merge", "--no-ff", "--no-commit", "main"]).is_err(), "two files conflict");
+        std::fs::write(p.join("resolved.txt"), "work\nmain\n").unwrap();
+        run(p, &["add", "resolved.txt"]).unwrap();
+        std::fs::write(p.join("notes.txt"), "mine\n").unwrap();
+
+        let merge = unfinished_merge(p).unwrap();
+        assert_eq!((merge.merge_head.as_str(), merge.name.as_str()), (main.as_str(), "main"));
+        assert_eq!(merge.conflicted, ["conflict.txt"]);
+        assert_eq!(merge.changed_here, ["notes.txt", "resolved.txt"]);
+        // `both.txt` took both sides' lines, as Git merged it by itself.
+        assert_eq!(merge.incoming, ["both.txt", "incoming.txt"]);
+
+        assert!(commit_merge(p, &main).unwrap_err().to_string().contains("conflict.txt"));
+        // Only the merge that was shown is acted on.
+        assert!(abort_merge(p, &work).unwrap_err().to_string().contains("different merge"));
+        assert!(commit_merge(p, &work).is_err());
+        assert_eq!(unfinished_merge(p).unwrap().merge_head, main);
+
+        // Resolved by hand and not staged: no markers left is resolved.
+        std::fs::write(p.join("conflict.txt"), "main\n").unwrap();
+        let merge = unfinished_merge(p).unwrap();
+        assert!(merge.conflicted.is_empty());
+        assert_eq!(merge.changed_here, ["conflict.txt", "notes.txt", "resolved.txt"]);
+        let head = commit_merge(p, &main).unwrap();
+        assert_eq!(run(p, &["show", "-s", "--format=%P", &head]).unwrap().split_whitespace().collect::<Vec<_>>(), [work.as_str(), main.as_str()]);
+        assert!(unfinished_merge(p).is_none());
+        assert!(run(p, &["status", "--porcelain"]).unwrap().trim().is_empty());
+        assert!(abort_merge(p, &main).unwrap_err().to_string().contains("No merge is in progress"));
+    }
+
+    #[test]
+    fn aborting_an_unfinished_merge_puts_the_checkout_back_and_a_commit_is_named_by_its_short_id() {
+        let dir = diverged();
+        let p = dir.path();
+        let work = head_commit(p).unwrap();
+        let main = run(p, &["rev-parse", "main"]).unwrap().trim().to_string();
+        assert!(run(p, &["merge", "--no-ff", "--no-commit", &main]).is_err());
+        let merge = unfinished_merge(p).unwrap();
+        assert_eq!(merge.name, main[..7]);
+        assert_eq!(merge.conflicted, ["conflict.txt", "resolved.txt"]);
+        assert!(merge.changed_here.is_empty());
+        abort_merge(p, &main).unwrap();
+        assert!(unfinished_merge(p).is_none());
+        assert_eq!(head_commit(p).unwrap(), work);
+        assert!(run(p, &["status", "--porcelain"]).unwrap().trim().is_empty());
+        assert_eq!(std::fs::read_to_string(p.join("conflict.txt")).unwrap(), "work\n");
     }
 }

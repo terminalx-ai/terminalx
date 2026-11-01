@@ -204,6 +204,23 @@ export interface WorkspacePr {
   isDraft: boolean;
 }
 
+/**
+ * A `git merge` stopped before its commit. Its uncommitted files are told
+ * apart, so what it brought in is not shown as the branch's own work (#736).
+ */
+export interface UnfinishedMerge {
+  /** The commit being merged in. */
+  mergeHead: string;
+  /** What is being merged: a branch name, or the commit's short id. */
+  name: string;
+  /** Conflicts not resolved yet. */
+  conflicted: string[];
+  /** Resolved, changed or added by hand: aborting the merge loses these. */
+  changedHere: string[];
+  /** Exactly as Git merged them in; what was merged still has them. */
+  incoming: string[];
+}
+
 /** The clean-and-merged check made before a workspace is deleted. */
 export interface Landed {
   /** The directory is a working tree of this project, so it could be read. */
@@ -214,6 +231,8 @@ export interface Landed {
   /** What the branch was compared with, e.g. `origin/main`. */
   base: string | null;
   uncommitted: number;
+  /** A merge stopped before its commit, when there is one. */
+  unfinishedMerge?: UnfinishedMerge;
   /** Stash entries made on this branch. */
   stashes: number;
   clean: boolean;
