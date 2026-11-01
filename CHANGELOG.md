@@ -34,6 +34,25 @@
   about 1 GB. (#696)
 - Merged workspaces of this repository are no longer kept for the CLI launcher
   the build leaves in `src-tauri/binaries`. (#696)
+- Archive conversations nobody has written in for a week (Settings → Agents:
+  a day to a month, or never). Idle counts from the last message in any tab,
+  not from when the session was made. A conversation stays while it is pinned
+  or open, while a tab is working, waiting for you or holding a queued message,
+  while its last reply is unread, while its worktree has uncommitted or
+  unpushed work, and while its issue pipeline's pull request is open. A new
+  message to an archived session, from the app, the CLI, a phone or an
+  automation, brings it back. Archiving deletes nothing. (#718)
+- Find archived conversations again. View → Show archived lists each
+  project's archived conversations, and the chats', under an "Archived" fold,
+  with Unarchive on each row; a project taken out of TerminalX comes back there
+  with the conversations removing it archived. The command palette finds an
+  archived conversation by its title and says it is archived. (#718)
+- Select several conversations in the sidebar (⌘-click, Shift-click, or
+  Select in a row's menu), then archive, unarchive or delete them together.
+  (#718)
+- `terminalx sessions archive|unarchive SESSION...` run the app's own
+  archive, so the sidebar updates at once. `sessions list` now lists what the
+  sidebar does, and `sessions list --archived` the archived sessions. (#718)
 ### Relay
 
 - Poll the account service for pairing grants and revocations once every 30

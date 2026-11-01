@@ -46,7 +46,7 @@ is `None` for a quick chat. What each consumer does with one:
 | Agent Dashboard, command palette | Listed; named "Quick chat", filterable as one group |
 | Worktrees, branches, base ref | None. Not offered at creation, never cut |
 | Changes / Repo / PR | Hidden in a scratch folder, with a "no repository" note above Files. Shown when the chat is pointed at a real repository |
-| `terminalx sessions list` | Listed, with `"kind": "quick"`; never matched by `--project` |
+| `terminalx sessions list` | Listed, with `"kind": "quick"` (an archived one with `--archived`); never matched by `--project` |
 | Automations | Not a target (they are per project) |
 | Leftover clean-up (Settings → Storage) | Not scanned: it walks projects. Orphaned scratch folders are swept separately (below) |
 | Resource panel | Grouped under "Quick chats" |
@@ -109,7 +109,9 @@ Settings → General → "Keep idle quick chats for": 7, 30 (default) or 90 days
 or for ever. A quick chat nobody has touched for that long is deleted with its
 scratch directory, at launch and every six hours. Kept regardless: pinned and
 archived chats, a chat with a turn running or waiting, and a chat with a
-shell still running in it. Manual delete is always available.
+shell still running in it. A chat the app archived itself for sitting idle
+(#718) was not set aside on purpose, so retention still deletes it; one a
+person archived is kept. Manual delete is always available.
 
 ### Provider trust
 

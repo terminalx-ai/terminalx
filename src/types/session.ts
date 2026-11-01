@@ -129,6 +129,10 @@ export interface SessionEntry {
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
   archived: boolean;
+  /** Archived by the idle sweep rather than by a person (#718); absent otherwise. */
+  autoArchived?: boolean;
+  /** When it last came back from the archive; its idle time counts from here too. */
+  unarchivedAt?: string | null;
   pinned: boolean;
   tabs: TabEntry[];
   activeTab?: string | null;

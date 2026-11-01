@@ -227,6 +227,19 @@ fn ending_of(pipeline: &Pipeline) -> Option<Ending> {
     ending_at(pipeline.state, pipeline.reason.as_ref())
 }
 
+/// Whether a pipeline still waits on its pull request: it has not merged
+/// and was not closed. One stopped is over, but the pull request it opened
+/// may still be open, so it waits as long as it has one; stopped before it
+/// opened one, it waits on nothing. Its sessions are not archived while it
+/// waits (#718).
+pub fn waits_on_pull_request(pipeline: &Pipeline) -> bool {
+    match ending_of(pipeline) {
+        Some(Ending::Merged | Ending::Closed) => false,
+        Some(Ending::Stopped) => pipeline.pr.is_some(),
+        None => true,
+    }
+}
+
 /// Whether the reviewer said its checks were running, and has had as long
 /// as it is given, without being asked for its verdict since.
 fn review_overdue(pipeline: &Pipeline, now: DateTime<Utc>) -> bool {

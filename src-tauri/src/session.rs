@@ -1438,6 +1438,13 @@ impl SessionManager {
             }
         }
         match store::message_activity::record(&ev) {
+            // A message to an archived session brings it back to the list
+            // (#718), whoever sent it: the window, the CLI, a phone, a guest,
+            // an automation or a pipeline. Only a new one does: a message
+            // read again from a transcript does not move its time on.
+            Ok(Some(session)) if session.archived && ev.subagent.is_none() && matches!(&ev.payload, Payload::UserMessage { .. }) => {
+                self.sink.emit("session_updated", &crate::session_archive::bring_back(session));
+            }
             Ok(Some(session)) => self.sink.emit("session_updated", &session),
             Ok(None) => {}
             Err(error) => log::warn!("record message activity: {error:#}"),

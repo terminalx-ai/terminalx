@@ -1985,7 +1985,63 @@ pub fn adopt_agent_title(app: AppHandle, session_id: String) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn set_session_archived(app: AppHandle, session_id: String, archived: bool) -> CmdResult<()> {
-    patch_session(&app, &session_id, crate::session_ops::SessionPatch { archived: Some(archived), ..Default::default() })
+    set_sessions_archived(app, vec![session_id], archived).map(drop)
+}
+
+/// Archive or bring back several sessions at once (the sidebar's bulk bar):
+/// all of them, or none when one is not a session (#718).
+#[tauri::command]
+pub fn set_sessions_archived(app: AppHandle, session_ids: Vec<String>, archived: bool) -> CmdResult<Vec<SessionEntry>> {
+    crate::session_archive::set_archived(&app, &session_ids, archived, crate::session_archive::By::Person).map_err(err)
+}
+
+/// The session each window shows, by the window's label: the idle sweep
+/// leaves them in the list (#718).
+static SHOWN_SESSIONS: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+
+/// A window shows `session_id` now, or no session.
+#[tauri::command]
+pub fn set_shown_session(window: tauri::Window, session_id: Option<String>) {
+    let mut shown = SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match session_id {
+        Some(id) => shown.insert(window.label().to_string(), id),
+        None => shown.remove(window.label()),
+    };
+}
+
+/// Archive the sessions nobody has written in for the limit in Settings
+/// (#718), in the runtime that knows what each one is doing. `keep`: what the
+/// asking window shows, besides what every window said it shows. Returns
+/// the ids archived.
+#[tauri::command]
+pub async fn archive_idle_sessions(state: State<'_, AppState>, keep: Vec<String>) -> CmdResult<Vec<String>> {
+    let sessions = state.sessions().map_err(err)?;
+    let mut shown: Vec<String> = SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).values().cloned().collect();
+    shown.extend(keep);
+    tauri::async_runtime::spawn_blocking(move || {
+        let swept: serde_json::Value = sessions.workspace("archiveIdle", serde_json::json!({ "shown": shown })).map_err(err)?;
+        serde_json::from_value(swept["archived"].clone()).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// When a finished conversation is archived (#718).
+#[tauri::command]
+pub fn conversation_settings() -> crate::store::settings::ConversationSettings {
+    store::settings::load().conversations
+}
+
+/// The runtime reads the limit again at its next sweep.
+#[tauri::command]
+pub fn set_archive_idle_days(days: u32) -> CmdResult<crate::store::settings::ConversationSettings> {
+    if !crate::store::settings::ARCHIVE_IDLE_DAYS.contains(&days) {
+        return Err(format!("{days} days is not one of the idle limits offered."));
+    }
+    let mut settings = store::settings::load();
+    settings.conversations.archive_idle_days = days;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.conversations)
 }
 
 #[tauri::command]
@@ -2205,6 +2261,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             created: now.clone(),
             modified: now,
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
@@ -4014,6 +4071,7 @@ mod command_tests {
             created: "now".into(),
             modified: "now".into(),
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: Vec::new(),
             link: None,

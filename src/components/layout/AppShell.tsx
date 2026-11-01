@@ -24,7 +24,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { startUpdateChecks } from "@/lib/updates";
-import { bootSessions, closeNewSession, openNewSession, openAgents, openAutomations, openIssues, openSkills, openStats, useSessionStore } from "@/lib/sessions";
+import { bootSessions, closeNewSession, openNewSession, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -105,6 +105,8 @@ export function AppShell() {
     void subscribeAgentEvents();
     void subscribeTabPty();
     void bootSessions();
+    // Conversations nobody has written in for the limit in Settings go to the archive (#718).
+    startIdleArchive();
     void bootAutomations();
     void bootIssuePipelines();
     void loadModels();

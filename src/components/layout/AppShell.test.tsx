@@ -50,6 +50,7 @@ vi.mock("@/lib/sessions", () => ({
   openSkills: vi.fn(),
   openStats: vi.fn(),
   selectSession: vi.fn(),
+  startIdleArchive: vi.fn(),
   useSessionStore: () => sessionStore,
 }));
 // The latest handler registered for each shortcut, so a test can press one.

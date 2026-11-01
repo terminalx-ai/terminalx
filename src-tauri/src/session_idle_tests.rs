@@ -270,3 +270,89 @@ fn opening_a_set_aside_sessions_tab_does_not_start_its_agent() {
     rig.manager.start_on_open(SESSION, TAB).unwrap();
     rig.wait("the CLI to run", || rig.running());
 }
+
+/// A rig's agent exits after its test is over, and what its manager writes
+/// then (the turn it closes, the recovery it raises) lands in whatever store
+/// the next test has set up, under the session id it had. The archive's tests
+/// go by when a session was last written in, so each has an id of its own.
+fn archive_rig(id: &str, session: Value) -> Rig {
+    let mut overlay = json!({ "id": id });
+    overlay.as_object_mut().unwrap().extend(session.as_object().unwrap().clone());
+    let rig = Rig::new(overlay);
+    rig.manager.ensure_started(id, TAB).unwrap();
+    rig.wait("the CLI to run", || rig.manager.is_running(id, TAB) && rig.ran.exists());
+    rig
+}
+
+/// #718: a session nobody has written in for a month is archived only once
+/// none of its tabs is at work, waiting on its reader, unread or holding a
+/// message, and it is not open in a window. A message sent to it, as the
+/// window, the CLI and an automation send one, brings it back, and a sweep
+/// straight after leaves it.
+#[test]
+fn a_quiet_session_is_archived_only_once_its_tab_has_nothing_going_and_a_message_brings_it_back() {
+    const QUIET: &str = "quiet-for-a-month";
+    let month_ago = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let rig = archive_rig(QUIET, json!({ "lastMessageAt": month_ago }));
+    let rt = || rig.manager.runtime(QUIET, TAB).unwrap();
+    let nobody = std::collections::HashSet::new();
+    let sweep = |shown: &std::collections::HashSet<String>| {
+        crate::session_archive::sweep_owned(&rig.manager, rig.manager.sink().as_ref(), shown).unwrap().into_iter().map(|session| session.id).collect::<Vec<_>>()
+    };
+    let archived = || index::get(QUIET).unwrap().archived;
+
+    for status in [TabStatus::InProgress, TabStatus::Waiting, TabStatus::Completed] {
+        rig.manager.set_display_status(&mut rt().lock().unwrap(), status);
+        assert!(sweep(&nobody).is_empty(), "{status:?}");
+    }
+    {
+        let rt = rt();
+        let mut rt = rt.lock().unwrap();
+        rig.manager.set_display_status(&mut rt, TabStatus::Idle);
+        rt.turn_open = true;
+    }
+    assert!(sweep(&nobody).is_empty(), "a turn is open");
+    {
+        let rt = rt();
+        let mut rt = rt.lock().unwrap();
+        rt.turn_open = false;
+        rt.queued.push(QueuedMessage { id: "held".into(), text: "and then".into(), images: Vec::new() });
+    }
+    assert!(sweep(&nobody).is_empty(), "a message waits to be sent");
+    rt().lock().unwrap().queued.clear();
+    assert!(sweep(&[QUIET.to_string()].into()).is_empty(), "open in a window");
+    assert!(!archived());
+
+    assert_eq!(sweep(&nobody), [QUIET]);
+    let entry = index::get(QUIET).unwrap();
+    assert!(entry.archived && entry.archive.auto_archived);
+    assert!(rig.manager.is_running(QUIET, TAB), "archiving stops nothing: that is the idle agents' to do");
+
+    rig.manager.send(QUIET, TAB, "one more thing".into(), Vec::new()).unwrap();
+    let entry = index::get(QUIET).unwrap();
+    assert!(!entry.archived && !entry.archive.auto_archived, "a message brings it back");
+    assert!(sweep(&nobody).is_empty(), "and it has just been written in");
+}
+
+/// #718: a paired phone's message to an archived session brings it back,
+/// through the phone's own way in (`send_mobile`, with its device permit).
+#[test]
+fn a_message_from_a_phone_brings_an_archived_session_back() {
+    const FROM_PHONE: &str = "archived-then-phoned";
+    let rig = archive_rig(FROM_PHONE, json!({ "archived": true, "autoArchived": true }));
+    store::write_json(&store::root().unwrap().join("devices.json"), &json!({"devices":[{
+        "id":"driver","label":"Fixture","platform":"test","token":"fixture-hash",
+        "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()
+    }]})).unwrap();
+    let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+    let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+    let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+    rig.manager.mobile.register(&lifetime, actor.clone(), "connection", "driver").unwrap();
+    let permit = rig.manager.mobile.permit(&actor, "connection", FROM_PHONE, TAB).unwrap();
+    assert!(index::get(FROM_PHONE).unwrap().archived);
+
+    rig.manager.send_mobile(FROM_PHONE, TAB, "from the phone".into(), "from the phone".into(), Vec::new(), permit).unwrap();
+    let entry = index::get(FROM_PHONE).unwrap();
+    assert!(!entry.archived && !entry.archive.auto_archived, "a phone's message brings it back");
+    assert!(entry.archive.unarchived_at.is_some());
+}

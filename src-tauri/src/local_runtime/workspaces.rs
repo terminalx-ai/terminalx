@@ -122,6 +122,15 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
             sink.emit("session_updated", &updated);
             Ok(serde_json::to_value(updated)?)
         }
+        // Sessions nobody wrote in for the limit are archived (#718), here
+        // where what their tabs are doing is known. Under the admission lock
+        // no message is taken meanwhile, so none can land between the look
+        // and the archiving.
+        "archiveIdle" => {
+            let shown: std::collections::HashSet<String> = serde_json::from_value(params["shown"].clone()).context("shown is required")?;
+            let archived = crate::session_archive::sweep_owned(manager, sink, &shown)?;
+            Ok(json!({"archived": archived.iter().map(|session| &session.id).collect::<Vec<_>>()}))
+        }
         "retention" => {
             let shells = manager.terminals().shells();
             let live: Vec<_> = shells.iter().filter(|shell| !shell.exited).map(|shell| shell.session_id.as_str()).collect();

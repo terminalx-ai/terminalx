@@ -132,6 +132,14 @@ fn project_at(root: &Path, sessions: &mut [SessionEntry]) -> Result<()> {
     Ok(())
 }
 
+/// When the newest message in any of a session's tabs was written, as
+/// [`project`] put it on the entry; `None` for an entry read without it, or
+/// a session none of whose messages carried a time.
+pub fn last_message_at(session: &SessionEntry) -> Option<chrono::DateTime<chrono::Utc>> {
+    let time = session.unknown.get(FIELD)?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(time).ok().map(|time| time.with_timezone(&chrono::Utc))
+}
+
 fn project_time(metadata: &mut BTreeMap<String, serde_json::Value>, time: Option<String>) {
     let mut newest = metadata
         .get(FIELD)

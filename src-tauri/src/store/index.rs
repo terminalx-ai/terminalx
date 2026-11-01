@@ -369,6 +369,22 @@ pub struct ChatLink {
     pub branch: Option<String>,
 }
 
+/// What the archive knows of a session beyond whether it is in it (#718).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMark {
+    /// Archived by the idle sweep, not by a person. Such a session was not
+    /// set aside on purpose: whatever lets go of idle sessions (quick chat
+    /// retention) still may.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_archived: bool,
+    /// When it last came back from the archive. Its idle time counts from
+    /// here as well as from its last message, so a session brought back is
+    /// not archived again at the next sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unarchived_at: Option<String>,
+}
+
 /// What a session belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -443,6 +459,11 @@ pub struct SessionEntry {
     pub modified: String,
     #[serde(default)]
     pub archived: bool,
+    /// How it came to be archived, or back (#718). Flattened and left out
+    /// while it says nothing, so an entry nobody archived is written exactly
+    /// as before.
+    #[serde(flatten, default)]
+    pub archive: ArchiveMark,
     #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
@@ -876,6 +897,7 @@ mod tests {
             created: now(),
             modified: now(),
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: vec![],
             active_tab: None,

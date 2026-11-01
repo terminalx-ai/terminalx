@@ -135,7 +135,9 @@ function set(patch: Partial<State>) {
   const removedTabs = activeTabs ? state.sessions.flatMap((session) =>
     session.tabs.filter((tab) => !activeTabs.has(tab.id)).map((tab) => tab.id),
   ) : [];
+  const shownChanged = next.selectedSessionId !== state.selectedSessionId;
   state = next;
+  if (shownChanged) reportShownSession(next.selectedSessionId);
   if (removedTabs.length) forgetClosedTabViews(removedTabs);
   if (patch.sessions) setArchivedTerminalSessions(patch.sessions.filter((session) => session.archived).map((session) => session.id));
   for (const l of listeners) l();
@@ -557,6 +559,7 @@ export function debug(message: string) {
   void invoke("frontend_log", { level: "info", message }).catch(() => {});
 }
 
+/** Show archived: each project's archived sessions, and the chats', under a fold of their own (#718). */
 export function setShowArchived(v: boolean) {
   set({ showArchived: v });
 }
@@ -618,6 +621,60 @@ export async function selectProject(path: string) {
 export async function archiveSession(id: string, archived: boolean) {
   await api.setSessionArchived(id, archived);
   patchSession(id, { archived });
+}
+
+/**
+ * Archive or bring back several sessions at once: all of them, or none when one is gone (#718). Archiving keeps a
+ * session whole (its transcript, its worktree, its agent's conversation) and lists it under Show archived.
+ */
+export async function archiveSessions(ids: string[], archived: boolean) {
+  if (!ids.length) return;
+  for (const session of await api.setSessionsArchived(ids, archived)) upsertSession(session);
+}
+
+/** The local session this window last said it shows. */
+let reportedShown: string | null = null;
+
+/**
+ * Tell the backend which local session this window shows, so the idle sweep leaves it in the list. Only a change of
+ * local session is said: a cloud session (`cloud:…`) is not the sweep's, and showing one asks nothing local (PRO-23).
+ * Best effort: a window that cannot say is still covered by `runIdleArchive`'s `keep`.
+ */
+function reportShownSession(id: string | null) {
+  const local = id && !id.startsWith("cloud:") ? id : null;
+  if (local === reportedShown) return;
+  reportedShown = local;
+  void Promise.resolve()
+    .then(() => api.setShownSession(local))
+    .catch(() => {});
+}
+
+/** How long after launch the first sweep runs: the runtime has its tabs back, and message times have been read by then. */
+const IDLE_ARCHIVE_FIRST = 60_000;
+/** How often after that. The limits are whole days, so a sweep every half hour is never late by much. */
+const IDLE_ARCHIVE_EVERY = 30 * 60_000;
+let idleArchiveStarted = false;
+
+/**
+ * Archive what nobody has written in for the limit in Settings (#718). The runtime decides, with what it knows of
+ * each session's tabs; this window adds the session it shows. What it archives reaches every window as an update.
+ */
+export async function runIdleArchive(): Promise<string[]> {
+  const shown = state.selectedSessionId && !state.selectedSessionId.startsWith("cloud:") ? [state.selectedSessionId] : [];
+  try {
+    return await api.archiveIdleSessions(shown);
+  } catch {
+    // An owner that is restarting, or an older one: the next sweep tries again.
+    return [];
+  }
+}
+
+/** The main window runs the idle sweep, once soon after launch and then every half hour. */
+export function startIdleArchive() {
+  if (idleArchiveStarted || isFloatingWindow()) return;
+  idleArchiveStarted = true;
+  const next = (delay: number) => setTimeout(() => void runIdleArchive().finally(() => next(IDLE_ARCHIVE_EVERY)), delay);
+  next(IDLE_ARCHIVE_FIRST);
 }
 
 export async function pinSession(id: string, pinned: boolean) {

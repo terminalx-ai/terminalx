@@ -594,6 +594,23 @@ impl ControlService {
                 self.sink.emit("session_updated", &session);
                 Ok(json!({"sessionId": session.id, "session": session}))
             }
+            // The app's own archive (#718): the windows hear of it at once.
+            "sessions.archive" | "sessions.unarchive" => {
+                let selectors: Vec<String> = match params.get("sessions") {
+                    Some(Value::Array(values)) => values.iter().map(|value| value.as_str().map(str::to_string).ok_or_else(|| ControlError::invalid("Each session must be a string."))).collect::<Result<_, _>>()?,
+                    _ => return Err(ControlError::invalid("Missing sessions.")),
+                };
+                if selectors.is_empty() {
+                    return Err(ControlError::invalid("Name at least one session."));
+                }
+                // Every selector is resolved before anything changes: one that
+                // matches nothing, or more than one session, changes nothing.
+                let ids = selectors.iter().map(|selector| resolve_session(selector).map(|session| session.id)).collect::<Result<Vec<_>, _>>()?;
+                let archived = command == "sessions.archive";
+                let sessions = crate::session_archive::set_archived(self.sink.as_ref(), &ids, archived, crate::session_archive::By::Person)
+                    .map_err(ControlError::internal)?;
+                Ok(json!({"sessions": sessions}))
+            }
             "tabs.list" => {
                 let selector = required_string(&params, "session")?;
                 let session = resolve_session(&selector)?;
@@ -681,6 +698,9 @@ impl ControlService {
         if quick {
             sessions.retain(SessionEntry::is_quick);
         }
+        // What the sidebar lists, or with `archived` what it lists under Show archived (#718).
+        let archived = params.get("archived").and_then(Value::as_bool).unwrap_or(false);
+        sessions.retain(|session| session.archived == archived);
         Ok(json!({"sessions": sessions}))
     }
 
@@ -1632,6 +1652,63 @@ mod tests {
         assert_eq!(service.execute("sessions.rename", json!({"session": quick.id, "title": "Renamed"}), "r6").unwrap()["session"]["title"], "Renamed");
     }
 
+    /// `terminalx sessions archive|unarchive` run the app's own archive, so
+    /// the sidebar hears of each session at once; `list --archived` lists
+    /// what the sidebar keeps under Show archived (#718).
+    #[test]
+    fn the_cli_archives_and_brings_back_sessions_as_the_app_does_and_lists_the_archived_ones() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let new = |title: &str| crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": title, "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let (first, second, third) = (new("first"), new("second"), new("third"));
+        let (service, sink) = headless_service();
+        let mut heard = sink.subscribe();
+        let ids = |listed: &Value| {
+            let mut ids: Vec<String> = listed["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
+            ids.sort();
+            ids
+        };
+        let sorted = |mut ids: Vec<String>| { ids.sort(); ids };
+
+        // By a prefix of one id and the whole of another, as any session command takes them.
+        let result = service.execute("sessions.archive", json!({"sessions": [&first.id[..first.id.len() - 2], second.id]}), "r1").unwrap();
+        assert!(result["sessions"].as_array().unwrap().iter().all(|session| session["archived"] == true));
+        for expected in [&first.id, &second.id] {
+            let event = heard.try_recv().unwrap();
+            assert_eq!(&*event.event, "session_updated");
+            let session: SessionEntry = serde_json::from_str(&event.payload).unwrap();
+            assert_eq!((&session.id, session.archived, session.archive.auto_archived), (expected, true, false));
+        }
+        assert!(heard.try_recv().is_err(), "one event per session that changed");
+
+        assert_eq!(ids(&service.execute("sessions.list", json!({}), "r2").unwrap()), vec![third.id.clone()]);
+        assert_eq!(ids(&service.execute("sessions.list", json!({"archived": true}), "r3").unwrap()), sorted(vec![first.id.clone(), second.id.clone()]));
+        assert_eq!(ids(&service.execute("sessions.list", json!({"archived": true, "project": project.path}), "r4").unwrap()).len(), 2);
+
+        // Archiving one that is archived already tells nobody anything.
+        service.execute("sessions.archive", json!({"sessions": [second.id]}), "r5").unwrap();
+        assert!(heard.try_recv().is_err());
+
+        // One unknown selector, and nothing changes.
+        let refused = service.execute("sessions.unarchive", json!({"sessions": [first.id, "no-such-session"]}), "r6").unwrap_err();
+        assert_eq!(refused.code, "not_found");
+        assert!(index::get(&first.id).unwrap().archived);
+        for empty in [json!({}), json!({"sessions": []}), json!({"sessions": [1]})] {
+            assert_eq!(service.execute("sessions.archive", empty, "r7").unwrap_err().code, "invalid_arguments");
+        }
+
+        let result = service.execute("sessions.unarchive", json!({"sessions": [first.id]}), "r8").unwrap();
+        assert_eq!(result["sessions"][0]["archived"], false);
+        let back = index::get(&first.id).unwrap();
+        assert!(!back.archived && back.archive.unarchived_at.is_some(), "it counts as idle from now");
+        let event = heard.try_recv().unwrap();
+        assert_eq!(serde_json::from_str::<SessionEntry>(&event.payload).unwrap().id, first.id);
+        assert_eq!(ids(&service.execute("sessions.list", json!({}), "r9").unwrap()), sorted(vec![first.id.clone(), third.id.clone()]));
+    }
+
     #[test]
     fn a_session_request_says_whether_it_is_a_quick_chat_or_names_its_project() {
         let _home = crate::store::temp_home();
@@ -1750,6 +1827,7 @@ mod tests {
             created: "now".into(),
             modified: "now".into(),
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: Vec::new(),
             active_tab: None,

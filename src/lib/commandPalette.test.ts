@@ -107,6 +107,26 @@ describe("command palette index", () => {
     expect(legacy.secondary).toContain("Removed workspace (removed)");
     expect(legacy.secondary).not.toContain("main");
   });
+
+  it("finds an archived session by its title, says it is archived, and keeps it out of the recent ones (#718)", () => {
+    const archived: SessionEntry = { ...sessions[0], id: "archived", title: "Fix login cookie", archived: true, modified: "2026-09-05T00:00:00Z" };
+    const index = buildPaletteIndex([...sessions, archived], projects, { "/code/raccoon": [workspace] }, harnesses);
+
+    // Nothing typed: the recent sessions, of which an archived one, however recent, is not one.
+    expect(searchPaletteIndex(index, "").sessions.map((match) => match.item.sessionId)).toEqual(["newer", "older"]);
+
+    const found = searchPaletteIndex(index, "login cookie").sessions;
+    expect(found.map((match) => match.item.sessionId)).toEqual(["archived"]);
+    expect(found[0].item.archived).toBe(true);
+    expect(found[0].item.secondary).toMatch(/ · Archived$/);
+    expect(found[0].primaryRanges.length).toBeGreaterThan(0);
+    // Its own name for the archive finds it too.
+    expect(searchPaletteIndex(index, "archived").sessions.map((match) => match.item.sessionId)).toEqual(["archived"]);
+
+    // As good a match as a live session, it comes after it, though it is newer.
+    const both = searchPaletteIndex(index, "fix login").sessions.map((match) => match.item.sessionId);
+    expect(both).toEqual(["older", "archived"]);
+  });
 });
 
 describe("smart palette input", () => {

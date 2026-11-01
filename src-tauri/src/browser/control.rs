@@ -270,6 +270,7 @@ mod tests {
             created: "now".into(),
             modified: "now".into(),
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: Vec::new(),
             active_tab: None,

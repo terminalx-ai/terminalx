@@ -265,6 +265,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         created: now.clone(),
         modified: now,
         archived: false,
+        archive: Default::default(),
         pinned: false,
         active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
         link: None,
@@ -377,6 +378,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             created: now.clone(),
             modified: now,
             archived: false,
+            archive: Default::default(),
             pinned: false,
             active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
             tabs: first_tab.into_iter().collect(),
@@ -546,7 +548,8 @@ pub(crate) fn has_shell_in_use(session: &SessionEntry, live: &[&str], running: i
 
 /// Delete quick chats nobody has touched for `days` days, with their scratch
 /// directories. A pinned or archived one is kept (the reader set it aside on
-/// purpose), and so is one `busy` says is running. `stop` ends what an idle
+/// purpose) unless it was the idle sweep that archived it (#718), and so is
+/// one `busy` says is running. `stop` ends what an idle
 /// one still has open. Returns what was deleted.
 #[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn Fn(&SessionEntry) -> bool, stop: &dyn Fn(&SessionEntry)) -> Result<Vec<SessionEntry>> {
@@ -563,7 +566,9 @@ pub(crate) fn sweep_idle_quick_chats_fallible(sink: &dyn EventSink, days: u32, b
         let working = session.tabs.iter().any(|tab| matches!(tab.status, TabStatus::InProgress | TabStatus::Waiting));
         // A date that cannot be read is not a reason to delete.
         let last = chrono::DateTime::parse_from_rfc3339(&session.modified).ok();
-        session.is_quick() && !session.pinned && !session.archived && !working && last.is_some_and(|last| last < cutoff)
+        // Archived by the idle sweep (#718) is not set aside on purpose.
+        let set_aside = session.archived && !session.archive.auto_archived;
+        session.is_quick() && !session.pinned && !set_aside && !working && last.is_some_and(|last| last < cutoff)
     };
     let doomed: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
     for session in &doomed {
@@ -1050,8 +1055,9 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
         if let Some(pinned) = patch.pinned {
             s.pinned = pinned;
         }
+        // A person's archive, as every other way in or out marks it (#718).
         if let Some(archived) = patch.archived {
-            s.archived = archived;
+            crate::session_archive::mark(s, archived, crate::session_archive::By::Person, &index::now());
         }
         Ok(s.clone())
     })
@@ -1856,14 +1862,21 @@ mod tests {
         let pinned = quick_chat(None);
         let working = quick_chat(None);
         let in_use = quick_chat(None);
+        let set_aside = quick_chat(None);
+        let swept = quick_chat(None);
         let ordinary = session_in(project.path(), &project.path().to_string_lossy(), "Old project session");
-        for session in [&old, &pinned, &working, &in_use, &ordinary] {
+        for session in [&old, &pinned, &working, &in_use, &set_aside, &swept, &ordinary] {
             aged(session, 45);
         }
         aged(&recent, 3);
         index::update(|sessions| {
             sessions.iter_mut().find(|s| s.id == pinned.id).unwrap().pinned = true;
             sessions.iter_mut().find(|s| s.id == working.id).unwrap().tabs[0].status = TabStatus::Waiting;
+            // Archived by the reader, and by the idle sweep (#718).
+            sessions.iter_mut().find(|s| s.id == set_aside.id).unwrap().archived = true;
+            let by_the_sweep = sessions.iter_mut().find(|s| s.id == swept.id).unwrap();
+            by_the_sweep.archived = true;
+            by_the_sweep.archive.auto_archived = true;
             Ok(())
         })
         .unwrap();
@@ -1875,19 +1888,26 @@ mod tests {
 
         // Kept for ever: nothing goes, however old.
         assert!(sweep_idle_quick_chats(&sink, 0, &busy, &stop).unwrap().is_empty());
-        assert_eq!(index::load().unwrap().len(), 6);
+        assert_eq!(index::load().unwrap().len(), 8);
 
         let removed = sweep_idle_quick_chats(&sink, 30, &busy, &stop).unwrap();
-        assert_eq!(removed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec![old.id.as_str()]);
-        assert_eq!(*stopped.borrow(), vec![old.id.clone()]);
+        let mut removed: Vec<&str> = removed.iter().map(|s| s.id.as_str()).collect();
+        removed.sort();
+        let mut gone = vec![old.id.as_str(), swept.id.as_str()];
+        gone.sort();
+        assert_eq!(removed, gone);
+        let mut stopped = stopped.borrow().clone();
+        stopped.sort();
+        assert_eq!(stopped, gone);
         assert!(!Path::new(&old.cwd).exists());
+        assert!(!Path::new(&swept.cwd).exists());
         assert_eq!(&*events.try_recv().unwrap().event, SESSION_DELETED_EVENT);
         let mut kept: Vec<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
         kept.sort();
-        let mut expected = vec![recent.id.clone(), pinned.id.clone(), working.id.clone(), in_use.id.clone(), ordinary.id.clone()];
+        let mut expected = vec![recent.id.clone(), pinned.id.clone(), working.id.clone(), in_use.id.clone(), set_aside.id.clone(), ordinary.id.clone()];
         expected.sort();
         assert_eq!(kept, expected);
-        for session in [&recent, &pinned, &working, &in_use] {
+        for session in [&recent, &pinned, &working, &in_use, &set_aside] {
             assert!(Path::new(&session.cwd).is_dir());
         }
     }

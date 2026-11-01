@@ -46,7 +46,8 @@ const HELP: &str = r#"terminalx — control a running TerminalX app
 Usage:
   terminalx status [--json]
   terminalx projects list [--json]
-  terminalx sessions list [--project PROJECT|--quick] [--json]
+  terminalx sessions list [--project PROJECT|--quick] [--archived] [--json]
+  terminalx sessions archive|unarchive SESSION... [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
       [--title TEXT] [--name NAME] [--experimental-codex-stdio]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
@@ -534,15 +535,33 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let org = tokens.option("--org")?;
             let cloud = tokens.flag("--cloud")?;
             let quick = tokens.flag("--quick")?;
+            let archived = tokens.flag("--archived")?;
             let in_cloud = cloud || org.is_some() || project.as_deref().is_some_and(is_cloud_key);
             if quick && (in_cloud || project.is_some()) {
                 return Err(invalid("--quick lists the chats that have no project; it cannot be combined with --project, --cloud or --org."));
             }
+            if archived && in_cloud {
+                return Err(invalid("--archived lists this computer's archived sessions; it cannot be combined with --cloud, --org or a cloud project."));
+            }
             if in_cloud {
                 cloud_rpc("sessions.list", json!({"project": project, "org": org}), tokens)
             } else {
-                rpc("sessions.list", json!({"project": project, "quick": quick}), tokens)
+                rpc("sessions.list", json!({"project": project, "quick": quick, "archived": archived}), tokens)
             }
+        }
+        // Several at once, all or none: the sidebar's bulk bar, from a shell (#718).
+        command @ ("archive" | "unarchive") => {
+            let mut sessions = Vec::new();
+            while let Some(session) = tokens.take_front() {
+                if session.starts_with("--") {
+                    return Err(invalid(format!("Unknown option {session} for sessions {command}.")));
+                }
+                sessions.push(session);
+            }
+            if sessions.is_empty() {
+                return Err(invalid(format!("Missing session: name one or more to {command}.")));
+            }
+            rpc(&format!("sessions.{command}"), json!({"sessions": sessions}), tokens)
         }
         "show" => {
             let session = tokens.required_front("session")?;
@@ -1169,10 +1188,31 @@ mod tests {
         assert!(parse(&args(&["sessions", "create", "--agent", "claude", "--prompt", "hi"])).is_err());
 
         let (command, params, _) = rpc_of(&["sessions", "list", "--quick"]);
-        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": null, "quick": true})));
-        assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false}));
+        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": null, "quick": true, "archived": false})));
+        assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false, "archived": false}));
         assert!(parse(&args(&["sessions", "list", "--quick", "--project", "api"])).is_err());
         assert!(parse(&args(&["sessions", "list", "--quick", "--cloud"])).is_err());
+    }
+
+    #[test]
+    fn sessions_are_archived_and_brought_back_several_at_once_and_the_archived_ones_listed() {
+        let (command, params, _) = rpc_of(&["sessions", "archive", "0198a", "0198b", "--json"]);
+        assert_eq!((command.as_str(), params), ("sessions.archive", json!({"sessions": ["0198a", "0198b"]})));
+        let (command, params, _) = rpc_of(&["sessions", "unarchive", "0198a"]);
+        assert_eq!((command.as_str(), params), ("sessions.unarchive", json!({"sessions": ["0198a"]})));
+        for refused in [&["sessions", "archive"][..], &["sessions", "unarchive", "0198a", "--yes"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+
+        assert_eq!(rpc_of(&["sessions", "list", "--archived"]).1, json!({"project": null, "quick": false, "archived": true}));
+        assert_eq!(rpc_of(&["sessions", "list", "--archived", "--project", "api"]).1, json!({"project": "api", "quick": false, "archived": true}));
+        assert_eq!(rpc_of(&["sessions", "list", "--archived", "--quick"]).1, json!({"project": null, "quick": true, "archived": true}));
+        // A cloud session is archived with its workspace, not here.
+        for cloud in [&["sessions", "list", "--archived", "--cloud"][..], &["sessions", "list", "--archived", "--org", "Acme"]] {
+            assert!(parse(&args(cloud)).is_err(), "{cloud:?}");
+        }
+        assert!(help_text().contains("terminalx sessions archive|unarchive SESSION..."));
+        assert!(help_text().contains("[--archived]"));
     }
 
     #[test]

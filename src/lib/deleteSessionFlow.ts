@@ -58,3 +58,39 @@ export async function confirmDeleteSession(session: SessionEntry) {
     await message(errorMessage(error), { title: "Could not delete session", kind: "error" }).catch(() => undefined);
   }
 }
+
+/**
+ * Ask once, then delete several sessions (the sidebar's bulk bar, #718). As with one, each session goes and nothing
+ * else: every workspace stays on disk, with whatever else runs in it. Removing a workspace too is done one at a time,
+ * from its own dialog, which checks its work first. A quick chat's scratch folder goes with it. One that cannot be
+ * deleted does not stop the rest; what failed is said once at the end. Resolves to whether anything was asked to go.
+ */
+export async function confirmDeleteSessions(sessions: SessionEntry[]): Promise<boolean> {
+  if (sessions.length === 0) return false;
+  if (sessions.length === 1) {
+    await confirmDeleteSession(sessions[0]);
+    return true;
+  }
+  const quick = sessions.filter(isQuickChat).length;
+  const scratch = quick === 0 ? "" : quick === sessions.length
+    ? "\n\nTheir scratch folders are deleted with them, and the files in them."
+    : `\n\n${quick} of them ${quick === 1 ? "is a quick chat, whose scratch folder is" : "are quick chats, whose scratch folders are"} deleted with ${quick === 1 ? "it" : "them"}, and the files in ${quick === 1 ? "it" : "them"}.`;
+  const workspaces = sessions.some((session) => session.worktreeName && !session.worktreeRemoved) ? " Their workspaces stay on disk." : "";
+  const yes = await ask(
+    `Delete ${sessions.length} sessions? Their transcripts and attachments are removed.${workspaces}\n\n${CONVERSATION_DELETION}${scratch}`,
+    { title: "Delete sessions", kind: "warning", okLabel: `Delete ${sessions.length}`, cancelLabel: "Cancel" },
+  ).catch(() => false);
+  if (!yes) return false;
+  const failed: string[] = [];
+  for (const session of sessions) {
+    try {
+      await deleteSession(session.id);
+    } catch (error) {
+      failed.push(`${session.title}: ${errorMessage(error)}`);
+    }
+  }
+  if (failed.length) {
+    await message(failed.join("\n"), { title: failed.length === 1 ? "Could not delete a session" : `Could not delete ${failed.length} sessions`, kind: "error" }).catch(() => undefined);
+  }
+  return true;
+}
