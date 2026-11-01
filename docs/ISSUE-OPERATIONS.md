@@ -91,9 +91,13 @@ filter, then closes and reopens the two sandbox issues through the closed list.
 A failure rejects with `{kind, message}`. `kind` is one of `not_signed_in`,
 `missing_scope`, `forbidden`, `not_found`, `conflict`, `rate_limited`,
 `network`, plus `unsupported` (the provider has no such thing), `invalid`,
+`moved` (GitHub redirected a write, so nothing was written),
 `not_implemented` and `other`. `message` is fixed per kind and provider: it
-never holds a token, a key or the provider's reply. `errorMessage` reads it
-like any other error.
+never holds a token, a key or the provider's reply. The one exception is a
+`moved` message for a repository that was renamed or moved: it names the
+repository as GitHub names it now, checked to be only a name, and the
+`git remote set-url origin` command that points the project there.
+`errorMessage` reads it like any other error.
 
 ## GitHub
 
@@ -115,6 +119,13 @@ Every command goes through `gh api` REST (`issue_ops/github.rs`).
   `expectedDescription` lets an edit through after someone commented.
 * Every write, and the comment list, reads the issue first and refuses a
   pull request's number.
+* Every write goes to the repository's current name, read once per session
+  with `GET repos/{owner}/{name}` (or from the comment list's own read of
+  it). A renamed repository still answers at its old name, but `gh` follows
+  the redirect only for reads: a write with a body to the old name answers
+  `307` (#699). A write that is still redirected (the repository moved again
+  since its name was read, or the issue was transferred) fails as `moved`.
+  Nothing is written then, and the next write reads the name again.
 * Recorded replies: `src-tauri/src/fixtures/github_issue_ops.json`, replayed
   by `issue_ops/github_tests.rs`.
 
