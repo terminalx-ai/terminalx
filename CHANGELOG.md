@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Command line
+
+- `terminalx worktrees delete` no longer deletes sessions it never named. Without
+  `--yes`, or with `--dry-run`, it lists every session it would delete, marking
+  sessions of another project, quick chats and archived ones, with the tabs
+  still running in them and the git state, and removes nothing. `--sessions
+  ID,…` names the sessions you were shown: if the worktree holds any other set,
+  nothing is removed and the sessions that differ are named, as in the desktop
+  dialog. The result gives each deleted session's title and project, not only
+  its id. `terminalx sessions list --worktree` lists what the delete would take,
+  `worktrees list` gives each worktree's sessions, and `sessions list
+  --project` now finds a session that names its project through a symlink.
+  (#719)
+
 ## 0.2.22
 
 ### Background sessions
