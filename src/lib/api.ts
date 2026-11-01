@@ -1750,13 +1750,28 @@ export interface KillResult {
  */
 export type LocalRuntimeState =
   | { state: "inProcess" }
-  | { state: "connected"; epoch: string; generation: number; view: number }
+  /** `outdated`: the runtime is older than this app, and is replaced with the app's own once none of its agents is mid-turn (#730). */
+  | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated }
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
   /** Retrying cannot help until something outside this window changes. */
   | { state: "unavailable"; message: string }
   /** There, but not answering: reconnecting reaches the same wedged runtime (#661). */
-  | { state: "unresponsive"; message: string; epoch: string | null };
+  | { state: "unresponsive"; message: string; epoch: string | null }
+  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. */
+  | { state: "updating"; from: string | null; to: string };
+
+/** A runtime older than this app, while its replacement waits for its agents' turns (#730). */
+export interface LocalRuntimeOutdated {
+  /** Its version, when it said. */
+  running: string | null;
+  /** This app's, which the runtime that replaces it shares. */
+  app: string;
+  /** The agents in the middle of a turn, which the switch waits for; null until they have been read. */
+  turns: string[] | null;
+  /** Why the turns could not be read, or why the last switch failed. */
+  problem: string | null;
+}
 
 export type QuitBehavior = "keepRunning" | "stopAll";
 export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
@@ -1766,6 +1781,8 @@ export const localRuntime = {
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
   /** Stop the runtime without asking it, with its agents and terminals; the desktop attaches a fresh one. */
   restart: (epoch: string | null) => invoke<LocalRuntimeState>("local_runtime_restart", { epoch }),
+  /** Replace runtime `epoch`, older than this app, with the app's own now, stopping its agents and terminals (#730). */
+  replace: (epoch: string) => invoke<LocalRuntimeState>("local_runtime_replace", { epoch }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
 };

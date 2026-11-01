@@ -172,6 +172,8 @@ pub struct AppState {
     runtime_supervisor: local_runtime::supervisor::Supervisor,
     /// Whether the attached runtime still answers (#661).
     runtime_health: local_runtime::ui::Health,
+    /// Whether the attached runtime is older than this app, and replacing it (#730).
+    runtime_replacement: local_runtime::replace::Replacement,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
 }
 
@@ -264,6 +266,7 @@ pub fn run() {
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
         runtime_supervisor: Default::default(),
         runtime_health: Default::default(),
+        runtime_replacement: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
 
@@ -382,6 +385,7 @@ pub fn run() {
                 }
             }
             local_runtime::ui::watch(app.handle());
+            local_runtime::replace::watch(app.handle());
             work_claims.start(app.handle().clone());
             Ok(())
         })
@@ -389,6 +393,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
+            local_runtime::ui::local_runtime_replace,
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,

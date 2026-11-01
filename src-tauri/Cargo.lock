@@ -4100,6 +4100,7 @@ dependencies = [
  "regex",
  "salsa20",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

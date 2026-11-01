@@ -136,6 +136,12 @@ impl Desktop {
     /// The owner this desktop is pinned to, whether or not its events still flow.
     pub fn epoch(&self) -> &str { self.client.epoch() }
 
+    /// The owner's build: its version, and what it can serve a phone (#730).
+    pub fn build(&self) -> &super::client::Build { self.client.build() }
+
+    /// The owner's full status. See [`Client::status`].
+    pub fn status(&self) -> Result<serde_json::Value> { self.client.status() }
+
     /// Whether the owner answers, and its own loop still turns. A loop held
     /// up behind a lock is a wedged owner even while it answers (#661). The
     /// question waits on nothing of the owner's, so a probe of a wedged owner

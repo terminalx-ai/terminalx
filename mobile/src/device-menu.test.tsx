@@ -79,7 +79,7 @@ beforeEach(() => {
     connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingMachines: false, loadingSessions: false, error: null,
     connection: { restart: vi.fn() }, clearError: vi.fn(), refreshMachines: vi.fn(), refreshSessions: vi.fn(), connectHost: vi.fn(async () => true),
     renameHost: vi.fn(async () => undefined), reconnectHost: vi.fn(async () => true), forgetHost: vi.fn(async () => undefined),
-    api: { features: async () => ({}) },
+    api: { features: async () => ({}), onFeaturesChanged: () => () => {} },
   };
   container = document.createElement("div");
   document.body.append(container);

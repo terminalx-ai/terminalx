@@ -55,6 +55,8 @@ pub mod typing;
 pub(crate) mod supervisor;
 #[cfg(all(unix, feature = "desktop"))]
 pub mod ui;
+#[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod replace;
 
 pub const PROTOCOL: u64 = 1;
 /// What the event socket understands within [`PROTOCOL`], so a desktop and a
@@ -237,9 +239,13 @@ impl Lifetime {
         let now = Instant::now();
         state.leases.retain(|_, attachment| attachment.valid_at(now));
         let loop_age = self.turned.lock().unwrap().map(|turned| now.saturating_duration_since(turned).as_millis() as u64);
+        // `version` and `mobileFeatures` (#730): a desktop compares the first
+        // with its own to bring this runtime along with an update, and offers
+        // a phone only the features named in the second.
         json!({ "protocol": PROTOCOL, "epoch": self.epoch, "attachedClients": state.leases.len(),
             "stopping": state.stop_requested || state.exiting, "idleGraceSeconds": self.grace.as_secs(),
-            "eventSocket": self.stream_socket.get(), "streamVersion": STREAM_VERSION, "nativeTray": native_tray(), "loopAgeMs": loop_age })
+            "eventSocket": self.stream_socket.get(), "streamVersion": STREAM_VERSION, "nativeTray": native_tray(), "loopAgeMs": loop_age,
+            "version": env!("CARGO_PKG_VERSION"), "mobileFeatures": mobile::features() })
     }
 
     pub(crate) fn attachment(&self, epoch: &str, lease: &str) -> anyhow::Result<Arc<Attachment>> {
@@ -450,6 +456,15 @@ mod tests {
         assert!(life.status()["loopAgeMs"].as_u64().unwrap() >= 90_000);
         life.turned();
         assert!(life.status()["loopAgeMs"].as_u64().unwrap() < 1_000);
+    }
+
+    /// #730: a desktop learns from the runtime's own answer which build it
+    /// attached to and what it may offer a phone through it.
+    #[test]
+    fn status_names_the_runtimes_version_and_the_phone_features_it_serves() {
+        let status = Lifetime::new(IDLE_GRACE).status();
+        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["mobileFeatures"], mobile::features());
     }
 
     #[test]

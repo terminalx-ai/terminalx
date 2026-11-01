@@ -311,33 +311,41 @@ fn launcher_process_fixture() {
     std::process::exit(0);
 }
 
-#[test]
-fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
-    use raccoon_lib::local_runtime::client::Client;
-    let world = AgentWorld::new();
-    struct StopPrivate(std::path::PathBuf);
-    impl Drop for StopPrivate {
-        fn drop(&mut self) {
-            if let Ok(client) = Client::connect(&self.0) {
-                let status = client.call::<serde_json::Value>("status", json!({})).ok();
-                let _ = client.stop_all();
-                if let Some(pid) = status.and_then(|status| status["pid"].as_u64()) {
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    while Instant::now() < deadline {
-                        let alive = std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).output().is_ok_and(|output| output.status.success());
-                        if !alive { break; }
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
+/// Asks whatever runtime owns a disposable home to stop, and waits for it,
+/// before the fixture is deleted, however the test ends.
+struct StopPrivate(std::path::PathBuf);
+
+impl Drop for StopPrivate {
+    fn drop(&mut self) {
+        if let Ok(client) = raccoon_lib::local_runtime::client::Client::connect(&self.0) {
+            let status = client.call::<serde_json::Value>("status", json!({})).ok();
+            let _ = client.stop_all();
+            if let Some(pid) = status.and_then(|status| status["pid"].as_u64()) {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    if !alive(pid) { break; }
+                    std::thread::sleep(Duration::from_millis(25));
                 }
             }
         }
     }
-    // Created before the launcher so even an attachment assertion failure
-    // asks only this disposable home's owner to stop before fixture deletion.
-    let _private_owner = StopPrivate(world.data.clone());
+}
+
+fn alive(pid: u64) -> bool {
+    std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).output().is_ok_and(|output| output.status.success())
+}
+
+/// A home with one project, and a bundled runtime to install from it.
+fn bundled(world: &AgentWorld) -> std::path::PathBuf {
     std::fs::write(world.data.join("projects.json"), serde_json::to_vec(&json!({"projects":[{"path":world.project,"name":"fixture"}]})).unwrap()).unwrap();
     let source = world.home.join("bundled-terminalx-serve");
     std::fs::copy(env!("CARGO_BIN_EXE_terminalx-serve"), &source).unwrap();
+    source
+}
+
+/// Discover or start the home's runtime from `source` as a desktop does, from
+/// a process with the fixture's environment, which then exits.
+fn launch_installed(world: &AgentWorld, source: &std::path::Path) {
     let mut launcher = std::process::Command::new(std::env::current_exe().unwrap());
     launcher.args(["--exact", "launcher_process_fixture", "--nocapture"])
         .env_clear().env("HOME", &world.home)
@@ -345,8 +353,19 @@ fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
         .env("CLAUDE_CONFIG_DIR", world.home.join(".claude"))
         .env("TERMINALX_HOME", &world.data)
         .env("TERMINALX_LAUNCHER_FIXTURE_HOME", &world.data)
-        .env("TERMINALX_LAUNCHER_FIXTURE_BINARY", &source);
+        .env("TERMINALX_LAUNCHER_FIXTURE_BINARY", source);
     assert!(launcher.status().unwrap().success());
+}
+
+#[test]
+fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
+    use raccoon_lib::local_runtime::client::Client;
+    let world = AgentWorld::new();
+    // Created before the launcher so even an attachment assertion failure
+    // asks only this disposable home's owner to stop before fixture deletion.
+    let _private_owner = StopPrivate(world.data.clone());
+    let source = bundled(&world);
+    launch_installed(&world, &source);
     let client = Client::connect(&world.data).unwrap();
     struct Stop(std::sync::Arc<Client>);
     impl Drop for Stop { fn drop(&mut self) { let _ = self.0.stop_all(); } }
@@ -373,11 +392,54 @@ fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
     });
     client.stop_all().unwrap();
     let pid = before["pid"].as_u64().unwrap();
-    common::agent::wait_until("the installed owner to stop", || {
-        let alive = std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).output().unwrap().status.success();
-        (!alive).then_some(())
-    });
+    common::agent::wait_until("the installed owner to stop", || (!alive(pid)).then_some(()));
     drop(cleanup);
+}
+
+/// #730, against a real installed runtime: what a desktop needs to bring the
+/// runtime along with an update. The runtime says its build without being
+/// asked, says which agents are in the middle of a turn (what the switch
+/// waits for), and once retired as Stop All retires it, has gone, so the next
+/// launch starts another in its place, with the session there to resume.
+#[test]
+fn a_runtime_says_its_build_and_turns_and_a_retired_one_is_replaced_by_the_next_launch() {
+    use raccoon_lib::local_runtime::{client::{Client, Stream}, launch};
+    let world = AgentWorld::new();
+    let _private_owner = StopPrivate(world.data.clone());
+    let source = bundled(&world);
+    launch_installed(&world, &source);
+    let client = Client::connect(&world.data).unwrap();
+    let _connection = client.stream(&Stream::Events).unwrap();
+    let status: serde_json::Value = client.call("status", json!({})).unwrap();
+    assert_eq!(client.build().version.as_ref().map(ToString::to_string).as_deref(), status["appVersion"].as_str());
+    assert_eq!(serde_json::Value::Object(client.build().mobile.clone()), raccoon_lib::local_runtime::mobile::features());
+
+    let created: serde_json::Value = client.call("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"slow:30:200","useWorktree":false,"onMain":true,"mode":"manual"
+    })).unwrap();
+    let (session, tab) = (created["sessionId"].as_str().unwrap().to_string(), created["tabId"].as_str().unwrap().to_string());
+    let turn = |status: &serde_json::Value| status["runningTabs"].as_array().unwrap().iter()
+        .find(|running| running["tabId"] == tab.as_str()).map(|running| running["status"].as_str().unwrap().to_string());
+    common::agent::wait_until("the agent to be in the middle of its turn", || {
+        (turn(&client.call("status", json!({})).unwrap()).as_deref() == Some("in_progress")).then_some(())
+    });
+    common::agent::wait_until("its turn to end", || {
+        let events: serde_json::Value = client.call("read", json!({"target":tab})).unwrap();
+        (count(events["events"].as_array().unwrap(), "turn_completed") == 1).then_some(())
+    });
+    let status: serde_json::Value = client.call("status", json!({})).unwrap();
+    assert!(turn(&status).is_some_and(|status| status != "in_progress" && status != "waiting"), "nothing mid-turn: {status}");
+
+    let pid = status["pid"].as_u64().unwrap();
+    launch::retire(&world.data, || client.stop_all()).unwrap();
+    // It has let go of its socket; the process itself may take a moment more.
+    common::agent::wait_until("the retired runtime to exit", || (!alive(pid)).then_some(()));
+    launch_installed(&world, &source);
+    let next = Client::connect(&world.data).unwrap();
+    assert_ne!(next.epoch(), client.epoch(), "a fresh runtime took its place");
+    let shown: serde_json::Value = next.call("sessions.show", json!({"session": session})).unwrap();
+    assert!(shown["tabs"].as_array().unwrap().iter().any(|shown| shown["id"] == tab.as_str()), "the session is there to resume: {shown}");
+    next.stop_all().unwrap();
 }
 
 #[test]

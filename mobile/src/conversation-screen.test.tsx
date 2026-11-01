@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   sessionListeners: new Map<string, (event: unknown) => void>(),
   sessionReady: new Map<string, () => void>(),
   terminalListeners: new Map<string, (event: unknown) => void>(),
+  featureListeners: new Set<() => void>(),
   listProps: {} as any,
   scrollToOffset: vi.fn(),
   initialBatchOnly: false,
@@ -36,7 +37,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
   removeItem: vi.fn(async (key: string) => { mocks.storage.delete(key); }),
 } }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Plus", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "link" ? "link" : undefined}>{children}</div>;
   return {
@@ -83,6 +84,7 @@ beforeEach(() => {
   mocks.sessionListeners.clear();
   mocks.sessionReady.clear();
   mocks.terminalListeners.clear();
+  mocks.featureListeners.clear();
   mocks.push.mockClear();
   mocks.scrollToOffset.mockClear();
   mocks.initialBatchOnly = false;
@@ -97,6 +99,7 @@ beforeEach(() => {
     connection: { onEvent: () => () => {}, reportError: vi.fn(), retryNow: vi.fn() },
     api: {
       features: async () => ({}),
+      onFeaturesChanged: (listener: () => void) => { mocks.featureListeners.add(listener); return () => { mocks.featureListeners.delete(listener); }; },
       // An older Mac: no session controls; `session-controls.test.tsx` covers them.
       sessionControls: async () => false,
       transport: () => "relay",
@@ -996,5 +999,51 @@ describe("the phone's terminal view, as on the desktop", () => {
     await click("Chat");
     expect(mocks.app.api.releaseInput).toHaveBeenCalledWith("worktree", "claude");
     expect(mocks.terminalListeners.has("claude")).toBe(false);
+  });
+
+  // #730: a Mac whose runtime is older than its app names no terminal until the runtime is replaced.
+  it("offers the Terminal view as soon as the Mac's runtime serves it, without reconnecting", async () => {
+    terminalMac();
+    mocks.app.api.features = async () => ({});
+    await render();
+    const labels = () => [...container.querySelectorAll("button")].map((item) => item.textContent);
+    expect(labels()).not.toContain("Terminal");
+    mocks.app.api.features = async () => ({ terminal: 1 });
+    await act(async () => { for (const listener of mocks.featureListeners) listener(); });
+    await vi.waitFor(() => expect(labels()).toContain("Terminal"));
+    await click("Terminal");
+    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+    // And it goes again with a runtime that does not serve it: the chat is shown.
+    mocks.app.api.features = async () => ({});
+    await act(async () => { for (const listener of mocks.featureListeners) listener(); });
+    await vi.waitFor(() => expect(labels()).not.toContain("Terminal"));
+    await vi.waitFor(() => expect(container.textContent).toContain("claude transcript"));
+    expect(mocks.terminalListeners.has("claude")).toBe(false);
+  });
+
+  it("says the Mac needs updating when it refuses to open the terminal, and the chat keeps working", async () => {
+    terminalMac();
+    // As the transport reads a runtime's refusal of an operation it does not know (`refusal.ts`).
+    mocks.app.api.openTerminal.mockResolvedValue({ opened: false, message: "TerminalX on your Mac needs updating or restarting to do this." });
+    await render();
+    await click("Terminal");
+    await vi.waitFor(() => expect(container.textContent).toContain("The terminal isn't available"));
+    expect(container.textContent).toContain("TerminalX on your Mac needs updating or restarting to do this.");
+    expect(container.textContent).not.toContain("Unsupported paired-device owner operation");
+    await click("Chat");
+    await vi.waitFor(() => expect(container.textContent).toContain("claude transcript"));
+    await type("still here");
+    await click("Send");
+    await vi.waitFor(() => expect(mocks.app.api.sendSession).toHaveBeenCalled());
+  });
+});
+
+describe("new sessions from the sessions list (#730)", () => {
+  it("offers New session once the Mac's runtime starts sessions for a phone", async () => {
+    await render(true);
+    expect(container.querySelector("[aria-label='New session']")).toBeNull();
+    mocks.app.api.features = async () => ({ sessionCreate: 1 });
+    await act(async () => { for (const listener of mocks.featureListeners) listener(); });
+    await vi.waitFor(() => expect(container.querySelector("[aria-label='New session']")).not.toBeNull());
   });
 });
