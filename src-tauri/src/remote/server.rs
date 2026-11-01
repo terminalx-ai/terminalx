@@ -2241,7 +2241,11 @@ impl WorkspaceRpc {
 
     /// `cleanup/1`: remove the named worktrees. Each is inspected again here,
     /// on the machine that holds it, and left alone unless it is still what
-    /// its token stands for. Nothing running is stopped.
+    /// its token stands for. Nothing running is stopped to make a worktree
+    /// removable; only a worktree already gone has its sessions' agents
+    /// stopped before they are filed under the project (`reconcile`, #696).
+    /// Admission is held throughout, as on the desktop, so no prompt starts
+    /// an agent between that stop and the filing.
     ///
     /// While it runs the caller, and nobody else, is sent `cleanup.progress`
     /// notifications: each worktree as it starts, the step it is on, and what
@@ -2259,7 +2263,12 @@ impl WorkspaceRpc {
         let p: Params = parse(params)?;
         let before = index::load().map_err(RpcError::internal)?;
         let report = |progress: &Progress| peer.notify("cleanup.progress", json!(OfRun { run: &p.client_request_id, progress }));
-        let results = self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items, Watch { report: Some(&report), stop: None }))?;
+        // `stop_agents_confirmed`'s caller holds admission across the stop and
+        // the filing that follows it.
+        let results = {
+            let _admission = crate::issue_pipeline::admission::lock();
+            self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items, Watch { report: Some(&report), stop: None }))?
+        };
         // What the runtime still holds for sessions that were deleted with
         // their worktree, as after `session.delete`.
         let deleted: HashSet<String> = results.iter().flat_map(|done| done.sessions_deleted.iter().cloned()).collect();

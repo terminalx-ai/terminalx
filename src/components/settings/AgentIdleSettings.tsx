@@ -46,7 +46,7 @@ export function AgentIdleSettings() {
     <div className="rounded-lg border border-hairline px-3 py-2" data-testid="agent-idle-settings">
       <SettingRow
         label="Stop idle agents after"
-        description="An agent sitting at its prompt still holds its memory, its MCP servers and its language server. Once it has had nothing to do for this long it is stopped; its conversation stays, and your next message starts it again where it left off. An agent at work or waiting for your answer, and one you started yourself in a terminal, keeps running. An agent in an archived session, or one whose workspace was removed, is stopped after 10 idle minutes."
+        description="An agent sitting at its prompt still holds its memory, its MCP servers and its language server. Once it has had nothing to do for this long it is stopped; its conversation stays, and your next message starts it again where it left off. An agent at work, waiting for your answer, or waiting on something it started (a background command, monitor or agent, a wakeup or scheduled job, a process it left running) keeps running, and so does one you started yourself in a terminal. An agent in an archived session, or one whose workspace was removed, is stopped after 10 idle minutes."
         stacked
         control={
           <Segmented

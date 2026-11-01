@@ -674,9 +674,11 @@ pub struct TabRuntime {
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
-    /// Its agent was stopped because nothing was using it ([`SessionManager::stop_if_idle`]):
-    /// showing the tab does not start it again, its next prompt does (#696).
-    pub parked: bool,
+    /// What the app's Claude CLI in this tab started that it is still waiting
+    /// on (a background command, a monitor, a wakeup, a cron job), read from
+    /// its transcript when an idle stop is weighed (#696). `None` for any
+    /// other agent, and once the CLI is let go of.
+    background: Option<Arc<Mutex<claude::background::Watch>>>,
     /// The transcript the tab's last CLI was writing, and how far it had been
     /// read when that CLI was let go of: where to read on from if a CLI is
     /// started on the same conversation by hand (#437).
@@ -1370,7 +1372,7 @@ impl SessionManager {
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
-                parked: false,
+                background: None,
                 left_at: None,
                 log_path,
                 me: std::sync::Weak::new(),
@@ -2535,7 +2537,10 @@ impl SessionManager {
             log::warn!("note in {session_id}:{tab_id} before stopping its agent: {error:#}");
         }
         self.stop_with(session_id, tab_id, true)?;
-        self.runtime(session_id, tab_id)?.lock().unwrap().parked = true;
+        // Kept with the tab, so a runtime started since knows it too.
+        if let Err(error) = index::set_parked(session_id, tab_id, true) {
+            log::warn!("mark {session_id}:{tab_id} as stopped for sitting idle: {error:#}");
+        }
         Ok(AgentStop::Stopped)
     }
 
@@ -2547,6 +2552,31 @@ impl SessionManager {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
         let rt = runtime.lock().unwrap();
         self.quiet(&rt, now)
+    }
+
+    /// What a tab's agent left running that stopping it would end (#696):
+    /// work its Claude CLI started and has not heard back from (a background
+    /// command, monitor or agent, a wakeup, a cron job: its transcript says,
+    /// [`claude::background`]), or a process in its group that outlived what
+    /// started it ([`crate::idle_agents::left_running`]). Between such work
+    /// and the turn it wakes, an agent is as quiet as one with nothing to do.
+    /// `None` when it left nothing, or is not running.
+    pub(crate) fn background_work(&self, session_id: &str, tab_id: &str) -> Option<String> {
+        let (watch, leader) = {
+            let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+            let rt = runtime.lock().unwrap();
+            let leader = match &rt.engine {
+                Engine::Cli(cli) => self.terminals.pid(&cli.pane_id),
+                Engine::None => None,
+                Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) => rt.child_pid,
+            };
+            (rt.background.clone(), leader)
+        };
+        // Read outside the tab's lock: it is a file, and may have grown a lot.
+        if let Some(what) = watch.and_then(|watch| watch.lock().unwrap().outstanding(chrono::Utc::now())) {
+            return Some(what);
+        }
+        crate::idle_agents::left_running(leader?)
     }
 
     /// Every running agent that has nothing to do, with how long it has had
@@ -2601,7 +2631,7 @@ impl SessionManager {
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         if !tab.is_terminal() && !tab.by_hand() && !self.is_running(session_id, tab_id) {
             let set_aside = entry.archived || entry.worktree_removed;
-            if set_aside || self.runtime(session_id, tab_id)?.lock().unwrap().parked {
+            if set_aside || tab.parked {
                 return Ok(());
             }
         }
@@ -3435,7 +3465,11 @@ impl SessionManager {
             }
         }
         // In use again: a stop for idleness is over.
-        rt.parked = false;
+        if tab.parked {
+            if let Err(error) = index::set_parked(&rt.session_id, &rt.tab_id, false) {
+                log::warn!("mark {}:{} as in use again: {error:#}", rt.session_id, rt.tab_id);
+            }
+        }
         // An orderly idle exit left history, not a process to kill. Keep
         // those bytes for the newly resumed CLI's terminal stream.
         if self.terminals.is_live(&pane) {
@@ -3523,6 +3557,9 @@ impl SessionManager {
         let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}", launch.command, config.args, computer), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
+        // From where its transcript stands now: what a CLI before this one
+        // left running went with it.
+        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.path(), tail.offset()))));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3859,6 +3896,7 @@ impl SessionManager {
     /// settle: a stop for idleness keeps a reply nobody has read unread.
     fn let_go_of_cli(&self, rt: &mut TabRuntime) -> Option<String> {
         rt.restart_claim = None;
+        rt.background = None;
         let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
         rt.left_at = Some((p.tail.path(), p.tail.offset()));

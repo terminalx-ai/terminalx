@@ -15,8 +15,11 @@
 - Stop agents nobody is using. An agent the app started that has had nothing to
   do for an hour (Settings → Agents: 30 minutes to a day, or never) is stopped
   with its MCP servers, and its next message starts it again on the same
-  conversation; a reply nobody has read stays unread. An agent at work or
-  waiting for an answer, and one started by hand in a terminal, keeps running.
+  conversation; a reply nobody has read stays unread. An agent keeps running
+  while it is at work, waits for an answer, or waits on something it started:
+  a command, monitor or agent it ran in the background and has not heard back
+  from, a wakeup or cron job it scheduled, or a process one of its commands
+  left running. So does one started by hand in a terminal.
   Agents in archived sessions, or whose workspace was removed, stop after 10
   idle minutes, and opening such a session, or a tab whose agent was stopped
   this way, no longer starts its agent. App resources can stop an idle agent,
