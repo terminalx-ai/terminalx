@@ -187,16 +187,19 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
 /// terminals close with it, and an agent left running would hold on to the
 /// conversation the next runtime resumes. `false` when no runtime was running.
 pub fn kill_owner(home: &Path) -> Result<bool> {
+    kill_holder(home, None)
+}
+
+/// [`kill_owner`], of process `expected` only when it is given: a runtime
+/// that started in its place in the meantime is left alone.
+fn kill_holder(home: &Path, expected: Option<libc::pid_t>) -> Result<bool> {
     let home = std::fs::canonicalize(home)?;
     let _launch = launch_lock(&home, Instant::now() + Duration::from_secs(30))?;
     let socket = home.join("run/hooks.sock");
     let Some(pid) = listener(&socket) else { return Ok(false) };
-    let executable = executable(pid).context("identify the process holding the runtime socket")?;
-    if executable.parent().and_then(Path::parent) != Some(home.join("runtime").as_path())
-        || executable.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
-        bail!("The process holding the runtime socket ({}) is not a TerminalX runtime of this home; it was left running.", executable.display());
-    }
-    log::warn!("stopping the unresponsive local runtime (pid {pid})");
+    if expected.is_some_and(|expected| expected != pid) { return Ok(false); }
+    owned_runtime(&home, pid)?;
+    log::warn!("stopping the local runtime (pid {pid}) without asking it");
     let children = children(pid);
     // The runtime leads its own group (it calls setsid), which holds every
     // helper it started without a terminal of its own.
@@ -223,6 +226,86 @@ pub fn kill_owner(home: &Path) -> Result<bool> {
     // SAFETY: as above.
     for child in &children { unsafe { libc::kill(-child, libc::SIGKILL) }; }
     Ok(true)
+}
+
+/// Check that `pid` runs a runtime installed in `home`, and so is one to stop.
+fn owned_runtime(home: &Path, pid: libc::pid_t) -> Result<()> {
+    let executable = executable(pid).context("identify the process holding the runtime socket")?;
+    if executable.parent().and_then(Path::parent) != Some(home.join("runtime").as_path())
+        || executable.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
+        bail!("The process holding the runtime socket ({}) is not a TerminalX runtime of this home; it was left running.", executable.display());
+    }
+    Ok(())
+}
+
+/// How long a runtime that has stopped its work may take to exit.
+const EXIT_AFTER_STOP: Duration = Duration::from_secs(30);
+
+/// When a runtime that was asked to stop and did not may be stopped without
+/// asking, as [`kill_owner`] does, with its terminals and what they run.
+pub enum Fallback<'a> {
+    /// Restart now, or a runtime that stopped answering: whatever it runs
+    /// stops with it.
+    Forced,
+    /// The desktop replacing it by itself (#730): only once it agreed to
+    /// stop, as `stopping` says, and so refuses any new work.
+    Agreed(&'a dyn Fn() -> bool),
+}
+
+/// The runtime was left running, and nothing of it was stopped.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct LeftRunning(pub &'static str);
+
+/// Whether `error` says the runtime was left running, nothing of it stopped.
+pub fn left_running(error: &anyhow::Error) -> bool { error.downcast_ref::<LeftRunning>().is_some() }
+
+/// Stop the runtime holding `home` the way quitting with Stop All does, and
+/// wait until it has gone, so the next attachment starts the bundled runtime
+/// in its place (#730). `stop_all` asks the runtime this desktop attached to,
+/// pinned to it: one that has been replaced since refuses, and is left alone,
+/// as is one that refuses for work under way (`runtime_busy`). One that agreed
+/// to stop and does not exit after it is stopped without asking; one that did
+/// not agree only as `fallback` allows. Either way each agent picks up its
+/// conversation again when its tab next starts. An error that left the
+/// runtime running says so ([`left_running`]).
+pub fn retire(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: Fallback<'_>) -> Result<()> {
+    retire_within(home, stop_all, fallback, EXIT_AFTER_STOP)
+}
+
+fn retire_within(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: Fallback<'_>, exit_after_stop: Duration) -> Result<()> {
+    let home = std::fs::canonicalize(home)?;
+    let socket = home.join("run/hooks.sock");
+    let Some(pid) = listener(&socket) else { return Ok(()) };
+    owned_runtime(&home, pid).map_err(|error| error.context(LeftRunning("The process holding the runtime socket was left running.")))?;
+    log::info!("stopping the local runtime (pid {pid}) so the one bundled with this app takes its place");
+    match stop_all() {
+        // It agreed: one that lingers is stopped without asking.
+        Ok(()) => if exited(pid, &socket, exit_after_stop) { return Ok(()); }
+        Err(error) if refused(&error, "runtime_restarted") => {
+            return Err(error.context(LeftRunning("The TerminalX runtime was replaced before it could be stopped; nothing was stopped.")));
+        }
+        Err(error) if refused(&error, "runtime_busy") => {
+            return Err(error.context(LeftRunning("The TerminalX runtime has work under way; nothing was stopped.")));
+        }
+        Err(error) => match fallback {
+            Fallback::Forced => log::warn!("the local runtime did not stop its work when asked ({error:#}); stopping it without asking"),
+            Fallback::Agreed(stopping) if stopping() => {
+                log::warn!("the local runtime agreed to stop but did not finish ({error:#}); stopping it without asking");
+            }
+            Fallback::Agreed(_) => {
+                return Err(error.context(LeftRunning("The TerminalX runtime did not agree to stop; nothing was stopped.")));
+            }
+        },
+    }
+    kill_holder(&home, Some(pid))?;
+    if !exited(pid, &socket, Duration::ZERO) { bail!("The TerminalX runtime (pid {pid}) did not exit."); }
+    Ok(())
+}
+
+/// Whether the runtime refused with `code`, anywhere in `error`'s chain.
+pub fn refused(error: &anyhow::Error, code: &str) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == code))
 }
 
 /// Whether the runtime has gone: its pid no longer exists, or nothing
@@ -420,6 +503,103 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!kill_owner(&home).unwrap(), "nothing is left to stop");
+    }
+
+    fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
+        wedged_owner(fixture, |home| {
+            let installed = home.join("runtime/fixture");
+            std::fs::create_dir_all(&installed).unwrap();
+            let installed = installed.join("terminalx-serve");
+            std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+            installed
+        })
+    }
+
+    fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {
+        let _ = owner.kill();
+        let _ = owner.wait();
+        // SAFETY: the fixture's own terminal session.
+        unsafe { libc::kill(-terminal, libc::SIGKILL) };
+    }
+
+    /// #730: a runtime that stops its work and exits when asked is not
+    /// stopped any other way.
+    #[test]
+    fn retiring_a_runtime_that_stops_when_asked_waits_for_it_to_exit() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, owner, terminal) = installed_owner(fixture.path());
+        let owner = std::sync::Mutex::new(owner);
+        let asked = std::cell::Cell::new(false);
+        retire_within(&home, || {
+            asked.set(true);
+            // As a runtime does once it has stopped its agents: it exits.
+            let mut owner = owner.lock().unwrap();
+            owner.kill().unwrap();
+            owner.wait().unwrap();
+            Ok(())
+        }, Fallback::Agreed(&|| panic!("it stopped when asked")), Duration::from_secs(10)).unwrap();
+        assert!(asked.get());
+        assert!(running(terminal), "a runtime asked to stop closes its own terminals; nothing else was signalled");
+        reap(owner.into_inner().unwrap(), terminal);
+    }
+
+    /// #730: a runtime that agreed to stop and does not exit, or did not stop
+    /// when Restart now asked, or agreed and could not finish, is stopped
+    /// without asking, with its terminals.
+    #[test]
+    fn a_runtime_that_does_not_stop_when_asked_is_stopped_without_asking() {
+        for answer in ["never exits", "refuses, forced", "agreed, then failed"] {
+            let fixture = tempfile::tempdir().unwrap();
+            let (home, mut owner, terminal) = installed_owner(fixture.path());
+            let stop = || if answer == "never exits" { Ok(()) } else { anyhow::bail!("timed out") };
+            let agreed = || true;
+            let fallback = match answer { "refuses, forced" => Fallback::Forced, _ => Fallback::Agreed(&agreed) };
+            retire_within(&home, stop, fallback, Duration::from_millis(300)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while owner.try_wait().unwrap().is_none() || running(terminal) {
+                assert!(Instant::now() < deadline, "{answer}: the owner or its terminal outlived the switch");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// #730: the desktop's stop is pinned to the runtime it saw. One replaced
+    /// in the meantime refuses it, and is not stopped any other way either.
+    #[test]
+    fn a_runtime_replaced_before_it_was_retired_is_left_running() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, mut owner, terminal) = installed_owner(fixture.path());
+        let replaced = || Err(super::super::client::Refused { code: "runtime_restarted".into(), message: "Refresh runtime status before stopping all work.".into() }.into());
+        let error = retire_within(&home, replaced, Fallback::Forced, Duration::from_millis(300)).unwrap_err();
+        assert!(error.to_string().contains("replaced") && refused(&error, "runtime_restarted") && left_running(&error), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        // Nor one that refuses for work under way.
+        let busy = || Err(super::super::client::Refused { code: "runtime_busy".into(), message: "an agent is mid-turn".into() }.into());
+        let error = retire_within(&home, busy, Fallback::Forced, Duration::from_millis(300)).unwrap_err();
+        assert!(error.to_string().contains("work under way") && refused(&error, "runtime_busy") && left_running(&error), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        // #730 review: replacing it by itself, any other failure before it
+        // agreed to stop (a re-read that failed, a timeout, no free request
+        // place) leaves it running too.
+        for failure in ["could not read what it runs", "busy"] {
+            let stop = || if failure == "busy" {
+                Err(super::super::client::Refused { code: "busy".into(), message: "Too many requests.".into() }.into())
+            } else { anyhow::bail!("{failure}") };
+            let error = retire_within(&home, stop, Fallback::Agreed(&|| false), Duration::from_millis(300)).unwrap_err();
+            assert!(left_running(&error) && format!("{error:#}").contains("did not agree to stop"), "{error:#}");
+            assert!(owner.try_wait().unwrap().is_none() && running(terminal), "{failure}: nothing was stopped");
+        }
+        reap(owner, terminal);
+
+        // Nor is a socket held by anything but this home's runtime touched.
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, mut owner, terminal) = wedged_owner(fixture.path(), |_| std::env::current_exe().unwrap());
+        let error = retire_within(&home, || panic!("a stranger is never asked"), Fallback::Forced, Duration::ZERO).unwrap_err();
+        assert!(format!("{error:#}").contains("not a TerminalX runtime") && left_running(&error), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        reap(owner, terminal);
+        // With no runtime at all there is nothing to do.
+        assert!(retire_within(&home, || panic!("nothing to ask"), Fallback::Forced, Duration::ZERO).is_ok());
     }
 
     #[test]

@@ -67,6 +67,7 @@ beforeEach(() => {
     connection: { restart: vi.fn() }, refreshSessions: vi.fn(async () => undefined), forgetHost: vi.fn(), renameHost: vi.fn(), reconnectHost: vi.fn(), connectHost: vi.fn(),
     api: {
       features: vi.fn(async () => ({ sessionCreate: 1, macSettings: 1 })),
+      onFeaturesChanged: () => () => {},
       newSessionOptions: vi.fn(async () => options),
       createSession: vi.fn(async () => ({ created: true, sessionId: "s-1", tabId: "t-1", title: "Fix the login redirect", native: false, queued: false })),
       macSettings: vi.fn(async () => ({ nativeCodex: false })),

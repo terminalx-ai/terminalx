@@ -90,6 +90,9 @@ jobs:
       - name: tsc
         run: pnpm exec tsc --noEmit
 
+      - name: tsc (phone app)
+        run: pnpm --dir mobile exec tsc --noEmit
+
       - name: vitest
         run: pnpm vitest run
 
@@ -165,6 +168,11 @@ jobs:
         run: |
           cargo test --locked --test owner_pretool
           cargo test --locked --test local_lifetime owner_hook_process_fails_closed_when_its_socket_disappears
+      - name: Replacing an older runtime with the bundled one (#730)
+        working-directory: src-tauri/serve
+        run: |
+          cargo test --locked --test local_lifetime a_runtime_names_what_stopping_it_would_cut_short_and_stops_by_itself_only_without_any
+          cargo test --locked --test local_lifetime a_runtime_says_its_build_and_turns_and_a_retired_one_is_replaced_by_the_next_launch
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test

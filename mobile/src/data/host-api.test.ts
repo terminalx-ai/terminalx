@@ -8,7 +8,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
 }));
 
 function hostApi(request: ReturnType<typeof vi.fn>) {
-  return new HostApi({ request } as unknown as HostConnection);
+  return new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
 }
 
 describe("mobile transcript pages", () => {
@@ -128,6 +128,45 @@ describe("a draft's id (#675)", () => {
     await api.sendSession("tab-1", "three", [], "draft-3");
     expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(2);
   });
+
+  // #730: an update replaces the Mac's runtime while the phone stays connected.
+  it("asks again, and tells whoever shows a feature, when the Mac says its runtime changed or after a reconnect", async () => {
+    let event: (value: { method: string; params?: unknown }) => void = () => {};
+    const request = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: { transcript: 1 } })
+      .mockResolvedValueOnce({ ok: true, value: { transcript: 1, terminal: 1, sendIds: 1 } })
+      .mockResolvedValue({ ok: true, value: { transcript: 1, terminal: 1, sendIds: 1, sessionCreate: 1 } });
+    const api = new HostApi({ request, onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
+    const changed = vi.fn();
+    const stop = api.onFeaturesChanged(changed);
+    expect((await api.features()).terminal).toBeUndefined();
+    expect(await api.features()).toEqual({ transcript: 1 });
+    event({ method: "sessions.changed" });
+    expect(changed).not.toHaveBeenCalled();
+    event({ method: "sync.capabilitiesChanged" });
+    expect(changed).toHaveBeenCalledOnce();
+    expect((await api.features()).terminal).toBe(1);
+    api.resetConnection();
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect((await api.features()).sessionCreate).toBe(1);
+    stop();
+    event({ method: "sync.capabilitiesChanged" });
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(3);
+  });
+
+  it("sends a draft's id only once the Mac's runtime takes it", async () => {
+    let event: (value: { method: string }) => void = () => {};
+    const request = vi.fn(async (method: string, _params?: unknown) => method === "sync.capabilities"
+      ? { ok: true, value: request.mock.calls.filter(([called]) => called === "sync.capabilities").length > 1 ? { sendIds: 1 } : {} }
+      : { ok: true, value: { status: "sent", queued: false } });
+    const api = new HostApi({ request, onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
+    await api.sendSession("tab-1", "one", [], "draft-1");
+    expect(request.mock.calls.find(([method]) => method === "session.send")?.[1]).not.toHaveProperty("clientMessageId");
+    event({ method: "sync.capabilitiesChanged" });
+    await api.sendSession("tab-1", "two", [], "draft-2");
+    expect(request.mock.calls.filter(([method]) => method === "session.send")[1]?.[1]).toMatchObject({ clientMessageId: "draft-2" });
+  });
 });
 
 // PRO-87
@@ -206,7 +245,7 @@ describe("the terminal view's requests", () => {
   it("hands on the pane's size and the Mac ending the view, and drops a size that is not one", () => {
     let deliver: (value: unknown) => void = () => {};
     const subscribe = vi.fn((_method: string, _params: unknown, listener: (value: unknown) => void) => { deliver = listener; return () => {}; });
-    const api = new HostApi({ request: vi.fn(), subscribe } as unknown as HostConnection);
+    const api = new HostApi({ request: vi.fn(), subscribe, onEvent: () => () => {} } as unknown as HostConnection);
     const packets: unknown[] = [];
     api.subscribeTerminal("worktree", "tab", (packet) => packets.push(packet));
     expect(subscribe).toHaveBeenCalledWith("terminal.subscribe", expect.objectContaining({ worktreeId: "worktree", tabId: "tab", attachMode: "observe" }), expect.any(Function));

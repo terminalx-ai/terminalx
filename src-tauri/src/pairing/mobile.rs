@@ -138,6 +138,15 @@ impl MobileRuntime {
         self.broadcast(json!({ "method": "sessions.changed" }));
     }
 
+    /// The desktop attached to a runtime: what each phone may be offered
+    /// comes from it (#730). A connection admitted by the attachment it
+    /// replaced checks that attachment before it sends this, finds it gone
+    /// and closes, so its phone connects again and asks afresh; one admitted
+    /// by this attachment passes it on, and its phone asks again.
+    pub(super) fn broadcast_capabilities_changed(&self) {
+        self.broadcast(json!({ "method": "sync.capabilitiesChanged" }));
+    }
+
     pub(super) fn capture_agent_event(&self, manager: &PairingManager, payload: &str) {
         let Ok(event) = serde_json::from_str::<AgentEvent>(payload) else { return };
         self.broadcast(json!({ "method": "session.event", "params": { "event": event } }));
@@ -263,7 +272,7 @@ impl MobileConnection {
 
     fn call(&self, method: &str, mut params: Value) -> Result<Value> {
         params.as_object_mut().context("Mobile parameters must be an object.")?.insert("connection".into(), json!(self.id));
-        self.owner.mobile(&self.actor, method, params)
+        self.owner.mobile(&self.actor, method, params).map_err(outdated)
     }
 
     pub(super) fn close(&self, _manager: &PairingManager) { self.finish(); }
@@ -381,7 +390,7 @@ pub(super) fn dispatch(
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let sink = manager.sink.get().cloned();
     let result = match method {
-        "sync.capabilities" => no_params(&params).map(|_| capabilities()),
+        "sync.capabilities" => no_params(&params).map(|_| capabilities(connection.owner.build())),
         "transport.negotiate" => parse_params(params).map(|params| negotiate(connection, params)),
         "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
@@ -445,10 +454,16 @@ pub(super) fn dispatch(
     Some(result)
 }
 
-/// What this Mac understands beyond the first phone protocol. A phone sends
-/// a field only to a Mac that names it here: every params type refuses
-/// fields it does not know.
-fn capabilities() -> Value {
+/// What this Mac understands beyond the first phone protocol, through
+/// `runtime`, the runtime the phone's connection was admitted by. A phone
+/// sends a field only to a Mac that names it here: every params type refuses
+/// fields it does not know. And it offers a feature only when it is named:
+/// one that the app knows and its runtime does not would be offered and then
+/// refused (#730), so those are named only as far as the runtime serves them
+/// (`local_runtime::mobile::features`).
+fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
+    // `transcript` and `conditionalLists` are this app's own.
+    let mut named = json!({ "transcript": 1, "conditionalLists": 1 });
     // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
     // `sessionControls`: stop, interrupt, recovery, settings and continuing in
     // a new tab, as the desktop offers them.
@@ -456,7 +471,24 @@ fn capabilities() -> Value {
     // as the desktop does. `macSettings`: `mac.settings` and `mac.setSettings`.
     // `terminal`: `terminal.open`, and terminal observations that carry the
     // pane's size, so the phone can emulate the screen and drive it.
-    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 })
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1)] {
+        if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
+            named[feature] = json!(level);
+        }
+    }
+    named
+}
+
+/// What a phone is told when the runtime refuses an operation it does not
+/// know: a feature this Mac named and its runtime cannot serve after all.
+pub(super) const OUTDATED: &str = "TerminalX on your Mac needs updating or restarting to do this.";
+
+/// The runtime's refusal of an operation it does not know, said so a person
+/// knows what to do (#730). Any other error is left as it is.
+fn outdated(error: anyhow::Error) -> anyhow::Error {
+    let unknown = error.chain().any(|cause| cause.downcast_ref::<crate::local_runtime::client::Refused>()
+        .is_some_and(|refused| refused.message == crate::local_runtime::mobile::UNSUPPORTED));
+    if unknown { anyhow!(OUTDATED) } else { error }
 }
 
 /// One tab, for a control that takes nothing else.
@@ -2267,10 +2299,48 @@ mod tests {
         assert!(validate_attachment_payloads(&with_attachment.attachments).is_ok());
     }
 
+    /// A runtime of this build, as the desktop reads it when attaching.
+    fn current_runtime() -> crate::local_runtime::client::Build {
+        runtime_of(Some(env!("CARGO_PKG_VERSION")), Some(crate::local_runtime::mobile::features()))
+    }
+
+    fn runtime_of(version: Option<&str>, named: Option<Value>) -> crate::local_runtime::client::Build {
+        let version = version.map(|version| semver::Version::parse(version).unwrap());
+        let mobile = named.unwrap_or_else(|| crate::local_runtime::mobile::released_features(version.as_ref()));
+        crate::local_runtime::client::Build { version, mobile: mobile.as_object().unwrap().clone() }
+    }
+
+    /// #730: the phone is told what the runtime its connection reaches can
+    /// serve, not what this app could serve through a runtime of its own build.
+    #[test]
+    fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
+        let every = json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
+        assert_eq!(capabilities(&current_runtime()), every);
+        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), every, "0.2.22 serves them all, without naming them");
+        let app_only = json!({ "transcript": 1, "conditionalLists": 1 });
+        assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
+            "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
+        assert_eq!(capabilities(&runtime_of(None, None)), app_only, "nor from one that would not say its version");
+        // A runtime that names features is taken at its word, at the level this app knows.
+        let named = capabilities(&runtime_of(Some("9.0.0"), Some(json!({ "terminal": 2, "sendIds": 0, "sessionCreate": "1", "futureThing": 1 }))));
+        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "terminal": 1 }));
+    }
+
+    /// #730: an operation the runtime does not know reads as what to do about it.
+    #[test]
+    fn a_runtime_refusing_an_unknown_operation_says_the_mac_needs_updating() {
+        use crate::local_runtime::client::Refused;
+        let refused = |message: &str| anyhow::Error::from(Refused { code: "internal".into(), message: message.into() });
+        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED)).to_string(), OUTDATED);
+        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED).context("open the terminal")).to_string(), OUTDATED);
+        assert_eq!(outdated(refused("The tab is not running.")).to_string(), "internal: The tab is not running.", "any other refusal is left as it is");
+        assert_eq!(outdated(anyhow!("timed out")).to_string(), "timed out");
+    }
+
     #[test]
     fn the_terminal_view_is_offered_with_the_requests_it_needs() {
         // A phone shows its Terminal view only to a Mac that names this.
-        assert_eq!(capabilities()["terminal"], 1);
+        assert_eq!(capabilities(&current_runtime())["terminal"], 1);
         let open: TerminalParams = serde_json::from_value(json!({ "worktreeId": "worktree", "tabId": "tab" })).unwrap();
         assert_eq!((open.worktree_id.as_str(), open.tab_id.as_str()), ("worktree", "tab"));
         assert!(serde_json::from_value::<TerminalParams>(json!({ "worktreeId": "worktree", "tabId": "tab", "force": true })).is_err());
@@ -2279,7 +2349,7 @@ mod tests {
     #[test]
     fn session_controls_are_named_and_take_only_their_own_fields() {
         // A phone offers the controls only to a Mac that names them.
-        assert_eq!(capabilities()["sessionControls"], 1);
+        assert_eq!(capabilities(&current_runtime())["sessionControls"], 1);
         let tab: TabControlParams = serde_json::from_value(json!({ "sessionId": "s", "tabId": "t" })).unwrap();
         assert_eq!(tab.into_call(), json!({ "sessionId": "s", "tabId": "t" }));
         assert!(serde_json::from_value::<TabControlParams>(json!({ "sessionId": "s", "tabId": "t", "force": true })).is_err());
@@ -2297,7 +2367,7 @@ mod tests {
     #[test]
     fn sends_and_notes_take_a_message_id_only_this_mac_reports_it_understands() {
         // A phone sends the id only after `sync.capabilities` names it (#675).
-        assert_eq!(capabilities()["sendIds"], 1);
+        assert_eq!(capabilities(&current_runtime())["sendIds"], 1);
         let id = "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11";
         let send: SessionSendParams = serde_json::from_value(json!({ "tabId": "tab", "text": "hello", "clientMessageId": id })).unwrap();
         assert_eq!(send.client_message_id.as_deref(), Some(id));
@@ -2377,7 +2447,8 @@ mod tests {
 
     #[test]
     fn a_phone_names_projects_by_id_and_never_sends_a_path() {
-        assert_eq!((capabilities()["sessionCreate"].clone(), capabilities()["macSettings"].clone()), (json!(1), json!(1)));
+        let named = capabilities(&current_runtime());
+        assert_eq!((named["sessionCreate"].clone(), named["macSettings"].clone()), (json!(1), json!(1)));
         let create: SessionCreateParams = serde_json::from_value(json!({ "projectId": "abc", "useWorktree": true, "agent": "codex", "model": "gpt-5", "effort": "high", "mode": "auto", "title": "Fix it", "text": "Fix the login", "clientMessageId": "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11" })).unwrap();
         assert_eq!((create.project_id.as_deref(), create.use_worktree, create.agent.as_str()), (Some("abc"), true, "codex"));
         for path in [json!({ "projectPath": "/Users/me/repo" }), json!({ "cwd": "/tmp" }), json!({ "baseRef": "main" })] {

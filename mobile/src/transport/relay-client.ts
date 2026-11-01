@@ -1,4 +1,5 @@
 import type { RpcCallResult, RpcErrorData } from "@terminalx/portable/rpc";
+import { plainRefusal } from "./refusal";
 import { PairingGetEndpointsResultSchema, RelayPhoneHelloSchema, type DeviceResumeConfirmed, type PairingRelay } from "../pairing/contracts";
 import { MobileE2EESession } from "./e2ee-session";
 import { secureRandom } from "./random";
@@ -250,7 +251,7 @@ export class RelayClient {
       if (pending) {
         clearTimeout(pending.timer);
         this.pending.delete(value.id);
-        pending.resolve(value.ok ? { ok: true, value: value.result } : { ok: false, refusal: value.error });
+        pending.resolve(value.ok ? { ok: true, value: value.result } : { ok: false, refusal: plainRefusal(value.error) });
         return;
       }
       this.handleStreamResponse(value);
@@ -316,7 +317,8 @@ export class RelayClient {
     const stream = this.streams.get(value.id);
     if (!stream) return;
     if (!value.ok) {
-      stream.listener({ type: "error", message: value.error.message, error: value.error });
+      const error = plainRefusal(value.error);
+      stream.listener({ type: "error", message: error.message, error });
       this.removeStream(value.id);
       return;
     }

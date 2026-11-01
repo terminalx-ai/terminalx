@@ -23,6 +23,11 @@ use crate::{pty::Tap, sink::EventSink};
 /// wedge, and restarting, which stops every agent, is not offered for one.
 const LOOP_STALL: Duration = Duration::from_secs(120);
 
+/// An owner too old to know a lifecycle command refuses it as unsupported.
+fn unsupported(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == "unsupported"))
+}
+
 /// How long the owner's loop has gone without finishing a pass, once that is
 /// past [`LOOP_STALL`]. An owner too old to say is taken at its word.
 fn loop_stalled(liveness: &serde_json::Value) -> Option<Duration> {
@@ -136,6 +141,12 @@ impl Desktop {
     /// The owner this desktop is pinned to, whether or not its events still flow.
     pub fn epoch(&self) -> &str { self.client.epoch() }
 
+    /// The owner's build: its version, and what it can serve a phone (#730).
+    pub fn build(&self) -> &super::client::Build { self.client.build() }
+
+    /// The owner's full status. See [`Client::status`].
+    pub fn status(&self) -> Result<serde_json::Value> { self.client.status() }
+
     /// Whether the owner answers, and its own loop still turns. A loop held
     /// up behind a lock is a wedged owner even while it answers (#661). The
     /// question waits on nothing of the owner's, so a probe of a wedged owner
@@ -165,6 +176,33 @@ impl Desktop {
     }
 
     pub fn stop_all(&self) -> Result<()> { self.client.stop_all() }
+
+    /// Whether the owner has agreed to stop: it refuses any new work (#730).
+    /// `false` when it does not say, as when it does not answer.
+    pub fn stopping(&self) -> bool {
+        self.client.liveness(QUICK_TIMEOUT).is_ok_and(|liveness| liveness["localRuntime"]["stopping"] == true)
+    }
+
+    /// What stopping the owner now would cut short, as it says (#730).
+    /// `None` from an owner too old to say: TerminalX 0.2.22 and before.
+    pub fn work(&self) -> Result<Option<Vec<crate::session::retire::Work>>> {
+        match self.client.quick::<serde_json::Value>("runtime.work", serde_json::json!({})) {
+            Ok(answer) => Ok(Some(serde_json::from_value(answer["work"].clone())?)),
+            Err(error) if unsupported(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Stop the owner as Stop All does, only if nothing would be cut short,
+    /// as the owner decides under the lock that admits work (#730). A refusal
+    /// says `runtime_busy`. `false` from an owner too old to decide.
+    pub fn stop_all_if_idle(&self) -> Result<bool> {
+        match self.client.call::<serde_json::Value>("runtime.stopAllIfIdle", serde_json::json!({"epoch": self.client.epoch()})) {
+            Ok(_) => Ok(true),
+            Err(error) if unsupported(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 
     /// Internal owner RPC only. Identity comes from the desktop's verified
     /// account, never from a guest frame; owner-side admission remains final.

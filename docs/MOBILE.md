@@ -250,6 +250,30 @@ read/subscription methods, and the session-scoped steering methods documented
 in [MULTIPLAYER.md](./MULTIPLAYER.md). Refusals are protocol data and render as
 unavailable/forbidden states instead of falling through to broader RPC.
 
+### What the phone is offered (#730)
+
+`sync.capabilities` names what the Mac can do beyond the first phone
+protocol, and the phone hides every feature it does not name. Most of them
+(`sendIds`, `sessionControls`, `sessionCreate`, `macSettings`, `terminal`) are
+served by the Mac's background runtime (`terminalx-serve`), which outlives the
+app and may be older than it. So the app names those only as far as the
+runtime its phone connection reaches serves them: a runtime says so in its
+status (`localRuntime.mobileFeatures`); one from before that is judged by its
+version (0.2.22 serves all five; earlier releases none). A 0.2.21 runtime gets
+the phone no Terminal view, session controls, new sessions or Mac settings,
+and no `clientMessageId` on sends.
+
+When the app attaches to another runtime (an update replaced it, or the
+connection was re-established), it sends each phone
+`{"method":"sync.capabilitiesChanged"}`. A phone connection admitted by the
+previous attachment closes on it, and the phone reconnects; one on the new
+attachment passes it on. Either way the phone reads `sync.capabilities`
+again and shows or hides features without a restart. If the runtime still
+refuses an operation it does not know, the phone says "TerminalX on your Mac
+needs updating or restarting to do this." in place of the runtime's
+"Unsupported paired-device owner operation.", and the rest of the session
+keeps working.
+
 The TerminalX mobile API carries public `tabId` values only. It never stores,
 accepts, or displays a PTY id, pane id, process handle, host path, or arbitrary
 filesystem path. The Rust host resolves each tab id under the session lock and

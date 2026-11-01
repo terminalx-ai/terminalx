@@ -78,14 +78,35 @@ export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
 
   private capabilities?: Promise<HostFeatures>;
+  private featureListeners = new Set<() => void>();
   private lists = new Map<string, { version: string; value: unknown }>();
   private pendingLists = new Map<string, Promise<unknown>>();
 
-  constructor(private readonly connection: HostConnection) {}
+  constructor(private readonly connection: HostConnection) {
+    // What the Mac offers comes from its background runtime, which an update
+    // replaces while the phone stays connected (#730).
+    connection.onEvent((event) => { if (event.method === "sync.capabilitiesChanged") this.featuresChanged(); });
+  }
 
   resetConnection(hostChanged = false): void {
-    this.capabilities = undefined;
     if (hostChanged) { this.lists = new Map(); this.pendingLists = new Map(); }
+    this.featuresChanged();
+  }
+
+  /**
+   * Called whenever what the Mac offers may have changed: on each new
+   * connection, and when the Mac says its runtime changed (#730). Read
+   * `features()` again then: a feature it no longer names is hidden, and
+   * one it now names is offered, without restarting the app.
+   */
+  onFeaturesChanged(listener: () => void): () => void {
+    this.featureListeners.add(listener);
+    return () => { this.featureListeners.delete(listener); };
+  }
+
+  private featuresChanged(): void {
+    this.capabilities = undefined;
+    for (const listener of [...this.featureListeners]) listener();
   }
 
   /** The path requests go over right now; null while disconnected. */

@@ -36,7 +36,13 @@ const LOST_VIEW: &str = "Live terminal output in this window disconnected. Agent
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ConnectionState {
-    Connected { epoch: String, generation: u64, view: u64 },
+    /// `outdated`: the runtime is older than this app, and is replaced with
+    /// the one bundled with it once none of its agents is mid-turn (#730).
+    Connected {
+        epoch: String, generation: u64, view: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        outdated: Option<super::replace::Outdated>,
+    },
     /// Retrying by itself. `terminal`: only this window's terminal output is
     /// down; otherwise every window's live updates are.
     Connecting { terminal: bool, attempt: u32, retry_in_ms: u64, down_ms: u64, message: String },
@@ -48,6 +54,10 @@ pub enum ConnectionState {
     /// process; only restarting it recovers (#661). `epoch` names the attached
     /// runtime, if any, so a restart cannot stop its replacement.
     Unresponsive { message: String, epoch: Option<String> },
+    /// The runtime is being replaced with the one bundled with this app
+    /// (`replace.rs`): its agents and terminals are stopping, and windows
+    /// attach to the new one in place. `from`: its version, when it said.
+    Updating { from: Option<String>, to: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -198,7 +208,7 @@ impl Inner {
             return ConnectionState::Connecting { terminal: false, attempt: 1, retry_in_ms: 0, down_ms: 0, message: LOST_EVENTS.into() };
         };
         if let Some(retry) = self.pending.get(&Target::View(window.into())) { return retrying(retry, true); }
-        ConnectionState::Connected { epoch, generation: attached.generation, view: attached.view }
+        ConnectionState::Connected { epoch, generation: attached.generation, view: attached.view, outdated: None }
     }
 }
 
@@ -224,6 +234,7 @@ impl Supervisor {
                         // An owner that holds its socket and never answers is
                         // not reached by trying again: say so (#661).
                         state.runtime_health.attach_failed(&error);
+                        state.runtime_replacement.attach_failed();
                         match error.downcast_ref::<Blocked>() {
                             Some(blocked) => (blocked.0.clone(), true),
                             None => (format!("Could not reconnect to the background runtime: {error:#}"), false),
@@ -387,7 +398,8 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
     let source = app.path().resource_dir()?.join("local-runtime/terminalx-serve");
     let home = crate::store::root()?;
     // The owner that is running now, which may have restarted since the last
-    // attachment, or a new one if it exited. A live owner is never replaced.
+    // attachment, or a new one if it exited. A live owner is never replaced
+    // here: one older than this app is, once attached (`replace.rs`).
     // A runtime started here keeps its log beside the app's (#661).
     let log = app.path().app_log_dir().ok().map(|dir| dir.join("runtime.log"));
     let client = super::launch::connect_desktop(&source, &home, &app.config().identifier, log.as_deref())?;
@@ -406,6 +418,8 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
         anyhow::ensure!(unchanged, "The desktop connection changed while attaching.");
         state.pairing.attach_runtime(next.clone());
         *current = Some(next.clone());
+        // One older than this app is replaced as soon as that cuts off no turn (#730).
+        state.runtime_replacement.attached(next.epoch(), next.build());
         Ok(())
     })?;
     Ok(next.generation())
@@ -548,7 +562,7 @@ mod tests {
         assert!(!connected(&inner.status("main", attached(4), "", now)));
         assert_eq!(attempt(&mut inner, now + SECOND, Ok(9)), Target::View("main".into()));
         let renewed = Some(Snapshot { generation: 4, epoch: Some("owner".into()), view: 9 });
-        assert_eq!(inner.status("main", renewed, "", now + SECOND), ConnectionState::Connected { epoch: "owner".into(), generation: 4, view: 9 });
+        assert_eq!(inner.status("main", renewed, "", now + SECOND), ConnectionState::Connected { epoch: "owner".into(), generation: 4, view: 9, outdated: None });
     }
 
     #[test]
