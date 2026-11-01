@@ -1753,7 +1753,9 @@ export type LocalRuntimeState =
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
   /** Retrying cannot help until something outside this window changes. */
-  | { state: "unavailable"; message: string };
+  | { state: "unavailable"; message: string }
+  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). */
+  | { state: "unresponsive"; message: string; epoch: string | null };
 
 export type QuitBehavior = "keepRunning" | "stopAll";
 export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
@@ -1761,6 +1763,8 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
+  /** Stop the runtime without asking it, with its agents and terminals; the desktop attaches a fresh one. */
+  restart: (epoch: string | null) => invoke<LocalRuntimeState>("local_runtime_restart", { epoch }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
 };

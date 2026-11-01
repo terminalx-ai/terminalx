@@ -9,11 +9,14 @@ use serde_json::json;
 
 use super::client::Client;
 
+/// Input, sizing and the lists a window shows are quick calls: a write that
+/// waits on a program that stopped reading gives up after
+/// [`crate::pty::INPUT_STALL`], so the owner answers well inside their timeout.
 #[derive(Clone)]
 pub struct Terminals(Arc<Client>);
 
 impl Terminals {
-    pub fn mobile_drivers(&self) -> Result<Vec<String>> { self.0.call("runtime.pty.mobileDrivers", serde_json::json!({})) }
+    pub fn mobile_drivers(&self) -> Result<Vec<String>> { self.0.quick("runtime.pty.mobileDrivers", serde_json::json!({})) }
 
     pub fn new(client: Arc<Client>) -> Self { Self(client) }
 
@@ -22,15 +25,15 @@ impl Terminals {
     }
 
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<()> {
-        self.0.call("runtime.pty.write", json!({"id":id,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))
+        self.0.quick("runtime.pty.write", json!({"id":id,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        self.0.call("runtime.pty.resize", json!({"id":id,"cols":cols,"rows":rows}))
+        self.0.quick("runtime.pty.resize", json!({"id":id,"cols":cols,"rows":rows}))
     }
 
     pub fn rename(&self, id: &str, title: &str) -> Result<()> {
-        self.0.call("runtime.pty.rename", json!({"id":id,"title":title}))
+        self.0.quick("runtime.pty.rename", json!({"id":id,"title":title}))
     }
 
     pub fn kill(&self, id: &str) -> Result<()> {
@@ -38,14 +41,14 @@ impl Terminals {
     }
 
     pub fn shells(&self) -> Result<Vec<crate::pty::ShellPane>> {
-        self.0.call("runtime.pty.visibleShells", json!({}))
+        self.0.quick("runtime.pty.visibleShells", json!({}))
     }
 
     pub fn busy(&self, ids: &[String]) -> Result<Vec<String>> {
-        self.0.call("runtime.pty.busyMany", json!({"ids":ids}))
+        self.0.quick("runtime.pty.busyMany", json!({"ids":ids}))
     }
 
     pub fn stats(&self) -> Result<crate::pty::TerminalStats> {
-        self.0.call("runtime.pty.stats", json!({}))
+        self.0.quick("runtime.pty.stats", json!({}))
     }
 }

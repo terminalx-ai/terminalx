@@ -535,11 +535,13 @@ where
     let control_token = endpoint.token.clone();
     let dispatch: Dispatch = std::sync::Arc::new(move |line: &str| dispatch_line(line, &control_token, &hook_handler, &control_handler));
     #[cfg(unix)]
+    let frames = Frames::new(MAX_FRAMES)?;
+    #[cfg(unix)]
     {
         // The file at this path is named for this process, so whatever is
         // there was left by a dead one and would only refuse the bind.
         let _ = std::fs::remove_file(&endpoint.socket);
-        accept(bind(&endpoint.socket)?, dispatch.clone())?;
+        accept(bind(&endpoint.socket)?, dispatch.clone(), frames.clone())?;
     }
     #[cfg(windows)]
     {
@@ -555,6 +557,8 @@ where
         own: endpoint.socket.clone(),
         token: endpoint.token,
         dispatch,
+        #[cfg(unix)]
+        frames,
         published: endpoint.published,
         held: None,
         waiting_on: None,
@@ -572,15 +576,111 @@ fn bind(path: &Path) -> std::io::Result<std::os::unix::net::UnixListener> {
     Ok(listener)
 }
 
+/// How many frames a launch handles at once, on all its sockets together.
+/// Each has a thread, and a frame
+/// held up behind a wedged owner may never return, so without a bound one
+/// stuck dispatch gathers hundreds of threads (#661). Past it a frame is
+/// refused with [`busy_reply`].
 #[cfg(unix)]
-fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch) -> std::io::Result<()> {
+const MAX_FRAMES: usize = 256;
+
+/// A launch's frame places, shared by its own socket and the published one,
+/// and where frames past them go to be refused.
+#[cfg(unix)]
+#[derive(Clone)]
+struct Frames {
+    count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    limit: usize,
+    refuse: std::sync::mpsc::SyncSender<std::os::unix::net::UnixStream>,
+}
+
+#[cfg(unix)]
+impl Frames {
+    fn new(limit: usize) -> std::io::Result<Self> {
+        Ok(Self { count: Default::default(), limit, refuse: refuser()? })
+    }
+
+    fn take(&self) -> Option<FrameSlot> {
+        crate::local_runtime::permissions::increment_bounded(&self.count, self.limit).then(|| FrameSlot(self.count.clone()))
+    }
+}
+
+/// One frame place, given back when the frame's thread ends.
+#[cfg(unix)]
+struct FrameSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(unix)]
+impl Drop for FrameSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What a frame refused for want of a place is told: a control request that
+/// the owner is busy, a hook nothing to act on (so a deciding hook fails
+/// closed) and why, for its CLI's hook log.
+#[cfg(unix)]
+fn busy_reply(line: &str) -> Value {
+    const BUSY: &str = "TerminalX is handling too many requests at once, so this one was refused.";
+    match serde_json::from_str::<Value>(line) {
+        Ok(value) if value.get("command").is_some() => {
+            let id = value.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+            serde_json::to_value(crate::control::ControlResponse::failure(id, crate::control::ControlError::new(
+                "busy", BUSY, Some("Retry shortly. If it keeps happening, restart the TerminalX runtime from the app.".into()),
+            ))).unwrap_or_default()
+        }
+        _ => serde_json::to_value(HookReply::refused(BUSY)).unwrap_or_default(),
+    }
+}
+
+/// Answer refused frames on one thread of their own, never the accepting one:
+/// reading a refused caller's line must not hold up the next connection.
+#[cfg(unix)]
+fn refuser() -> std::io::Result<std::sync::mpsc::SyncSender<std::os::unix::net::UnixStream>> {
+    let (refuse, refused) = std::sync::mpsc::sync_channel::<std::os::unix::net::UnixStream>(32);
+    std::thread::Builder::new().name("hook-refuse".into()).spawn(move || {
+        for stream in refused {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+            let mut line = String::new();
+            let Ok(reader) = stream.try_clone() else { continue };
+            if BufReader::new(reader).take(1024 * 1024).read_line(&mut line).is_err() || line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(mut bytes) = serde_json::to_vec(&busy_reply(&line)) {
+                bytes.push(b'\n');
+                let mut stream = stream;
+                let _ = stream.write_all(&bytes);
+            }
+        }
+    })?;
+    Ok(refuse)
+}
+
+#[cfg(unix)]
+fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames: Frames) -> std::io::Result<()> {
     std::thread::Builder::new().name("hook-socket".into()).spawn(move || {
+        let mut refusing = false;
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
+            let Some(slot) = frames.take() else {
+                if !refusing {
+                    log::warn!("{} socket frames are already in progress; refusing new ones until some finish", frames.limit);
+                    refusing = true;
+                }
+                // A full refusal queue closes the connection unanswered.
+                let _ = frames.refuse.try_send(stream);
+                continue;
+            };
+            if refusing {
+                log::info!("socket frames are being accepted again");
+                refusing = false;
+            }
             let dispatch = dispatch.clone();
             // One thread per hook: a permission frame parks until it is
             // answered, and the next hook must not queue behind it.
             let _ = std::thread::Builder::new().name("hook-frame".into()).spawn(move || {
+                let _slot = slot;
                 let mut reader = BufReader::new(match stream.try_clone() {
                     Ok(s) => s,
                     Err(_) => return,
@@ -671,6 +771,8 @@ struct Publisher {
     own: PathBuf,
     token: String,
     dispatch: Dispatch,
+    #[cfg(unix)]
+    frames: Frames,
     published: std::sync::Arc<std::sync::atomic::AtomicBool>,
     held: Option<Claim>,
     /// Why the last attempt did not publish, so a standing reason is logged
@@ -751,7 +853,7 @@ impl Publisher {
                 let _ = std::fs::remove_file(&self.socket);
                 return Err(error.context("write the control token"));
             }
-            accept(listener, self.dispatch.clone())?;
+            accept(listener, self.dispatch.clone(), self.frames.clone())?;
             Ok(Claim { _lock: lock, identity })
         }
         #[cfg(windows)]
@@ -1262,6 +1364,61 @@ mod tests {
         let mut reply = String::new();
         BufReader::new(stream).read_line(&mut reply).unwrap();
         serde_json::from_str(&reply).unwrap()
+    }
+
+    /// Frames held up behind a wedged owner take every place; the next ones
+    /// are answered at once instead of each getting a thread that never
+    /// returns (#661). A deciding hook gets nothing to act on.
+    #[cfg(unix)]
+    #[test]
+    fn frames_past_the_limit_are_refused_without_a_thread_each() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::{mpsc, Arc, Condvar, Mutex};
+        let dir = tempfile::Builder::new().prefix("tx").tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let held = Arc::new((Mutex::new(true), Condvar::new()));
+        let (entered, inside) = mpsc::channel::<()>();
+        let entered = Mutex::new(entered);
+        let gate = held.clone();
+        let dispatch: Dispatch = Arc::new(move |line: &str| {
+            if line.contains("\"command\"") {
+                return json!({"ok": true});
+            }
+            entered.lock().unwrap().send(()).unwrap();
+            let (lock, released) = &*gate;
+            // A regression must fail rather than hang the test runner.
+            let _ = released.wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |held| *held).unwrap();
+            json!({"output": {"answered": true}})
+        });
+        accept(bind(&socket).unwrap(), dispatch, Frames::new(2).unwrap()).unwrap();
+        let hook = json!({"tab": "t", "session": "s", "token": "t", "event": "PreToolUse", "payload": {}});
+        let parked: Vec<_> = (0..2).map(|_| {
+            let mut stream = UnixStream::connect(&socket).unwrap();
+            stream.write_all(format!("{hook}\n").as_bytes()).unwrap();
+            inside.recv_timeout(Duration::from_secs(5)).unwrap();
+            stream
+        }).collect();
+
+        let control = send(&socket, &json!({"id": "busy-check", "command": "status", "token": "x", "params": {}}));
+        assert_eq!(control["ok"], false, "{control}");
+        assert_eq!(control["id"], "busy-check");
+        assert_eq!(control["error"]["code"], "busy");
+        let refused = send(&socket, &hook);
+        assert!(refused.get("output").is_none(), "a refused deciding hook must not authorize anything: {refused}");
+        assert!(refused["refused"].as_str().is_some_and(|reason| reason.contains("too many requests")), "{refused}");
+
+        *held.0.lock().unwrap() = false;
+        held.1.notify_all();
+        for stream in parked {
+            let mut reply = String::new();
+            BufReader::new(stream).read_line(&mut reply).unwrap();
+            assert!(reply.contains("answered"), "{reply}");
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while send(&socket, &json!({"id": "again", "command": "status", "token": "x", "params": {}}))["ok"] != true {
+            assert!(std::time::Instant::now() < deadline, "finished frames did not give their places back");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[cfg(unix)]
