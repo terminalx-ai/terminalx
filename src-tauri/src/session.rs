@@ -614,7 +614,14 @@ pub struct TabRuntime {
     compaction: compaction::Admission,
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
-    stdio_writer: Option<std::sync::mpsc::SyncSender<codex::stdio::Outbound>>,
+    /// Each frame with the phone or share a prompt came from, if any.
+    stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
+    /// The phone or share the prompt just sent came from, until its frame is
+    /// queued with it: it is held to its permits when that frame is written.
+    stdio_authority: Option<codex_stdio::Authority>,
+    /// A continuation sent to experimental Codex, answered once Codex takes
+    /// its turn or the connection ends before it does.
+    stdio_receipt: Option<(u64, DeliveryReceipt)>,
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
@@ -1335,7 +1342,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None,
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None,
                 turn_started_at: None,
                 turn_by_command: false,
                 signed_out_in_turn: false,
@@ -1555,9 +1562,14 @@ impl SessionManager {
         self.reconcile_compactions(&mut rt, &mut events)?;
         for event in &mut events { recovery::sanitize(&mut event.payload); }
         // A tab that is a terminal has no agent to recover.
-        let terminal = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).map(TabEntry::is_terminal)).unwrap_or(false);
+        let tab = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).cloned());
+        let terminal = tab.as_ref().is_some_and(TabEntry::is_terminal);
         if rt.status == TabStatus::Idle && !rt.turn_open && !rt.stopping && !terminal {
             if let Some(kind) = recovery::from_history(&events) {
+                let kind = match &tab {
+                    Some(tab) if codex_stdio::selected(tab) => codex_stdio::recovery_on_open(tab, &path, kind),
+                    _ => kind,
+                };
                 self.needs_recovery(&mut rt, kind);
             }
         }
@@ -2018,7 +2030,9 @@ impl SessionManager {
         let agent = agent_name(&rt.harness);
         let pane = match &rt.engine {
             Engine::Cli(p) if p.awaiting_delivery == Some(seq) => p.pane_id.clone(),
-            Engine::Cli(_) => return Ok(false),
+            // Experimental Codex has no input to leave a prompt in: Codex
+            // took it or it failed, and the receipt already said which.
+            Engine::Cli(_) | Engine::CodexStdio(_) => return Ok(false),
             _ => bail!("{agent} is not running in this tab."),
         };
         match self.enter_again(&mut rt, &pane, seq, Instant::now(), "reader") {
@@ -2137,8 +2151,7 @@ impl SessionManager {
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
         if codex_stdio::selected(&tab) {
-            anyhow::ensure!(receipt.is_none(), "Experimental Codex does not support continuation delivery");
-            return self.send_codex_stdio(&mut rt, &rt_arc, &entry, prompt, refs, wire_images);
+            return self.send_codex_stdio(&mut rt, &rt_arc, &entry, prompt, refs, wire_images, receipt);
         }
 
         if receipt.is_some() && (pty_first(&tab.harness).is_none() || rt.turn_open || !rt.pending.is_empty()) {

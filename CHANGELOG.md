@@ -99,6 +99,15 @@
   own terminal interface on the same thread, instead of an empty terminal. The
   chat keeps its history without repeating it; the move is one-way and waits for
   a running turn to finish. (#644)
+- Message an experimental Codex session from a paired phone or as a guest or host
+  of a shared session, including `/compact` from the phone, instead of being
+  refused as local-only. Each message is checked against its sender's access when
+  it is delivered, as for other agents; one whose access ended is not sent. (#644)
+- Continue in New Session can hand off to an experimental Codex session. Delivery
+  is confirmed once Codex starts the handoff's turn. A handoff, or any prompt,
+  that Codex never took because it failed or was stopped first is offered back
+  with **Resend last prompt**, after a restart too, and is never sent again on
+  its own. (#644)
 - Add Settings → Experimental with a **Native Codex** switch, off by default. When
   it is on, new Codex sessions and tabs started from the app or the `terminalx`
   command line connect to Codex directly, for reliable compaction status. Sessions
