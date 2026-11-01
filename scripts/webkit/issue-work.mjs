@@ -34,7 +34,8 @@ try {
         ];
         const claim = (number, patch) => ({
           scope: "github.com/demo/project", issue: { provider: "github", id: String(number), identifier: `#${number}` },
-          person: { name: "Alexandria Montgomery-Whitfield", you: false }, title: `Synthetic session on #${number}`, branch: `alexandria/${number}-a-rather-long-branch-name-for-the-work`,
+          // A session title and branch far wider than the hover card (#713).
+          person: { name: "Alexandria Montgomery-Whitfield", you: false }, title: `#${number} Question card: an option whose label contains the separator is kept by its position, not by its joined label`, branch: `alexandria/${number}-a-rather-long-branch-name-for-the-work`,
           state: "working", cloud: false, live: true, since: now - 90 * 60000, lastActiveAt: now - 2 * 60000, refreshedAt: now - 10000, ...patch,
         });
         Object.assign(answers, {
@@ -96,6 +97,62 @@ try {
         "the chips stay inside their rows and over nothing": rows.every((row) => row.inside && !row.over && !row.title && !row.scrolls),
       }, rows);
       if (shots) await page.screenshot({ path: join(shots, `issue-work-list-${mode}-${width}.png`) });
+
+      // Hovering a chip opens its card (#713): a solid card that holds all
+      // it shows, long titles and branches cut with "…" at its edge, and
+      // nothing drawn outside it over the rows below. Work that went quiet
+      // is not dimmed there: its "Was working on this" line says so. The
+      // card stays solid in macOS glass mode too, where popovers are
+      // translucent, so glass mode is on here whatever the platform.
+      const glass = await page.evaluate(() => document.documentElement.hasAttribute("data-glass"));
+      await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
+      for (const [index, chip] of [[0, "a chip of current work"], [1, "a chip of work that went quiet"]]) {
+        await page.getByTestId("issue-work-chip").nth(index).hover();
+        const card = page.getByTestId("issue-work-card");
+        await card.waitFor();
+        const shown = await card.evaluate(async (node) => {
+          await Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished));
+          // Radix repeats the content in a visually hidden copy for screen readers.
+          const hidden = node.querySelector('[role="tooltip"]');
+          const parts = [...node.querySelectorAll("*")].filter((child) => !hidden?.contains(child));
+          const bounds = node.getBoundingClientRect();
+          const outside = parts.filter((child) => {
+            const box = child.getBoundingClientRect();
+            return box.width > 0 && (box.left < bounds.left - 0.5 || box.right > bounds.right + 0.5 || box.top < bounds.top - 0.5 || box.bottom > bounds.bottom + 0.5);
+          });
+          const overflowing = parts.filter((child) => child.scrollWidth > child.clientWidth + 1);
+          const cut = overflowing.filter((child) => getComputedStyle(child).overflowX === "hidden" && getComputedStyle(child).textOverflow === "ellipsis");
+          const alpha = (color) => {
+            const match = color.match(/\/\s*([\d.]+)(%?)\s*\)$/) ?? color.match(/^rgba\(.*,\s*([\d.]+)()\)$/);
+            return match ? Number(match[1]) / (match[2] ? 100 : 1) : 1;
+          };
+          const rows = parts.filter((child) => child.matches('[data-testid="issue-worker"]'));
+          return {
+            width: Math.round(bounds.width),
+            list: Math.round(node.querySelector("ul").getBoundingClientRect().width),
+            inWindow: bounds.left >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight,
+            scrolls: node.scrollWidth > node.clientWidth + 1,
+            outside: outside.map((child) => child.textContent.slice(0, 60)),
+            spills: overflowing.filter((child) => !cut.includes(child)).map((child) => child.textContent.slice(0, 60)),
+            cut: cut.map((child) => child.textContent.slice(0, 60)),
+            background: getComputedStyle(node).backgroundColor,
+            solid: alpha(getComputedStyle(node).backgroundColor) === 1 && getComputedStyle(node).opacity === "1",
+            rows: rows.length,
+            dimmed: rows.filter((row) => getComputedStyle(row).opacity !== "1").length,
+            quiet: rows.some((row) => row.textContent.includes("Was working on this, 3 hours ago")),
+          };
+        });
+        failed += report(`${mode}, ${width}px, ${chip}`, {
+          "its card holds everything it shows, inside the window": shown.width <= 288 && shown.list < shown.width && shown.inWindow && !shown.scrolls && !shown.outside.length,
+          "long titles and branches are cut with … inside the card": shown.cut.some((text) => text.includes("Question card")) && shown.cut.some((text) => text.includes("a-rather-long-branch-name")) && !shown.spills.length,
+          "the card is solid and no row in it is dimmed": shown.solid && shown.rows === (index ? 1 : 3) && !shown.dimmed && shown.quiet === (index === 1),
+        }, shown);
+        if (shots) await page.screenshot({ path: join(shots, `issue-work-card-${index ? "quiet" : "working"}-${mode}-${width}.png`) });
+        // In steps: the card stays open while the pointer is on its way to it.
+        await page.mouse.move(width - 4, 696, { steps: 5 });
+        await card.waitFor({ state: "hidden" });
+      }
+      await page.evaluate((glass) => document.documentElement.toggleAttribute("data-glass", glass), glass);
 
       await page.getByText("Show who is working on an issue across machines and teammates in the Issues list", { exact: true }).click();
       const panel = page.getByTestId("issue-work-panel");
