@@ -31,7 +31,7 @@ import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } f
 import { TranscriptionInputSubmenu } from "./TranscriptionInputPicker";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
-import { beginComposerSend, editComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
+import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
@@ -213,11 +213,6 @@ export function Composer({
       mounted.current = false;
     };
   }, []);
-  const previousDraft = useRef(draft);
-  useLayoutEffect(() => {
-    if (previousDraft.current !== draft) editComposerSend(sendScope);
-    previousDraft.current = draft;
-  }, [draft, sendScope]);
   // The model and permission pickers open on a click and an accessibility press too.
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshPickerModels() });
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -411,7 +406,7 @@ export function Composer({
     const text = draft.trim();
     if ((!text && !attachments.length) || disabled) return;
     const previews = attachments.map((a) => ({ url: a.previewUrl, name: a.name }));
-    const operation = beginComposerSend(sendScope, tab.id, { text, images: previews, pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
+    const operation = beginComposerSend(sendScope, { text, images: previews, pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
     // The message goes to the chat at once, drawn as sending, and the composer
     // is free for the next one (#727): what was set aside to send a recalled
@@ -548,7 +543,6 @@ export function Composer({
           {...textProps}
           value={draft}
           onChange={(e) => {
-            editComposerSend(sendScope);
             onDraftChange(e.target.value);
             setCaret(e.target.selectionStart ?? e.target.value.length);
             setDismissedToken(null);

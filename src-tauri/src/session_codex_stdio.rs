@@ -117,13 +117,20 @@ impl SessionManager {
         Ok(())
     }
     /// The reader opened the terminal view of an experimental tab: Codex moves
-    /// to its own terminal interface on the same thread, for good. Admission is
-    /// held throughout, so no send starts another connection between the
-    /// confirmed exit and the switch. The PTY engine copies the thread's
-    /// rollout into its home and reads it from the end, so what the chat
-    /// already shows is not drawn again.
+    /// to its own terminal interface on the same thread, for good. The tab is
+    /// fenced throughout, so no send starts another connection between the
+    /// confirmed exit and the switch: a prompt sent to it meanwhile waits and
+    /// then goes to the terminal, and every other tab is admitted while Codex
+    /// exits (#727). The PTY engine copies the thread's rollout into its home
+    /// and reads it from the end, so what the chat already shows is not drawn
+    /// again.
     pub fn codex_stdio_to_terminal(&self, session_id: &str, tab_id: &str) -> Result<()> {
-        let _admission = crate::issue_pipeline::admission::lock();
+        use crate::issue_pipeline::admission::{fence, Kind, Scope};
+        // One switch at a time, as when admission was held for it: a second
+        // finds the first one's tab already moved.
+        static SWITCHING: Mutex<()> = Mutex::new(());
+        let _one = SWITCHING.lock().unwrap_or_else(|error| error.into_inner());
+        let _switching = fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]);
         self.accepting_work()?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let experimental = index::get(session_id)?.tab(tab_id).is_some_and(selected);

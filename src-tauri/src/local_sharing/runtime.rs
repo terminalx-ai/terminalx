@@ -5,6 +5,7 @@
 
 use crate::events::AgentEvent;
 use crate::harness::settings::allowed_while_shared;
+use crate::issue_pipeline::admission;
 use crate::local_sharing::{self, QueuedInput};
 use crate::session::SessionManager;
 use crate::store::{
@@ -57,7 +58,12 @@ pub(crate) fn request(
         return guest_status(sessions, owner, session, connection);
     }
     // Never wait for checkout admission while holding sharing or a view lease.
-    let admission = crate::issue_pipeline::admission::lock();
+    // A guest's prompt or stop for a tab whose agent is being stopped waits
+    // for that stop, as the host's own prompt does (#727).
+    let admission = match (method, params["tabId"].as_str()) {
+        ("session.send" | "session.queue" | "session.steer" | "session.stop", Some(tab)) => admission::lock_for(session, tab),
+        _ => admission::lock(),
+    };
     let mut sharing = sessions.sharing.lock().unwrap();
     let share = sharing
         .sessions
@@ -249,8 +255,19 @@ pub(crate) fn request(
         }
         "session.stop" => {
             share.cancel_tab_inputs(tab_id);
+            // The process exit is waited for behind a fence on this tab, with
+            // admission and sharing given back (#727): a prompt to it waits
+            // for the stop, and every other tab, the host's included, is sent
+            // to meanwhile.
+            let _stopping = admission::fence(admission::Kind::Hold, [admission::Scope::Tab(session.into(), tab_id.into())]);
+            drop(sharing);
+            drop(admission);
             sessions.stop(session, tab_id)?;
-            share.record(&person.user_id, "stop", json!({ "tabId": tab_id }), now());
+            // Sharing is taken after the view lease is let go, never under it.
+            drop(_attachment);
+            if let Some(share) = sessions.sharing.lock().unwrap().sessions.get_mut(session) {
+                share.record(&person.user_id, "stop", json!({ "tabId": tab_id }), now());
+            }
             Ok(json!({ "stopped": true, "interrupted": false }))
         }
         "permission.respond" => {
@@ -289,20 +306,23 @@ pub(crate) fn drain_queue(
     session: &str,
 ) -> Result<()> {
     // Never wait for checkout admission while holding sharing or a view lease.
-    let admission = crate::issue_pipeline::admission::lock();
+    let admission = admission::lock();
     let mut sharing = sessions.sharing.lock().unwrap();
     let Some(share) = sharing.sessions.get_mut(session) else {
         return Ok(());
     };
     super::owner::authorize(share, owner)?;
+    // An input for a tab whose agent is being stopped stays queued: the next
+    // drain sends it once the stop is done, as a host prompt waits for it.
     let ready = share.queue.iter().position(|input| {
         !matches!(
             sessions.status_of(session, &input.tab_id),
             TabStatus::InProgress | TabStatus::Waiting
-        )
+        ) && !admission::held(session, &input.tab_id)
     });
     if let Some(at) = ready {
         let input = share.queue.remove(at).unwrap();
+        let kept = input.clone();
         let result = (|| {
             let tab = index::get(session)?
                 .tab(&input.tab_id)
@@ -333,7 +353,11 @@ pub(crate) fn drain_queue(
             );
             Ok::<_, anyhow::Error>(())
         })();
-        if let Err(error) = result {
+        // A stop that began after the look above refused it; nothing was
+        // sent, so it keeps its place.
+        if result.as_ref().is_err_and(admission::stopping) {
+            share.queue.insert(at, kept);
+        } else if let Err(error) = result {
             share.record(
                 "host",
                 "queue-dropped",

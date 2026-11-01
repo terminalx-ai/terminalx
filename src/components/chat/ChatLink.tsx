@@ -37,6 +37,7 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
   const originalHref = originalChatHref(href);
   const destination = useMemo(() => parseChatLink(originalHref), [originalHref]);
   const identity = `${context.sessionId}\0${context.cwd}\0${context.basePath ?? ""}\0${originalHref}`;
+  const element = useRef<HTMLAnchorElement>(null);
   const currentIdentity = useRef(identity);
   const request = useRef(0);
   if (currentIdentity.current !== identity) {
@@ -107,7 +108,7 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
       run(() => openChatLinkInBrowser(destination, context, browser));
       return;
     }
-    run(() => openChatLink(destination, context));
+    run(() => openChatLink(destination, context, element.current));
   };
 
   const chooseBrowser = (browser: "system" | "terminalx") => {
@@ -119,6 +120,7 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
   const anchor = (
     <a
       {...props}
+      ref={element}
       href={href}
       target={undefined}
       rel={undefined}

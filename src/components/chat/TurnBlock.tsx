@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -14,22 +14,23 @@ import { ToolCallRow, ToolGroupRow } from "./ToolCallRow";
 import { usePrefs } from "@/lib/prefs";
 import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
+import { DisclosureScope, useDisclosure } from "./disclosures";
 
 /**
  * One exchange: the prompt, the work under it, the answer. Once the agent has
  * started answering, the tool calls fold behind one line (a setting), and a
  * settled turn's footer says how long it took.
  */
-export const TurnBlock = memo(function TurnBlock({
-  turn,
-  sessionId,
-  cwd,
-  stream,
-  working,
-  streamingTool,
-  onSendQueuedNow,
-  onSendAgain,
-}: {
+export const TurnBlock = memo(function TurnBlock(props: TurnProps) {
+  // What is opened or folded in it outlives the turn being drawn (#727).
+  return (
+    <DisclosureScope value={props.turn.key}>
+      <TurnBody {...props} />
+    </DisclosureScope>
+  );
+});
+
+interface TurnProps {
   turn: Turn;
   sessionId: string;
   cwd?: string;
@@ -40,9 +41,20 @@ export const TurnBlock = memo(function TurnBlock({
   onSendQueuedNow?: (seq: number) => void;
   /** Send a message the agent dropped unanswered again, as a new message (#722); absent where that cannot be done. */
   onSendAgain?: (seq: number) => void;
-}) {
+}
+
+function TurnBody({
+  turn,
+  sessionId,
+  cwd,
+  stream,
+  working,
+  streamingTool,
+  onSendQueuedNow,
+  onSendAgain,
+}: TurnProps) {
   const prefs = usePrefs();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useDisclosure("fold");
   const hasAnswer = turn.work.some((w) => w.kind === "text");
   const toolItems = turn.work.filter((w) => w.kind === "tool" || w.kind === "tool_group" || w.kind === "reasoning" || w.kind === "subagent");
   const foldable = prefs.foldToolCalls && !turn.live && toolItems.length > 0 && (hasAnswer || turn.completed);
@@ -62,6 +74,7 @@ export const TurnBlock = memo(function TurnBlock({
           <button
             type="button"
             onClick={() => setExpanded((e) => !e)}
+            aria-expanded={expanded}
             className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground hover:bg-veil-raised"
           >
             <ChevronRight className={cn("size-3.5 transition-transform", expanded && "rotate-90")} />
@@ -135,7 +148,7 @@ export const TurnBlock = memo(function TurnBlock({
       )}
     </div>
   );
-});
+}
 
 /**
  * The agent's own last line under an error (#667): "update Codex" or "unauthorized (401)" without opening its terminal.
@@ -185,7 +198,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
     case "text":
       return <div className="mb-3"><Markdown text={item.text} linkContext={linkContext} /><MessageTime ts={item.messageTs} /></div>;
     case "reasoning":
-      return <ReasoningRow text={item.text} linkContext={linkContext} />;
+      return <ReasoningRow name={item.key} text={item.text} linkContext={linkContext} />;
     case "tool":
       return <ToolCallRow call={item.call} cwd={cwd} linkContext={linkContext} />;
     case "tool_group":
@@ -214,12 +227,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
       return (
         <div className="px-1.5 py-1 text-xs text-faint">
           <LinkedText text={item.text} context={linkContext} />
-          {item.initiatingPrompt?.trim() && (
-            <details className="mt-1">
-              <summary className="cursor-pointer rounded focus-visible:outline focus-visible:outline-2">Initiating prompt</summary>
-              <div className="mt-2 whitespace-pre-wrap break-words select-text"><LinkedText text={item.initiatingPrompt} context={linkContext} /></div>
-            </details>
-          )}
+          {item.initiatingPrompt?.trim() && <InitiatingPrompt name={item.key} text={item.initiatingPrompt} linkContext={linkContext} />}
         </div>
       );
     case "error":
@@ -256,6 +264,17 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
         </div>
       );
   }
+}
+
+/** The prompt an automation or a handoff started the session with, folded under its status line. */
+function InitiatingPrompt({ name, text, linkContext }: { name: string; text: string; linkContext?: { sessionId: string; cwd: string } }) {
+  const [open, setOpen] = useDisclosure(name);
+  return (
+    <details className="mt-1" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer rounded focus-visible:outline focus-visible:outline-2">Initiating prompt</summary>
+      <div className="mt-2 whitespace-pre-wrap break-words select-text"><LinkedText text={text} context={linkContext} /></div>
+    </details>
+  );
 }
 
 /**
@@ -361,7 +380,7 @@ function ReaderMessage({
  * under the line, as Claude Code keeps it behind ctrl+o.
  */
 function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "compaction" }>; linkContext?: { sessionId: string; cwd: string } }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(item.key);
   // The existing Chat indicator owns animation; do not add a second spinner.
   if (item.lifecycle?.state === "item_started") return null;
   const count = (value: number) => value < 1000 ? String(value) : `${Math.round(value / 1000)}k`;
@@ -404,8 +423,8 @@ function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: 
   );
 }
 
-function ReasoningRow({ text, linkContext }: { text: string; linkContext?: { sessionId: string; cwd: string } }) {
-  const [open, setOpen] = useState(false);
+function ReasoningRow({ name, text, linkContext }: { name: string; text: string; linkContext?: { sessionId: string; cwd: string } }) {
+  const [open, setOpen] = useDisclosure(name);
   const first = text.split("\n").find((l) => l.trim()) ?? "";
   return (
     <div>

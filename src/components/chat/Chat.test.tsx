@@ -76,8 +76,8 @@ function wheel(deltaY: number) {
 const distFromBottom = () => maxTop() - top;
 const latestShown = () => screen.getByRole("button", { name: /latest/i }).parentElement!.classList.contains("opacity-100");
 
-function setup(turnCount: number) {
-  const transcript = buildTranscript(syntheticLog(turnCount, true), true);
+function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
+  const transcript = buildTranscript(log, true);
   const lastKey = transcript.turns[transcript.turns.length - 1].key;
   const props = {
     sessionId: "s",
@@ -136,6 +136,9 @@ describe("chat scroll follow", () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       let y = 0;
       if (this !== content) {
+        // Something inside a turn is taken to be at the turn's top.
+        const turn = this.parentElement?.closest<HTMLElement>("[data-turn]");
+        if (turn && content.contains(turn)) return turn.getBoundingClientRect();
         if (this.parentElement !== content) return new DOMRect(0, 0, 0, 0);
         for (let c = this.previousElementSibling; c; c = c.previousElementSibling) y += heightOf(c);
       }
@@ -301,6 +304,50 @@ describe("chat scroll follow", () => {
       expect(drawn()).toBeLessThan(25);
     }
     expect(content.querySelector(`[data-turn="${keys.at(-1)}"]`)).toBeNull();
+    expect(latestShown()).toBe(true);
+  });
+
+  // #727: a turn scrolled far from the view is not drawn. What the reader
+  // opened in it is the chat's to keep, so it comes back as they left it.
+  it("keeps a turn's tool calls unfolded after it was scrolled out of the drawn band and back", () => {
+    const { transcript } = setup(200);
+    const key = transcript.turns.at(-2)!.key;
+    const fold = () => content.querySelector<HTMLElement>(`[data-turn="${key}"]`)?.querySelector<HTMLElement>("button[aria-expanded]") ?? null;
+    expect(fold()!.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(fold()!);
+    expect(fold()!.getAttribute("aria-expanded")).toBe("true");
+    for (let step = 0; step < 40 && fold(); step++) wheel(-400);
+    expect(fold(), "scrolled out of the drawn band").toBeNull();
+    setTop(maxTop());
+    frame();
+    frame();
+    expect(fold()!.getAttribute("aria-expanded")).toBe("true");
+    // Another turn's fold was never opened, and is not now.
+    const other = content.querySelector<HTMLElement>(`[data-turn="${transcript.turns.at(-3)!.key}"] button[aria-expanded]`)!;
+    expect(other.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  // #727: a link to a place in a turn that is not drawn draws every turn to
+  // find it, brings it to the top, and goes back to drawing the turns near it.
+  it("follows a link to a place in a turn that is not drawn", () => {
+    const log = syntheticLog(200, true);
+    const answers = log.flatMap((event, index) => (event.payload.type === "assistant_text" ? [index] : []));
+    const place = (index: number, text: string) => {
+      log[index] = { ...log[index], payload: { type: "assistant_text", text } };
+    };
+    place(answers[3], 'The plan is <span id="the-plan">here</span>.');
+    place(answers.at(-1)!, "As [the plan](#the-plan) says.");
+    const { transcript } = setup(200, log);
+    scroller.style.overflowY = "auto";
+    const far = transcript.turns[3].key;
+    const drawn = () => content.querySelectorAll("[data-turn]").length;
+    expect(content.querySelector(`[data-turn="${far}"]`)).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: "the plan" }));
+    expect(content.querySelector("#the-plan")).not.toBeNull();
+    expect(content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top).toBe(0);
+    expect(drawn()).toBeLessThan(25);
+    frame();
+    expect(content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top).toBe(0);
     expect(latestShown()).toBe(true);
   });
 });

@@ -7,7 +7,9 @@ import type { StreamBlock } from "@/lib/agentEvents";
 import { SendingMessage, TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
 import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
-import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
+import { READER_SCROLL_EVENT, scrollToInOwnScroller } from "@/lib/shellScroll";
+import { elementWithId, SEEK_ANCHOR_EVENT } from "@/lib/chatLinks";
+import { DisclosureMemory, type Disclosures } from "./disclosures";
 
 const NEAR_BOTTOM_PX = 40;
 /** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
@@ -29,6 +31,13 @@ function firstAfter(values: number[], at: number): number {
     else lo = mid + 1;
   }
   return lo;
+}
+
+/** Each turn's top in the list, and, last, the list's end. */
+function topsOf(turns: Transcript["turns"], measured: Map<string, number>): number[] {
+  const tops = [0];
+  for (const turn of turns) tops.push(tops[tops.length - 1] + (measured.get(turn.key) ?? ESTIMATED_TURN_PX));
+  return tops;
 }
 
 /**
@@ -65,7 +74,9 @@ export function visibleTurns(tops: number[], top: number, viewport: number, tail
  * rest, at the heights the turns had when they were last drawn (or an
  * estimate for one never drawn). A turn that comes into view at a height
  * other than its spacer's moves the turn the reader is on by exactly that
- * much, so scrollTop is shifted to keep it where it was.
+ * much, so scrollTop is shifted to keep it where it was. What the reader
+ * opened or folded in a turn is kept by the chat, not the turn, and a link to
+ * a place in a turn not drawn draws every turn once to find it.
  */
 export function Chat({
   sessionId,
@@ -121,6 +132,9 @@ export function Chat({
   const [band, setBand] = useState({ start: 0, end: 0, height: 0 });
   const topSpacer = useRef<HTMLDivElement>(null);
   const tops = useRef<number[]>([0]);
+  const [disclosures] = useState<Disclosures>(() => new Map());
+  /** The id a link asked for that no drawn turn holds: every turn is drawn until it has been looked for. */
+  const [seeking, setSeeking] = useState<string | null>(null);
 
   const follow = useCallback((on: boolean) => {
     pinned.current = on;
@@ -141,9 +155,7 @@ export function Chat({
   // Each turn's top in the list, and the list's end. A fixed estimate for
   // the turns never drawn keeps the spacer above the view from changing
   // while the view stays where it is.
-  const measured = heights.current;
-  const turnTops: number[] = [0];
-  for (const turn of turns) turnTops.push(turnTops[turnTops.length - 1] + (measured.get(turn.key) ?? ESTIMATED_TURN_PX));
+  const turnTops = topsOf(turns, heights.current);
   tops.current = turnTops;
   // A new prompt is followed from the render it arrives in, not one later;
   // so is the reader's own message while it is being sent.
@@ -152,7 +164,7 @@ export function Chat({
   const tail = pinned.current || followedPrompt.current !== lastPrompt;
   // Off the bottom, the band the view last asked for; one not worked out yet (or for a list since cut short) is the tail's.
   const known = band.end > band.start && band.end <= turns.length;
-  const { start, end } = tail || !known ? visibleTurns(turnTops, 0, band.height, true) : band;
+  const { start, end } = seeking != null ? { start: 0, end: turns.length } : tail || !known ? visibleTurns(turnTops, 0, band.height, true) : band;
 
   /** Which turns the view needs drawn, from where it is over the list now. */
   const readView = useCallback(() => {
@@ -220,6 +232,7 @@ export function Chat({
       if (up && el.scrollTop > 0) follow(false);
     };
     const onReaderScroll = () => follow(false);
+    const onSeek = (e: Event) => setSeeking((e as CustomEvent<string>).detail);
     const onPointerDown = () => {
       dragging = true;
     };
@@ -240,6 +253,7 @@ export function Chat({
     el.addEventListener("wheel", onWheel, { passive: true });
     el.addEventListener("keydown", onKeyDown);
     el.addEventListener(READER_SCROLL_EVENT, onReaderScroll);
+    el.addEventListener(SEEK_ANCHOR_EVENT, onSeek);
     el.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
@@ -248,6 +262,7 @@ export function Chat({
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener(READER_SCROLL_EVENT, onReaderScroll);
+      el.removeEventListener(SEEK_ANCHOR_EVENT, onSeek);
       el.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
@@ -282,6 +297,22 @@ export function Chat({
     pinToBottom();
   }, [lastPrompt, follow, pinToBottom]);
 
+  // Every turn is drawn and measured now (the effects above ran first): the
+  // place a link asked for is brought to the top if a turn holds it, and the
+  // band is worked out around it on heights that are all real.
+  useLayoutEffect(() => {
+    if (seeking == null) return;
+    const el = scroller.current;
+    const target = el && elementWithId(el, seeking);
+    if (el && target) {
+      scrollToInOwnScroller(target);
+      lastTop.current = el.scrollTop;
+      tops.current = topsOf(turns, heights.current);
+      readView();
+    }
+    setSeeking(null);
+  }, [seeking, turns, readView]);
+
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
 
@@ -289,6 +320,7 @@ export function Chat({
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
+          <DisclosureMemory value={disclosures}>
           {!turns.length && !live && !sending && loading && (
             // Loading is a label alone; the scene is for a conversation that really is empty.
             <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
@@ -340,6 +372,7 @@ export function Chat({
               )}
             </div>
           ))}
+          </DisclosureMemory>
         </div>
       </div>
       <div className="relative shrink-0">

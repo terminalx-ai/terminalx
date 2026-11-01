@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { getDraft, setDraft, subscribeDrafts } from "./drafts";
+import { getDraft, setDraft } from "./drafts";
 import type { AgentEvent } from "@/types/events";
 
 /** Connection generations govern attachment, not an unresolved mailbox enqueue. */
@@ -23,11 +23,10 @@ export interface SendingMessage {
   afterSeq: number;
 }
 
-// UI ownership only, not a delivery receipt or a transport retry token.
+// UI ownership only, not a delivery receipt or a transport retry token. The
+// draft is not the send's: the composer clears it on Send and a failure puts
+// the message back into whatever it holds then (`withReturned`).
 export interface ComposerSend {
-  edited: boolean;
-  ownsDraft: () => boolean;
-  release: () => void;
   /** What is being sent, for the chat to draw meanwhile. */
   message: SendingMessage | null;
 }
@@ -54,24 +53,13 @@ export function useComposerSend(key: string): Snapshot {
     };
   }, () => states.get(key) ?? EMPTY, () => EMPTY);
 }
-export function beginComposerSend(key: string, tabId: string, message: SendingMessage | null = null): ComposerSend | null {
+export function beginComposerSend(key: string, message: SendingMessage | null = null): ComposerSend | null {
   if (states.get(key)?.pending) return null;
-  const initialDraft = getDraft(tabId);
-  const operation: ComposerSend = { edited: false, ownsDraft: () => !operation.edited && getDraft(tabId) === initialDraft, release: () => {}, message };
-  // This subscription belongs to the request, so edits while its view is absent
-  // (including identical writes) still invalidate draft ownership.
-  operation.release = subscribeDrafts((id) => {
-    if (id === tabId) operation.edited = true;
-  });
+  const operation: ComposerSend = { message };
   publish(key, { pending: operation, error: null });
   return operation;
 }
-export function editComposerSend(key: string) {
-  const operation = states.get(key)?.pending;
-  if (operation) operation.edited = true;
-}
 export function finishComposerSend(key: string, operation: ComposerSend, error: unknown = null) {
-  operation.release();
   if (states.get(key)?.pending === operation) publish(key, { pending: null, error });
 }
 

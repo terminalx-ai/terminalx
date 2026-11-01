@@ -188,14 +188,18 @@ changes what they run in takes a fence (`issue_pipeline::admission::fence`)
 over just those sessions, one tab, or a checkout path, and runs its slow part
 behind it: workspace and session removal, quick-chat moves and retention, merged
 cleanup's removals and restores, Settings → Storage removal, CLI worktree
-deletion, tab closing and the idle-agent stop. Taking a fence takes admission
+deletion, tab closing, the idle-agent stop, a guest's forced stop and an
+experimental Codex tab's move to its terminal. Taking a fence takes admission
 for a moment only, so a prompt admitted before it has finished (and its turn is
 visible to the work's last look) and one admitted after it meets the fence. A
 prompt for a fenced session is refused with the fence's reason; one for a tab
-whose agent is being stopped for sitting idle waits for that stop and is then
-admitted as usual. Scans, sizing, merged-cleanup's GitHub calls and fetches,
-and the ledger take no fence at all. A prompt's baseline tree (`git add -A`
-into a scratch index) is read before it is admitted.
+whose agent is only being stopped (or moved) waits for that and is then
+admitted as usual, the host's and a guest's alike, and a guest's queued input
+for it stays queued until then. Merged cleanup weighs a workspace's grace period
+again behind its fence, so a turn that ended while the sweep asked GitHub or
+fetched keeps the workspace. Scans, sizing, merged-cleanup's GitHub calls and
+fetches, and the ledger take no fence at all. A prompt's baseline tree
+(`git add -A` into a scratch index) is read before it is admitted.
 
 Every composer send is timed in the tab's diagnostics as `send_timing` lines
 sharing its `seq`: `received` (the window's `pressed_at`, the runtime's

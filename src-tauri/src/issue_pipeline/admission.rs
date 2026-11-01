@@ -174,6 +174,17 @@ pub fn fence(kind: Kind, scopes: impl IntoIterator<Item = Scope>) -> Fence {
     Fence { ids }
 }
 
+/// Whether a prompt for this tab is held now: its agent is being stopped.
+pub fn held(session_id: &str, tab_id: &str) -> bool {
+    FENCES.lock().unwrap_or_else(|error| error.into_inner()).iter().any(|fence| fence.holds(session_id, tab_id))
+}
+
+/// Whether `error` refused a prompt only because its tab's agent was being
+/// stopped: nothing was sent, and sent again once the stop is done, it goes.
+pub fn stopping(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.to_string() == STOPPING)
+}
+
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -346,5 +357,17 @@ mod tests {
         drop(hold);
         admitted_rx.recv_timeout(Duration::from_secs(5)).expect("admitted once the fence is lifted");
         waiting.join().unwrap();
+    }
+
+    #[test]
+    fn a_prompt_refused_for_a_stop_is_told_apart_from_one_refused_for_good() {
+        let hold = fence(Kind::Hold, [Scope::Tab("parked".into(), "t1".into())]);
+        let closing = fence(Kind::Refuse(TAB_CLOSED), [Scope::Tab("parked".into(), "t2".into())]);
+        assert!(held("parked", "t1") && !held("parked", "t2") && !held("other", "t1"));
+        let stopping_error = open("parked", Some("t1")).unwrap_err();
+        assert!(stopping(&stopping_error) && stopping(&stopping_error.context("sending")));
+        assert!(!stopping(&open("parked", Some("t2")).unwrap_err()));
+        drop((hold, closing));
+        assert!(!held("parked", "t1"));
     }
 }
