@@ -35,9 +35,12 @@ pub(crate) struct Outbound {
     validity: WriteValidity,
 }
 #[derive(Debug)]
-enum WriteValidity { Connection, Request { id: u64, discard_if_stale: bool }, Reply(String) }
+enum WriteValidity { Connection, Request { id: u64, discard_if_stale: bool, prompt: bool }, Reply(String) }
 impl Outbound {
     pub(crate) fn connection(line: String) -> Self { Self { line, validity: WriteValidity::Connection } }
+    /// The frame that hands Codex a prompt: a turn or a manual compaction.
+    /// Its sender's authority is checked before its first byte is written.
+    pub(crate) fn delivers_prompt(&self) -> bool { matches!(self.validity, WriteValidity::Request { prompt: true, .. }) }
     pub(crate) fn can_discard_unsent(&self) -> bool {
         matches!(self.validity, WriteValidity::Reply(_) | WriteValidity::Request { discard_if_stale: true, .. })
     }
@@ -113,7 +116,7 @@ impl Stdio {
         ensure!(self.pending.len() < MAX_PENDING, "Too many pending Codex requests");
         self.next_id = self.next_id.checked_add(1).ok_or_else(|| anyhow::anyhow!("request IDs exhausted"))?;
         self.pending.insert(self.next_id, Pending { kind, epoch: self.turn_epoch, turn: self.turn.clone() });
-        Ok(Action::Write(Outbound { line: json!({"id": self.next_id, "method": method, "params": params}).to_string(), validity: WriteValidity::Request { id: self.next_id, discard_if_stale: matches!(kind, Request::Interrupt) } }))
+        Ok(Action::Write(Outbound { line: json!({"id": self.next_id, "method": method, "params": params}).to_string(), validity: WriteValidity::Request { id: self.next_id, discard_if_stale: matches!(kind, Request::Interrupt), prompt: matches!(kind, Request::Turn | Request::Compact) } }))
     }
 
     pub(crate) fn start(&mut self, text: String, images: Vec<(String, String)>) -> Result<Vec<Action>> {
@@ -205,6 +208,14 @@ impl Stdio {
 
     fn accepted(&mut self) -> Option<Action> {
         std::mem::take(&mut self.awaiting).then_some(Action::Accepted)
+    }
+
+    /// A prompt its sender may no longer give: nothing of it was written, so
+    /// its request is forgotten and the connection stays ready for the next.
+    /// It is settled as stopped, not awaited as one Codex has yet to take.
+    pub(crate) fn withdraw(&mut self, frame: &Outbound) {
+        self.retire_write(frame, false);
+        if frame.delivers_prompt() { self.manual_compact = false; self.awaiting = false; }
     }
 
     pub(crate) fn is_manual_compact(&self) -> bool { self.manual_compact || self.first.as_ref().is_some_and(|(text, _)| text.trim() == "/compact") }

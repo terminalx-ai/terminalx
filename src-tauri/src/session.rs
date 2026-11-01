@@ -615,6 +615,9 @@ pub struct TabRuntime {
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
     stdio_writer: Option<std::sync::mpsc::SyncSender<codex::stdio::Outbound>>,
+    /// The phone or share a native Codex prompt came from, held to its
+    /// permits when the frame that delivers it is written.
+    stdio_authority: Option<codex_stdio::Authority>,
     /// A continuation sent to experimental Codex, answered once Codex takes
     /// its turn or the connection ends before it does.
     stdio_receipt: Option<(u64, DeliveryReceipt)>,
@@ -1338,7 +1341,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_receipt: None,
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None,
                 turn_started_at: None,
                 turn_by_command: false,
                 signed_out_in_turn: false,
