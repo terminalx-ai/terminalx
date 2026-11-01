@@ -93,14 +93,15 @@ export function LocalRuntimeNotice() {
   );
 }
 
-/** A runtime older than the app (#730): which agents' turns the switch waits
- * for, and a restart now, which stops them. Each picks up its conversation
- * again when its tab starts. Only the runtime this window was told about:
- * another window may already have replaced it. */
+/** A runtime older than the app (#730): what the switch waits for (anything
+ * restarting it would cut short), and a restart now, which stops all of it.
+ * Each agent picks up its conversation again when its tab starts. Only the
+ * runtime this window was told about: another window may already have
+ * replaced it. After a switch that failed it does not try again by itself. */
 function OutdatedNotice({ epoch, outdated, onHide }: { epoch: string; outdated: LocalRuntimeOutdated; onHide: () => void }) {
   const [restarting, setRestarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const { running, app, turns, problem } = outdated;
+  const { running, app, work, problem, failed } = outdated;
   const restart = async () => {
     setRestarting(true);
     setFailure(null);
@@ -108,18 +109,20 @@ function OutdatedNotice({ epoch, outdated, onHide }: { epoch: string; outdated: 
     catch (error) { setFailure(errorMessage(error)); }
     finally { setRestarting(false); }
   };
-  const waiting = turns === null
-    ? `It restarts with ${app} once it has checked that no agent is in the middle of a turn.`
-    : turns.length === 0 ? `It restarts with ${app} now.`
-    : turns.length === 1 ? `It restarts with ${app} when this agent finishes its turn:`
-    : `It restarts with ${app} when these agents finish their turns:`;
+  const waiting = failed
+    ? `Restarting it with ${app} failed, and it will not try again by itself.`
+    : work === null
+    ? `It restarts with ${app} once it has checked that nothing it runs would be cut short.`
+    : work.length === 0 ? `Nothing it runs would be cut short: it restarts with ${app} in a moment.`
+    : `It restarts with ${app} once nothing it runs would be cut short. It is waiting for:`;
+  const busy = !failed && work !== null && work.length > 0;
   return (
     <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
       <div className="min-w-0 flex-1 text-xs">
         <div className="font-medium">TerminalX runtime is older than the app</div>
         <p className="mt-1 text-muted-foreground">The runtime running your agents is {running ? `version ${running}` : "an earlier version"}; this app is {app}. {waiting}</p>
-        {turns && turns.length > 0 && <ul className="mt-1 list-disc pl-4 text-muted-foreground">{turns.map((turn, index) => <li key={index}>{turn}</li>)}</ul>}
-        <p className="mt-1 text-muted-foreground">Restarting now stops {turns && turns.length > 0 ? (turns.length === 1 ? "it" : "them") : "its agents"} and its terminals; each agent picks up its conversation again when its tab starts.</p>
+        {busy && <ul className="mt-1 list-disc pl-4 text-muted-foreground">{work.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+        <p className="mt-1 text-muted-foreground">Restarting now stops {busy ? (work.length === 1 ? "that" : "all of that") : "its agents"}, and its terminals and whatever they run; each agent picks up its conversation again when its tab starts.</p>
         {(failure ?? problem) && <p role="alert" className="mt-1 text-destructive">{failure ?? problem}</p>}
       </div>
       <div className="flex shrink-0 flex-col gap-1.5">

@@ -323,6 +323,29 @@ impl Lifetime {
         }
     }
 
+    /// `runtime.stopAllIfIdle` (#730): what `runtime.stopAll` does, committed
+    /// only while this request is the only one being handled and `idle` finds
+    /// nothing it would cut short, under the lock that admits commands. The
+    /// caller holds the admission lock, so no turn starts meanwhile either.
+    pub(crate) fn stop_all_if(&self, params: &Value, idle: impl FnOnce() -> Result<(), ControlError>) -> Result<Value, ControlError> {
+        let mut state = self.state.lock().unwrap();
+        if state.starting {
+            return Err(ControlError::new("runtime_starting", "The local runtime is restoring its stores.", None::<String>));
+        }
+        if state.exiting || state.stop_requested { return Err(unavailable()); }
+        if params["epoch"].as_str() != Some(&self.epoch) {
+            return Err(ControlError::new("runtime_restarted", "Refresh runtime status before stopping all work.", None::<String>));
+        }
+        if state.requests > 1 {
+            return Err(ControlError::new("runtime_busy", "The local runtime is handling another request.", None::<String>));
+        }
+        idle()?;
+        state.stop_requested = true;
+        state.stop_failed = false;
+        for attachment in state.leases.values() { attachment.revoke(); }
+        Ok(json!({ "stopping": true }))
+    }
+
     pub(crate) fn stop_failed(&self) {
         self.state.lock().unwrap().stop_failed = true;
     }
@@ -477,6 +500,27 @@ mod tests {
         assert!(!life.should_exit_at(now, || false));
         assert!(life.should_exit_at(now + Duration::from_secs(1), || false));
         assert!(life.enter().is_err());
+    }
+
+    /// #730: a desktop replacing this runtime by itself stops it only while
+    /// nothing is under way, decided under the lock that admits requests.
+    #[test]
+    fn a_stop_if_idle_commits_only_while_nothing_else_is_under_way() {
+        let life = Lifetime::new(IDLE_GRACE);
+        let epoch = json!({"epoch": life.epoch});
+        let busy = || Err(ControlError::new("runtime_busy", "an agent is in the middle of a turn", None::<String>));
+        let this = life.enter().unwrap();
+        assert_eq!(life.stop_all_if(&epoch, busy).unwrap_err().code, "runtime_busy");
+        assert!(life.enter().is_ok(), "refused: nothing was stopped, and work is still admitted");
+        let other = life.enter().unwrap();
+        assert_eq!(life.stop_all_if(&epoch, || panic!("not asked while another request runs")).unwrap_err().code, "runtime_busy");
+        drop(other);
+        assert_eq!(life.stop_all_if(&json!({"epoch": "replaced"}), || Ok(())).unwrap_err().code, "runtime_restarted");
+        assert_eq!(life.stop_all_if(&epoch, || Ok(())).unwrap(), json!({"stopping": true}));
+        assert!(life.enter().is_err(), "stopping: no new work");
+        assert!(!life.should_exit(|| false), "its own request is still being answered");
+        drop(this);
+        assert!(life.should_exit(|| false));
     }
 
     #[test]

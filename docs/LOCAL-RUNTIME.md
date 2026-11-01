@@ -222,18 +222,29 @@ owner exits.
 An update brings the runtime with it (#730). The runtime says its `version`
 in `runtime.liveness` (0.2.22 only in `status`, as `appVersion`), and a desktop
 that attaches to one older than itself replaces it with its bundled runtime
-(`local_runtime/replace.rs`): at once when none of its agents is in the
-middle of a turn (`runningTabs` with `in_progress` or `waiting`), otherwise
-once none is. Until then every window says the runtime is older than the app,
-names the agents it waits for, and offers **Restart now**. Replacing stops the
-runtime as Stop All does (`launch::retire`, pinned to the runtime's epoch;
-one that will not stop or exit is stopped as Restart runtime stops it), and the
-supervisor attaches the bundled runtime in its place; each agent picks up its
-conversation again when its tab next starts. A runtime of the app's version
-or newer is attached as before, so two builds sharing one home never take
-turns replacing each other's runtime. What a phone is offered follows the
-attached runtime, not the app ([MOBILE.md](./MOBILE.md), "What the phone is
-offered"). Validate keychain access under the helper signing identity and
+(`local_runtime/replace.rs`). It does so by itself only once nothing the
+runtime runs would be cut short, by the runtime's own idle rule: only managed
+agents that have settled, with no process of their own running, may be
+stopped without asking. A runtime of this build or later names everything
+else (`runtime.work`: agents mid-turn, prompts not yet delivered or held,
+agents started by hand, running terminals, processes that outlived what
+started them, issue pipeline steps) and stops only when there is none,
+deciding under the admission lock (`runtime.stopAllIfIdle`, refused as
+`runtime_busy`). An older one is judged by what it shows (agents mid-turn in
+`runningTabs`, open terminals in `runtime.pty.shells`, any process below one
+it started), read again just before it is stopped; it cannot show the prompts
+it holds, nor can any runtime see a follow-up a CLI holds until its turn ends,
+so nothing may be found under way for 15 s first. Until then every window says
+the runtime is older than the app, lists what it waits for, and offers
+**Restart now**; after a switch that failed it says it will not try again by
+itself. Replacing stops the runtime as Stop All does (`launch::retire`, pinned
+to its epoch; one that will not stop or exit is stopped as Restart runtime
+stops it), and the supervisor attaches the bundled runtime in its place; each
+agent picks up its conversation again when its tab next starts. A runtime of
+the app's version or newer is attached as before, so two builds sharing one
+home never take turns replacing each other's runtime. What a phone is offered
+follows the attached runtime, not the app ([MOBILE.md](./MOBILE.md), "What the
+phone is offered"). Validate keychain access under the helper signing identity and
 notification authorization on macOS; these are not established by a shell test.
 
 ## Integration release request and reviewable stages

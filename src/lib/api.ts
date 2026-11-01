@@ -1761,16 +1761,18 @@ export type LocalRuntimeState =
   /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. */
   | { state: "updating"; from: string | null; to: string };
 
-/** A runtime older than this app, while its replacement waits for its agents' turns (#730). */
+/** A runtime older than this app, while its replacement waits until nothing it runs would be cut short (#730). */
 export interface LocalRuntimeOutdated {
   /** Its version, when it said. */
   running: string | null;
   /** This app's, which the runtime that replaces it shares. */
   app: string;
-  /** The agents in the middle of a turn, which the switch waits for; null until they have been read. */
-  turns: string[] | null;
-  /** Why the turns could not be read, or why the last switch failed. */
+  /** What restarting it now would cut short (agents mid-turn or with prompts waiting, terminals, processes), which the switch waits for; null until read. */
+  work: string[] | null;
+  /** Why that could not be read, or why the last switch failed. */
   problem: string | null;
+  /** The last switch failed: it is tried again only when asked (Restart now). */
+  failed: boolean;
 }
 
 export type QuitBehavior = "keepRunning" | "stopAll";

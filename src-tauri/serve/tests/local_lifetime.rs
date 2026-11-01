@@ -442,6 +442,50 @@ fn a_runtime_says_its_build_and_turns_and_a_retired_one_is_replaced_by_the_next_
     next.stop_all().unwrap();
 }
 
+/// #730 review: a runtime says what stopping it would cut short, by its own
+/// idle rule, and a stop that must cut nothing short is refused while any of
+/// it remains, decided under the lock that admits work: an agent mid-turn,
+/// then a terminal running a program. With only a settled agent left, it
+/// stops as Stop All does.
+#[test]
+fn a_runtime_names_what_stopping_it_would_cut_short_and_stops_by_itself_only_without_any() {
+    let world = AgentWorld::new();
+    let mut serve = Serve::start(world.command(), &world.data);
+    let epoch = serve.control("status", json!({}))["localRuntime"]["epoch"].clone();
+    let work = |serve: &Serve| -> Vec<String> {
+        serve.control("runtime.work", json!({}))["work"].as_array().unwrap().iter().map(|work| work["kind"].as_str().unwrap().to_string()).collect()
+    };
+    let refused = |serve: &Serve| {
+        let answer = serve.try_control("runtime.stopAllIfIdle", json!({"epoch": epoch}));
+        assert_eq!(answer["error"]["code"], "runtime_busy", "{answer}");
+    };
+    let created = serve.control("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"slow:40:200","useWorktree":false,"onMain":true,"mode":"manual"
+    }));
+    let (session, tab) = (created["sessionId"].as_str().unwrap(), created["tabId"].as_str().unwrap());
+    let turn = common::agent::wait_until("its turn to be under way", || {
+        let work = serve.control("runtime.work", json!({}))["work"].clone();
+        (work.as_array().unwrap().iter().map(|work| work["kind"].clone()).collect::<Vec<_>>() == [json!("turn")]).then_some(work)
+    });
+    assert_eq!((turn[0]["sessionId"].as_str(), turn[0]["tabId"].as_str(), turn[0]["harness"].as_str()), (Some(session), Some(tab), Some("claude")));
+    refused(&serve);
+    // A terminal running a program, as a dev server does.
+    let shell = format!("{session}:1");
+    serve.control("runtime.pty.spawn", json!({"id":shell,"cwd":world.project,"cols":80,"rows":24,"command":"sh -c 'sleep 600'","title":"server"}));
+    serve.wait_events(tab, "the turn to end", |events| count(events, "turn_completed") == 1);
+    let left = common::agent::wait_until("only the terminal to be left", || {
+        let work = serve.control("runtime.work", json!({}))["work"].clone();
+        (work.as_array().unwrap().len() == 1 && work[0]["kind"] == "terminal").then_some(work)
+    });
+    assert_eq!((left[0]["sessionId"].as_str(), left[0]["title"].as_str()), (Some(session), Some("server")));
+    refused(&serve);
+    assert!(serve.child.try_wait().unwrap().is_none(), "nothing was stopped");
+    serve.control("runtime.pty.kill", json!({"id": shell}));
+    common::agent::wait_until("nothing it would cut short", || work(&serve).is_empty().then_some(()));
+    assert_eq!(serve.control("runtime.stopAllIfIdle", json!({"epoch": epoch})), json!({"stopping": true}));
+    stopped(&mut serve);
+}
+
 #[test]
 fn a_partial_view_request_is_not_discarded_when_an_event_arrives() {
     let world = AgentWorld::new();

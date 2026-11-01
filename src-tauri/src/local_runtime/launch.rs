@@ -244,10 +244,11 @@ const EXIT_AFTER_STOP: Duration = Duration::from_secs(30);
 /// Stop the runtime holding `home` the way quitting with Stop All does, and
 /// wait until it has gone, so the next attachment starts the bundled runtime
 /// in its place (#730). `stop_all` asks the runtime this desktop attached to,
-/// pinned to it: one that has been replaced since refuses, and is left alone.
-/// A runtime that cannot stop its work, or does not exit after it, is
-/// stopped without asking, as [`kill_owner`] does. Each agent picks up its
-/// conversation again when its tab next starts.
+/// pinned to it: one that has been replaced since refuses, and is left alone,
+/// as is one that refuses for work under way (`runtime_busy`). A runtime that
+/// cannot stop its work, or does not exit after it, is stopped without
+/// asking, as [`kill_owner`] does. Each agent picks up its conversation again
+/// when its tab next starts.
 pub fn retire(home: &Path, stop_all: impl FnOnce() -> Result<()>) -> Result<()> {
     retire_within(home, stop_all, EXIT_AFTER_STOP)
 }
@@ -260,14 +261,22 @@ fn retire_within(home: &Path, stop_all: impl FnOnce() -> Result<()>, exit_after_
     log::info!("stopping the local runtime (pid {pid}) so the one bundled with this app takes its place");
     match stop_all() {
         Ok(()) => if exited(pid, &socket, exit_after_stop) { return Ok(()); }
-        Err(error) if error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == "runtime_restarted")) => {
-            bail!("The TerminalX runtime was replaced before it could be stopped; nothing was stopped.");
+        Err(error) if refused(&error, "runtime_restarted") => {
+            return Err(error.context("The TerminalX runtime was replaced before it could be stopped; nothing was stopped."));
+        }
+        Err(error) if refused(&error, "runtime_busy") => {
+            return Err(error.context("The TerminalX runtime has work under way; nothing was stopped."));
         }
         Err(error) => log::warn!("the local runtime did not stop its work when asked ({error:#}); stopping it without asking"),
     }
     kill_holder(&home, Some(pid))?;
     if !exited(pid, &socket, Duration::ZERO) { bail!("The TerminalX runtime (pid {pid}) did not exit."); }
     Ok(())
+}
+
+/// Whether the runtime refused with `code`, anywhere in `error`'s chain.
+pub fn refused(error: &anyhow::Error, code: &str) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == code))
 }
 
 /// Whether the runtime has gone: its pid no longer exists, or nothing
@@ -529,7 +538,12 @@ mod tests {
         let (home, mut owner, terminal) = installed_owner(fixture.path());
         let replaced = || Err(super::super::client::Refused { code: "runtime_restarted".into(), message: "Refresh runtime status before stopping all work.".into() }.into());
         let error = retire_within(&home, replaced, Duration::from_millis(300)).unwrap_err();
-        assert!(error.to_string().contains("replaced"), "{error:#}");
+        assert!(error.to_string().contains("replaced") && refused(&error, "runtime_restarted"), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        // Nor one that refuses for work under way.
+        let busy = || Err(super::super::client::Refused { code: "runtime_busy".into(), message: "an agent is mid-turn".into() }.into());
+        let error = retire_within(&home, busy, Duration::from_millis(300)).unwrap_err();
+        assert!(error.to_string().contains("work under way") && refused(&error, "runtime_busy"), "{error:#}");
         assert!(owner.try_wait().unwrap().is_none() && running(terminal));
         reap(owner, terminal);
 

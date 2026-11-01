@@ -207,7 +207,7 @@ pub async fn local_runtime_restart(app: AppHandle, window: tauri::WebviewWindow,
 pub async fn local_runtime_replace(app: AppHandle, window: tauri::WebviewWindow, epoch: String) -> Result<ConnectionState, String> {
     let _restart = RESTART.lock().await;
     tauri::async_runtime::spawn_blocking(move || {
-        super::replace::switch(&app, &epoch)?;
+        super::replace::switch(&app.state::<AppState>().runtime_replacement, &super::replace::AppHost(&app), &epoch, true)?;
         Ok(status(&app, window.label()))
     }).await.map_err(|error| error.to_string())?
 }

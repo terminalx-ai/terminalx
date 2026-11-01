@@ -17,11 +17,28 @@ fn childless(output: &str, roots: &[u32]) -> Result<bool> {
     Ok(roots.iter().all(|pid| seen.contains(pid) && !parents.contains(pid)))
 }
 
-pub(crate) fn safe(roots: &[u32]) -> Result<bool> {
-    if roots.is_empty() { return Ok(true); }
+/// The process table as `pid ppid` lines.
+pub(crate) fn table() -> Result<String> {
     let output = std::process::Command::new("/bin/ps").args(["-eo", "pid=,ppid="]).env("LC_ALL", "C").output()?;
     if !output.status.success() { anyhow::bail!("cannot classify idle runtime processes"); }
-    childless(std::str::from_utf8(&output.stdout)?, roots)
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+pub(crate) fn safe(roots: &[u32]) -> Result<bool> {
+    if roots.is_empty() { return Ok(true); }
+    childless(&table()?, roots)
+}
+
+/// The `roots` that are not childless, as [`safe`] judges each: one with a
+/// process of its own, or one gone from the process table.
+pub(crate) fn busy(roots: &[u32]) -> Result<Vec<u32>> {
+    if roots.is_empty() { return Ok(Vec::new()); }
+    let table = table()?;
+    let mut busy = Vec::new();
+    for root in roots {
+        if !childless(&table, std::slice::from_ref(root))? { busy.push(*root); }
+    }
+    Ok(busy)
 }
 
 #[cfg(test)]

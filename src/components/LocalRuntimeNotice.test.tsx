@@ -164,22 +164,26 @@ it("says why a restart failed and leaves it to be tried again", async () => {
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-const outdated = (turns: string[] | null, problem: string | null = null): LocalRuntimeState =>
-  ({ ...connected, outdated: { running: "0.2.21", app: "0.2.23", turns, problem } });
+const outdated = (work: string[] | null, problem: string | null = null, failed = false): LocalRuntimeState =>
+  ({ ...connected, outdated: { running: "0.2.21", app: "0.2.23", work, problem, failed } });
 
-it("says the runtime is older than the app, names the agents it waits for, and Restart now replaces only that runtime", async () => {
+it("says the runtime is older than the app, names what it waits for, and Restart now replaces only that runtime", async () => {
   await mounted();
   await changed(outdated(null));
   const notice = () => screen.getByRole("status").textContent ?? "";
   expect(notice()).toContain("TerminalX runtime is older than the app");
   expect(notice()).toContain("version 0.2.21; this app is 0.2.23");
-  expect(notice()).toContain("It restarts with 0.2.23 once it has checked that no agent is in the middle of a turn");
-  await changed(outdated(["Claude Code in “Fix login” (Review)", "Codex in “Release notes”"]));
-  expect(notice()).toContain("It restarts with 0.2.23 when these agents finish their turns:");
-  expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Claude Code in “Fix login” (Review)", "Codex in “Release notes”"]);
-  expect(notice()).toContain("Restarting now stops them and its terminals");
-  await changed(outdated(["Codex in “Release notes”"]));
-  expect(notice()).toContain("when this agent finishes its turn:");
+  expect(notice()).toContain("It restarts with 0.2.23 once it has checked that nothing it runs would be cut short.");
+  // #730 review: not only turns: a terminal running a server is waited for too.
+  await changed(outdated(["Claude Code in “Fix login” (Review), in the middle of a turn", "The terminal “npm run dev” in “Web”"]));
+  expect(notice()).toContain("It restarts with 0.2.23 once nothing it runs would be cut short. It is waiting for:");
+  expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Claude Code in “Fix login” (Review), in the middle of a turn", "The terminal “npm run dev” in “Web”"]);
+  expect(notice()).toContain("Restarting now stops all of that, and its terminals and whatever they run");
+  await changed(outdated(["The terminal “npm run dev” in “Web”"]));
+  expect(notice()).toContain("Restarting now stops that,");
+  await changed(outdated([]));
+  expect(notice()).toContain("Nothing it runs would be cut short: it restarts with 0.2.23 in a moment.");
+  expect(screen.queryAllByRole("listitem")).toHaveLength(0);
   expect(native.replace).not.toHaveBeenCalled();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
   // Only the runtime this window was told about.
@@ -187,6 +191,16 @@ it("says the runtime is older than the app, names the agents it waits for, and R
   expect(screen.queryByRole("status")).toBeNull();
   // Its terminals move to the app's own runtime without a reload.
   expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
+});
+
+it("after a switch failed, says it will not try again by itself rather than that it restarts now", async () => {
+  await mounted();
+  await changed(outdated([], "Could not restart the TerminalX runtime: it did not exit.", true));
+  const notice = screen.getByRole("status").textContent ?? "";
+  expect(notice).toContain("Restarting it with 0.2.23 failed, and it will not try again by itself.");
+  expect(notice).not.toContain("in a moment");
+  expect(screen.getByRole("alert").textContent).toContain("it did not exit");
+  expect(screen.getByRole("button", { name: "Restart now" })).toBeTruthy();
 });
 
 it("says while the runtime is being replaced, and clears once the app's own attaches", async () => {
@@ -203,8 +217,8 @@ it("says while the runtime is being replaced, and clears once the app's own atta
 it("hides for the runtime it was hidden for, and says why a restart failed", async () => {
   native.replace.mockRejectedValue("Could not restart the TerminalX runtime: it did not exit.");
   await mounted();
-  await changed(outdated(["Codex in “Release notes”"], "Could not tell which of its agents are in the middle of a turn: timed out"));
-  expect(screen.getByRole("alert").textContent).toContain("Could not tell which of its agents");
+  await changed(outdated(["Codex in “Release notes”, in the middle of a turn"], "Could not tell what it is running: timed out"));
+  expect(screen.getByRole("alert").textContent).toContain("Could not tell what it is running");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
   expect(screen.getByRole("alert").textContent).toContain("it did not exit");
   expect((screen.getByRole("button", { name: "Restart now" }) as HTMLButtonElement).disabled).toBe(false);
@@ -214,5 +228,5 @@ it("hides for the runtime it was hidden for, and says why a restart failed", asy
   expect(screen.queryByRole("status")).toBeNull();
   // Another older runtime is news again.
   await changed({ ...outdated([]), epoch: "another", generation: 3 } as LocalRuntimeState);
-  expect(screen.getByRole("status").textContent).toContain("It restarts with 0.2.23 now.");
+  expect(screen.getByRole("status").textContent).toContain("it restarts with 0.2.23 in a moment.");
 });

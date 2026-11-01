@@ -157,7 +157,7 @@ describe("a draft's id (#675)", () => {
 
   it("sends a draft's id only once the Mac's runtime takes it", async () => {
     let event: (value: { method: string }) => void = () => {};
-    const request = vi.fn(async (method: string) => method === "sync.capabilities"
+    const request = vi.fn(async (method: string, _params?: unknown) => method === "sync.capabilities"
       ? { ok: true, value: request.mock.calls.filter(([called]) => called === "sync.capabilities").length > 1 ? { sendIds: 1 } : {} }
       : { ok: true, value: { status: "sent", queued: false } });
     const api = new HostApi({ request, onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
