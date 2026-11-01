@@ -16,7 +16,7 @@ pub(super) fn observed_full_pipe() {
 
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread"] {
+    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -57,21 +57,24 @@ impl Sink for GateSink {
 }
 
 /// Stands in for Codex at the process boundary: answers the version probe and
-/// the resume handshake, records each frame it is sent, then plays one turn.
+/// the resume handshake, records each frame it is sent, and plays one turn per
+/// `turn/start` until its input closes.
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
-read -r line; printf '%s\n' "$line" >> "$here/received"
-printf '%s\n' '{"id":1,"result":{}}'
-read -r line; printf '%s\n' "$line" >> "$here/received"
-read -r line; printf '%s\n' "$line" >> "$here/received"
-printf '{"id":2,"result":{"thread":{"id":"%s"}}}\n' "$(cat "$here/answer")"
-read -r line; printf '%s\n' "$line" >> "$here/received"
-printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1"}}}'
-printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}'
-printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"m1","delta":"resumed"}}'
-printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}'
-exec sleep 10
+while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/resume"'*) printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$(cat "$here/answer")" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-%s","itemId":"m%s","delta":"resumed"}}\n' "$id" "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ;;
+  esac
+done
 "#;
 
 /// A tab whose connection ended (app restart, Stop) keeps its thread: the next
@@ -85,7 +88,7 @@ fn resume_fixture(case: &str) {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
     std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(bin.join("answer"), if case == "resume-thread" { "thread-1" } else { "thread-2" }).unwrap();
+    std::fs::write(bin.join("answer"), if case == "resume-other-thread" { "thread-2" } else { "thread-1" }).unwrap();
     assert!(crate::binpath::set_priority_dir(&bin));
     let session: index::SessionEntry = serde_json::from_value(json!({
         "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
@@ -110,6 +113,9 @@ fn resume_fixture(case: &str) {
     assert_eq!(received[2]["params"]["threadId"], "thread-1");
     assert_eq!(received[2]["params"]["excludeTurns"], true);
     let events = events();
+    if case == "settings" {
+        return settings_fixture(&manager, &bin, &received);
+    }
     if case == "resume-thread" {
         assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
         assert_eq!(received[3]["params"]["input"][0]["text"], "carry on");
@@ -127,6 +133,49 @@ fn resume_fixture(case: &str) {
     manager.stop("stdio-owner", "tab").unwrap();
 }
 
+/// Model and effort reach a live connection with its next turn. A permission
+/// mode is only taken between turns: the connection stops, and the next send
+/// resumes the thread under the new approval policy and sandbox.
+fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::Value]) {
+    let frames = || -> Vec<serde_json::Value> { std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect() };
+    let turns = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().iter().filter(|event| matches!(event.payload, Payload::TurnCompleted { .. })).count();
+    let idle_after = |n: usize| {
+        let until = Instant::now() + WAIT;
+        while turns() < n || manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open {
+            assert!(Instant::now() < until, "turn {n} did not settle");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    assert_eq!(first[3]["params"]["model"], serde_json::Value::Null);
+    idle_after(1);
+    manager.set_model("stdio-owner", "tab", "gpt-next").unwrap();
+    manager.set_effort("stdio-owner", "tab", Some("high")).unwrap();
+    assert!(matches!(manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().engine, Engine::CodexStdio(_)), "model and effort keep the connection");
+    manager.send("stdio-owner", "tab", "next".into(), Vec::new()).unwrap();
+    idle_after(2);
+    let sent = frames();
+    assert_eq!(sent.len(), 5, "the same connection takes the next turn");
+    assert_eq!((&sent[4]["method"], &sent[4]["params"]["model"], &sent[4]["params"]["effort"]), (&json!("turn/start"), &json!("gpt-next"), &json!("high")));
+    for ask in ["manual", "default"] {
+        let refused = manager.set_permission_mode("stdio-owner", "tab", ask).unwrap_err();
+        assert!(refused.to_string().contains("Ask every time"), "{refused:#}");
+    }
+    manager.set_permission_mode("stdio-owner", "tab", "plan").unwrap();
+    assert!(matches!(manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().engine, Engine::None), "the old approval policy and sandbox are not kept running");
+    manager.send("stdio-owner", "tab", "planned".into(), Vec::new()).unwrap();
+    idle_after(3);
+    let sent = frames();
+    let methods: Vec<_> = sent[5..].iter().map(|frame| frame["method"].as_str().unwrap()).collect();
+    assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
+    let resumed = &sent[7]["params"];
+    assert_eq!((&resumed["threadId"], &resumed["approvalPolicy"], &resumed["sandbox"], &resumed["model"]), (&json!("thread-1"), &json!("on-request"), &json!("read-only"), &json!("gpt-next")));
+    assert_eq!(sent[8]["params"]["effort"], "high");
+    manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open = true;
+    let refused = manager.set_permission_mode("stdio-owner", "tab", "auto").unwrap_err();
+    assert!(refused.to_string().contains("between turns"), "{refused:#}");
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
 fn rt_bound(manager: &SessionManager) -> bool {
     manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().stdio_compaction.is_some()
 }
@@ -134,7 +183,7 @@ fn rt_bound(manager: &SessionManager) -> bool {
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
-    if case.starts_with("resume-") { return resume_fixture(&case); }
+    if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings") { return resume_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({

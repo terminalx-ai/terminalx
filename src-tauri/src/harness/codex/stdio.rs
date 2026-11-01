@@ -96,6 +96,11 @@ impl Stdio {
             seen_text: HashSet::new(), cwd, model, effort, mode, first: None, resume }
     }
 
+    /// A new model or effort reaches Codex with the next turn it starts;
+    /// `turn/start` takes both for that turn and the ones after it.
+    pub(crate) fn set_model(&mut self, model: &str) { self.model = model.to_owned(); }
+    pub(crate) fn set_effort(&mut self, effort: Option<&str>) { self.effort = effort.map(str::to_owned); }
+
     fn request(&mut self, method: &str, params: Value, kind: Request) -> Result<Action> {
         ensure!(!self.exited && !self.blocked, "Experimental Codex connection is no longer writable");
         ensure!(self.pending.len() < MAX_PENDING, "Too many pending Codex requests");
@@ -123,7 +128,8 @@ impl Stdio {
         self.manual_compact = false;
         let mut input = vec![json!({"type": "text", "text": text})];
         input.extend(images.into_iter().map(|(mime, data)| json!({"type": "image", "url": format!("data:{mime};base64,{data}")})));
-        Ok(vec![self.request("turn/start", json!({"threadId": thread, "input": input, "effort": self.effort}), Request::Turn)?])
+        let model = if self.model.is_empty() { None } else { Some(&self.model) };
+        Ok(vec![self.request("turn/start", json!({"threadId": thread, "input": input, "model": model, "effort": self.effort}), Request::Turn)?])
     }
 
     pub(crate) fn interrupt(&mut self) -> Result<Vec<Action>> {
