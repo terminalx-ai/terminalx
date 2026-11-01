@@ -364,7 +364,7 @@ impl Registry {
     }
 
     fn send(&self, manager: &crate::session::SessionManager, pending: Pending) -> Result<Sent> {
-        if pending.bytes() > 8 * 1024 * 1024 { bail!("The mobile prompt is too large."); }
+        if pending.bytes() > MAX_PROMPT_BYTES { bail!("The mobile prompt is too large."); }
         let pending = match self.repeat(pending)? {
             Ok(repeat) => return Ok(Sent::Repeat(repeat)),
             Err(pending) => pending,
@@ -657,29 +657,16 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         let session = string("sessionId")?;
         let tab = string("tabId")?;
         let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
-        let display = string("text")?.to_string();
-        let prompt = string("prompt")?;
-        let mirror: Option<AccountMirror> = crate::store::read_json(&crate::store::root()?.join("account.json"))?;
-        let (user, name) = match mirror {
-            Some(mirror) if actor.user_id.as_deref() == Some(&mirror.user_id) =>
-                (mirror.user_id, if mirror.display_name.trim().is_empty() { mirror.email } else { mirror.display_name }),
-            None if actor.user_id.is_none() => (grant.device.id.clone(), if grant.device.label.trim().is_empty() { "Paired mobile device".into() } else { grant.device.label.clone() }),
-            _ => bail!("The mobile host identity changed."),
-        };
-        let envelope = serde_json::json!({"userId":user,"displayName":name,"authority":"host"});
         let message = match params.get("clientMessageId") {
             None | Some(Value::Null) => None,
             Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => Some(id.clone()),
             Some(_) => bail!("Invalid mobile message id."),
         };
-        let pending = Pending { session:session.into(),tab:tab.into(),
-            agent:format!("[TerminalX Effective User v1] {envelope}\n{prompt}"), display,
-            images:serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| serde_json::json!([])))?,permit,message };
-        return Ok(match manager.mobile.send(manager,pending)? {
-            Sent::Outcome(outcome) => serde_json::to_value(outcome)?,
-            // Shaped as an outcome: `queued` reads as it always has.
-            Sent::Repeat(repeat) => serde_json::json!({"queued":repeat != Repeat::Delivered,"events":[],"repeat":repeat}),
-        });
+        let images = serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| serde_json::json!([])))?;
+        return phone_send(manager, &actor, &grant, (session, tab), permit, string("text")?.to_string(), string("prompt")?, images, message);
+    }
+    if let Some(result) = controls(manager, &actor, &grant, method, &params) {
+        return result;
     }
     let _admitted = grant.enter()?;
     match method {
@@ -719,6 +706,99 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     }
 }
 
+
+/// The most a phone's prompt may carry, attachments included.
+const MAX_PROMPT_BYTES: usize = 8 * 1024 * 1024;
+
+/// A phone's prompt as the agent gets it: who it is from, then what was typed.
+fn attributed(actor: &Actor, grant: &Grant, prompt: &str) -> Result<String> {
+    let mirror: Option<AccountMirror> = crate::store::read_json(&crate::store::root()?.join("account.json"))?;
+    let (user, name) = match mirror {
+        Some(mirror) if actor.user_id.as_deref() == Some(&mirror.user_id) =>
+            (mirror.user_id, if mirror.display_name.trim().is_empty() { mirror.email } else { mirror.display_name }),
+        None if actor.user_id.is_none() => (grant.device.id.clone(), if grant.device.label.trim().is_empty() { "Paired mobile device".into() } else { grant.device.label.clone() }),
+        _ => bail!("The mobile host identity changed."),
+    };
+    let envelope = serde_json::json!({"userId":user,"displayName":name,"authority":"host"});
+    Ok(format!("[TerminalX Effective User v1] {envelope}\n{prompt}"))
+}
+
+/// A phone's prompt to a tab. It goes through the queue, so a busy tab takes
+/// it after its turn.
+#[allow(clippy::too_many_arguments)]
+fn phone_send(manager: &crate::session::SessionManager, actor: &Actor, grant: &Grant, (session, tab): (&str, &str), permit: WritePermit,
+    display: String, prompt: &str, images: Vec<crate::session::ImageInput>, message: Option<String>) -> Result<Value> {
+    let pending = Pending { session:session.into(), tab:tab.into(), agent:attributed(actor, grant, prompt)?, display, images, permit, message };
+    Ok(match manager.mobile.send(manager,pending)? {
+        Sent::Outcome(outcome) => serde_json::to_value(outcome)?,
+        // Shaped as an outcome: `queued` reads as it always has.
+        Sent::Repeat(repeat) => serde_json::json!({"queued":repeat != Repeat::Delivered,"events":[],"repeat":repeat}),
+    })
+}
+
+/// The session controls a phone offers as the desktop does (`sessionControls`
+/// in the phone protocol). Each is the desktop's own operation, after a
+/// phone's device checks: a live grant for all of them, and a driver for any
+/// change. Nothing of the device is held across the operation: Stop waits for
+/// the agent's exit, and a mode, a tab or a send takes sharing and admission,
+/// which come before a device's grant in the lock order. `None` for any other
+/// method.
+fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Grant, method: &str, params: &Value) -> Option<Result<Value>> {
+    const CHANGES: &[&str] = &["stop", "interrupt", "setModel", "setEffort", "setMode", "resendUnsent", "continue"];
+    const READS: &[&str] = &["tab", "models", "prepareContinuation"];
+    if !CHANGES.contains(&method) && !READS.contains(&method) { return None; }
+    Some((|| {
+        let string = |key: &str| -> Result<&str> { params[key].as_str().with_context(|| format!("{key} must be a string")) };
+        if CHANGES.contains(&method) { grant.driver()?; }
+        drop(grant.enter()?);
+        if method == "models" {
+            return Ok(serde_json::to_value(crate::models::list(&manager.codex_models(), params["refresh"].as_bool().unwrap_or(false)))?);
+        }
+        let (session, tab) = (string("sessionId")?, string("tabId")?);
+        let entry = crate::store::index::get(session)?;
+        let current = entry.tab(tab).context("The tab does not belong to this session.")?;
+        Ok(match method {
+            "tab" => serde_json::json!({
+                "harness": current.harness, "model": current.model, "effort": current.effort, "permissionMode": current.permission_mode,
+                "requestedModel": current.requested_model, "requestedEffort": current.requested_effort,
+                "requestedPermissionMode": current.requested_permission_mode, "status": manager.status_of(session, tab),
+            }),
+            "stop" => { manager.stop(session, tab)?; Value::Null }
+            "interrupt" => serde_json::json!({ "interrupted": manager.interrupt(session, tab)? }),
+            "setModel" => { manager.set_model(session, tab, string("model")?)?; Value::Null }
+            "setEffort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
+            "setMode" => { manager.set_permission_mode(session, tab, string("mode")?)?; Value::Null }
+            "resendUnsent" => {
+                let (text, images) = manager.unsent_prompt(session, tab)?;
+                let permit = manager.mobile.permit(actor, string("connection")?, session, tab)?;
+                phone_send(manager, actor, grant, (session, tab), permit, text.clone(), &text, images, None)?
+            }
+            "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
+            // "Continue in new session": a new tab in this session with the
+            // chosen agent and settings, handed the prompt the phone built from
+            // `prepareContinuation`. It goes as any phone message (the sender
+            // named, the size held to a phone's, the permit checked again at
+            // the write) and is confirmed with a receipt as the desktop's is.
+            // The new tab's permit is taken once the tab has started: nothing
+            // of this phone is held across its start.
+            _ => {
+                let prompt = string("prompt")?;
+                anyhow::ensure!(prompt.len() <= MAX_PROMPT_BYTES, "The mobile prompt is too large.");
+                let agent = attributed(actor, grant, prompt)?;
+                let settings: crate::session_ops::NewTab = serde_json::from_value(params["tab"].clone()).context("Invalid new tab settings.")?;
+                let started = manager.add_tab(session, &settings)?;
+                let delivered = manager.ensure_started(session, &started.id)
+                    .and_then(|()| manager.mobile.permit(actor, string("connection")?, session, &started.id))
+                    .and_then(|permit| manager.send_mobile_confirmed(session, &started.id, agent, prompt.to_owned(), permit));
+                match delivered {
+                    Ok(outcome) => serde_json::json!({ "tab": started, "delivered": true, "inInput": outcome.in_input }),
+                    // The tab is there either way: the phone opens it to check.
+                    Err(error) => serde_json::json!({ "tab": started, "delivered": false, "error": format!("{error:#}") }),
+                }
+            }
+        })
+    })())
+}
 
 #[derive(Debug)]
 pub struct Busy;

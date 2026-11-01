@@ -1932,9 +1932,32 @@ impl SessionManager {
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
         let outcome = self.send_impl(session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        self.confirm_continuation(session_id, tab_id, outcome, &rx)
+    }
+
+    /// A phone's Continue in New Session: the handoff goes as any phone
+    /// message does, in `send_mobile`'s order (the permit before the tab), so
+    /// it is held to the permit again at its write and names its sender, and
+    /// is confirmed as the desktop's handoff is. A permit gone by the write
+    /// delivers nothing: the receipt says so, and the tab keeps no brief to
+    /// send again under the host's authority.
+    pub(crate) fn send_mobile_confirmed(&self, session_id: &str, tab_id: &str, agent: String, display: String,
+        permit: crate::local_runtime::mobile::WritePermit) -> Result<SendOutcome> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let outcome = {
+            let admission = crate::issue_pipeline::admission::lock();
+            let _sharing = self.sharing.lock().unwrap();
+            let _admitted = permit.enter()?;
+            permit.check_mode(session_id, tab_id)?;
+            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx))?
+        };
+        self.confirm_continuation(session_id, tab_id, outcome, &rx)
+    }
+
+    fn confirm_continuation(&self, session_id: &str, tab_id: &str, outcome: SendOutcome, rx: &std::sync::mpsc::Receiver<std::result::Result<(), String>>) -> Result<SendOutcome> {
         let seq = outcome.events.first().map(|event| event.seq).context("the continuation was not published")?;
         let rt_arc = self.runtime(session_id, tab_id)?;
-        match self.await_receipt(&rt_arc, seq, &rx, ReceiptWait::DEFAULT) {
+        match self.await_receipt(&rt_arc, seq, rx, ReceiptWait::DEFAULT) {
             Receipt::Delivered => Ok(outcome),
             Receipt::Failed(message) => Err(anyhow!(message)),
             Receipt::Unconfirmed => {
@@ -4267,6 +4290,7 @@ impl SessionManager {
                 if readiness == Readiness::Cancelled {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
                 if !manager.prepare_prompt(&mut rt, readiness, receipt.as_ref().map(|(_, receipt)| receipt)) {
@@ -4331,9 +4355,11 @@ impl SessionManager {
             if let Err(e) = result {
                 log::warn!("[{pane}] write: {e:#}");
                 let mut rt = rt_arc.lock().unwrap();
-                if !admitted_to_writer {
-                    if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); return; }
-                    if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); return; }
+                if !admitted_to_writer && (shared.is_some() || mobile.is_some()) {
+                    if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    manager.refuse_continuation(&mut rt, receipt);
+                    return;
                 }
                 if ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready))) {
                     return;
@@ -4398,6 +4424,22 @@ impl SessionManager {
             self.end_open_turn(rt, TurnStatus::Aborted, None);
             self.set_status(rt, TabStatus::Idle);
         }
+    }
+
+    /// A phone's or share's handoff refused before a byte of it was typed:
+    /// the dialog that sent it is told it was not delivered, and the tab
+    /// keeps no brief a later launch would send again under the host's
+    /// authority. No banner: nothing failed that the reader could recover.
+    fn refuse_continuation(&self, rt: &mut TabRuntime, receipt: Option<(u64, DeliveryReceipt)>) {
+        let Some((seq, receipt)) = receipt else { return };
+        // Forgotten before the sender is told, so no answer outruns it.
+        if let Err(error) = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+            if t.continuation == Some(seq) { t.continuation = None; }
+            Ok(())
+        }) {
+            log::warn!("forget the refused continuation of {}: {error:#}", rt.key());
+        }
+        let _ = receipt.send(Err("The sender's access changed before the handoff was delivered, so nothing was sent.".into()));
     }
 
     /// Decide whether to type after readiness has settled. A quiet-screen
@@ -5238,6 +5280,10 @@ mod watch_tests;
 #[cfg(test)]
 #[path = "session_mobile_admission_tests.rs"]
 mod mobile_admission_tests;
+
+#[cfg(test)]
+#[path = "session_mobile_controls_tests.rs"]
+mod mobile_controls_tests;
 
 #[cfg(test)]
 #[path = "session_follow_tests.rs"]

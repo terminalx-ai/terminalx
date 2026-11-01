@@ -172,6 +172,13 @@ impl SessionManager {
     /// sends nothing again by itself, so its unanswered brief (Continue in New
     /// Session) goes first, as a PTY launch would send it.
     pub fn resend_unsent(&self, session_id: &str, tab_id: &str) -> Result<SendOutcome> {
+        let (text, images) = self.unsent_prompt(session_id, tab_id)?;
+        self.send(session_id, tab_id, text, images)
+    }
+
+    /// The last prompt the tab's agent never answered, as it was sent: what
+    /// "Resend last prompt" sends again, from the desktop or a phone.
+    pub fn unsent_prompt(&self, session_id: &str, tab_id: &str) -> Result<(String, Vec<ImageInput>)> {
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         let log = store::log_path(session_id, tab_id)?;
@@ -184,7 +191,7 @@ impl SessionManager {
         } else { said.since.pop() };
         let last = last.ok_or_else(|| anyhow!("There is no unanswered prompt to send again."))?;
         let images = last.images.iter().map(image_input).collect::<Result<Vec<_>>>()?;
-        self.send(session_id, tab_id, last.text, images)
+        Ok((last.text, images))
     }
 }
 
