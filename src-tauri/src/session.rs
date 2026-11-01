@@ -1830,14 +1830,11 @@ impl SessionManager {
     /// live hook samples share the same store across desktop attachments.
     pub fn refresh_usage(&self, manual: bool) -> crate::status::usage::UsageSnapshot {
         let cadence = crate::store::settings::load().status_bar.usage_refresh_ms();
-        if let Err(error) = self.status.usage.refresh_claude(manual, cadence) {
-            log::warn!("Claude usage refresh: {error:#}");
-        }
+        // The store logs every refresh: what arrived, what it kept, any failure.
+        let _ = self.status.usage.refresh_claude(manual, cadence);
         // A slow Codex app-server must not delay publishing Claude's rollover.
         self.emit_usage();
-        if let Err(error) = self.status.usage.refresh_codex(manual, cadence) {
-            log::warn!("Codex usage refresh: {error:#}");
-        }
+        let _ = self.status.usage.refresh_codex(manual, cadence);
         let snapshot = self.usage_snapshot();
         self.sink.emit(crate::status::usage::EVENT, &snapshot);
         snapshot
