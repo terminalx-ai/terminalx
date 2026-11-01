@@ -152,7 +152,7 @@ fn every_error_kind_comes_from_a_recorded_failure() {
 #[test]
 fn error_messages_carry_no_secret_or_reply() {
     use IssueOpErrorKind::*;
-    let kinds = [NotSignedIn, MissingScope, Forbidden, NotFound, Conflict, RateLimited, Network, Unsupported, Invalid, NotImplemented, Other];
+    let kinds = [NotSignedIn, MissingScope, Forbidden, NotFound, Conflict, RateLimited, Network, Unsupported, Invalid, Moved, NotImplemented, Other];
     // A failure whose reply holds a token: what reaches the UI is the fixed message alone.
     let printed = "gh: Bad credentials (HTTP 401) token ghp_SECRETSECRETSECRET lin_api_SECRETSECRET";
     let error = IssueOpError::new(github::classify(printed), Provider::Github);
@@ -168,6 +168,17 @@ fn error_messages_carry_no_secret_or_reply() {
         }
     }
     assert!(!serde_json::to_string(&error).unwrap().contains("SECRET"));
+
+    // A renamed repository's message names it, and nothing but a name gets in.
+    let moved = IssueOpError::repository_moved("acme/widgets", Some("git@github.com:acme/gadgets.git"));
+    assert_eq!(moved.kind, Moved);
+    assert_eq!(moved.message, "GitHub now names this repository acme/widgets, so nothing was changed. Point the project at it with git remote set-url origin git@github.com:acme/widgets.git, then try again.");
+    assert_eq!(IssueOpError::repository_moved("acme/widgets", None).message, "GitHub now names this repository acme/widgets, so nothing was changed. Try again.");
+    assert_eq!(IssueOpError::repository_moved("acme/widgets", Some("https://ghp_SECRET@github.com/acme/gadgets")).message, "GitHub now names this repository acme/widgets, so nothing was changed. Try again.");
+    for not_a_name in ["acme/widgets ghp_SECRET", "acme/{\"message\"}", "acme/widgets/extra", ""] {
+        assert_eq!(IssueOpError::repository_moved(not_a_name, Some("git@github.com:acme/gadgets.git")), IssueOpError::new(Moved, Provider::Github), "{not_a_name}");
+    }
+    assert_eq!(round_trip(&moved)["kind"], "moved");
 }
 
 #[test]

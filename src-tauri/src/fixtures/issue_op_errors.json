@@ -10,7 +10,9 @@
     { "kind": "rate_limited", "printed": "gh: API rate limit exceeded for user ID 12. (HTTP 403)\n{\"message\":\"API rate limit exceeded for user ID 12.\",\"status\":\"403\"}" },
     { "kind": "rate_limited", "printed": "gh: You have exceeded a secondary rate limit. (HTTP 403)" },
     { "kind": "network", "printed": "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com" },
-    { "kind": "invalid", "printed": "gh: Validation Failed (HTTP 422)\n{\"message\":\"Validation Failed\",\"errors\":[{\"resource\":\"Issue\",\"code\":\"invalid\",\"field\":\"assignees\"}],\"status\":\"422\"}" }
+    { "kind": "invalid", "printed": "gh: Validation Failed (HTTP 422)\n{\"message\":\"Validation Failed\",\"errors\":[{\"resource\":\"Issue\",\"code\":\"invalid\",\"field\":\"assignees\"}],\"status\":\"422\"}" },
+    { "kind": "moved", "printed": "gh: HTTP 307\n{\"message\":\"Moved Permanently\",\"url\":\"https://api.github.com/repositories/123456789/issues\",\"documentation_url\":\"https://docs.github.com/rest/guides/best-practices-for-using-the-rest-api#follow-redirects\"}" },
+    { "kind": "moved", "printed": "gh: HTTP 307\n{\"message\":\"Moved Permanently\",\"url\":\"https://api.github.com/repositories/123456789/issues/99999999/assignees\",\"documentation_url\":\"https://docs.github.com/rest/guides/best-practices-for-using-the-rest-api#follow-redirects\"}" }
   ],
   "linear": [
     { "kind": "not_signed_in", "status": 400, "body": { "errors": [{ "message": "Authentication required, not authenticated", "extensions": { "code": "AUTHENTICATION_ERROR", "type": "authentication error", "userPresentableMessage": "You need to authenticate to access this operation." } }] } },

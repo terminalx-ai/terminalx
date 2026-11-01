@@ -42,7 +42,10 @@ pub(crate) fn gh_api(cwd: &Path, method: &str, path: &str, body: Option<&Value>)
 pub fn classify(printed: &str) -> IssueOpErrorKind {
     let text = printed.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
-    if has(&["gh auth login", "not logged into", "http 401", "bad credentials", "requires authentication"]) {
+    // `gh` follows a redirect for a read, but not for a write with a body (#699).
+    if has(&["http 301", "http 302", "http 307", "http 308", "moved permanently"]) {
+        IssueOpErrorKind::Moved
+    } else if has(&["gh auth login", "not logged into", "http 401", "bad credentials", "requires authentication"]) {
         IssueOpErrorKind::NotSignedIn
     } else if has(&["rate limit", "http 429"]) {
         IssueOpErrorKind::RateLimited
@@ -177,12 +180,14 @@ pub(crate) struct Access {
     pub moderates: bool,
 }
 
-/// Picker options and access per repository, kept for the session. Asking
-/// for options with `refresh` reads both again.
+/// Picker options, access and the repository's current name per repository,
+/// kept for the session. Asking for options with `refresh` reads them again.
 #[derive(Default)]
 pub(crate) struct Session {
     options: HashMap<String, IssueOptions>,
     access: HashMap<String, Access>,
+    /// What GitHub names the repository now, by the name the project's remote uses.
+    names: HashMap<String, String>,
 }
 
 static SESSION: LazyLock<Mutex<Session>> = LazyLock::new(Default::default);
@@ -197,11 +202,57 @@ fn access(api: &mut Api, session: &Mutex<Session>, repo: &str) -> OpResult<Acces
         return Ok(access.clone());
     }
     let viewer = api("GET", "user", None)?["login"].as_str().map(String::from).ok_or_else(|| IssueOpError::new(IssueOpErrorKind::NotSignedIn, GITHUB))?;
-    let permissions = api("GET", &format!("repos/{repo}"), None)?["permissions"].clone();
-    let moderates = ["admin", "maintain", "push"].iter().any(|level| permissions[level].as_bool() == Some(true));
+    let repository = api("GET", &format!("repos/{repo}"), None)?;
+    let moderates = ["admin", "maintain", "push"].iter().any(|level| repository["permissions"][level].as_bool() == Some(true));
     let access = Access { viewer, moderates };
-    lock(session).access.insert(key, access.clone());
+    let mut session = lock(session);
+    // The same read names the repository, which spares the next write asking.
+    if let Some(name) = full_name(&repository) {
+        session.names.insert(key.clone(), name);
+    }
+    session.access.insert(key, access.clone());
     Ok(access)
+}
+
+/// The repository's name as `GET repos/{repo}` answers it.
+fn full_name(repository: &Value) -> Option<String> {
+    repository["full_name"].as_str().filter(|name| crate::issues::is_github_repo(name)).map(String::from)
+}
+
+/// What GitHub names the repository the project's remote names, now. A
+/// renamed repository still answers at its old name, but `gh` follows that
+/// redirect only for a read: a write with a body answers `307` (#699). The
+/// read follows it, so it names the repository as it is now.
+fn current_name(api: &mut Api, session: &Mutex<Session>, repo: &str) -> OpResult<String> {
+    let key = repo.to_ascii_lowercase();
+    if let Some(name) = lock(session).names.get(&key) {
+        return Ok(name.clone());
+    }
+    let name = full_name(&api("GET", &format!("repos/{repo}"), None)?).ok_or_else(|| IssueOpError::new(IssueOpErrorKind::Other, GITHUB))?;
+    lock(session).names.insert(key, name.clone());
+    Ok(name)
+}
+
+/// A write, made against the repository's current name. A write GitHub still
+/// redirects wasn't made. When the repository moved again since its name was
+/// read, the error names it as it is now, with the command that points
+/// `origin` there when the project's remote is the one that names `repo`, and
+/// the next write goes there. When it didn't, something else moved, like an
+/// issue transferred to another repository, and the error says only that.
+pub(crate) fn write_with<T>(api: &mut Api, session: &Mutex<Session>, repo: &str, origin: impl FnOnce() -> Option<String>, op: impl FnOnce(&mut Api, &str) -> OpResult<T>) -> OpResult<T> {
+    let name = current_name(api, session, repo)?;
+    let moved = match op(&mut *api, &name) {
+        Err(error) if error.kind == IssueOpErrorKind::Moved => error,
+        done => return done,
+    };
+    lock(session).names.remove(&repo.to_ascii_lowercase());
+    match current_name(api, session, repo) {
+        Ok(now) if !now.eq_ignore_ascii_case(&name) => {
+            let origin = origin().filter(|url| crate::issues::github_repo_from_url(url).is_some_and(|named| named.eq_ignore_ascii_case(repo)));
+            Err(IssueOpError::repository_moved(&now, origin.as_deref()))
+        }
+        _ => Err(moved),
+    }
 }
 
 // ------------------------------------------------------------------ parsing
@@ -302,40 +353,47 @@ pub fn options(cwd: &Path, repo: &str, refresh: bool) -> OpResult<IssueOptions> 
     options_with(&mut gh(cwd), &SESSION, repo, refresh)
 }
 
+/// A write through `gh` in `cwd`, against the repository's current name
+/// ([`write_with`]). Reads go to the name they're given: `gh` follows the
+/// redirect for them.
+fn write<T>(cwd: &Path, repo: &str, op: impl FnOnce(&mut Api, &str) -> OpResult<T>) -> OpResult<T> {
+    write_with(&mut gh(cwd), &SESSION, repo, || crate::git::remote_url(cwd), op)
+}
+
 pub fn comment_add(cwd: &Path, repo: &str, id: &str, body: &str) -> OpResult<IssueComment> {
-    comment_add_with(&mut gh(cwd), repo, id, body)
+    write(cwd, repo, |api, repo| comment_add_with(api, repo, id, body))
 }
 
 pub fn comment_edit(cwd: &Path, repo: &str, id: &str, comment_id: &str, body: &str) -> OpResult<IssueComment> {
-    comment_edit_with(&mut gh(cwd), repo, id, comment_id, body)
+    write(cwd, repo, |api, repo| comment_edit_with(api, repo, id, comment_id, body))
 }
 
 pub fn comment_delete(cwd: &Path, repo: &str, id: &str, comment_id: &str) -> OpResult<()> {
-    comment_delete_with(&mut gh(cwd), repo, id, comment_id)
+    write(cwd, repo, |api, repo| comment_delete_with(api, repo, id, comment_id))
 }
 
 pub fn set_state(cwd: &Path, repo: &str, id: &str, change: &StateChange) -> OpResult<IssueDetails> {
-    set_state_with(&mut gh(cwd), repo, id, change)
+    write(cwd, repo, |api, repo| set_state_with(api, repo, id, change))
 }
 
 pub fn set_assignees(cwd: &Path, repo: &str, id: &str, assignees: &[String]) -> OpResult<IssueDetails> {
-    set_assignees_with(&mut gh(cwd), repo, id, assignees)
+    write(cwd, repo, |api, repo| set_assignees_with(api, repo, id, assignees))
 }
 
 pub fn set_labels(cwd: &Path, repo: &str, id: &str, labels: &[String]) -> OpResult<IssueDetails> {
-    set_labels_with(&mut gh(cwd), &SESSION, repo, id, labels)
+    write(cwd, repo, |api, repo| set_labels_with(api, &SESSION, repo, id, labels))
 }
 
 pub fn set_title(cwd: &Path, repo: &str, id: &str, title: &str) -> OpResult<IssueDetails> {
-    set_title_with(&mut gh(cwd), repo, id, title)
+    write(cwd, repo, |api, repo| set_title_with(api, repo, id, title))
 }
 
 pub fn set_description(cwd: &Path, repo: &str, id: &str, edit: &DescriptionEdit) -> OpResult<IssueDetails> {
-    set_description_with(&mut gh(cwd), repo, id, edit)
+    write(cwd, repo, |api, repo| set_description_with(api, repo, id, edit))
 }
 
 pub fn create(cwd: &Path, repo: &str, input: &IssueCreate) -> OpResult<IssueDetails> {
-    create_with(&mut gh(cwd), &SESSION, repo, input)
+    write(cwd, repo, |api, repo| create_with(api, &SESSION, repo, input))
 }
 
 /// The issue's raw reply. The issues endpoints also answer for pull
@@ -377,6 +435,7 @@ pub(crate) fn options_with(api: &mut Api, session: &Mutex<Session>, repo: &str, 
         let mut session = lock(session);
         session.options.remove(&key);
         session.access.remove(&key);
+        session.names.remove(&key);
     } else if let Some(options) = lock(session).options.get(&key) {
         return Ok(options.clone());
     }
