@@ -119,12 +119,18 @@ an experimental integration, not a production-supported replacement.
 The transport choice is persisted. Opening the view never starts or resumes it;
 existing PTY sessions cannot be migrated into this mode. After the app restarts,
 after Stop, or after a lost connection, the next message sent resumes the same
-Codex thread in a new connection; nothing earlier is replayed. The owner handles local
-send, command/file approvals, interrupt, Stop and `/compact`. Manual compaction
-adds system status, not a user message. Unsupported modes or protocol requests
-fail explicitly. Shared/mobile input, issue pipelines and continuation delivery
-are not supported. Opening the tab's terminal view in the app moves it to Codex's
-own terminal interface on the same thread, for good: the chat keeps its history,
+Codex thread in a new connection; nothing earlier is replayed. The owner handles
+send, command/file approvals, interrupt, Stop and `/compact`, from the desktop, a
+paired phone (a phone's `/compact` compacts too) or a shared session's guests and
+host. A phone's or guest's message is held to its permit when it is written, as
+for a PTY tab: one revoked or no longer allowed is not sent, and its turn ends as
+stopped. Manual compaction adds system status, not a user message. Unsupported
+modes or protocol requests fail explicitly. Issue pipelines are not supported.
+Continue in New Session can hand off to an experimental tab: delivery is confirmed
+once Codex starts the turn for the handoff. If Codex fails or is stopped before
+then, the handoff, like any prompt Codex never took, is reported as not delivered
+and offered back with "Resend last prompt"; nothing is sent again by itself.
+Opening the tab's terminal view in the app moves it to Codex'sown terminal interface on the same thread, for good: the chat keeps its history,
 and from then on the tab is an ordinary PTY Codex tab. A new model or effort
 applies from the next turn. A new permission mode (other than Ask every time) is taken between turns:
 the connection stops and the next message resumes the thread under that mode.
