@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { SettingRow, Switch } from "@/components/ui/controls";
 import { errorMessage, experimental } from "@/lib/api";
 
@@ -22,6 +23,18 @@ export function ExperimentalTab() {
       });
     return () => {
       live = false;
+    };
+  }, []);
+
+  // A paired phone can change it too (Settings → This Mac on the phone).
+  useEffect(() => {
+    let live = true;
+    const unlisten = listen<{ nativeCodex?: boolean }>("experimental_settings_changed", (event) => {
+      if (live && typeof event.payload?.nativeCodex === "boolean") setNativeCodex(event.payload.nativeCodex);
+    }).catch(() => null);
+    return () => {
+      live = false;
+      void unlisten.then((stop) => stop?.());
     };
   }, []);
 

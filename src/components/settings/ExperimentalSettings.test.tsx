@@ -5,11 +5,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   setNativeCodex: vi.fn(),
+  listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
   experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
+    mocks.listeners.set(event, handler);
+    return () => mocks.listeners.delete(event);
+  }),
 }));
 
 const { ExperimentalTab } = await import("./ExperimentalSettings");
@@ -50,5 +58,15 @@ describe("Settings → Experimental (#644)", () => {
     fireEvent.click(toggle());
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("settings.json is not writable"));
     expect(toggle().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("follows a change made from a paired phone while it is open", async () => {
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(mocks.listeners.has("experimental_settings_changed")).toBe(true));
+    mocks.listeners.get("experimental_settings_changed")!({ payload: { nativeCodex: true } });
+    await waitFor(() => expect(toggle().getAttribute("aria-checked")).toBe("true"));
+    cleanup();
+    await waitFor(() => expect(mocks.listeners.has("experimental_settings_changed")).toBe(false));
   });
 });

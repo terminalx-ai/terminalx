@@ -1318,6 +1318,11 @@ impl SessionManager {
         &self.terminals
     }
 
+    /// Where this manager tells the windows what changed.
+    pub fn sink(&self) -> &Arc<dyn EventSink> {
+        &self.sink
+    }
+
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
         let key = key_of(session_id, tab_id);
         one_per_key(&self.tabs, &key, || {

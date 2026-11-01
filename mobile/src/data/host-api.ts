@@ -22,8 +22,35 @@ export interface ChatNote { id: string; body: string; createdAt: number; author:
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
 export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
-/** What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675). */
-export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number }
+/**
+ * What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675).
+ * `sessionCreate`: it starts sessions as its new-session view does. `macSettings`: it shows and changes its settings.
+ */
+export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; sessionCreate?: number; macSettings?: number }
+
+/** A project on the Mac, named by an id that is not its path. */
+export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean }
+export interface NewSessionModel { id: string; label: string; isDefault: boolean; efforts: string[]; defaultEffort?: string | null }
+export interface NewSessionAgent { id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[] }
+/** What the Mac's new-session view lets a person choose. */
+export interface NewSessionOptions { projects: NewSessionProject[]; agents: NewSessionAgent[]; modes: { id: string; label: string }[]; defaultMode: string; nativeCodex: boolean }
+export interface NewSessionRequest {
+  /** A quick chat, or a project's session: in a new worktree, or on its checkout. */
+  where: { quick: true } | { projectId: string; useWorktree: boolean };
+  agent: string;
+  model: string;
+  effort?: string | null;
+  mode?: string | null;
+  title?: string;
+  text: string;
+  attachments?: AttachmentInput[];
+}
+/** A session the Mac started. `sendError`: its first message was not sent, and the session is there to retry in. */
+export type NewSessionResult =
+  | { created: true; sessionId: string; tabId: string; title: string; native: boolean; queued?: boolean; sendError?: string }
+  | { created: false; message: string };
+/** This Mac's settings a phone shows and may change. */
+export interface MacSettings { nativeCodex: boolean }
 
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
@@ -198,6 +225,76 @@ export class HostApi {
   async releaseInput(sessionId: string, tabId: string): Promise<void> {
     await this.connection.request("steerLease.release", { worktreeId: sessionId, tabId }).catch(() => undefined);
   }
+
+  /** What a new session can be started with; null from a Mac that cannot start one for a phone. */
+  async newSessionOptions(): Promise<NewSessionOptions | null> {
+    if ((await this.features()).sessionCreate !== 1) return null;
+    const result = await this.connection.request<unknown>("sessions.options");
+    if (!result.ok) throw new Error(result.refusal.message);
+    if (!isNewSessionOptions(result.value)) throw new Error("The Mac returned new-session choices this phone cannot read.");
+    return result.value;
+  }
+
+  /** `messageId` names the draft (#675): starting it again after a lost reply gets the first session, not a second one. */
+  async createSession(request: NewSessionRequest, messageId?: string): Promise<NewSessionResult> {
+    if ((await this.features()).sessionCreate !== 1) return { created: false, message: "Update TerminalX on this Mac to start sessions from your phone." };
+    const where = "quick" in request.where ? { quick: true } : { projectId: request.where.projectId, useWorktree: request.where.useWorktree };
+    const result = await this.connection.request<Record<string, unknown>>("sessions.create", {
+      ...where,
+      agent: request.agent,
+      model: request.model,
+      ...(request.effort ? { effort: request.effort } : {}),
+      ...(request.mode ? { mode: request.mode } : {}),
+      ...(request.title?.trim() ? { title: request.title.trim() } : {}),
+      text: request.text,
+      ...(request.attachments?.length ? { attachments: request.attachments } : {}),
+      ...(messageId ? { clientMessageId: messageId } : {}),
+    });
+    if (!result.ok) return { created: false, message: result.refusal.message };
+    const value = result.value;
+    if (typeof value.sessionId !== "string" || typeof value.tabId !== "string") return { created: false, message: "The Mac did not say which session it started." };
+    const sent = value.sent as { status?: unknown; queued?: unknown } | undefined;
+    return {
+      created: true,
+      sessionId: value.sessionId,
+      tabId: value.tabId,
+      title: typeof value.title === "string" ? value.title : "New session",
+      native: value.native === true,
+      ...(sent && typeof sent.queued === "boolean" ? { queued: sent.queued } : {}),
+      ...(typeof value.sendError === "string" ? { sendError: value.sendError } : !sent ? { sendError: "The Mac did not say whether it sent the first message." } : {}),
+    };
+  }
+
+  /** This Mac's settings; null from a Mac that does not offer them to a phone. */
+  async macSettings(): Promise<MacSettings | null> {
+    if ((await this.features()).macSettings !== 1) return null;
+    const result = await this.connection.request<unknown>("mac.settings");
+    if (!result.ok) throw new Error(result.refusal.message);
+    if (!isMacSettings(result.value)) throw new Error("The Mac returned settings this phone cannot read.");
+    return result.value;
+  }
+
+  async setNativeCodex(on: boolean): Promise<MacSettings> {
+    const result = await this.connection.request<unknown>("mac.setSettings", { nativeCodex: on });
+    if (!result.ok) throw new Error(result.refusal.message);
+    if (!isMacSettings(result.value)) throw new Error("The Mac returned settings this phone cannot read.");
+    return result.value;
+  }
+}
+
+function isNewSessionOptions(value: unknown): value is NewSessionOptions {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  const strings = (item: unknown, ...keys: string[]) => !!item && typeof item === "object" && keys.every((key) => typeof (item as Record<string, unknown>)[key] === "string");
+  return Array.isArray(record.projects) && record.projects.every((project) => strings(project, "id", "name") && typeof (project as NewSessionProject).git === "boolean")
+    && Array.isArray(record.agents) && record.agents.every((agent) => strings(agent, "id", "name") && typeof (agent as NewSessionAgent).available === "boolean"
+      && Array.isArray((agent as NewSessionAgent).models) && (agent as NewSessionAgent).models.every((model) => strings(model, "id", "label") && Array.isArray(model.efforts)))
+    && Array.isArray(record.modes) && record.modes.every((mode) => strings(mode, "id", "label"))
+    && typeof record.defaultMode === "string" && typeof record.nativeCodex === "boolean";
+}
+
+function isMacSettings(value: unknown): value is MacSettings {
+  return !!value && typeof value === "object" && typeof (value as Record<string, unknown>).nativeCodex === "boolean";
 }
 
 export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): AgentEvent[] {

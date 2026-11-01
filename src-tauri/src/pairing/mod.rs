@@ -186,6 +186,11 @@ impl PairingManager {
         let _ = self.sessions.set(sessions);
     }
 
+    /// A phone starting a session chooses from the models the desktop offers.
+    pub fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
+        self.mobile.attach_models(cache);
+    }
+
     pub(crate) fn attach_runtime(&self, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
         *self.runtime.lock().unwrap() = Some(runtime);
     }
