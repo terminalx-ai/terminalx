@@ -538,6 +538,7 @@ const REFUSAL_COPY: Record<UsageRefusal, string> = {
   earlierWindow: "the reply's reset time is earlier than the shown window's",
   olderObservation: "a newer value had already arrived",
   noDeadline: "the reply had no reset time while the shown window runs",
+  notYetStarted: "the window the endpoint saw running had not ended",
 };
 
 const LIVE_REFUSAL_COPY: Record<LiveUsageRefused["reason"], string> = {

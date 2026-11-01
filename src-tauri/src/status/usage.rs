@@ -46,6 +46,11 @@ pub struct UsageWindow {
     pub updated_at: i64,
     pub stale: bool,
     pub source: String,
+    /// The usage endpoint said this window was still running when it was
+    /// asked; a status line updating the same window keeps that (#737). Only
+    /// `judge` reads it, so it is not sent.
+    #[serde(skip)]
+    pub endpoint_running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -144,6 +149,10 @@ pub enum Refusal {
     /// No reset deadline while the shown window still runs, from a status
     /// line that may be repeating a tab's sample from before that window.
     NoDeadline,
+    /// A later deadline from a status line before a window the endpoint saw
+    /// running has ended: no later window has started, and the tab may be
+    /// repeating the window that one replaced (#737).
+    NotYetStarted,
 }
 
 impl Refusal {
@@ -152,6 +161,7 @@ impl Refusal {
             Refusal::EarlierWindow => "earlier reset than the shown window",
             Refusal::OlderObservation => "not newer than the shown window",
             Refusal::NoDeadline => "no reset time while the shown window runs",
+            Refusal::NotYetStarted => "later reset while the endpoint's running window has not ended",
         }
     }
 }
@@ -352,6 +362,7 @@ fn parse_claude_window(key: &str, raw: &Value, updated_at: i64) -> Option<UsageW
         updated_at,
         stale: false,
         source: "statusline".into(),
+        endpoint_running: false,
     })
 }
 
@@ -475,13 +486,20 @@ fn later_observation(incoming: &UsageWindow, current: &UsageWindow) -> bool {
 /// key follow each other without overlapping, so when the endpoint says at
 /// request start that a window runs until a later moment, no later window had
 /// started then (#737). Unlike a status line, which may repeat an old sample,
-/// that answer is fresh: it replaces the shown window if observed later.
+/// that answer is fresh: it replaces the shown window if observed later. For
+/// the same reason a status line's later deadline is not the next window
+/// while one the endpoint saw running has not ended.
 fn judge(incoming: &UsageWindow, current: Option<&UsageWindow>) -> Verdict {
     let Some(current) = current else { return Verdict::Take(Taken::First) };
     match (incoming.resets_at, current.resets_at) {
         (Some(next), Some(shown)) if !same_deadline(next, shown) => {
             if next > shown {
-                Verdict::Take(Taken::NextWindow)
+                let before_end = incoming.updated_at < shown.saturating_sub(RESET_TOLERANCE_MS);
+                if incoming.source != "oauth" && current.endpoint_running && before_end {
+                    Verdict::Refuse(Refusal::NotYetStarted)
+                } else {
+                    Verdict::Take(Taken::NextWindow)
+                }
             } else if incoming.source != "oauth" || next <= incoming.updated_at {
                 Verdict::Refuse(Refusal::EarlierWindow)
             } else if later_observation(incoming, current) {
@@ -518,6 +536,13 @@ fn settled(mut window: UsageWindow, current: Option<&UsageWindow>) -> UsageWindo
         // A status line repeating an expired window does not confirm a reset.
         window.updated_at = current.map_or(window.updated_at, |shown| shown.updated_at);
     }
+    // A status line updating the same window keeps what the endpoint said of it.
+    window.endpoint_running = if window.source == "oauth" {
+        window.resets_at.is_some_and(|reset| reset > window.updated_at)
+    } else {
+        current.is_some_and(|shown| shown.endpoint_running
+            && shown.resets_at.zip(window.resets_at).is_some_and(|(a, b)| same_deadline(a, b)))
+    };
     window
 }
 
@@ -657,6 +682,7 @@ fn parse_codex_limit(limits: &Value, updated_at: i64) -> Vec<UsageWindow> {
                 updated_at,
                 stale: false,
                 source: "app-server".into(),
+                endpoint_running: false,
             })
         })
         .collect()
@@ -1634,6 +1660,10 @@ mod tests {
     const WEEK_RESET: i64 = 1_788_757_220;
     /// Three days into that week, when the status line reported it.
     const WEEK_SEEN: i64 = WEEK_RESET * 1000 - 3 * DAY;
+    /// The endpoint's 7d deadline two hours before `WEEK_RESET` (#737), and
+    /// the same moment in milliseconds.
+    const RUNNING: &str = "2026-09-07T03:00:20.373000+00:00";
+    const RUNNING_MS: i64 = WEEK_RESET * 1000 - 2 * HOUR + 373;
 
     fn shown(inner: &Inner, key: &str) -> UsageWindow {
         inner.windows[&("claude".to_string(), key.to_string())].clone()
@@ -1734,8 +1764,7 @@ mod tests {
     /// window until the shown deadline passed.
     #[test]
     fn an_endpoint_window_still_running_when_asked_replaces_a_later_shown_one() {
-        const RUNNING: &str = "2026-09-07T03:00:20.373000+00:00";
-        let running = WEEK_RESET * 1000 - 2 * HOUR + 373;
+        let running = RUNNING_MS;
         let mut inner = week_shown();
         let now = WEEK_SEEN + HOUR;
         assert!(begin_claude_refresh(&mut inner, now, true, None));
@@ -1759,6 +1788,57 @@ mod tests {
         assert!(begin_claude_refresh(&mut inner, next, true, None));
         finish_claude_refresh(&mut inner, 0, Ok(week_reply(RUNNING, next)), next, next + 300).unwrap();
         assert_eq!((shown(&inner, "seven_day").used_percent, shown(&inner, "seven_day").resets_at), (30.0, Some(running)));
+    }
+
+    /// #737: once the endpoint replaced the shown 7d window with its earlier,
+    /// running one, any tab's next frame still carrying the old deadline was
+    /// taken as the next window, and the old number came back on every turn.
+    /// No later window starts before the endpoint's one ends.
+    #[test]
+    fn a_status_line_frame_does_not_take_back_a_window_the_endpoint_replaced() {
+        let mut inner = week_shown();
+        let now = WEEK_SEEN + HOUR;
+        assert!(begin_claude_refresh(&mut inner, now, true, None));
+        finish_claude_refresh(&mut inner, 0, Ok(week_reply(RUNNING, now)), now, now + 300).unwrap();
+        assert!(shown(&inner, "seven_day").endpoint_running);
+        let old = week_sample(24, WEEK_RESET);
+        assert_eq!(judge(&parse_claude(&old, now + MINUTE)[0], Some(&shown(&inner, "seven_day"))), Verdict::Refuse(Refusal::NotYetStarted));
+        assert!(!apply_claude_live(&mut inner, &old, now + MINUTE));
+        assert_eq!(shown(&inner, "seven_day").used_percent, 30.0);
+
+        // A turn reporting the endpoint's window, in whole seconds, updates
+        // it. What the endpoint said of that window stays with it.
+        assert!(apply_claude_live(&mut inner, &week_sample(31, RUNNING_MS / 1000), now + 2 * MINUTE));
+        let week = shown(&inner, "seven_day");
+        assert_eq!((week.used_percent, week.source.as_str(), week.endpoint_running), (31.0, "statusline", true));
+        assert!(!apply_claude_live(&mut inner, &old, now + 3 * MINUTE));
+        assert_eq!(shown(&inner, "seven_day").used_percent, 31.0);
+
+        // Once that window has ended, a later deadline is the next window.
+        let next = week_sample(2, RUNNING_MS / 1000 + 7 * 24 * 3600);
+        assert!(apply_claude_live(&mut inner, &next, RUNNING_MS + MINUTE));
+        let week = shown(&inner, "seven_day");
+        assert_eq!((week.used_percent, week.endpoint_running), (2.0, false));
+
+        // The endpoint's own later deadline is taken at once: a provider that
+        // moved the window is believed on its next answer.
+        let mut inner = week_shown();
+        assert!(begin_claude_refresh(&mut inner, now, true, None));
+        finish_claude_refresh(&mut inner, 0, Ok(week_reply(RUNNING, now)), now, now + 300).unwrap();
+        let later = now + MINUTE;
+        assert!(begin_claude_refresh(&mut inner, later, true, None));
+        finish_claude_refresh(&mut inner, 0, Ok(week_reply("2026-09-07T05:00:20.000000+00:00", later)), later, later + 300).unwrap();
+        assert_eq!((shown(&inner, "seven_day").resets_at, inner.claude.last_updated), (Some(WEEK_RESET * 1000), Some(later)));
+    }
+
+    /// A status line alone, with no endpoint answer, still moves to a later
+    /// deadline at once: nothing said the shown window was running.
+    #[test]
+    fn a_later_status_line_deadline_is_the_next_window_without_an_endpoint_answer() {
+        let mut inner = week_shown();
+        assert!(!shown(&inner, "seven_day").endpoint_running);
+        assert!(apply_claude_live(&mut inner, &week_sample(1, WEEK_RESET + 3 * 3600), WEEK_SEEN + MINUTE));
+        assert_eq!(shown(&inner, "seven_day").resets_at, Some((WEEK_RESET + 3 * 3600) * 1000));
     }
 
     /// #737: the same earlier window from a status line is still the previous

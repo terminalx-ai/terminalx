@@ -131,8 +131,10 @@ Each received window now gets a verdict against the window shown under its key
   receipt of the previous window, such as an idle tab's last sample) or from an
   endpoint window already over when the request started; the same window
   observed no later; a deadline that had passed when the shown window was
-  observed; or no deadline from a status line while the shown window still
-  runs. Only the endpoint's fresh answer may say a running window has none.
+  observed; no deadline from a status line while the shown window still
+  runs (only the endpoint's fresh answer may say a running window has none);
+  or a later status-line deadline before a window the endpoint saw running
+  has ended.
 
 An earlier deadline is not always the previous window (#737). Windows under
 one key follow each other and never overlap. If the endpoint says at request
@@ -143,6 +145,15 @@ fix the reply was refused until the shown deadline passed, up to a week for a
 taken, so its earlier deadline is still refused. If a sample arrived while the
 request was out, the reply is the older observation and the next request
 decides.
+
+The same reasoning holds the other way. While a window the endpoint saw running
+has not ended (more than 60 s before its deadline), a status line's later
+deadline is not the next window: any tab may still be repeating the window that
+reply replaced. Taking it would put the old number back on every turn. A turn
+that reports the endpoint's own window updates it and keeps that knowledge. A
+window with no endpoint answer behind it still moves to a later status-line
+deadline at once. If the provider really moved a window later, the endpoint's
+next answer says so and is taken, so the status line waits at most one refresh.
 
 The endpoint names an account window with nothing running (`five_hour`,
 `seven_day`) as `null`, or with neither utilization nor deadline. That is read as
