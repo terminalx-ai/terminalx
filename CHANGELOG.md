@@ -12,6 +12,13 @@
   window whose terminal output alone dropped recovers without affecting others.
   The notice stays quiet for short gaps and asks for action only when retrying
   cannot help or has not helped for minutes. (#643)
+- Keep the live connection up when a window falls behind. A terminal that
+  cannot keep up is redrawn from its scrollback on its own, while the others
+  in the window keep streaming. Events the window missed are read again,
+  without reconnecting. Each window's terminal connection now carries terminal
+  output only. Every lost connection is now logged: which connection, why, how
+  long it was down and how many attempts it took to reconnect. The log is
+  `desktop.log`, beside `runtime.log` in `~/Library/Logs`. (#716)
 - Stop agents nobody is using. An agent the app started that has had nothing to
   do for an hour (Settings → Agents: 30 minutes to a day, or never) is stopped
   with its MCP servers, and its next message starts it again on the same

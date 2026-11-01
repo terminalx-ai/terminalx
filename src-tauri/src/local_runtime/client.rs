@@ -92,8 +92,28 @@ pub struct Client {
     token: zeroize::Zeroizing<String>,
     epoch: String,
     event_socket: PathBuf,
+    /// The owner's `streamVersion`: 1 from one too old to say.
+    streams: u64,
     ping: Duration,
     liveness: Duration,
+}
+
+/// What one connection to the event socket carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stream {
+    /// The app's events.
+    Events,
+    /// The output of the terminals one window shows.
+    Terminals { window: String },
+}
+
+impl std::fmt::Display for Stream {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Events => write!(out, "the background runtime's event connection"),
+            Self::Terminals { window } => write!(out, "terminal output of window {window:?}"),
+        }
+    }
 }
 
 fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Duration) -> Result<Value> {
@@ -154,18 +174,27 @@ impl Client {
             bail!("runtime endpoints are outside the selected home");
         }
         let epoch = local["epoch"].as_str().context("runtime has no epoch")?.to_string();
+        let streams = local["streamVersion"].as_u64().unwrap_or(1);
         // Pin discovery to this owner. A publisher change between reading the
         // token and status cannot authorize commands to the replacement.
         let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
-        Ok(Arc::new(Self { socket, event_socket, token, epoch, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT }))
+        Ok(Arc::new(Self { socket, event_socket, token, epoch, streams, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT }))
+    }
+
+    /// A client of the event socket at `event_socket` alone, as discovery
+    /// would have found it: for tests that serve a stream in process.
+    #[cfg(test)]
+    pub(crate) fn for_stream(event_socket: PathBuf, token: &str, epoch: &str) -> Arc<Self> {
+        Arc::new(Self { socket: event_socket.with_file_name("unused.sock"), event_socket, token: token.to_string().into(),
+            epoch: epoch.into(), streams: super::STREAM_VERSION, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT })
     }
 
     /// The same owner, pinged every `ping` and given up on after `liveness`
     /// of silence: a test hangs an owner without waiting the full deadline.
     pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
         Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
-            event_socket: self.event_socket.clone(), ping, liveness })
+            event_socket: self.event_socket.clone(), streams: self.streams, ping, liveness })
     }
 
     pub(crate) fn ping_interval(&self) -> Duration { self.ping }
@@ -195,14 +224,20 @@ impl Client {
         Ok(())
     }
 
-    pub fn stream(&self) -> Result<Connection> {
+    /// Whether the owner takes a connection for one stream, and says when a
+    /// view or events fall behind instead of closing it (#716).
+    pub fn names_streams(&self) -> bool { self.streams >= 2 }
+
+    /// A connection that carries `stream`. An owner too old to take one
+    /// stream at a time sends both, and the bridge drops what it was not after.
+    pub fn stream(&self, stream: &Stream) -> Result<Connection> {
         let mut socket = UnixStream::connect(&self.event_socket)?;
         socket.set_read_timeout(Some(Duration::from_secs(10)))?;
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
-        serde_json::to_writer(&mut socket, &json!({"protocol":super::PROTOCOL,"token":self.token.as_str()}))?;
+        serde_json::to_writer(&mut socket, &hello(self.token.as_str(), self.names_streams().then_some(stream)))?;
         socket.write_all(b"\n")?;
         let mut read = BufReader::new(socket.try_clone()?);
-        let hello = receive(&mut read)?;
+        let hello = receive(&mut read, Duration::from_secs(10))?;
         if hello["type"] != "ready" || hello["attachment"]["epoch"] != self.epoch {
             bail!("runtime changed before event attachment");
         }
@@ -211,8 +246,23 @@ impl Client {
         // The bridge pings every `ping` interval, so a live owner always has
         // something to say well within this deadline.
         read.get_ref().set_read_timeout(Some(self.liveness))?;
-        Ok(Connection { read, write: socket, attachment })
+        Ok(Connection { read, write: socket, attachment, silence: self.liveness })
     }
+}
+
+/// The first frame on the event socket. `stream` is left out for an owner
+/// that does not know it, which refuses a hello with fields it does not know.
+fn hello(token: &str, stream: Option<&Stream>) -> Value {
+    let mut hello = json!({"protocol":super::PROTOCOL, "token":token});
+    match stream {
+        Some(Stream::Events) => { hello["stream"] = json!("events"); }
+        Some(Stream::Terminals { window }) => {
+            hello["stream"] = json!("terminals");
+            hello["window"] = json!(window);
+        }
+        None => {}
+    }
+    hello
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -226,6 +276,8 @@ pub struct Connection {
     attachment: AttachmentIdentity,
     read: BufReader<UnixStream>,
     write: UnixStream,
+    /// How long the owner may say nothing before it is taken for hung.
+    silence: Duration,
 }
 
 impl Connection {
@@ -233,13 +285,19 @@ impl Connection {
 
     pub fn writer(&self) -> Result<UnixStream> { Ok(self.write.try_clone()?) }
 
-    pub fn receive(&mut self) -> Result<Value> { receive(&mut self.read) }
+    pub fn receive(&mut self) -> Result<Value> { receive(&mut self.read, self.silence) }
 }
 
-fn receive(read: &mut BufReader<UnixStream>) -> Result<Value> {
+/// One frame. Its errors say what happened, for the log of a lost connection.
+fn receive(read: &mut BufReader<UnixStream>, silence: Duration) -> Result<Value> {
     let mut line = String::new();
-    let count = read.take(1024 * 1024 + 1).read_line(&mut line)?;
-    if count == 0 { bail!("local event stream disconnected"); }
+    let count = match read.take(1024 * 1024 + 1).read_line(&mut line) {
+        Ok(count) => count,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            bail!("the background runtime sent nothing, not even a pong, for {}", super::log_file::span(silence)),
+        Err(error) => return Err(anyhow::Error::new(error).context("reading from the background runtime failed")),
+    };
+    if count == 0 { bail!("the background runtime closed the connection"); }
     if count > 1024 * 1024 { bail!("local event frame exceeded its size limit"); }
     Ok(serde_json::from_str(&line)?)
 }
@@ -276,6 +334,14 @@ mod tests {
 
     fn refusal(request: &ControlRequest, code: &str) -> Option<ControlResponse> {
         Some(ControlResponse::failure(request.id.clone(), ControlError::new(code, "refused", None::<String>)))
+    }
+
+    #[test]
+    fn a_hello_names_its_stream_only_to_an_owner_that_knows_them() {
+        let main = Stream::Terminals { window: "main".into() };
+        assert_eq!(hello("t", Some(&main)), json!({"protocol": super::super::PROTOCOL, "token": "t", "stream": "terminals", "window": "main"}));
+        assert_eq!(hello("t", Some(&Stream::Events)), json!({"protocol": super::super::PROTOCOL, "token": "t", "stream": "events"}));
+        assert_eq!(hello("t", None), json!({"protocol": super::super::PROTOCOL, "token": "t"}), "what an owner from before #716 accepts");
     }
 
     #[test]

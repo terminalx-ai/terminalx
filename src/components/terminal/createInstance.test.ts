@@ -138,6 +138,25 @@ describe("a local terminal's attachment", () => {
     inst.term.dispose();
   });
 
+  it("answers to the name of its current attachment only, and to none once released (#716)", async () => {
+    pty.detachAll.mockResolvedValue(undefined);
+    const { createInstance } = await import("./TerminalView");
+    const inst = createInstance("tab:t1", "dark");
+    await settled();
+    const first = pty.attach.mock.calls[0][1] as string;
+    expect(inst.attachedAs!(first)).toBe(true);
+    expect(inst.attachedAs!("another")).toBe(false);
+    inst.reattach!();
+    await new Promise<void>((resolve) => inst.term.write("", resolve));
+    await settled();
+    const second = pty.attach.mock.calls[1][1] as string;
+    expect(inst.attachedAs!(first)).toBe(false);
+    expect(inst.attachedAs!(second)).toBe(true);
+    inst.release?.();
+    expect(inst.attachedAs!(second)).toBe(false);
+    inst.term.dispose();
+  });
+
   it("attaches again once for reattaches in quick succession, and never once released", async () => {
     pty.detachAll.mockResolvedValue(undefined);
     const { createInstance } = await import("./TerminalView");
