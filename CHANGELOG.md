@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Chat
+
+- Never type a message into an agent's input box that already holds text. The
+  app used to clear the box with Ctrl+U, which deletes only the row the cursor
+  is on: when Claude Code had put a dropped prompt back in its box, the prompt
+  lost its last wrapped row and the rest was sent with the next message glued
+  to it. The app now reads the box from the agent's screen (Claude Code and
+  Codex), and a message waits while the box holds something, saying so in the
+  chat, until that text is sent or cleared in the terminal. (#722)
+- Show a prompt Claude Code dropped before answering as not answered, with Send
+  again, when it takes another prompt in its place; one sent again from its
+  input box stays the one message. A message the agent received inside a longer
+  prompt is shown once, as received, with what was sent behind it, and its
+  queued bubble clears. (#722)
+
 ## 0.2.22
 
 ### Background sessions

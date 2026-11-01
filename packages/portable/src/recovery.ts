@@ -77,7 +77,8 @@ export function recoveryOffer(kind: RecoveryKind | null, { asks, limitReset = fa
     // "continue" only where the turn has ended or the agent's process has gone (a send starts it again): a usage
     // limit once its window has reset, and signed out as the step after signing in. Not on a turn still open (a
     // timeout, or an older log's failed tool), where it would queue behind it; not when delivery is unconfirmed,
-    // since typing clears the CLI's input and the unsent prompt with it; not over a request, which it would answer.
+    // where the unsent prompt may still be in the CLI's input and "continue" would only wait behind it (#722); not
+    // over a request, which it would answer.
     sendContinue: canSendContinue && open && (kind === "failed" || kind === "capacity" || kind === "disconnected" || kind === "signed_out" || (kind === "usage_limit" && limitReset)),
     chooseModel: (kind === "capacity" || kind === "usage_limit") && open,
     continueInNewSession: kind !== null,

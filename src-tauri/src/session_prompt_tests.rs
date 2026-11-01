@@ -563,13 +563,24 @@ impl Rig {
     /// Run `script` in the tab's pane, in place of the CLI, once it has
     /// said `CLI-IS-UP`.
     fn run_in_pane(&self, script: &str) {
+        self.run_in_pane_sized(script, 80, 24);
+    }
+
+    /// [`Self::run_in_pane`], in a terminal `cols` by `rows`: the size a
+    /// recording of a real CLI's screen was made at.
+    fn run_in_pane_sized(&self, script: &str, cols: u16, rows: u16) {
         let path = self._dir.path().join("cli.sh");
         std::fs::write(&path, script).unwrap();
         let sink = Arc::new(crate::sink::BroadcastSink::new(256));
         let command = format!("sh '{}'", path.display());
-        let spec = pty::PaneSpec { cwd: self._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(&command), env: &[] };
+        let spec = pty::PaneSpec { cwd: self._dir.path().to_str().unwrap(), cols, rows, command: Some(&command), env: &[] };
         self.manager.terminals.spawn(sink, &self.pane, spec).unwrap();
         self.pane_says(&["CLI-IS-UP"]);
+    }
+
+    /// Whether the pane has printed `needle`, by now.
+    fn pane_has_said(&self, needle: &str) -> bool {
+        String::from_utf8_lossy(&self.manager.terminals.read_output(&self.pane).unwrap_or_default()).contains(needle)
     }
 
     /// Wait until the pane has printed one of `needles`, and say which.
@@ -2324,4 +2335,248 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
             assert!(!rig.events().iter().any(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "must not start")));
         }
     }
+}
+
+// ---- #722: a queued message spliced into the prompt Claude Code put back in its input box
+
+/// The incident's two messages, as sent.
+const DROPPED: &str = "so I want you to understand this scenario and create a proper issue with expected behavior";
+const QUEUED: &str = "and same is happening when I am clicking any of the old sessions related that toolquant.";
+
+/// A prompt as Claude Code 2.1.316 records it: chained to the record before
+/// it by `parentUuid` (cut down from a pty recording of the incident).
+fn recorded(uuid: &str, parent: &str, text: &str) -> String {
+    let content = serde_json::to_string(text).unwrap();
+    format!(
+        r#"{{"parentUuid":"{parent}","isSidechain":false,"type":"user","message":{{"role":"user","content":{content}}},"uuid":"{uuid}","timestamp":"2026-11-01T19:47:51.463Z","origin":{{"kind":"human"}},"promptSource":"typed","turnOrigin":"human","userType":"external","cwd":"/w","sessionId":"s","version":"2.1.316"}}
+"#
+    )
+}
+
+/// The agent's reply to the record `parent`.
+fn answered(uuid: &str, parent: &str, text: &str) -> String {
+    format!(
+        r#"{{"parentUuid":"{parent}","isSidechain":false,"type":"assistant","uuid":"{uuid}","cwd":"/w","sessionId":"s","message":{{"id":"m-{uuid}","role":"assistant","content":[{{"type":"text","text":"{text}"}}]}}}}
+"#
+    )
+}
+
+impl Rig {
+    /// What the chat was told, the marks on its messages included.
+    fn said(&self) -> Vec<String> {
+        let events = self.events();
+        let text = |seq: u64| {
+            events.iter().find(|e| e.seq == seq).and_then(|e| match &e.payload {
+                Payload::UserMessage { text, .. } => Some(text.clone()),
+                _ => None,
+            }).unwrap_or_else(|| format!("no message at {seq}"))
+        };
+        events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                Payload::UserMessage { text, queued: false, .. } => Some(format!("user: {text}")),
+                Payload::UserMessage { text, queued: true, .. } => Some(format!("queued: {text}")),
+                Payload::PromptReplaced { prompt_seq } => Some(format!("replaced: {}", text(*prompt_seq))),
+                Payload::PromptChanged { prompt_seq, text: received } => Some(format!("changed: {} -> {received}", text(*prompt_seq))),
+                Payload::PromptAbsorbed { prompt_seq } => Some(format!("taken: {}", text(*prompt_seq))),
+                Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(format!("turn for: {}", text(*seq))),
+                Payload::InputOccupied { prompt_seq, occupied } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
+                Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The reader's message `text`, sent from the composer, typed and taken
+    /// by Claude Code as the record `uuid` that follows `parent`.
+    fn delivered(&self, text: &str, uuid: &str, parent: &str) -> u64 {
+        assert!(!self.compose(text, 0), "sent while idle");
+        self.submitted();
+        let seq = self.awaited();
+        self.hook("UserPromptSubmit", json!({ "prompt": text }));
+        self.append(&recorded(uuid, parent, text));
+        assert!(!self.delivery_pending());
+        seq
+    }
+}
+
+/// Test 1 of #722, against a real pane drawing what Claude Code 2.1.316
+/// drew: a prompt put back in its input box, wrapped over three rows, after
+/// its turn was dropped before any reply. The app used to type Ctrl+U, the
+/// queued message and Enter into it: Ctrl+U took the last row only, and the
+/// Enter sent the rest of the dropped prompt with the message glued on.
+///
+/// Now nothing is typed while the box holds anything, and the chat says why.
+/// The program in the pane watches for a keystroke until the chat has said
+/// the message is waiting; then, as the reader sending what is in the box
+/// from the terminal would, it draws the box empty, and only then may the
+/// message go in, with no Ctrl+U before it. Nothing in it is timed.
+#[cfg(unix)]
+#[test]
+fn a_queued_message_is_never_typed_into_a_prompt_put_back_in_the_input_box() {
+    let rig = Rig::of(CliKind::Claude, "");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/claude/fixtures");
+    let told = rig._dir.path().join("told-it-is-waiting");
+    rig.run_in_pane_sized(
+        &format!(
+            r#"stty raw -echo
+printf '\033]0;CLI-IS-UP\007'
+cat '{restored}'
+printf '\033]0;RESTORED\007'
+stty min 0 time 1
+while :; do
+  early=$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')
+  if [ -n "$early" ]; then printf '\033]0;TYPED-INTO-RESTORED\007'; sleep 600; fi
+  if [ -e '{told}' ]; then break; fi
+done
+printf '\033[2J\033[H'
+cat '{emptied}'
+printf '\033]0;BOX-EMPTIED\007'
+stty min 1 time 0
+got=''
+while :; do
+  got="$got$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')"
+  case "$got" in *'[201~'*'\r'*) break ;; esac
+done
+case "$got" in *025*) printf '\033]0;CLEARED-A-ROW\007' ;; *) printf '\033]0;PROMPT-SUBMITTED\007' ;; esac
+sleep 600
+"#,
+            restored = fixtures.join("composer_restored.bin").display(),
+            emptied = fixtures.join("composer_working.bin").display(),
+            told = told.display(),
+        ),
+        110,
+        40,
+    );
+    rig.pane_says(&["RESTORED"]);
+    // A turn is open: the reader's next message is queued behind it.
+    rig.delivered(DROPPED, "p1", "a0");
+    assert!(rig.compose(QUEUED, 0), "sent behind the running turn");
+    let seq = rig.queued_seq(QUEUED);
+    let ready = match &rig.rt.lock().unwrap().engine {
+        Engine::Cli(cli) => cli.ready.clone(),
+        _ => unreachable!(),
+    };
+    ready.mark();
+    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: true, receipt: None, shared: None });
+
+    // The chat says the message is waiting, and why.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !rig.said().contains(&format!("waiting: {QUEUED}")) {
+        assert!(!rig.pane_has_said("TYPED-INTO-RESTORED"), "nothing is typed into a box that holds a prompt");
+        assert!(Instant::now() < deadline, "the chat was never told the message is waiting: {:?}", rig.said());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::write(&told, b"").unwrap();
+    assert_eq!(rig.pane_says(&["BOX-EMPTIED", "TYPED-INTO-RESTORED"]), "BOX-EMPTIED", "nothing is typed into a box that holds a prompt");
+    assert_eq!(rig.pane_says(&["PROMPT-SUBMITTED", "CLEARED-A-ROW"]), "PROMPT-SUBMITTED", "an empty box needs no Ctrl+U");
+    rig.typed();
+    let (stages, file) = rig.delivery_stages();
+    assert_eq!(stages, ["accepted", "ready", "input_occupied", "body_written", "submit_written"], "{file}");
+    assert!(file.contains(r#""input":"cleared""#), "{file}");
+    assert!(!file.contains("scenario") && !file.contains("toolquant"), "the diagnostics hold no prompt text: {file}");
+    assert_eq!(rig.said(), [format!("user: {DROPPED}"), format!("queued: {QUEUED}"), format!("waiting: {QUEUED}"), format!("typed: {QUEUED}")]);
+}
+
+/// Test 2 of #722: a transcript with two prompts that follow the same
+/// record. Claude Code dropped the first before answering it and took the
+/// second in its place: the first is marked replaced, never answered, and
+/// is not drawn again.
+#[test]
+fn a_prompt_in_the_place_of_one_the_agent_dropped_marks_that_one_replaced() {
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.delivered("deploy to staging", "p1", "a0");
+    // Typed into the terminal instead: the transcript is its only record.
+    rig.append(&recorded("p2", "a0", "deploy to production"));
+    rig.append(&answered("r2", "p2", "Deploying to production."));
+    assert_eq!(rig.said(), ["user: deploy to staging", "replaced: deploy to staging", "user: deploy to production", "reply: Deploying to production."]);
+}
+
+/// The prompt Claude Code put back in its input box, sent from there as it
+/// was: still the one message, not a second one or a replaced one.
+#[test]
+fn a_dropped_prompt_sent_again_from_the_input_box_is_the_same_message() {
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.delivered("deploy to staging", "p1", "a0");
+    // Claude Code wraps a long prompt differently each time; the words are what count.
+    rig.append(&recorded("p2", "a0", "deploy  to\nstaging"));
+    rig.append(&answered("r2", "p2", "Deploying."));
+    assert_eq!(rig.said(), ["user: deploy to staging", "reply: Deploying."]);
+    assert!(rig.turn_open());
+}
+
+/// A prompt the agent worked on is not replaced by one that follows the same
+/// record: that is the reader rewinding the conversation, and it was answered.
+#[test]
+fn a_prompt_the_agent_answered_is_never_marked_replaced() {
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.delivered("first", "p1", "a0");
+    rig.append(&answered("r1", "p1", "done"));
+    rig.append(&recorded("p2", "a0", "first, put differently"));
+    assert_eq!(rig.said(), ["user: first", "reply: done", "user: first, put differently"]);
+}
+
+/// Tests 3 and 4 of #722, as the incident's transcript had them: the queued
+/// message reached the agent inside the dropped prompt's remains. Its queued
+/// bubble clears into the prompt the agent received, shown once and flagged
+/// as changed, and that prompt is the start of the turn the agent answers.
+#[test]
+fn a_queued_message_recorded_inside_a_longer_prompt_is_that_prompt_shown_once() {
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.delivered(DROPPED, "p1", "a0");
+    assert!(rig.compose(QUEUED, 0));
+    rig.submitted();
+    let spliced = format!("so I want you to {QUEUED}");
+    rig.append(&recorded("p2", "a0", &spliced));
+    rig.append(&answered("r2", "p2", "Filed it."));
+    assert_eq!(
+        rig.said(),
+        [
+            format!("user: {DROPPED}"),
+            format!("queued: {QUEUED}"),
+            format!("replaced: {DROPPED}"),
+            format!("changed: {QUEUED} -> {spliced}"),
+            format!("turn for: {QUEUED}"),
+            "reply: Filed it.".to_string(),
+        ]
+    );
+    assert!(rig.held().is_empty(), "nothing is left to send now");
+}
+
+/// A prompt whose record has more in it than was sent, with no prompt
+/// dropped: what the reader had typed in the box went with it. Shown once,
+/// as received; delivered all the same.
+#[test]
+fn a_prompt_recorded_with_more_than_was_sent_is_flagged_as_changed() {
+    let rig = Rig::of(CliKind::Claude, "");
+    assert!(!rig.compose("run the tests", 0));
+    rig.submitted();
+    rig.append(&recorded("p1", "a0", "half typed run the tests"));
+    assert!(!rig.delivery_pending(), "it was delivered");
+    assert_eq!(rig.said(), ["user: run the tests", "changed: run the tests -> half typed run the tests"]);
+    // One rig at a time: each holds the test home's lock until it is dropped.
+    drop(rig);
+
+    // Words that were never typed into the box are not inside anything:
+    // a prompt whose Enter was not written is still on its way.
+    let rig = Rig::of(CliKind::Claude, "");
+    assert!(!rig.compose("run the tests", 0));
+    rig.append(&recorded("p1", "a0", "please run the tests now"));
+    assert_eq!(rig.said(), ["user: run the tests", "user: please run the tests now"]);
+}
+
+/// A prompt is replaced once. Rewinding later to the point it followed is
+/// the reader's doing, and a prompt sent from there is a message of its own,
+/// even one that says what the replaced prompt said.
+#[test]
+fn a_replaced_prompt_is_not_replaced_again_by_a_later_rewind() {
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.delivered("deploy to staging", "p1", "a0");
+    rig.append(&recorded("p2", "a0", "deploy to production"));
+    rig.append(&answered("r2", "p2", "Deployed."));
+    rig.append(&recorded("p3", "a0", "deploy to staging"));
+    assert_eq!(
+        rig.said(),
+        ["user: deploy to staging", "replaced: deploy to staging", "user: deploy to production", "reply: Deployed.", "user: deploy to staging"]
+    );
 }

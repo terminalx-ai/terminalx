@@ -22,9 +22,6 @@ use crate::events::Payload;
 
 // ------------------------------------------------------------------ keystrokes
 
-/// Clears whatever is in the CLI's composer (Ctrl+U) before a prompt lands, so
-/// a half-typed line in the terminal view is not glued to the front of it.
-pub const CLEAR_LINE: &[u8] = b"\x15";
 pub const BRACKETED_PASTE_START: &str = "\x1b[200~";
 pub const BRACKETED_PASTE_END: &str = "\x1b[201~";
 /// Interrupt: both TUIs read a bare Escape as "stop what you are doing".
@@ -121,6 +118,33 @@ pub const NUDGES: u32 = 2;
 /// lost with nothing on screen to say so (#662). Past this the Enter goes
 /// anyway and the nudges are the fallback.
 pub const PASTE_DRAW_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// What a CLI's input box holds, as its screen shows it (#722).
+///
+/// Nothing is typed into an input box that holds something: the paste would
+/// join it, and the Enter after it would send the two as one prompt. The app
+/// used to clear the box first with Ctrl+U, which deletes only back to the
+/// start of the row the cursor is on. A prompt the CLI had put back in the
+/// box lost its last wrapped row that way, and the rest went with the next
+/// message glued to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Composer {
+    /// Nothing in it: what is typed now is the whole prompt.
+    Empty,
+    /// Something the app is not typing now, its words as drawn: what the
+    /// reader typed in the terminal, or a prompt the CLI put back there.
+    Holds(String),
+    /// The box is not on screen (a picker or dialog is in its place), or
+    /// this CLI's box cannot be read.
+    Unseen,
+}
+
+/// How often an input box that holds something is looked at again.
+pub const INPUT_POLL: Duration = Duration::from_millis(250);
+/// How long an input box may go on holding something before the prompt to be
+/// typed into it is said to be waiting. A CLI that has just taken the prompt
+/// before it is still drawing its box empty.
+pub const INPUT_SETTLE: Duration = Duration::from_secs(1);
 
 /// Whether the CLI read what was written into its pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,7 +516,7 @@ impl Streamer {
     #[cfg(test)]
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Payload> {
         let mut out = Vec::new();
-        for (payloads, mark, _) in self.push_records(chunk) {
+        for (payloads, mark, _, _) in self.push_records(chunk) {
             out.extend(payloads);
             if mark.is_some() {
                 self.mark = mark;
@@ -522,14 +546,15 @@ impl Streamer {
                         }
                     };
                     if !out.is_empty() || mark.is_some() {
+                        let record = serde_json::from_str::<serde_json::Value>(line).ok();
                         // Both supported transcript formats use an RFC3339 timestamp.
                         // Missing historical time stays unknown, never the import time.
-                        let ts = serde_json::from_str::<serde_json::Value>(line)
-                            .ok()
+                        let ts = record
+                            .as_ref()
                             .and_then(|record| record["timestamp"].as_str().map(str::to_owned))
                             .filter(|ts| chrono::DateTime::parse_from_rfc3339(ts).is_ok())
                             .unwrap_or_default();
-                        records.push((out, mark, ts));
+                        records.push((out, mark, ts, record.as_ref().and_then(Lineage::of)));
                     }
                 }
             }
@@ -538,8 +563,31 @@ impl Streamer {
     }
 }
 
-/// One transcript record: its payloads, turn mark, and source time (empty if unknown).
-pub type Record = (Vec<Payload>, Option<TurnMark>, String);
+/// One transcript record: its payloads, turn mark, source time (empty if
+/// unknown), and where it stands in its conversation.
+pub type Record = (Vec<Payload>, Option<TurnMark>, String, Option<Lineage>);
+
+/// Where a record stands in its conversation: its own id, and the id of the
+/// record it follows.
+///
+/// Claude Code chains each record to the one before it (`parentUuid`). When
+/// it drops a turn before answering it, it puts the prompt back in its input
+/// box, and the next prompt it records follows the same record the dropped
+/// one did (#722): a prompt with the same parent as an earlier one took that
+/// one's place. Codex records carry neither id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lineage {
+    pub uuid: String,
+    /// `None` for the first record of a conversation.
+    pub parent: Option<String>,
+}
+
+impl Lineage {
+    fn of(record: &serde_json::Value) -> Option<Self> {
+        let uuid = record["uuid"].as_str().filter(|uuid| !uuid.is_empty())?;
+        Some(Self { uuid: uuid.to_string(), parent: record["parentUuid"].as_str().map(str::to_owned) })
+    }
+}
 
 /// How long a `Stop` hook waits for the transcript to catch up with the reply
 /// the hook is already holding. Well inside the hook's own 10 s.
@@ -1001,7 +1049,19 @@ mod tests {
     fn records_keep_source_timestamps_and_never_invent_missing_history() {
         let mut stream = Streamer::at(0, echo);
         let records = stream.push_records(b"{\"timestamp\":\"2026-10-22T23:59:00Z\"}\n{\"timestamp\":\"invalid\"}\n{}\n");
-        assert_eq!(records.iter().map(|(_, _, ts)| ts.as_str()).collect::<Vec<_>>(), ["2026-10-22T23:59:00Z", "", ""]);
+        assert_eq!(records.iter().map(|(_, _, ts, _)| ts.as_str()).collect::<Vec<_>>(), ["2026-10-22T23:59:00Z", "", ""]);
+    }
+
+    /// Claude Code chains each record to the one before it; Codex's records
+    /// name neither (#722).
+    #[test]
+    fn records_say_where_they_stand_in_their_conversation() {
+        let mut stream = Streamer::at(0, echo);
+        let records = stream.push_records(
+            b"{\"uuid\":\"u2\",\"parentUuid\":\"u1\"}\n{\"uuid\":\"u1\",\"parentUuid\":null}\n{\"type\":\"event_msg\"}\n{\"uuid\":\"\"}\n",
+        );
+        let lineage = |uuid: &str, parent: Option<&str>| Some(Lineage { uuid: uuid.into(), parent: parent.map(String::from) });
+        assert_eq!(records.into_iter().map(|(_, _, _, lineage)| lineage).collect::<Vec<_>>(), [lineage("u2", Some("u1")), lineage("u1", None), None, None]);
     }
 
     #[test]

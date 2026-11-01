@@ -114,6 +114,8 @@ export interface SessionBackend {
   sendQueuedNow?(tabId: string, seq: number): Promise<void>;
   /** Local only: send the last prompt the agent never received again, as it was sent (#663). */
   resendUnsent?(tabId: string): Promise<SendResult>;
+  /** Local only: send the message at `seq`, which the agent dropped unanswered, again as a new message (#722). */
+  resendMessage?(tabId: string, seq: number): Promise<SendResult>;
   /**
    * Escape, as the agent's own screen takes it (#427): the running turn is
    * interrupted and the agent's process stays. Nothing is queued or dropped
@@ -219,6 +221,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
     sendQueuedNow: (tabId, seq) => agent.sendQueuedNow(sessionId, tabId, seq),
     resendUnsent: (tabId) => agent.resendUnsent(sessionId, tabId),
+    resendMessage: (tabId, seq) => agent.resendMessage(sessionId, tabId, seq),
     interrupt: (tabId) => agent.interrupt(sessionId, tabId).then(() => undefined),
     stop: (tabId) => agent.stop(sessionId, tabId),
     respondPermission: (tabId, requestId, optionId) => agent.respondPermission(sessionId, tabId, requestId, optionId),
