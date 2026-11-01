@@ -25,13 +25,20 @@
 //!   it in `toolUseResult.id`). A one-shot job is spent by the next turn the
 //!   scheduler starts, and Claude Code lets any job lapse after seven days.
 //!
-//! Only what the CLI wrote after it started is read ([`Watch::new`]): what a
-//! CLI before it left running went with it. Sidechain (subagent) records are
-//! not the session's own.
+//! Only what this CLI wrote is read ([`Watch`]): the file its tab's tail
+//! follows, from where the tail began reading it, and on into the next file
+//! when the tail moves (a `/clear` starts one; a resumed conversation can be
+//! filed elsewhere than guessed). What a CLI before it left running went
+//! with it; the records a fork's file is given as a copy of its parent are
+//! the parent's, and skipped as the tail skips them. Sidechain (subagent)
+//! records are not the session's own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::harness::tui::Tail;
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
@@ -82,9 +89,15 @@ pub struct Ledger {
 
 impl Ledger {
     /// Take in one transcript record.
+    #[cfg(test)]
     pub fn read(&mut self, line: &str) {
+        self.read_skipping(line, &HashSet::new());
+    }
+
+    /// Take in one transcript record, unless its uuid is in `skip`.
+    pub fn read_skipping(&mut self, line: &str, skip: &HashSet<String>) {
         let Ok(record) = serde_json::from_str::<Value>(line) else { return };
-        if record["isSidechain"].as_bool() == Some(true) {
+        if record["isSidechain"].as_bool() == Some(true) || record["uuid"].as_str().is_some_and(|uuid| skip.contains(uuid)) {
             return;
         }
         let at = record["timestamp"].as_str().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map_or_else(Utc::now, |at| at.with_timezone(&Utc));
@@ -245,22 +258,27 @@ fn text_of(content: &Value) -> String {
     }
 }
 
-/// A [`Ledger`] kept up with a transcript, read on from where it was last
-/// looked at.
-#[derive(Debug)]
+/// A [`Ledger`] kept up with what a CLI writes: the file its tab's tail
+/// follows, read on from where it was last looked at.
 pub struct Watch {
-    path: PathBuf,
+    tail: Arc<Tail>,
+    /// The file read, and where the tail began reading it: the pair that
+    /// says when the tail has moved on.
+    aimed: (PathBuf, u64),
     offset: u64,
     /// A line the CLI had not finished writing at the last look.
     partial: Vec<u8>,
+    /// Records copied in from another conversation (a fork's parent).
+    skip: HashSet<String>,
     ledger: Ledger,
 }
 
 impl Watch {
-    /// From `offset` in the transcript at `path`: where it stood when the
-    /// CLI was started.
-    pub fn new(path: PathBuf, offset: u64) -> Self {
-        Self { path, offset, partial: Vec::new(), ledger: Ledger::default() }
+    /// Keep up with `tail` from where it stands: where its CLI was started.
+    pub fn new(tail: Arc<Tail>) -> Self {
+        let aimed = tail.reading();
+        let skip = tail.carried();
+        Self { offset: aimed.1, aimed, tail, partial: Vec::new(), skip, ledger: Ledger::default() }
     }
 
     /// Read what the CLI has written since the last look; what it is still
@@ -268,13 +286,33 @@ impl Watch {
     /// known as it was.
     pub fn outstanding(&mut self, now: DateTime<Utc>) -> Option<String> {
         if let Err(error) = self.catch_up() {
-            log::debug!("read {} for background work: {error}", self.path.display());
+            log::debug!("read {} for background work: {error}", self.aimed.0.display());
         }
         self.ledger.outstanding(now)
     }
 
     fn catch_up(&mut self) -> std::io::Result<()> {
-        let mut file = match std::fs::File::open(&self.path) {
+        let now = self.tail.reading();
+        if now != self.aimed {
+            // The rest of the file it left first: what it wrote there just
+            // before it moved on is still its own. Then the new one, from where
+            // the tail began it. What was started stays started: it is the same
+            // CLI, and a task may report in to the next file.
+            self.read_on()?;
+            self.partial.clear();
+            self.offset = now.1;
+            self.skip = self.tail.carried();
+            self.aimed = now;
+        }
+        self.read_on()
+    }
+
+    fn read_on(&mut self) -> std::io::Result<()> {
+        let path = &self.aimed.0;
+        if path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let mut file = match std::fs::File::open(path) {
             Ok(file) => file,
             // Not written yet: the CLI writes it with its first prompt.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -291,7 +329,7 @@ impl Watch {
         let Some(end) = self.partial.iter().rposition(|byte| *byte == b'\n') else { return Ok(()) };
         let complete: Vec<u8> = self.partial.drain(..=end).collect();
         for line in complete.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-            self.ledger.read(&String::from_utf8_lossy(line));
+            self.ledger.read_skipping(&String::from_utf8_lossy(line), &self.skip);
         }
         Ok(())
     }
@@ -444,6 +482,28 @@ mod tests {
         assert_eq!(ledger(&once).outstanding(at(61)), None);
     }
 
+    fn tail(path: &std::path::Path, carried: HashSet<String>) -> Arc<Tail> {
+        Arc::new(Tail::opening(path.to_path_buf(), super::super::transcript::decode_line, carried))
+    }
+
+    fn append(path: &std::path::Path, lines: &[String]) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        for line in lines {
+            file.write_all(format!("{line}\n").as_bytes()).unwrap();
+        }
+    }
+
+    fn uuid(line: String, uuid: &str) -> String {
+        let mut record: Value = serde_json::from_str(&line).unwrap();
+        record["uuid"] = uuid.into();
+        record.to_string()
+    }
+
+    fn background(id: &str) -> String {
+        tool_use(id, "Bash", serde_json::json!({ "command": "gh run watch", "run_in_background": true }))
+    }
+
     /// Read on from where the CLI was started, a line at a time as it lands.
     #[test]
     fn a_watch_reads_only_what_its_cli_wrote_and_picks_up_where_it_left_off() {
@@ -451,22 +511,67 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("conversation.jsonl");
         // Left by the CLI before: its background command died with it.
-        let before = format!("{}\n", tool_use("toolu_old", "Bash", serde_json::json!({ "command": "x", "run_in_background": true })));
-        std::fs::write(&path, &before).unwrap();
-        let mut watch = Watch::new(path.clone(), before.len() as u64);
+        append(&path, &[background("toolu_old")]);
+        let mut watch = Watch::new(tail(&path, HashSet::new()));
         assert_eq!(watch.outstanding(at(1)), None);
 
-        let started = format!("{}\n", tool_use("toolu_new", "Bash", serde_json::json!({ "command": "y", "run_in_background": true })));
+        let started = format!("{}\n", background("toolu_new"));
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         // Half a line: not read until it is whole.
         file.write_all(&started.as_bytes()[..20]).unwrap();
         assert_eq!(watch.outstanding(at(1)), None);
         file.write_all(&started.as_bytes()[20..]).unwrap();
         assert!(watch.outstanding(at(1)).is_some());
-        file.write_all(format!("{}\n", queued(&notification("bnew", "toolu_new", "completed"))).as_bytes()).unwrap();
+        append(&path, &[queued(&notification("bnew", "toolu_new", "completed"))]);
         assert_eq!(watch.outstanding(at(1)), None);
 
         // A transcript not written yet has nothing in it.
-        assert_eq!(Watch::new(dir.path().join("none.jsonl"), 0).outstanding(at(1)), None);
+        assert_eq!(Watch::new(tail(&dir.path().join("none.jsonl"), HashSet::new())).outstanding(at(1)), None);
+    }
+
+    /// The second review's case: `/clear` starts a new file and the tail
+    /// follows it. What the CLI starts there is read there; what it wrote to
+    /// the old file just before is not lost; and a task started before can
+    /// report in to the new file.
+    #[test]
+    fn a_watch_follows_its_tail_to_the_file_a_clear_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, cleared) = (dir.path().join("first.jsonl"), dir.path().join("cleared.jsonl"));
+        let tail = tail(&first, HashSet::new());
+        let mut watch = Watch::new(tail.clone());
+        append(&first, &[background("toolu_before")]);
+        assert!(watch.outstanding(at(1)).is_some());
+        // Written to the old file, unread, as the CLI moved on.
+        append(&first, &[background("toolu_last")]);
+        tail.retarget(&cleared);
+        append(&cleared, &[background("toolu_after")]);
+        assert_eq!(watch.outstanding(at(1)).as_deref(), Some("3 background tasks it has not heard back from"));
+        append(&cleared, &[
+            queued(&notification("b1", "toolu_before", "completed")),
+            queued(&notification("b2", "toolu_last", "completed")),
+            queued(&notification("b3", "toolu_after", "completed")),
+        ]);
+        assert_eq!(watch.outstanding(at(1)), None);
+        // And on, in the new file.
+        append(&cleared, &[tool_use("toolu_w", "ScheduleWakeup", serde_json::json!({ "delaySeconds": 1800 }))]);
+        assert_eq!(watch.outstanding(at(10)).as_deref(), Some("a wakeup it scheduled"));
+    }
+
+    /// The second review's other case: a fork's new file is given a copy of
+    /// its parent, under the parent's uuids. What the parent started there is
+    /// the parent's, not this CLI's.
+    #[test]
+    fn a_forks_copy_of_its_parent_is_not_what_its_cli_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fork.jsonl");
+        let carried = HashSet::from(["p-1".to_string(), "p-2".to_string()]);
+        let mut watch = Watch::new(tail(&path, carried));
+        append(&path, &[
+            uuid(background("toolu_parent"), "p-1"),
+            uuid(tool_use("toolu_cron", "CronCreate", serde_json::json!({ "cron": "7 * * * *", "prompt": "check" })), "p-2"),
+        ]);
+        assert_eq!(watch.outstanding(at(1)), None);
+        append(&path, &[uuid(background("toolu_own"), "f-1")]);
+        assert_eq!(watch.outstanding(at(1)).as_deref(), Some("a background command it has not heard back from"));
     }
 }

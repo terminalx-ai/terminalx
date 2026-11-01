@@ -3557,9 +3557,10 @@ impl SessionManager {
         let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}", launch.command, config.args, computer), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
-        // From where its transcript stands now: what a CLI before this one
-        // left running went with it.
-        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.path(), tail.offset()))));
+        // Kept up with the file this tab's tail follows, wherever it moves,
+        // from where it stands now: what a CLI before this one left running
+        // went with it.
+        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

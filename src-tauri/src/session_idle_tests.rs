@@ -190,34 +190,41 @@ fn an_agent_in_a_turn_or_waiting_on_its_reader_is_never_stopped() {
     assert!(!rig.statuses().iter().any(|line| line == "never said"));
 }
 
-/// The review's case: a CI watch run in the background, its turn over. The
-/// agent is as quiet as one with nothing to do, but waits on it, and is not
-/// stopped until it has reported in.
+/// The first review's case, after the second's: the reader runs `/clear`, so
+/// the CLI writes a new conversation file and the tab's tail follows it
+/// there; the agent then runs a CI watch in the background and ends its
+/// turn. As quiet as an agent with nothing to do, it waits on that watch, and
+/// is not stopped until the watch has reported in.
 #[test]
 fn an_agent_waiting_on_a_background_command_is_not_stopped_until_it_reports_in() {
     let rig = Rig::new(json!({}));
     rig.manager.ensure_started(SESSION, TAB).unwrap();
     rig.idle_for_the_limit();
-    // The launch reads its CLI's transcript for what it starts. Here the
-    // same records go to a file of their own, which the tab's tailer does not
-    // follow, so that it is only the sweep that hears of them.
-    assert!(rig.rt().lock().unwrap().background.is_some());
-    let transcript = rig.checkout.join("transcript.jsonl");
-    rig.rt().lock().unwrap().background = Some(Arc::new(Mutex::new(claude::background::Watch::new(transcript.clone(), 0))));
-    let records = [
-        json!({ "type": "assistant", "timestamp": index::now(), "message": { "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_ci", "name": "Bash", "input": { "command": "gh run watch", "run_in_background": true } }] } }),
-        json!({ "type": "user", "timestamp": index::now(), "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_ci", "content": "Command running in background with ID: bci" }] }, "toolUseResult": { "backgroundTaskId": "bci" } }),
-    ];
-    std::fs::write(&transcript, records.iter().map(|record| format!("{record}\n")).collect::<String>()).unwrap();
+    let tail = match &rig.rt().lock().unwrap().engine {
+        Engine::Cli(cli) => cli.tail.clone(),
+        _ => panic!("the CLI is not running"),
+    };
+    // What the `SessionStart` hook of a `/clear` does: aim the tail at the new file.
+    let cleared = claude::transcript::transcript_in(&crate::agent_data::claude_projects_root().unwrap(), rig.checkout.to_str().unwrap(), "0b6c2f3e-6f4d-4f0e-9d37-7d2f4c1b9a21");
+    std::fs::create_dir_all(cleared.parent().unwrap()).unwrap();
+    tail.retarget(&cleared);
+    let write = |record: serde_json::Value| {
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(&cleared).unwrap().write_all(format!("{record}\n").as_bytes()).unwrap();
+    };
+    write(json!({ "type": "assistant", "uuid": "a-1", "timestamp": index::now(), "message": { "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_ci", "name": "Bash", "input": { "command": "gh run watch", "run_in_background": true } }] } }));
+    write(json!({ "type": "user", "uuid": "u-1", "timestamp": index::now(), "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_ci", "content": "Command running in background with ID: bci" }] }, "toolUseResult": { "backgroundTaskId": "bci" } }));
+    // The tail reads them too; quiet again for the limit, it has nothing else to do.
+    rig.idle_for_the_limit();
 
     assert!(rig.sweep(Some(LIMIT)).is_empty());
     assert!(rig.running());
     assert_eq!(rig.manager.background_work(SESSION, TAB).as_deref(), Some("a background command it has not heard back from"));
 
-    let reported = json!({ "type": "attachment", "timestamp": index::now(), "attachment": { "type": "queued_command", "commandMode": "task-notification",
-        "prompt": "<task-notification>\n<task-id>bci</task-id>\n<tool-use-id>toolu_ci</tool-use-id>\n<status>completed</status>\n</task-notification>" } });
-    use std::io::Write;
-    std::fs::OpenOptions::new().append(true).open(&transcript).unwrap().write_all(format!("{reported}\n").as_bytes()).unwrap();
+    write(json!({ "type": "attachment", "uuid": "n-1", "timestamp": index::now(), "attachment": { "type": "queued_command", "commandMode": "task-notification",
+        "prompt": "<task-notification>\n<task-id>bci</task-id>\n<tool-use-id>toolu_ci</tool-use-id>\n<status>completed</status>\n</task-notification>" } }));
+    rig.wait("the watch to be heard back from", || rig.manager.background_work(SESSION, TAB).is_none());
+    rig.idle_for_the_limit();
     assert_eq!(rig.sweep(Some(LIMIT)), [crate::idle_agents::Why::Idle(LIMIT)]);
     assert!(!rig.running());
 }
