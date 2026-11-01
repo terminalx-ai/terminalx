@@ -99,6 +99,11 @@
   own terminal interface on the same thread, instead of an empty terminal. The
   chat keeps its history without repeating it; the move is one-way and waits for
   a running turn to finish. (#644)
+- Continue in New Session can hand off to an experimental Codex session. Delivery
+  is confirmed once Codex starts the handoff's turn. A handoff, or any prompt,
+  that Codex never took because it failed or was stopped first is offered back
+  with **Resend last prompt**, after a restart too, and is never sent again on
+  its own. (#644)
 
 ### Status bar
 

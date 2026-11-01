@@ -122,8 +122,11 @@ after Stop, or after a lost connection, the next message sent resumes the same
 Codex thread in a new connection; nothing earlier is replayed. The owner handles local
 send, command/file approvals, interrupt, Stop and `/compact`. Manual compaction
 adds system status, not a user message. Unsupported modes or protocol requests
-fail explicitly. Shared/mobile input, issue pipelines and continuation delivery
-are not supported. Opening the tab's terminal view in the app moves it to Codex's
+fail explicitly. Shared/mobile input and issue pipelines are not supported.
+Continue in New Session can hand off to an experimental tab: delivery is confirmed
+once Codex starts the turn for the handoff. If Codex fails or is stopped before
+then, the handoff is reported as not delivered and offered back with "Resend last
+prompt"; nothing is sent again by itself. Opening the tab's terminal view in the app moves it to Codex's
 own terminal interface on the same thread, for good: the chat keeps its history,
 and from then on the tab is an ordinary PTY Codex tab. A new model or effort
 applies from the next turn. A new permission mode (other than Ask every time) is taken between turns:
