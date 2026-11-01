@@ -715,6 +715,8 @@ describe("creating a session", () => {
       title: "#433 Carry issue sessions on",
       useWorktree: true,
       issue: { ref: issue, body: "Sessions stop at code.", worktreeName: "433-carry-issue-sessions-on", pipeline: true, settings: { autoMerge: false, requirePerson: false } },
+      // With no flag, an issue resolves its conflicts as the issue page starts it (#700); a cloud workspace never merges.
+      pipeline: { autoMerge: false, resolveConflicts: true },
     });
     // --no-pipeline starts it plain; a runtime from before pipelines is said to be one.
     vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {
@@ -724,6 +726,7 @@ describe("creating a session", () => {
     const older = await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue, noPipeline: true });
     expect(older).toMatchObject({ pipeline: null, pipelineNote: expect.stringContaining("older TerminalX") });
     expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].issue).toMatchObject({ pipeline: false });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].pipeline).toBeUndefined();
     // An issue is never started in a new machine: that one would start without its pipeline.
     await list(ORG, []);
     const { setPrefs, getPrefs } = await import("@/lib/prefs");

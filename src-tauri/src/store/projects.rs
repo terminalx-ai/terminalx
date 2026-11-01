@@ -81,10 +81,16 @@ pub struct IssuePipelineSettings {
     /// Off leaves a session started from an issue as it always was: the agent
     /// writes code and nothing follows.
     pub enabled: bool,
-    /// What "Merge automatically when the review is addressed" starts at for
-    /// a new issue session. Each issue has its own switch after that.
-    pub auto_merge: bool,
-    pub resolve_conflicts: bool,
+    /// The project's own choice for what "Merge when green" starts at in a new
+    /// session, for every session. `None` until one is made: then a session
+    /// started from an issue starts with it on and any other with it off
+    /// (`auto_merge_at_start`). Each pipeline has its own switch after that.
+    /// Never written as `null`, which an older runtime could not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_merge: Option<bool>,
+    /// The same for "Resolve conflicts automatically" (`resolve_conflicts_at_start`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolve_conflicts: Option<bool>,
     #[serde(deserialize_with = "review_rounds")]
     pub max_resolutions: u32,
     /// A person presses merge whatever the switch says: for a repository that
@@ -125,8 +131,8 @@ impl Default for IssuePipelineSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            auto_merge: false,
-            resolve_conflicts: false,
+            auto_merge: None,
+            resolve_conflicts: None,
             max_resolutions: 3,
             require_person: false,
             max_rounds: DEFAULT_REVIEW_ROUNDS,
@@ -137,6 +143,28 @@ impl Default for IssuePipelineSettings {
             local_check_command: None,
             local_checks_only: false,
         }
+    }
+}
+
+impl IssuePipelineSettings {
+    /// What "Merge when green" starts at for a new session that nobody chose
+    /// it for: the project's choice, else on for a session started from an
+    /// issue (#700) and off for any other. Never on where a person does the
+    /// merge. A cloud workspace, which never merges, is the caller's to rule out.
+    pub fn auto_merge_at_start(&self, from_issue: bool) -> bool {
+        !self.require_person && self.auto_merge.unwrap_or(from_issue)
+    }
+
+    /// What "Resolve conflicts automatically" starts at, as `auto_merge_at_start`.
+    pub fn resolve_conflicts_at_start(&self, from_issue: bool) -> bool {
+        self.resolve_conflicts.unwrap_or(from_issue)
+    }
+
+    /// Before #700 every save wrote both switches, `false` unless turned on,
+    /// so a stored `false` from then is no choice: read it as none made.
+    fn forget_unchosen_switches(&mut self) {
+        if self.auto_merge == Some(false) { self.auto_merge = None; }
+        if self.resolve_conflicts == Some(false) { self.resolve_conflicts = None; }
     }
 }
 
@@ -243,18 +271,38 @@ pub fn move_branch_label(path: &str, from: &str, to: &str) -> Result<Project> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectsFile {
+    /// What the file was last written by; absent before `PROJECTS_VERSION` 1.
+    #[serde(default)]
+    version: u32,
     #[serde(default)]
     projects: Vec<Project>,
     #[serde(default)]
     last_selected: Option<String>,
 }
 
+/// 1: an issue pipeline's switches are stored only once chosen (#700).
+const PROJECTS_VERSION: u32 = 1;
+
 fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("projects.json"))
 }
 
 fn load() -> Result<ProjectsFile> {
-    Ok(super::read_json(&file_path()?)?.unwrap_or_default())
+    let mut f: ProjectsFile = super::read_json(&file_path()?)?.unwrap_or_default();
+    if f.version < 1 {
+        for project in &mut f.projects {
+            if let Some(settings) = project.issue_pipeline.as_mut() {
+                settings.forget_unchosen_switches();
+            }
+            // As `update` keeps it: every default is stored as nothing.
+            if project.issue_pipeline.as_ref() == Some(&IssuePipelineSettings::default()) {
+                project.issue_pipeline = None;
+            }
+        }
+    }
+    // Written as this version by the next save; never as an older one than a newer build wrote.
+    f.version = f.version.max(PROJECTS_VERSION);
+    Ok(f)
 }
 
 fn save(f: &ProjectsFile) -> Result<()> {
@@ -404,7 +452,10 @@ mod tests {
     #[test]
     fn issue_pipeline_settings_default_to_no_merge_and_survive_a_damaged_file() {
         let defaults = IssuePipelineSettings::default();
-        assert!(defaults.enabled && !defaults.auto_merge && !defaults.require_person);
+        assert!(defaults.enabled && defaults.auto_merge.is_none() && defaults.resolve_conflicts.is_none() && !defaults.require_person);
+        // Nothing chosen and nothing written: an older runtime reads it as off.
+        assert!(!serde_json::to_string(&defaults).unwrap().contains("autoMerge"));
+        assert!(!serde_json::to_string(&defaults).unwrap().contains("resolveConflicts"));
         assert_eq!((defaults.max_rounds, defaults.merge_method.as_str()), (3, "merge"));
         assert!(defaults.protected.migrations && defaults.protected.deploy && defaults.protected.security);
         // A project written before the pipeline existed.
@@ -413,7 +464,7 @@ mod tests {
         assert!(!serde_json::to_string(&older).unwrap().contains("issuePipeline"));
         // A partial or hand-edited block: what is readable is kept, the rest is the default.
         let partial: IssuePipelineSettings = serde_json::from_str(r#"{"autoMerge":true,"maxRounds":0,"mergeMethod":"force","protected":{"deploy":false,"paths":["db/"]}}"#).unwrap();
-        assert!(partial.auto_merge && partial.enabled);
+        assert!(partial.auto_merge == Some(true) && partial.resolve_conflicts.is_none() && partial.enabled);
         assert!(!partial.allow_no_ci);
         assert!(serde_json::from_str::<IssuePipelineSettings>(r#"{"allowNoCi":true}"#).unwrap().allow_no_ci);
         assert_eq!((partial.max_rounds, partial.merge_method.as_str()), (3, "merge"));
@@ -429,7 +480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = add(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(issue_pipeline_settings(&project.path).unwrap(), IssuePipelineSettings::default());
-        let chosen = IssuePipelineSettings { auto_merge: true, require_person: true, ignored_checks: vec!["windows".into()], ..Default::default() };
+        let chosen = IssuePipelineSettings { auto_merge: Some(true), require_person: true, ignored_checks: vec!["windows".into()], ..Default::default() };
         let updated = update(&project.path, ProjectPatch { issue_pipeline: Some(chosen.clone()), ..Default::default() }).unwrap();
         assert_eq!(updated.issue_pipeline, Some(chosen.clone()));
         assert_eq!(issue_pipeline_settings(&project.path).unwrap(), chosen);
@@ -443,6 +494,59 @@ mod tests {
         assert!(issue_pipeline_settings("/not/attached").unwrap_err().to_string().contains("no longer attached"));
         std::fs::write(crate::store::root().unwrap().join("projects.json"), "{broken").unwrap();
         assert!(issue_pipeline_settings(&project.path).is_err());
+    }
+
+    #[test]
+    fn a_session_from_an_issue_starts_with_both_switches_on_unless_the_project_chose_otherwise() {
+        let unset = IssuePipelineSettings::default();
+        assert!(unset.auto_merge_at_start(true) && unset.resolve_conflicts_at_start(true));
+        // Any other session is as it was: off until the project turns a switch on.
+        assert!(!unset.auto_merge_at_start(false) && !unset.resolve_conflicts_at_start(false));
+        let off = IssuePipelineSettings { auto_merge: Some(false), resolve_conflicts: Some(false), ..Default::default() };
+        assert!(!off.auto_merge_at_start(true) && !off.resolve_conflicts_at_start(true));
+        let on = IssuePipelineSettings { auto_merge: Some(true), resolve_conflicts: Some(true), ..Default::default() };
+        assert!(on.auto_merge_at_start(false) && on.resolve_conflicts_at_start(false));
+        // A person does the merge: no session starts set to merge, whatever was chosen.
+        let person = IssuePipelineSettings { require_person: true, ..on };
+        assert!(!person.auto_merge_at_start(true) && !person.auto_merge_at_start(false));
+        assert!(person.resolve_conflicts_at_start(true));
+    }
+
+    #[test]
+    fn a_switch_saved_off_before_it_was_a_choice_reads_as_unchosen_once() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let (busy, idle, merging) = (dir.path().join("busy"), dir.path().join("idle"), dir.path().join("merging"));
+        for path in [&busy, &idle, &merging] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let path = |dir: &std::path::Path| canonical(dir.to_str().unwrap()).unwrap();
+        // As an older build saved them: every field, the switches `false` unless turned on.
+        let legacy = |auto_merge: bool, max_rounds: u32| serde_json::json!({
+            "enabled": true, "autoMerge": auto_merge, "resolveConflicts": false, "maxResolutions": 3, "requirePerson": false,
+            "maxRounds": max_rounds, "mergeMethod": "merge", "protected": {"migrations": true, "deploy": true, "security": true, "paths": []},
+            "ignoredChecks": [], "allowNoCi": false, "localCheckCommand": null, "localChecksOnly": false,
+        });
+        let file = serde_json::json!({"projects": [
+            {"path": path(&busy), "name": "busy", "issuePipeline": legacy(false, 5)},
+            {"path": path(&idle), "name": "idle", "issuePipeline": legacy(false, 3)},
+            {"path": path(&merging), "name": "merging", "issuePipeline": legacy(true, 3)},
+        ]});
+        std::fs::write(file_path().unwrap(), serde_json::to_string(&file).unwrap()).unwrap();
+
+        // What else was set stays; the off switches become no choice; one turned on stays on.
+        let kept = issue_pipeline_settings(&path(&busy)).unwrap();
+        assert_eq!((kept.auto_merge, kept.resolve_conflicts, kept.max_rounds), (None, None, 5));
+        assert_eq!(list().unwrap().0.iter().find(|p| p.name == "idle").unwrap().issue_pipeline, None);
+        assert_eq!(issue_pipeline_settings(&path(&merging)).unwrap().auto_merge, Some(true));
+
+        // A choice made since is kept, the next save marks the file, and nothing is read again as unchosen.
+        let off = IssuePipelineSettings { auto_merge: Some(false), resolve_conflicts: Some(false), ..kept };
+        update(&path(&busy), ProjectPatch { issue_pipeline: Some(off.clone()), ..Default::default() }).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file_path().unwrap()).unwrap()).unwrap();
+        assert_eq!(written["version"], PROJECTS_VERSION);
+        assert_eq!(issue_pipeline_settings(&path(&busy)).unwrap(), off);
+        assert!(!issue_pipeline_settings(&path(&busy)).unwrap().auto_merge_at_start(true));
     }
 
     #[test]

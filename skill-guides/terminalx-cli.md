@@ -333,7 +333,9 @@ work done and its checks passing, TerminalX pushes the branch, opens a pull requ
 the issue, has a separate reviewer session review it, takes the findings back to the author
 session, and reviews the new commit, up to the project's limit (three by default). It stops at
 `readyToMerge` unless automatic merging is on for the issue. `--auto-merge` and
-`--no-auto-merge` set that switch; without either the project's default applies.
+`--no-auto-merge` set that switch; without either the project's default applies, which for
+an issue is on (and conflict resolution with it) unless the project turned it off or has a
+person do the merge.
 `--no-pipeline` starts from the issue and stops at the code. `--on-main` implies no pipeline:
 there is no branch to open a pull request from.
 

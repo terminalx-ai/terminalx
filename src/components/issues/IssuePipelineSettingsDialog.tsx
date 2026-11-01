@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
-import { cloudPipelineSettings, pipelineSettings } from "@/lib/issuePipeline";
+import { cloudPipelineSettings, pipelineSettings, switchChoiceOf, switchDefaultOf, type SwitchDefault } from "@/lib/issuePipeline";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { updateProject } from "@/lib/sessions";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
@@ -10,6 +10,21 @@ import type { Project } from "@/types/session";
 import type { CloudProject } from "@/types/target";
 
 const ROUNDS = ["1", "2", "3", "4", "5"] as const;
+
+const SWITCH_DEFAULTS: { value: SwitchDefault; label: string; title: string }[] = [
+  { value: "issues", label: "From issues", title: "On for a session started from a GitHub or Linear issue, off for any other" },
+  { value: "all", label: "All sessions", title: "On for every new session on a worktree branch" },
+  { value: "off", label: "Off", title: "Off for every new session, including those started from an issue" },
+];
+
+/**
+ * Which new sessions a launch switch starts on in. Left alone it is "From
+ * issues" and nothing is stored; "All sessions" and "Off" are the project's
+ * own choice, which every launch then starts at (#700).
+ */
+function SwitchDefaultControl({ choice, onChange, disabled, "aria-label": ariaLabel }: { choice: boolean | undefined; onChange: (choice: boolean | undefined) => void; disabled: boolean; "aria-label": string }) {
+  return <Segmented<SwitchDefault> aria-label={ariaLabel} disabled={disabled} value={switchDefaultOf(choice)} onChange={(value) => onChange(switchChoiceOf(value))} options={SWITCH_DEFAULTS} />;
+}
 
 /** One pattern or name per line; commas work too, since a check name has none. */
 function lines(text: string, alsoCommas: boolean): string[] {
@@ -110,15 +125,15 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
             description="Off leaves a session started from an issue as it was: the agent writes code and nothing follows."
             control={<Switch aria-label="Open a pull request and review it" checked={settings.enabled} onCheckedChange={(enabled) => save({ enabled })} />}
           />
-          <SettingRow label="Resolve conflicts automatically by default" description="Wait for idle conversations, merge the base, run checks and review the new head."
-            control={<Switch aria-label="Resolve conflicts automatically by default" disabled={off} checked={settings.resolveConflicts ?? false} onCheckedChange={(resolveConflicts) => save({ resolveConflicts })} />} />
+          <SettingRow disabled={off} label="Resolve conflicts automatically by default" description="Wait for idle conversations, merge the base, run checks and review the new head. Which new sessions start with it on."
+            control={<SwitchDefaultControl aria-label="Resolve conflicts automatically by default" disabled={off} choice={settings.resolveConflicts} onChange={(resolveConflicts) => save({ resolveConflicts })} />} />
           <SettingRow label="Conflict resolution limit" description="Stop for a person after this many attempts per pull request."
             control={<Segmented aria-label="Conflict resolution limit" value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => save({ maxResolutions: Number(value) })} />} />
           <SettingRow
             disabled={off}
             label="Merge automatically by default"
-            description="What “Merge automatically when the review is addressed” starts at for a new issue. Each issue keeps its own switch."
-            control={<Switch aria-label="Merge automatically by default" disabled={off || settings.requirePerson} checked={settings.autoMerge} onCheckedChange={(autoMerge) => save({ autoMerge })} />}
+            description="Which new sessions start with “Merge when green” on. Each keeps its own switch."
+            control={<SwitchDefaultControl aria-label="Merge automatically by default" disabled={off || settings.requirePerson} choice={settings.requirePerson ? false : settings.autoMerge} onChange={(autoMerge) => save({ autoMerge })} />}
           />
           <SettingRow label="Local check command" description="TerminalX runs this command on the final reviewed head, with a 30-minute timeout. Leave empty to use hosted checks."
             control={<input aria-label="Local check command" className="rounded bg-well px-2 py-1 text-xs" value={localCommand} onChange={(event) => setLocalCommand(event.target.value)} onBlur={saveLists} />} />
@@ -279,8 +294,8 @@ export function CloudIssuePipelineSettingsDialog({ project, open, onOpenChange }
             description="Off leaves a session started from an issue as it was: the agent writes code and nothing follows."
             control={<Switch aria-label="Open a pull request and review it" checked={settings.enabled} onCheckedChange={(enabled) => save({ enabled })} />}
           />
-          <SettingRow label="Resolve conflicts automatically by default" description="A resolver waits for idle conversations and reviews each changed head. Cloud merges still require a person."
-            control={<Switch aria-label="Resolve conflicts automatically by default" disabled={off} checked={settings.resolveConflicts ?? false} onCheckedChange={(resolveConflicts) => save({ resolveConflicts })} />} />
+          <SettingRow disabled={off} label="Resolve conflicts automatically by default" description="A resolver waits for idle conversations and reviews each changed head. Cloud merges still require a person. Which new sessions start with it on."
+            control={<SwitchDefaultControl aria-label="Resolve conflicts automatically by default" disabled={off} choice={settings.resolveConflicts} onChange={(resolveConflicts) => save({ resolveConflicts })} />} />
           <SettingRow label="Conflict resolution limit" description="Stop for a person after this many attempts."
             control={<Segmented aria-label="Conflict resolution limit" value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => save({ maxResolutions: Number(value) })} />} />
           <SettingRow label="Local check command" description="The runtime runs this command on the final reviewed head with a 30-minute timeout."

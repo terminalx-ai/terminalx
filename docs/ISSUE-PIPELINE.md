@@ -1,8 +1,14 @@
 # Session pipeline
 
 The shared launch settings offer **Resolve conflicts automatically** and **Merge
-when green** on Git worktree branches. Both default to the project's pipeline
-settings and can be changed from the session's pipeline panel. The read-only
+when green** on Git worktree branches. A session started from a GitHub or Linear
+issue (the Issues page, an issue picked in New Session, the command palette, or
+`terminalx sessions create --issue`) starts with both on; any other session
+starts with both off. A project can choose otherwise for either switch: **Off**
+for every session, or **All sessions**. Each launch can still change its own
+switches, and each pipeline keeps its own after that, on the session's pipeline
+panel. Merge stays off wherever it cannot apply: a project where a person does
+the merge, a disabled or unavailable pipeline, and a cloud workspace. The read-only
 cleanup line follows the existing merged-cleanup settings; its link opens those
 settings. There is no per-session cleanup override or second deletion engine.
 Continuing a session applies both launch switches even when both are off.
@@ -80,8 +86,9 @@ some code". It now goes on through five stages, each shown on the issue's page:
 4. **Address.** Findings go back to the author session. It fixes and commits,
    TerminalX pushes, and the same reviewer reads the new head. At most three
    reviews by default.
-5. **Merge.** By default the pipeline stops at *Ready to merge*. With the
-   issue's switch on, TerminalX merges if every condition below holds.
+5. **Merge.** With the issue's switch on, as an issue's session starts unless
+   its project turned it off, TerminalX merges if every condition below holds.
+   With it off, the pipeline stops at *Ready to merge*.
 
 It applies to workspaces on this computer and to cloud workspaces. A cloud
 workspace carries the pipeline itself and stops at *Ready to merge*; see the
@@ -240,12 +247,13 @@ project was removed, or its file is damaged), nothing is merged automatically.
 
 The review is an agent's reading of the change, and its verdict is the block
 that agent wrote. It can be wrong, and text in the repository or the issue can
-try to steer it. That is why a verdict alone merges nothing: the switch is off
-unless you turn it on, the checks are GitHub's, the categories and the "a
-person does the merge" setting are the project's and no session can change
-them from inside its work, and the merge is pinned to the commit that was
-read. For a repository where a wrong merge is costly, leave the switch off or
-have a person do the merge.
+try to steer it. That is why a verdict alone merges nothing: the checks are
+GitHub's, the categories and the "a person does the merge" setting are the
+project's and no session can change them from inside its work, and the merge
+is pinned to the commit that was read. An issue's session starts with the
+switch on unless its project says otherwise. For a repository where a wrong
+merge is costly, set **Merge automatically by default** to **Off** or have a
+person do the merge.
 
 Any process that holds the app's control token, a session's agent included,
 can run `terminalx pipelines auto-merge <pipeline> on`. It could equally run
@@ -261,13 +269,25 @@ The issue's switch is per issue. Everything else is per project, under
 | Setting | Default |
 |---|---|
 | Open a pull request and review it | on |
-| Merge automatically by default (what a new issue's switch starts at) | off |
+| Resolve conflicts automatically by default (which new sessions start with it on) | from issues |
+| Merge automatically by default (which new sessions start with "Merge when green" on) | from issues |
 | A person does the merge, whatever the switch says | off |
 | Review rounds | 3 |
 | Merge method | merge commit |
 | Always left for a person: database migrations, deploy configuration, what the security pass flags | all on |
 | Paths of your own that are always left for a person (`.gitignore` syntax) | none |
 | Checks that never hold a merge, by a part of their name | none |
+
+The two launch defaults each take one of three values. **From issues**, the
+default, stores nothing: sessions started from an issue start with the switch
+on and other sessions with it off. **All sessions** and **Off** are the
+project's own choice, and every new session starts there. A project that turns
+a switch off keeps it off for its issue sessions too. Versions before #700
+saved both switches as `false` whenever any pipeline setting was saved, so a
+stored `false` from then was no choice. It is read once as **From issues**
+(`projects.json` gains a `version`; a cloud project's settings, kept in the
+app's preferences, are migrated the same way). A switch saved as on keeps
+meaning **All sessions**.
 
 A session on the project's own checkout (not a worktree) has no branch to open
 a pull request from, so it gets no pipeline.

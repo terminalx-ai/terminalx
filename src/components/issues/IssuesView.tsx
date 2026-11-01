@@ -252,7 +252,7 @@ export function IssuesView({
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && selected ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
   const { harness, modelId, effort, mode } = agentSelection;
-  const pipelineLaunch = usePipelineLaunch(projectPath, pipelineDefaults, !cloud && !pipelineOffered ? "Start on a worktree branch to automate this session." : undefined, cloud ? "Cloud workspaces require a person to merge." : undefined);
+  const pipelineLaunch = usePipelineLaunch(projectPath, pipelineDefaults, !cloud && !pipelineOffered ? "Start on a worktree branch to automate this session." : undefined, cloud ? "Cloud workspaces require a person to merge." : undefined, "issue");
   const [startNote, setStartNote] = useState<string | null>(null);
   const linkedIssueUrls = useMemo(
     () => new Set([...store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : []), ...pipelines.filter((value) => value.projectPath === projectPath).flatMap((value) => value.issue ? [value.issue.url] : [])]),

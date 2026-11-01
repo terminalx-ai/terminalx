@@ -55,6 +55,8 @@ export interface Prefs {
   issueCloudProject: string | null;
   /** Issue pipeline settings of cloud projects, by project key. Kept here; each issue session started from here takes them to its workspace. */
   cloudIssuePipelines: Record<string, IssuePipelineSettings>;
+  /** 1: `cloudIssuePipelines` stores a launch switch only once it is chosen (#700). */
+  cloudIssuePipelinesVersion: number;
   /** The Issues list's filter and sort, by project and tracker (`issueFilterKey`). */
   issueFilters: Record<string, Partial<IssueListFilter>>;
   useWorktree: boolean;
@@ -116,6 +118,8 @@ export interface Prefs {
   projectsDir: string | null;
 }
 
+const CLOUD_ISSUE_PIPELINES_VERSION = 1;
+
 const DEFAULTS: Prefs = {
   linkBrowser: "ask",
   linkBrowserChosen: false,
@@ -145,6 +149,7 @@ const DEFAULTS: Prefs = {
   issueProvider: "github",
   issueCloudProject: null,
   cloudIssuePipelines: {},
+  cloudIssuePipelinesVersion: CLOUD_ISSUE_PIPELINES_VERSION,
   issueFilters: {},
   useWorktree: true,
   bypassConfirmed: false,
@@ -216,6 +221,19 @@ function load(): Prefs {
       prefs.linkBrowser = "system";
       migrated = true;
     }
+    // Before #700 every save of a cloud project's pipeline wrote both launch
+    // switches, `false` unless turned on: that `false` was no choice, so it is
+    // forgotten once and the switch follows where each session starts.
+    if (!(Number(parsed.cloudIssuePipelinesVersion) >= CLOUD_ISSUE_PIPELINES_VERSION)) {
+      for (const settings of Object.values(prefs.cloudIssuePipelines as Record<string, IssuePipelineSettings>)) {
+        for (const key of ["autoMerge", "resolveConflicts"] as const) {
+          if (settings[key] !== false) continue;
+          delete settings[key];
+          migrated = true;
+        }
+      }
+    }
+    prefs.cloudIssuePipelinesVersion = CLOUD_ISSUE_PIPELINES_VERSION;
     // Shortcuts saved under an older version's action ids, once. A newer version's are left as they are.
     const version = shortcutsVersionOf(parsed.shortcutsVersion);
     if (version < SHORTCUTS_VERSION) {
