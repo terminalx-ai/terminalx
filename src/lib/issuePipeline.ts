@@ -196,6 +196,8 @@ export function pipelineHeadline(pipeline: IssuePipeline): { label: string; tone
       // Checks running, or not listed yet; otherwise it is GitHub itself: mergeability, a merge queue.
       return { label: pipeline.note?.includes("checks") ? "Waiting for checks" : "Waiting for GitHub", tone: "info" };
     case "working":
+      // Answered out of a stop, the author is at work on that, at whatever stage it stopped (#725).
+      if (pipeline.answered) return { label: "Working", tone: "info" };
       return { label: pipeline.note === "Merging the pull request." ? "Merging" : WORKING[pipeline.stage], tone: "info" };
   }
 }

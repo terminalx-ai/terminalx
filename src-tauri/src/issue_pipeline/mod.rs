@@ -129,8 +129,8 @@ pub struct Event {
     pub stage: Stage,
     /// `started`, `workDone`, `pullRequest`, `tracker`, `reviewRequested`,
     /// `reviewPending`, `verdict`, `findingsPosted`, `findingsSent`, `pushed`,
-    /// `reminder`, `waiting`, `readyToMerge`, `needsYou`, `merged`, `stopped`,
-    /// `resumed`, `participantsReleased`, `lateReply`, `autoMerge`, `note`.
+    /// `reminder`, `waiting`, `readyToMerge`, `needsYou`, `answered`, `merged`,
+    /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`, `note`.
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,6 +186,11 @@ pub struct Pipeline {
     /// What it is doing or waiting for, in a line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The stop a person answered the author out of (#725). The author is at
+    /// work on that answer, and the end of its turn settles the pipeline
+    /// again; a turn that settles nothing leaves it stopped for this once more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered: Option<StopReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PrLink>,
     /// Reviews asked for so far.
