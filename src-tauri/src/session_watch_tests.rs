@@ -204,7 +204,7 @@ impl Rig {
             seq: 0,
             source_timestamp: None,
             message_times: HashMap::new(),
-            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None,
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,

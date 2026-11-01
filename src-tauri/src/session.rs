@@ -615,6 +615,9 @@ pub struct TabRuntime {
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
     stdio_writer: Option<std::sync::mpsc::SyncSender<codex::stdio::Outbound>>,
+    /// The phone or share a native Codex prompt came from, held to its
+    /// permits when the frame that delivers it is written.
+    stdio_authority: Option<codex_stdio::Authority>,
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
@@ -1335,7 +1338,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None,
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None,
                 turn_started_at: None,
                 turn_by_command: false,
                 signed_out_in_turn: false,

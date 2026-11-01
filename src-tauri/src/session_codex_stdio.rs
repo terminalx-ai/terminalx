@@ -58,9 +58,12 @@ impl SessionManager {
     pub(super) fn send_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry,
         prompt: PromptText, images: Vec<ImageRef>, wire_images: Vec<(String, String)>) -> Result<SendOutcome> {
         let tab = entry.tab(&rt.tab_id).context("tab not found")?;
-        ensure_local(&prompt)?;
-        anyhow::ensure!(!prompt.agent.trim_start().starts_with('/') || prompt.agent.trim() == "/compact", "Only /compact is supported in experimental Codex stdio");
-        anyhow::ensure!(prompt.agent.trim() != "/compact" || images.is_empty(), "Compaction does not accept images");
+        // A phone's prompt names who it is from ahead of the request itself;
+        // the request alone says whether it is a command.
+        let request = typed_request(&prompt.agent);
+        let manual = request.trim() == "/compact";
+        anyhow::ensure!(!request.trim_start().starts_with('/') || manual, "Only /compact is supported in experimental Codex stdio");
+        anyhow::ensure!(!manual || images.is_empty(), "Compaction does not accept images");
         anyhow::ensure!(tab.harness == "codex", "Experimental stdio requires Codex");
         anyhow::ensure!(!rt.turn_open && rt.pending.is_empty(), "Experimental Codex is busy; wait or interrupt before sending again");
         Stdio::validate_mode(&tab.permission_mode)?;
@@ -69,13 +72,18 @@ impl SessionManager {
             anyhow::ensure!(tab.fork_from.is_none(), "Experimental Codex cannot fork a thread. Create a new experimental session.");
             self.start_codex_stdio(rt, rt_arc, entry, tab)?;
         }
-        let manual = prompt.agent.trim() == "/compact";
+        let text = if manual { "/compact".to_owned() } else { prompt.agent };
         let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
-        let actions = if engine.ready { engine.prompt(prompt.agent, wire_images)? } else { engine.start(prompt.agent, wire_images)? };
+        let actions = if engine.ready { engine.prompt(text, wire_images)? } else { engine.start(text, wire_images)? };
         // No user message or user turn for manual compaction (#524/#566).
         let events = if manual { Vec::new() } else { vec![self.publish(rt, Payload::UserMessage {
-            author: None, text: prompt.display, images, baseline: git::snapshot_tree(Path::new(&entry.cwd)).ok(), queued: false, cwd: Some(entry.cwd.clone()),
+            author: prompt.author, text: prompt.display, images, baseline: git::snapshot_tree(Path::new(&entry.cwd)).ok(), queued: false, cwd: Some(entry.cwd.clone()),
         }, None)] };
+        // Every prompt replaces what the last one left: a desktop prompt is
+        // held to nothing, a phone's or a share's to its permits.
+        rt.stdio_authority = (prompt.mobile.is_some() || prompt.shared_connection.is_some()).then(|| Authority {
+            seq: events.first().map(|event| event.seq), mobile: prompt.mobile, shared: prompt.shared_connection,
+        });
         rt.open_turn();
         rt.turn_started_at = Some(Instant::now());
         self.set_status(rt, TabStatus::InProgress);
@@ -177,6 +185,14 @@ impl SessionManager {
         Ok(())
     }
 
+    /// A prompt refused at its write, as `cancel_shared_prompt` ends a PTY
+    /// one: the turn it opened ends as stopped and the tab is idle again. A
+    /// manual compaction opened no user turn, so it only closes.
+    fn withdraw_codex_prompt(&self, rt: &mut TabRuntime, seq: Option<u64>) {
+        if seq.is_some() { self.end_open_turn(rt, TurnStatus::Aborted, None); } else { rt.turn_open = false; }
+        self.set_status(rt, TabStatus::Idle);
+    }
+
     fn write_codex_frame(&self, runtime: &std::sync::Weak<Mutex<TabRuntime>>, launch: &Arc<()>, frame: Outbound) -> Result<()> {
         let mut bytes = frame.line.as_bytes().to_vec();
         bytes.push(b'\n');
@@ -186,6 +202,10 @@ impl SessionManager {
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
             {
                 let _admission = crate::issue_pipeline::admission::lock();
+                // A prompt's sender is admitted in the order its send was:
+                // sharing, then its permits, then the tab.
+                let first_prompt_byte = offset == 0 && frame.delivers_prompt();
+                let mut sharing = first_prompt_byte.then(|| self.sharing.lock().unwrap());
                 let rt_arc = runtime.upgrade().context("Codex runtime was removed")?;
                 let mut rt = rt_arc.lock().unwrap();
                 self.accepting_work()?;
@@ -201,8 +221,29 @@ impl SessionManager {
                 }
                 let entry = index::get(&rt.session_id)?;
                 anyhow::ensure!(entry.tab(&rt.tab_id).is_some_and(selected), "Codex tab was closed or changed");
+                anyhow::ensure!(rt.child.as_ref().is_some_and(|child| self.host.get(&rt.key()).is_some_and(|live| Arc::ptr_eq(&live, child))), "Codex child has been replaced or exited");
+                // The launch is the instance a PTY prompt's pane stands for,
+                // and it was checked above. Delivery that has begun under a
+                // current permit is finished: a stream takes no half frame back.
+                let authority = if first_prompt_byte { rt.stdio_authority.take() } else { None };
+                let mut owner_attachment = None;
+                let admitted = match &authority {
+                    None => Ok(None),
+                    Some(authority) => admit_codex_prompt(authority, sharing.as_deref_mut(), &entry, &rt.tab_id, &mut owner_attachment)
+                        .and_then(|()| authority.mobile.as_ref().map(|permit| permit.enter()).transpose()),
+                };
+                let owner = admitted.as_ref().ok().and(owner_attachment.as_ref()).map(|attachment| attachment.enter()).transpose();
+                let (_mobile, _owner) = match (admitted, owner) {
+                    (Ok(mobile), Ok(owner)) => (mobile, owner),
+                    (Err(error), _) | (_, Err(error)) => {
+                        log::warn!("[{}] withdrew a Codex prompt before delivery: {error:#}", rt.key());
+                        let seq = authority.as_ref().and_then(|authority| authority.seq);
+                        if let Engine::CodexStdio(engine) = &mut rt.engine { engine.withdraw(&frame); }
+                        self.withdraw_codex_prompt(&mut rt, seq);
+                        return Ok(());
+                    }
+                };
                 let child = rt.child.as_ref().context("Codex child is missing")?;
-                anyhow::ensure!(self.host.get(&rt.key()).is_some_and(|live| Arc::ptr_eq(&live, child)), "Codex child has been replaced or exited");
                 // A nonblocking syscall is the only physical write under the
                 // authority locks. Reader/Stop can run between attempts, even
                 // when the child never reads or produces a full stdout pipe.
@@ -281,6 +322,7 @@ impl SessionManager {
             _ => said.clone(),
         }));
         rt.stdio_writer = None;
+        rt.stdio_authority = None;
         if let Engine::CodexStdio(engine) = &mut rt.engine { engine.fail(); }
         self.cancel_asks(rt);
         self.codex_stdio_loss(rt, CompactionLoss::Disconnected);
@@ -352,7 +394,7 @@ impl SessionManager {
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
-        rt.child = None; rt.child_pid = None; rt.stdio_compaction = None;
+        rt.child = None; rt.child_pid = None; rt.stdio_compaction = None; rt.stdio_authority = None;
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
         self.set_status(&mut rt, TabStatus::Idle);
@@ -360,9 +402,35 @@ impl SessionManager {
     }
 }
 
-fn ensure_local(prompt: &PromptText) -> Result<()> {
-    anyhow::ensure!(prompt.shared_connection.is_none() && prompt.mobile.is_none() && prompt.author.is_none(), "Experimental Codex stdio currently accepts local input only");
+/// A phone's or a share's prompt, as `type_prompt` holds a PTY one: what the
+/// sender may give is decided again when its frame is written, and a prompt
+/// refused there is withdrawn with nothing of it sent.
+pub(super) struct Authority {
+    /// The user message it was published as; none for a manual compaction.
+    seq: Option<u64>,
+    mobile: Option<crate::local_runtime::mobile::WritePermit>,
+    shared: Option<crate::local_sharing::WritePermit>,
+}
+
+/// What `type_prompt` asks of a share and of a phone before it types, with
+/// the sharing mutex held: the share's own admission and a mode it allows,
+/// and the phone's mode unchanged. The guards are taken by the caller.
+fn admit_codex_prompt(authority: &Authority, sharing: Option<&mut crate::local_sharing::Sharing>, entry: &index::SessionEntry, tab_id: &str,
+    owner: &mut Option<Arc<crate::local_runtime::Attachment>>) -> Result<()> {
+    if let Some(connection) = &authority.shared {
+        let share = sharing.and_then(|sharing| sharing.sessions.get_mut(&entry.id)).context("Sharing ended before prompt delivery.")?;
+        share.admit_at_writer(connection, tab_id, chrono::Utc::now().timestamp_millis())?;
+        *owner = share.owner.as_ref().map(|owner| owner.attachment.clone());
+        let tab = entry.tab(tab_id).context("Tab closed before prompt delivery.")?;
+        anyhow::ensure!(settings::allowed_while_shared(&tab.permission_mode), "The shared tab changed before prompt delivery.");
+    }
+    if let Some(permit) = &authority.mobile { permit.check_mode(&entry.id, tab_id)?; }
     Ok(())
+}
+
+/// What was typed, without the effective-user line a phone's prompt starts with.
+fn typed_request(agent: &str) -> &str {
+    agent.strip_prefix("[TerminalX Effective User v1] ").and_then(|attributed| attributed.split_once('\n')).map_or(agent, |(_, request)| request)
 }
 
 /// `startup_stderr` holds, in memory only, the same bounded startup stderr

@@ -16,7 +16,8 @@ pub(super) fn observed_full_pipe() {
 
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal"] {
+    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
+        "phone-input", "phone-compact", "phone-revoked", "share-input", "share-ended", "host-while-shared"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -58,7 +59,9 @@ impl Sink for GateSink {
 
 /// Stands in for Codex at the process boundary: answers the version probe and
 /// the resume handshake, records each frame it is sent, and plays one turn per
-/// `turn/start` until its input closes.
+/// `turn/start` or manual compaction until its input closes. While a `hold`
+/// file exists it does not answer the resume, so a test can act between a
+/// send and the write of its prompt.
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
@@ -67,7 +70,15 @@ while read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
-    *'"method":"thread/resume"'*) printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$(cat "$here/answer")" ;;
+    *'"method":"thread/resume"'*)
+      while [ -f "$here/hold" ]; do sleep 0.02; done
+      printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$(cat "$here/answer")" ;;
+    *'"method":"thread/compact/start"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"contextCompaction","id":"c%s"}}}\n' "$id" "$id"
+      printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"contextCompaction","id":"c%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
       printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
@@ -206,6 +217,126 @@ fn to_terminal_fixture(manager: &SessionManager) {
     assert_eq!(chat(), before, "the move adds nothing to the chat");
 }
 
+/// A phone, a share's guest and the host of a shared session reach a native
+/// tab as they reach a PTY one. Each prompt is delivered under a permit that
+/// is still current when its frame is written; one that is not is withdrawn
+/// with nothing of it sent, and the turn it opened ends as stopped.
+fn remote_input_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("answer"), "thread-1").unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "providerSessionId":"thread-1", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    store::write_json(&root.join("devices.json"), &json!({"devices":[{
+        "id":"driver","label":"Fixture","platform":"test","token":"fixture-hash",
+        "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()
+    }]})).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    let methods = || -> Vec<String> {
+        std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["method"].as_str().unwrap().to_owned()).collect()
+    };
+    let last_frame = || -> serde_json::Value { serde_json::from_str(std::fs::read_to_string(bin.join("received")).unwrap().lines().last().unwrap()).unwrap() };
+    let idle_after = |frames: usize| {
+        let until = Instant::now() + WAIT;
+        while methods().len() < frames || manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open {
+            assert!(Instant::now() < until, "{case}: did not settle: {:?} {:?}", methods(), events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let ended = || events().iter().filter_map(|event| match &event.payload { Payload::TurnCompleted { status, .. } => Some(*status), _ => None }).collect::<Vec<_>>();
+    let users = || events().iter().filter_map(|event| match &event.payload {
+        Payload::UserMessage { text, author, .. } => Some((text.clone(), author.as_ref().map(|person| person.user_id.clone()))),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let ready = || matches!(&manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().engine, Engine::CodexStdio(engine) if engine.ready && !engine.blocked && !engine.exited);
+    if case.starts_with("phone-") {
+        let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+        let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+        let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+        manager.mobile.register(&lifetime, actor.clone(), "connection", "driver").unwrap();
+        let permit = manager.mobile.permit(&actor, "connection", "stdio-owner", "tab").unwrap();
+        // As `mobile::execute` sends it: who it is from, then what was typed.
+        let typed = if case == "phone-compact" { "/compact" } else { "from the phone" };
+        let agent = format!("[TerminalX Effective User v1] {{\"authority\":\"host\",\"userId\":\"driver\"}}\n{typed}");
+        if case == "phone-revoked" { std::fs::write(bin.join("hold"), "").unwrap(); }
+        manager.send_mobile("stdio-owner", "tab", agent.clone(), typed.into(), Vec::new(), permit).unwrap();
+        match case {
+            "phone-input" => {
+                idle_after(4);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume", "turn/start"]);
+                assert_eq!(last_frame()["params"]["input"][0]["text"], agent.as_str(), "the agent is told who the prompt is from");
+                assert_eq!(users(), [("from the phone".to_owned(), None)]);
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
+            "phone-compact" => {
+                idle_after(4);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume", "thread/compact/start"]);
+                assert!(users().is_empty() && ended().is_empty(), "a compaction is no user message or turn (#524/#566)");
+            }
+            _ => {
+                manager.mobile.revoke_device(&actor, "driver").unwrap();
+                std::fs::remove_file(bin.join("hold")).unwrap();
+                idle_after(3);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume"], "a revoked phone's prompt is not written");
+                assert_eq!(ended(), [TurnStatus::Aborted]);
+                assert!(ready(), "the connection stays usable");
+            }
+        }
+    } else {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut share = crate::local_sharing::tests::fixture();
+        let link = share.links.get_mut("link").unwrap();
+        link.settings.expires_at = now + 3_600_000;
+        link.credential_expires_at = now + 3_600_000;
+        let mut guest = crate::local_sharing::tests::guest("guest-connection", "alice");
+        guest.verified_until = now + 3_600_000;
+        let person = guest.person.clone();
+        share.join(guest, now).unwrap();
+        let permit = share.write_permit("guest-connection", "tab").unwrap();
+        manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
+        match case {
+            "share-input" => {
+                manager.send_shared("stdio-owner", "tab", "from a guest".into(), person, permit).unwrap();
+                idle_after(4);
+                assert_eq!(last_frame()["params"]["input"][0]["text"], "from a guest");
+                assert_eq!(users(), [("from a guest".to_owned(), Some("alice".to_owned()))]);
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
+            "share-ended" => {
+                std::fs::write(bin.join("hold"), "").unwrap();
+                manager.send_shared("stdio-owner", "tab", "from a guest".into(), person, permit).unwrap();
+                manager.sharing.lock().unwrap().sessions.remove("stdio-owner");
+                std::fs::remove_file(bin.join("hold")).unwrap();
+                idle_after(3);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume"], "a guest of an ended share sends nothing");
+                assert_eq!(ended(), [TurnStatus::Aborted]);
+                assert!(ready(), "the connection stays usable");
+            }
+            _ => {
+                manager.send("stdio-owner", "tab", "from the host".into(), Vec::new()).unwrap();
+                idle_after(4);
+                assert_eq!(users(), [("from the host".to_owned(), Some("host".to_owned()))], "the host's message says it is theirs");
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
+        }
+    }
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
 fn rt_bound(manager: &SessionManager) -> bool {
     manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().stdio_compaction.is_some()
 }
@@ -214,6 +345,7 @@ fn rt_bound(manager: &SessionManager) -> bool {
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
     if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
+    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({
