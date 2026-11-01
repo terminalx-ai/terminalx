@@ -121,7 +121,10 @@ Codex** switch (off by default): when it is on, a new Codex session or tab start
 from the app or with `terminalx sessions create --agent codex` uses this connection,
 except sessions started from an issue, automations, and the Ask every time mode,
 which keep the PTY engine. Otherwise ordinary creation uses the PTY engine.
-Cloud workspace sessions keep the PTY engine for now.
+The app also applies the setting to sessions and tabs it starts in an existing
+cloud workspace, under the same rules: there Codex signs in with the workspace's
+credential and takes its route and configuration, and opening the terminal view
+moves the tab as on a Mac. A new workspace's first session keeps the PTY engine.
 
 The transport choice is persisted. Opening the view never starts or resumes it;
 existing PTY sessions cannot be migrated into this mode. After the app restarts,

@@ -111,9 +111,15 @@
 - Add Settings → Experimental with a **Native Codex** switch, off by default. When
   it is on, new Codex sessions and tabs started from the app or the `terminalx`
   command line connect to Codex directly, for reliable compaction status. Sessions
-  from issues, automations, Ask every time and cloud workspaces keep the terminal.
+  from issues, automations and Ask every time keep the terminal.
   A tab whose Codex is older than 0.164.0 when it first starts switches to the
   terminal and sends as usual, with no error. Existing sessions are unchanged. (#644)
+- Native Codex in cloud workspaces: with the switch on, Codex sessions and tabs
+  the app starts in an existing workspace connect to Codex directly too. Codex
+  signs in with the workspace's credential and takes the creator's route and the
+  workspace's variables, secrets, instructions and MCP servers, in a home of its
+  own where no TerminalX hook runs; sign-in problems are reported as for other
+  sessions, and the terminal view moves the tab as on a Mac. (#644)
 
 ### Status bar
 

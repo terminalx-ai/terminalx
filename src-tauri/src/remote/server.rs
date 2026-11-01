@@ -2350,6 +2350,11 @@ impl WorkspaceRpc {
             worktree_name: Option<String>,
             #[serde(default)]
             repository: Option<super::session_target::RepositoryTarget>,
+            /// The desktop's Settings → Experimental → Native Codex (#644): a
+            /// Codex tab goes through the app server where it can. A runtime
+            /// that does not know the field starts a terminal tab, as before.
+            #[serde(default)]
+            native_codex: bool,
         }
         let mut p: Params = parse(params)?;
         // A blank mode is no mode: the tab takes the default launch mode.
@@ -2373,6 +2378,17 @@ impl WorkspaceRpc {
                 log::warn!("prepare the blank project folder: {error:#}");
             }
         }
+        let mut first_tab = crate::session_ops::NewTab { transport: Default::default(),
+            harness: p.agent,
+            model: p.model,
+            effort: p.effort,
+            permission_mode: p.mode,
+        };
+        // The desktop's Native Codex setting, under the same rules as a Mac's:
+        // a session that carries a pipeline keeps the terminal engine.
+        if p.native_codex {
+            crate::session_ops::native_codex(&mut first_tab, p.issue.is_some() || p.pipeline == Some(true));
+        }
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
@@ -2386,12 +2402,7 @@ impl WorkspaceRpc {
                 issue: p.issue.clone(),
                 automation: None,
                 cwd: None,
-                tab: Some(crate::session_ops::NewTab { transport: Default::default(),
-                    harness: p.agent,
-                    model: p.model,
-                    effort: p.effort,
-                    permission_mode: p.mode,
-                }),
+                tab: Some(first_tab),
             },
         )
         .map_err(RpcError::internal)?;
@@ -2683,12 +2694,16 @@ impl WorkspaceRpc {
             effort: Option<String>,
             #[serde(default)]
             mode: Option<String>,
+            /// As in `session.create`.
+            #[serde(default)]
+            native_codex: bool,
         }
         let p: Params = parse(params)?;
         let session = self.visible_session(peer, &p.session_id)?;
         let mode = index::requested_mode(p.mode);
         self.check_new_tab(&p.agent, &p.model, mode.as_deref())?;
-        let new_tab = crate::session_ops::NewTab { transport: Default::default(), harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode };
+        let mut new_tab = crate::session_ops::NewTab { transport: Default::default(), harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode };
+        if p.native_codex { crate::session_ops::native_codex(&mut new_tab, false); }
         // Through the session manager where there is one: it is the one place that refuses a Bypass tab in a shared session.
         let tab = match &self.sessions {
             Some(manager) => manager.add_tab(&session.id, &new_tab).map_err(|error| RpcError::new("refused", error.to_string()))?,

@@ -1893,7 +1893,7 @@ impl SessionManager {
         // (`cloud_config`) first, so a grant always wins.
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
-        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -3574,15 +3574,20 @@ impl SessionManager {
             self.publish(rt, Payload::Status { text }, None);
         }
 
-        // A conversation started by the old headless engine lives in the
-        // reader's own home, where a `codex resume` against ours would not
-        // look for it.
+        // A conversation started by native Codex or the old headless engine
+        // lives in their home (in a cloud workspace native Codex's own, else
+        // the reader's), where a `codex resume` against ours would not look.
         let mut resume = tab.provider_session_id.clone();
-        if let (Some(id), Some(user)) = (&resume, codex::home::user_root()) {
-            match codex::home::adopt_rollout(&home, &user, id) {
-                Ok(true) => log::info!("brought Codex conversation {id} into the managed home"),
-                Ok(false) => {}
-                Err(e) => log::warn!("could not adopt Codex conversation {id}: {e:#}"),
+        if let Some(id) = &resume {
+            for source in [codex::home::native_root_if_made(), codex::home::user_root()].into_iter().flatten() {
+                match codex::home::adopt_rollout(&home, &source, id) {
+                    Ok(true) => {
+                        log::info!("brought Codex conversation {id} into the managed home");
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(e) => log::warn!("could not adopt Codex conversation {id}: {e:#}"),
+                }
             }
         }
         let rollout = resume.as_deref().and_then(|id| codex::home::find_rollout(&home, id));

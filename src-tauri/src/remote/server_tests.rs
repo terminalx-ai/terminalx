@@ -1725,6 +1725,29 @@ fn genuine_blank_session_still_initializes_its_own_root() {
     assert!(crate::git::remote_url(&f.root).is_none());
 }
 
+#[test]
+fn the_desktops_native_codex_setting_reaches_a_workspace_session_under_a_macs_rules() {
+    use crate::store::index::AgentTransport::{ExperimentalCodexStdio as Native, Pty};
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager)).unwrap();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let transport = |params: Value| {
+        let created = f.rpc.session_create(params).unwrap();
+        index::get(created["sessionId"].as_str().unwrap()).unwrap().tabs[0].transport
+    };
+    let issue = json!({"provider":"github","id":"1","identifier":"#1","title":"Fix it","url":"https://github.com/acme/api/issues/1"});
+    assert_eq!(transport(json!({"agent":"codex","nativeCodex":true})), Native);
+    assert_eq!(transport(json!({"agent":"codex"})), Pty, "the setting off, or an older desktop");
+    assert_eq!(transport(json!({"agent":"codex","mode":"manual","nativeCodex":true})), Pty, "Ask every time");
+    assert_eq!(transport(json!({"agent":"claude","nativeCodex":true})), Pty);
+    assert_eq!(transport(json!({"agent":"codex","nativeCodex":true,"issue":issue,"pipeline":false})), Pty, "an issue's session");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn repository_session_target_requires_negotiated_capability_and_manager_authority() {
     let f = fixture();
@@ -1970,6 +1993,14 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
     .unwrap();
     assert_eq!(again["tabId"], tab_id.as_str());
     assert_eq!(index::get(&session.id).unwrap().tabs.len(), 2);
+    // The desktop's Native Codex setting (#644), under a Mac's rules.
+    for (agent, mode, request, native) in [("codex", "plan", "request-tab-native-1", true), ("codex", "manual", "request-tab-native-2", false), ("claude", "plan", "request-tab-native-3", false)] {
+        let added = call(&f.rpc, &manager, "session.addTab", json!({ "sessionId": session.id, "agent": agent, "mode": mode, "nativeCodex": true, "clientRequestId": request }))
+            .await
+            .unwrap();
+        let transport = index::get(&session.id).unwrap().tab(added["tabId"].as_str().unwrap()).unwrap().transport;
+        assert_eq!(transport == index::AgentTransport::ExperimentalCodexStdio, native, "{agent} {mode}");
+    }
     for (params, expected) in [
         (json!({ "sessionId": session.id, "agent": "opencode", "clientRequestId": "request-tab-2" }), "unavailable"),
         (json!({ "sessionId": session.id, "agent": "vim", "clientRequestId": "request-tab-3" }), "invalid_params"),

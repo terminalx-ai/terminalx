@@ -2325,6 +2325,15 @@ export interface ExperimentalSettings {
 export const experimental = {
   settings: () => invoke<ExperimentalSettings>("experimental_settings"),
   setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
+  /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
+  nativeCodexFor: async (agent: string): Promise<boolean> => {
+    if (agent !== "codex") return false;
+    try {
+      return (await invoke<ExperimentalSettings>("experimental_settings"))?.nativeCodex === true;
+    } catch {
+      return false;
+    }
+  },
 };
 
 export interface OrganizationWorkStatus {

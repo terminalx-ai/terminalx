@@ -1009,6 +1009,8 @@ export class WorkspaceRpcClient {
     pipelineOptions?: { autoMerge: boolean; resolveConflicts: boolean };
     pipelineSettings?: Record<string, unknown>;
     worktreeName?: string | null;
+    /** The desktop's Native Codex setting (#644): a Codex tab goes through Codex's app server where it can. An older runtime ignores it. */
+    nativeCodex?: boolean;
   }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null; startError?: string | null }> {
     if (params.repository && !this.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
@@ -1056,7 +1058,7 @@ export class WorkspaceRpcClient {
   /** Another agent tab in an existing session (`session/2`, manage only). */
   addSessionTab(
     sessionId: string,
-    params: { agent: string; model?: string; effort?: string | null; mode?: string },
+    params: { agent: string; model?: string; effort?: string | null; mode?: string; nativeCodex?: boolean },
   ): Promise<{ sessionId: string; tabId: string; session: RuntimeSession; tab?: AgentTabInfo | null }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
     return this.mutate("session.addTab", { sessionId, ...defined });

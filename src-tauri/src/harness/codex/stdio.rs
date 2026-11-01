@@ -81,6 +81,9 @@ pub struct Stdio {
     awaiting: bool,
     /// The owner has already reported this connection's failure.
     failed: bool,
+    /// A cloud workspace creator's route (`cloud_grants::RouteLaunch`) serves
+    /// the model it names, whatever the tab asks for.
+    routed: bool,
 }
 
 /// Whether `codex --version` reports MIN_VERSION or a later release.
@@ -103,12 +106,21 @@ impl Stdio {
     pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
         Self { launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
-            seen_text: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false }
+            seen_text: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }
+    }
+
+    /// Start on, and keep, the model a cloud route names (PRO-18): the route's
+    /// provider serves that model, not the account's list.
+    pub(crate) fn route_model(&mut self, model: String) {
+        self.model = model;
+        self.routed = true;
     }
 
     /// A new model or effort reaches Codex with the next turn it starts;
     /// `turn/start` takes both for that turn and the ones after it.
-    pub(crate) fn set_model(&mut self, model: &str) { self.model = model.to_owned(); }
+    pub(crate) fn set_model(&mut self, model: &str) {
+        if !self.routed { self.model = model.to_owned(); }
+    }
     pub(crate) fn set_effort(&mut self, effort: Option<&str>) { self.effort = effort.map(str::to_owned); }
 
     fn request(&mut self, method: &str, params: Value, kind: Request) -> Result<Action> {
