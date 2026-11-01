@@ -183,3 +183,44 @@ describe("conditional lists", () => {
     expect(request).toHaveBeenLastCalledWith("chat.list", { worktreeId: "session", limit: 100 });
   });
 });
+
+describe("the terminal view's requests", () => {
+  it("opens a tab's terminal on the Mac, and says why when it cannot", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ ok: true, value: { opened: true } })
+      .mockResolvedValueOnce({ ok: false, refusal: { code: "unavailable", message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." } });
+    const api = hostApi(request);
+    await expect(api.openTerminal("worktree", "tab")).resolves.toEqual({ opened: true });
+    expect(request).toHaveBeenLastCalledWith("terminal.open", { worktreeId: "worktree", tabId: "tab" });
+    await expect(api.openTerminal("worktree", "tab")).resolves.toEqual({ opened: false, message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." });
+  });
+
+  it("passes the Mac's reason when typing is refused", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ ok: true, value: { accepted: true } })
+      .mockResolvedValueOnce({ ok: false, refusal: { code: "unavailable", message: "Another mobile client or terminal instance owns this driver lease." } });
+    const api = hostApi(request);
+    await expect(api.queueInput("worktree", "tab", "ls\r")).resolves.toEqual({ accepted: true });
+    expect(request).toHaveBeenLastCalledWith("steerLease.queueInput", { worktreeId: "worktree", tabId: "tab", text: "ls\r" });
+    await expect(api.queueInput("worktree", "tab", "x")).resolves.toEqual({ accepted: false, message: "Another mobile client or terminal instance owns this driver lease." });
+  });
+
+  it("hands on the pane's size and the Mac ending the view, and drops a size that is not one", () => {
+    let deliver: (value: unknown) => void = () => {};
+    const subscribe = vi.fn((_method: string, _params: unknown, listener: (value: unknown) => void) => { deliver = listener; return () => {}; });
+    const api = new HostApi({ request: vi.fn(), subscribe } as unknown as HostConnection);
+    const packets: unknown[] = [];
+    api.subscribeTerminal("worktree", "tab", (packet) => packets.push(packet));
+    expect(subscribe).toHaveBeenCalledWith("terminal.subscribe", expect.objectContaining({ worktreeId: "worktree", tabId: "tab", attachMode: "observe" }), expect.any(Function));
+    deliver({ subscriptionId: "s", type: "scrollback", serialized: "\x1b[31mhi", cols: 120, rows: 40 });
+    deliver({ type: "resized", cols: 100, rows: 30 });
+    deliver({ type: "resized", cols: 0, rows: 30 });
+    deliver({ type: "data", chunk: "more" });
+    deliver({ type: "error", error: { code: "unavailable", message: "Terminal output is unavailable." } });
+    expect(packets).toEqual([
+      { type: "scrollback", serialized: "\x1b[31mhi", cols: 120, rows: 40 },
+      { type: "resized", cols: 100, rows: 30 },
+      { type: "resized" },
+      { type: "data", chunk: "more" },
+      { type: "error", message: "Terminal output is unavailable." },
+    ]);
+  });
+});

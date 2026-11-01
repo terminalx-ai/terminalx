@@ -336,7 +336,12 @@ impl MobileConnection {
                             let request = connection.terminal_subscriptions.lock().unwrap()
                                 .get(packet["subscriptionId"].as_str().unwrap_or_default()).cloned();
                             if let Some(request) = request {
-                                connection.stream(&request,json!({"type":"data","chunk":packet["text"]}));
+                                if packet.get("cols").is_some() {
+                                    connection.stream(&request,json!({"type":"resized","cols":packet["cols"],"rows":packet["rows"]}));
+                                }
+                                if packet["text"].as_str().is_some_and(|text| !text.is_empty()) {
+                                    connection.stream(&request,json!({"type":"data","chunk":packet["text"]}));
+                                }
                             }
                         }
                     }
@@ -414,6 +419,9 @@ pub(super) fn dispatch(
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| promote_notes(manager, connection, params)))
         }
         "terminal.read" => parse_params(params).and_then(|params| read_terminal(connection, params)),
+        "terminal.open" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| open_terminal(connection, params)))
+        }
         "terminal.subscribe" => parse_params(params).and_then(|params| subscribe_terminal(connection, request_id(request), params)),
         "steerLease.queueInput" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(connection, params)))
@@ -446,7 +454,9 @@ fn capabilities() -> Value {
     // a new tab, as the desktop offers them.
     // `sessionCreate`: `sessions.options` and `sessions.create` start a session
     // as the desktop does. `macSettings`: `mac.settings` and `mac.setSettings`.
-    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1 })
+    // `terminal`: `terminal.open`, and terminal observations that carry the
+    // pane's size, so the phone can emulate the screen and drive it.
+    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 })
 }
 
 /// One tab, for a control that takes nothing else.
@@ -1524,6 +1534,13 @@ fn read_terminal(connection: &MobileConnection, params: TerminalParams) -> Resul
     connection.call("terminalRead", json!({"sessionId":params.worktree_id,"tabId":params.tab_id}))
 }
 
+/// Opening a tab's terminal view from the phone, as the desktop's terminal
+/// toggle does: the tab's agent is started in its terminal if it is not
+/// running, and a native Codex tab moves to Codex's own terminal for good.
+fn open_terminal(connection: &MobileConnection, params: TerminalParams) -> Result<Value> {
+    connection.call("openTerminal", json!({"sessionId":params.worktree_id,"tabId":params.tab_id}))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalSubscribeParams {
@@ -2248,6 +2265,15 @@ mod tests {
         .unwrap();
         assert_eq!(with_attachment.attachments.len(), 1);
         assert!(validate_attachment_payloads(&with_attachment.attachments).is_ok());
+    }
+
+    #[test]
+    fn the_terminal_view_is_offered_with_the_requests_it_needs() {
+        // A phone shows its Terminal view only to a Mac that names this.
+        assert_eq!(capabilities()["terminal"], 1);
+        let open: TerminalParams = serde_json::from_value(json!({ "worktreeId": "worktree", "tabId": "tab" })).unwrap();
+        assert_eq!((open.worktree_id.as_str(), open.tab_id.as_str()), ("worktree", "tab"));
+        assert!(serde_json::from_value::<TerminalParams>(json!({ "worktreeId": "worktree", "tabId": "tab", "force": true })).is_err());
     }
 
     #[test]

@@ -653,6 +653,20 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         result?;
         return Ok(serde_json::json!({"accepted":true,"bytesWritten":text.len()}));
     }
+    if method == "openTerminal" {
+        // What the desktop's terminal toggle does: a native Codex tab moves
+        // to Codex's own terminal (refused mid-turn), then the tab's agent is
+        // started if it is not running. The permit is checked, then let go:
+        // both steps take admission, which goes before a permit (#702).
+        // Neither writes input, and both are idempotent.
+        let session = string("sessionId")?;
+        let tab = string("tabId")?;
+        let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
+        drop(permit.enter()?);
+        manager.codex_stdio_to_terminal(session, tab)?;
+        manager.ensure_started(session, tab)?;
+        return Ok(serde_json::json!({"opened":true}));
+    }
     if method == "send" {
         let session = string("sessionId")?;
         let tab = string("tabId")?;
@@ -1054,6 +1068,99 @@ mod repeat_tests {
         registry.1.lock().unwrap().items.clear();
         lifetime.command("runtime.detach",lease).unwrap();
         assert!(manager.terminals().panes().is_empty(),"a repeat must not launch a provider");
+    }
+}
+
+/// Opening a tab's terminal from the phone, as the desktop's toggle does,
+/// against real grants: a read-only phone is refused, and a driver's moves a
+/// native Codex tab to Codex's terminal and starts it there. A stand-in Codex
+/// on the lookup path is what launches; runs in a child process.
+#[cfg(test)]
+mod open_terminal_tests {
+    use super::*;
+    use crate::{harness::host::Host, pty, session::SessionManager, sink, store};
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "TERMINALX_TEST_MOBILE_OPEN_TERMINAL_CHILD";
+    const STAND_IN: &str = "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf '  --no-daemon  Run without the shared daemon\\n'; exit 0; fi\nprintf 'stand-in codex %s\\n' \"$*\"\nexec sleep 30\n";
+
+    #[test]
+    fn a_driving_phone_opens_a_native_codex_tab_in_codexs_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "local_runtime::mobile::open_terminal_tests::open_terminal_child", "--nocapture"])
+            .env(CHILD, "1").env("TERMINALX_HOME", dir.path().join("store")).env("CODEX_HOME", dir.path().join("codex"))
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+            .spawn().unwrap();
+        let until = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if Instant::now() >= until {
+                child.kill().unwrap(); child.wait().unwrap();
+                panic!("mobile open-terminal fixture exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let log = std::fs::read_to_string(dir.path().join("child.log")).unwrap();
+        assert!(status.success(), "{log}");
+        assert!(log.contains("1 passed"), "the fixture did not run: {log}");
+    }
+
+    #[test]
+    fn open_terminal_child() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var(CHILD).is_err() { return; }
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), STAND_IN).unwrap();
+        std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(crate::binpath::set_priority_dir(&bin));
+        let entry: store::index::SessionEntry = serde_json::from_value(json!({
+            "id":"open","projectPath":root,"cwd":root,"title":"fixture",
+            "created":store::index::now(),"modified":store::index::now(),
+            "tabs":[{"id":"native","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"auto","created":store::index::now()}]
+        })).unwrap();
+        store::index::save(&[entry]).unwrap();
+        let device = |id: &str, scope: &str| json!({"id":id,"label":"Fixture","platform":"test","token":format!("{id}-hash"),
+            "scope":scope,"provenance":"explicit","bindingGeneration":0,"createdAt":store::index::now()});
+        store::write_json(&root.join("devices.json"), &json!({"devices":[device("driver","driver"),device("viewer","viewer")]})).unwrap();
+        let manager = SessionManager::new(Arc::new(sink::BroadcastSink::new(256)),Arc::new(sink::NoObserver),
+            Arc::new(Host::new()),Arc::new(pty::Terminals::new()),Arc::new(Default::default()),
+            Arc::new(Default::default()),crate::hooks::prepare_control().unwrap());
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let lease = lifetime.command("runtime.attach",json!({"protocol":1})).unwrap();
+        let actor: Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+        manager.mobile.register(&lifetime,actor.clone(),"phone","driver").unwrap();
+        manager.mobile.register(&lifetime,actor.clone(),"watch","viewer").unwrap();
+        let open = |connection: &str| execute(&manager,&lifetime,"openTerminal",json!({"actor":actor,"connection":connection,"sessionId":"open","tabId":"native"}));
+        let transport = || store::index::get("open").unwrap().tab("native").unwrap().transport;
+
+        let refused = open("watch").unwrap_err();
+        assert!(format!("{refused:#}").contains("read-only"), "{refused:#}");
+        assert_eq!(transport(), store::index::AgentTransport::ExperimentalCodexStdio, "a viewer moves nothing");
+        assert!(manager.terminals().panes().is_empty(), "a viewer starts nothing");
+
+        assert_eq!(open("phone").unwrap(), json!({"opened":true}));
+        assert_eq!(transport(), store::index::AgentTransport::Pty);
+        let pane = manager.pane_of("open","native").expect("Codex runs in the tab's terminal").pane_id;
+        let until = Instant::now() + Duration::from_secs(20);
+        let shown = loop {
+            let output = String::from_utf8_lossy(&manager.terminals().read_output(&pane).unwrap_or_default()).into_owned();
+            if output.contains("stand-in codex") || Instant::now() >= until { break output; }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(shown.contains("stand-in codex --no-daemon"), "the terminal shows Codex's own interface: {shown}");
+        // Opening it again changes nothing: the same Codex keeps its pane.
+        assert_eq!(open("phone").unwrap(), json!({"opened":true}));
+        assert_eq!(manager.pane_of("open","native").unwrap().pane_id, pane);
+        assert_eq!(manager.terminals().panes().len(), 1);
+
+        manager.terminals().kill_all();
+        lifetime.command("runtime.detach",lease).unwrap();
     }
 }
 

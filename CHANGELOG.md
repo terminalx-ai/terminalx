@@ -41,6 +41,15 @@
   phones cannot start sessions.
 - Settings → This Mac on the phone turns Native Codex on or off for the Mac's
   next Codex sessions; the Mac's own Settings follows it while open.
+- Open a tab's terminal view on the phone, as on the desktop. The agent's own
+  screen is emulated on the phone with the desktop's terminal (xterm.js) at the
+  size the Mac draws it, so full-screen CLIs like Codex and Claude Code show as
+  they do there. Type into it directly or send text whole, with Esc, Tab, Ctrl,
+  arrow and Enter keys sent as the desktop sends them. While the phone types,
+  desktop typing waits, and leaving the view gives it back. Opening the terminal
+  starts the tab's agent if it is not running, and moves a native Codex tab to
+  Codex's own terminal on the same conversation, as the desktop does. Shown only
+  for Macs that support it.
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
 - Sending a message or worktree note again after the connection dropped no
