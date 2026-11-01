@@ -17,7 +17,7 @@ pub(super) fn observed_full_pipe() {
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
-        "phone-input", "phone-compact", "phone-revoked", "share-input", "share-ended", "host-while-shared"] {
+        "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -272,9 +272,32 @@ fn remote_input_fixture(case: &str) {
         // As `mobile::execute` sends it: who it is from, then what was typed.
         let typed = if case == "phone-compact" { "/compact" } else { "from the phone" };
         let agent = format!("[TerminalX Effective User v1] {{\"authority\":\"host\",\"userId\":\"driver\"}}\n{typed}");
-        if case == "phone-revoked" { std::fs::write(bin.join("hold"), "").unwrap(); }
+        if matches!(case, "phone-revoked" | "phone-reconcile-race") { std::fs::write(bin.join("hold"), "").unwrap(); }
+        let grant = permit.grant.clone();
         manager.send_mobile("stdio-owner", "tab", agent.clone(), typed.into(), Vec::new(), permit).unwrap();
         match case {
+            "phone-reconcile-race" => {
+                // A phone's reconcile holds its grant, then reads the tab
+                // (`mobile::execute`). The writer, reaching that phone's
+                // prompt meanwhile, must wait for the grant without holding
+                // the tab, or neither can go on.
+                let (held_tx, held_rx) = mpsc::channel();
+                let (read_tx, read_rx) = mpsc::channel();
+                let reconciling = manager.clone();
+                let reconciler = std::thread::spawn(move || {
+                    let _held = grant.enter().unwrap();
+                    held_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(300));
+                    read_tx.send(reconciling.load_events("stdio-owner", "tab").map(|_| ())).unwrap();
+                });
+                held_rx.recv_timeout(WAIT).unwrap();
+                std::fs::remove_file(bin.join("hold")).unwrap();
+                read_rx.recv_timeout(WAIT).expect("a phone reconcile and the native writer deadlocked").unwrap();
+                reconciler.join().unwrap();
+                idle_after(4);
+                assert_eq!(last_frame()["params"]["input"][0]["text"], agent.as_str());
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
             "phone-input" => {
                 idle_after(4);
                 assert_eq!(methods(), ["initialize", "initialized", "thread/resume", "turn/start"]);
@@ -345,7 +368,7 @@ fn rt_bound(manager: &SessionManager) -> bool {
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
     if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
-    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
+    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({
@@ -451,7 +474,7 @@ fn child_fixture() {
         drop(rt);
         // There is deliberately no child: a stale, entirely unsent control
         // must retire before touching stdin and without failing the owner.
-        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame).unwrap();
+        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, None).unwrap();
         assert!(matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(e) if !e.blocked));
         return;
     }
@@ -478,7 +501,7 @@ fn child_fixture() {
         let (blocked, full_pipe) = mpsc::channel();
         let writer = std::thread::spawn(move || {
             FULL_PIPE.with(|hook| *hook.borrow_mut() = Some(blocked));
-            finished.send(writer_manager.write_codex_frame(&runtime, &launch, frame)).unwrap();
+            finished.send(writer_manager.write_codex_frame(&runtime, &launch, frame, None)).unwrap();
         });
         full_pipe.recv_timeout(WAIT).unwrap();
         // Buffered stdout and Stop must both advance despite the full stdin.
