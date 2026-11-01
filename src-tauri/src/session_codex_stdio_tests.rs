@@ -16,7 +16,7 @@ pub(super) fn observed_full_pipe() {
 
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit"] {
+    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -56,9 +56,85 @@ impl Sink for GateSink {
     fn drained(&self, receipt: &TerminalReceipt) { self.sink.drained(receipt); }
 }
 
+/// Stands in for Codex at the process boundary: answers the version probe and
+/// the resume handshake, records each frame it is sent, then plays one turn.
+const RESUMING_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+read -r line; printf '%s\n' "$line" >> "$here/received"
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line; printf '%s\n' "$line" >> "$here/received"
+read -r line; printf '%s\n' "$line" >> "$here/received"
+printf '{"id":2,"result":{"thread":{"id":"%s"}}}\n' "$(cat "$here/answer")"
+read -r line; printf '%s\n' "$line" >> "$here/received"
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1"}}}'
+printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}'
+printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"m1","delta":"resumed"}}'
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}'
+exec sleep 10
+"#;
+
+/// A tab whose connection ended (app restart, Stop) keeps its thread: the next
+/// send resumes that thread in a new connection, and a reply naming any other
+/// thread gets no prompt.
+fn resume_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("answer"), if case == "resume-thread" { "thread-1" } else { "thread-2" }).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "providerSessionId":"thread-1", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    manager.send("stdio-owner", "tab", "carry on".into(), Vec::new()).unwrap();
+    let events = || -> Vec<AgentEvent> { store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap() };
+    let until = Instant::now() + WAIT;
+    let settled = |events: &[AgentEvent]| events.iter().any(|event| matches!(&event.payload, Payload::TurnCompleted { .. } | Payload::Error { .. }));
+    while !settled(&events()) {
+        assert!(Instant::now() < until, "{case}: no outcome: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let received: Vec<serde_json::Value> = std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let methods: Vec<_> = received.iter().map(|frame| frame["method"].as_str().unwrap()).collect();
+    assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().provider_session_id.as_deref(), Some("thread-1"));
+    assert_eq!(received[2]["params"]["threadId"], "thread-1");
+    assert_eq!(received[2]["params"]["excludeTurns"], true);
+    let events = events();
+    if case == "resume-thread" {
+        assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
+        assert_eq!(received[3]["params"]["input"][0]["text"], "carry on");
+        let said: Vec<_> = events.iter().filter_map(|event| match &event.payload {
+            Payload::AssistantText { text, .. } => Some(text.as_str()),
+            Payload::TurnCompleted { status, .. } => Some(if *status == TurnStatus::Ok { "ok" } else { "not ok" }),
+            _ => None,
+        }).collect();
+        assert_eq!(said, ["resumed", "ok"]);
+        assert!(rt_bound(&manager), "the resumed thread must own compaction status again");
+    } else {
+        assert_eq!(methods, ["initialize", "initialized", "thread/resume"], "no prompt for another thread");
+        assert!(events.iter().any(|event| matches!(&event.payload, Payload::Error { detail: Some(detail), .. } if detail.contains("resumed a different thread"))), "{:?}", events.iter().map(|event| &event.payload).collect::<Vec<_>>());
+    }
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
+fn rt_bound(manager: &SessionManager) -> bool {
+    manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().stdio_compaction.is_some()
+}
+
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
+    if case.starts_with("resume-") { return resume_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({
@@ -75,7 +151,7 @@ fn child_fixture() {
     let (release, gate) = mpsc::channel();
     let (settled, done) = mpsc::channel();
     let mut rt = rt_arc.lock().unwrap();
-    let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into());
+    let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into(), None);
     let frame = if matches!(case.as_str(), "expired-input-pipe" | "stale-control") {
         engine.thread = Some("thread".into());
         engine.ready = true;
