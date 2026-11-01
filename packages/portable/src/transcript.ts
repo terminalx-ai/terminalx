@@ -31,6 +31,8 @@ export interface Delivery {
   inputOccupied?: boolean;
   /** The agent dropped its turn before answering it, and took another prompt in its place. */
   replaced?: boolean;
+  /** Stopped while it waited on the agent's input box: never typed. */
+  withdrawn?: boolean;
   /** What was sent, when the agent received something else; `text` is then what it received. */
   sent?: string;
 }
@@ -156,8 +158,8 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   const found = pullQueued(turns, seq);
   if (!found) return undefined;
   const { item, turn } = found;
-  const { inputOccupied, replaced, sent } = item;
-  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, sent }, from: turn };
+  const { inputOccupied, replaced, withdrawn, sent } = item;
+  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, sent }, from: turn };
 }
 
 /** The reader's message published under `seq`, wherever it is drawn now: a turn's prompt, or a note in a turn's work. */
@@ -338,6 +340,27 @@ export function buildTranscript(events: AgentEvent[], live: boolean, options: { 
         // Drawn where it was, never answered: what the agent took in its place has a message of its own.
         const message = findMessage(turns, payload.promptSeq);
         if (message) message.replaced = true;
+        break;
+      }
+      case "prompt_withdrawn": {
+        const message = findMessage(turns, payload.promptSeq);
+        if (message) {
+          message.withdrawn = true;
+          message.inputOccupied = undefined;
+        }
+        break;
+      }
+      case "prompt_joined": {
+        // Received inside another message's prompt, which shows it: its own bubble goes, and what was sent stays with that one.
+        const taken = takeMessage(turns, payload.promptSeq);
+        if (!taken) break;
+        const { prompt, from } = taken;
+        const into = findMessage(turns, payload.intoSeq);
+        if (into) into.sent = [into.sent ?? into.text, prompt.text].join("\n\n");
+        if (!from.prompt && !from.work.length && !from.completed) {
+          turns.splice(turns.indexOf(from), 1);
+          if (current === from) current = null;
+        }
         break;
       }
       case "prompt_changed": {

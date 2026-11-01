@@ -775,3 +775,58 @@ describe("a message on its way to the agent", () => {
     expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "queued", seq: queued.seq, inputOccupied: undefined }));
   });
 });
+
+// #722, review 1: a message stopped while it waited on the input box, and messages the agent received as one prompt.
+describe("a message that never went, or went with others", () => {
+  it("marks a message withdrawn while it waited on the input box, wherever it is drawn", () => {
+    const prompt = ev({ type: "user_message", text: "run it", queued: false });
+    const queued = ev({ type: "user_message", text: "and lint", queued: true });
+    const t = buildTranscript([
+      prompt,
+      queued,
+      ev({ type: "input_occupied", promptSeq: prompt.seq, occupied: true }),
+      ev({ type: "input_occupied", promptSeq: queued.seq, occupied: true }),
+      ev({ type: "prompt_withdrawn", promptSeq: prompt.seq }),
+      ev({ type: "input_occupied", promptSeq: queued.seq, occupied: false }),
+      ev({ type: "prompt_withdrawn", promptSeq: queued.seq }),
+      ev({ type: "turn_completed", status: "aborted", authFailed: false }),
+    ], true);
+    expect(t.turns[0].prompt).toMatchObject({ text: "run it", withdrawn: true });
+    expect(t.turns[0].prompt?.inputOccupied).toBeUndefined();
+    expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "queued", seq: queued.seq, withdrawn: true }));
+  });
+
+  it("folds a message the agent received inside another's prompt into that one, keeping what was sent", () => {
+    const first = ev({ type: "user_message", text: "fix the build", queued: false });
+    const lint = ev({ type: "user_message", text: "also lint", queued: true });
+    const tests = ev({ type: "user_message", text: "and run the tests", queued: true });
+    const t = buildTranscript([
+      first,
+      lint,
+      tests,
+      ev({ type: "assistant_text", text: "Fixed." }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "prompt_changed", promptSeq: lint.seq, text: "half typed also lint and run the tests" }),
+      ev({ type: "turn_started", promptSeq: lint.seq }),
+      ev({ type: "prompt_joined", promptSeq: tests.seq, intoSeq: lint.seq }),
+      ev({ type: "assistant_text", text: "Linted and tested." }),
+    ], true);
+    expect(t.turns).toHaveLength(2);
+    expect(t.turns[1].prompt).toMatchObject({ text: "half typed also lint and run the tests", sent: "also lint\n\nand run the tests", seq: lint.seq });
+    const drawn = t.turns.flatMap((turn) => turn.work.filter((item) => item.kind === "queued" || item.kind === "message"));
+    expect(drawn).toEqual([]);
+  });
+
+  it("drops a turn that only ever held the folded message", () => {
+    const first = ev({ type: "user_message", text: "also lint", queued: false });
+    const second = ev({ type: "user_message", text: "and run the tests", queued: false });
+    const t = buildTranscript([
+      first,
+      second,
+      ev({ type: "prompt_changed", promptSeq: first.seq, text: "also lint and run the tests" }),
+      ev({ type: "prompt_joined", promptSeq: second.seq, intoSeq: first.seq }),
+    ], true);
+    expect(t.turns).toHaveLength(1);
+    expect(t.turns[0].prompt).toMatchObject({ seq: first.seq, sent: "also lint\n\nand run the tests" });
+  });
+});
