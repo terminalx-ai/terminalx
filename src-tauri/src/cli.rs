@@ -47,6 +47,7 @@ Usage:
   terminalx status [--json]
   terminalx projects list [--json]
   terminalx sessions list [--project PROJECT|--quick] [--json]
+  terminalx sessions list --worktree WORKTREE [--project PROJECT] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
       [--title TEXT] [--name NAME] [--experimental-codex-stdio]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
@@ -88,7 +89,8 @@ Usage:
   terminalx cloud resume CLOUD_WORKSPACE [--json]
   terminalx worktrees list [--project PROJECT] [--json]
   terminalx worktrees rename WORKTREE --name NAME [--project PROJECT] [--json]
-  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--force] [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --dry-run [--sessions ID,ID] [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--sessions ID,ID] [--force] [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
   terminalx issues view ISSUE [--project PROJECT] [--provider github|linear] [--comments] [--json]
@@ -534,14 +536,18 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let org = tokens.option("--org")?;
             let cloud = tokens.flag("--cloud")?;
             let quick = tokens.flag("--quick")?;
+            let worktree = tokens.option("--worktree")?;
             let in_cloud = cloud || org.is_some() || project.as_deref().is_some_and(is_cloud_key);
             if quick && (in_cloud || project.is_some()) {
                 return Err(invalid("--quick lists the chats that have no project; it cannot be combined with --project, --cloud or --org."));
             }
+            if worktree.is_some() && (in_cloud || quick) {
+                return Err(invalid("--worktree lists the sessions in a local worktree, quick chats included; it cannot be combined with --quick, --cloud or --org."));
+            }
             if in_cloud {
                 cloud_rpc("sessions.list", json!({"project": project, "org": org}), tokens)
             } else {
-                rpc("sessions.list", json!({"project": project, "quick": quick}), tokens)
+                rpc("sessions.list", json!({"project": project, "quick": quick, "worktree": worktree}), tokens)
             }
         }
         "show" => {
@@ -784,10 +790,18 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let project = tokens.option("--project")?;
             let confirmed = tokens.flag("--yes")?;
             let force = tokens.flag("--force")?;
+            let dry_run = tokens.flag("--dry-run")?;
+            if confirmed && dry_run {
+                return Err(invalid("--dry-run removes nothing; it cannot be combined with --yes."));
+            }
+            // `--sessions ""` names no sessions: the worktree must hold none.
+            let sessions = tokens.option("--sessions")?.map(|list| {
+                list.split(',').map(str::trim).filter(|id| !id.is_empty()).map(String::from).collect::<Vec<_>>()
+            });
             let worktree = tokens.required_front("worktree")?;
             rpc(
                 "worktrees.delete",
-                json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force}),
+                json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force, "dryRun": dry_run, "sessions": sessions}),
                 tokens,
             )
         }
@@ -1169,8 +1183,8 @@ mod tests {
         assert!(parse(&args(&["sessions", "create", "--agent", "claude", "--prompt", "hi"])).is_err());
 
         let (command, params, _) = rpc_of(&["sessions", "list", "--quick"]);
-        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": null, "quick": true})));
-        assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false}));
+        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": null, "quick": true, "worktree": null})));
+        assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false, "worktree": null}));
         assert!(parse(&args(&["sessions", "list", "--quick", "--project", "api"])).is_err());
         assert!(parse(&args(&["sessions", "list", "--quick", "--cloud"])).is_err());
     }
@@ -1612,6 +1626,36 @@ mod tests {
         assert_eq!(command, "worktrees.delete");
         assert_eq!(params["confirmed"], true);
         assert_eq!(params["worktree"], "feature");
+        assert_eq!((&params["dryRun"], &params["sessions"]), (&json!(false), &json!(null)), "naming no sessions is not naming none");
+    }
+
+    /// #719: the delete can be previewed, and told which sessions the caller
+    /// saw; the listing can ask for exactly what the delete would take.
+    #[test]
+    fn a_worktree_delete_can_be_previewed_and_name_the_sessions_it_expects() {
+        let (command, params, _) = rpc_of(&["worktrees", "delete", "zero-comparison", "--dry-run", "--project", "raccoon"]);
+        assert_eq!(command, "worktrees.delete");
+        assert_eq!(params, json!({"project": "raccoon", "worktree": "zero-comparison", "confirmed": false, "force": false, "dryRun": true, "sessions": null}));
+
+        let (_, params, _) = rpc_of(&["worktrees", "delete", "zero-comparison", "--yes", "--sessions", "01a1787e, 01a174ef-2919,"]);
+        assert_eq!((&params["confirmed"], &params["sessions"]), (&json!(true), &json!(["01a1787e", "01a174ef-2919"])));
+        // An empty list says the worktree should hold no sessions at all.
+        assert_eq!(rpc_of(&["worktrees", "delete", "w", "--yes", "--sessions", ""]).1["sessions"], json!([]));
+        assert!(parse(&args(&["worktrees", "delete", "w", "--yes", "--dry-run"])).is_err());
+        assert!(parse(&args(&["worktrees", "delete", "w", "--yes", "--sessions"])).is_err(), "--sessions needs a value");
+
+        let (command, params, _) = rpc_of(&["sessions", "list", "--worktree", "zero-comparison", "--project", "raccoon"]);
+        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": "raccoon", "quick": false, "worktree": "zero-comparison"})));
+        for refused in [&["--quick"][..], &["--cloud"], &["--org", "Acme"]] {
+            let mut values = vec!["sessions", "list", "--worktree", "w"];
+            values.extend_from_slice(refused);
+            assert!(parse(&args(&values)).is_err(), "{refused:?}");
+        }
+        for text in [help_text(), GUIDE.to_string()] {
+            for usage in ["sessions list --worktree", "--dry-run", "--sessions"] {
+                assert!(text.contains(usage), "missing {usage}");
+            }
+        }
     }
 
     #[test]

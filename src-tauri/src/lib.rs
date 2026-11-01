@@ -133,6 +133,7 @@ mod terminal_perf;
 mod work_claims;
 mod workspaces;
 mod worktree_cleanup;
+mod worktree_control;
 
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
