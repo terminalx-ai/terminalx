@@ -914,3 +914,87 @@ describe("mobile latest conversation edge", () => {
     } finally { vi.useRealTimers(); }
   });
 });
+
+describe("the phone's terminal view, as on the desktop", () => {
+  const terminalMac = () => {
+    mocks.app.api.features = async () => ({ terminal: 1 });
+    mocks.app.api.openTerminal = vi.fn(async () => ({ opened: true }));
+    mocks.app.api.queueInput = vi.fn(async () => ({ accepted: true }));
+  };
+  const show = async (packet: unknown) => { await act(async () => { mocks.terminalListeners.get("claude")!(packet); }); };
+  const sent = () => mocks.app.api.queueInput.mock.calls.map(([, , text]: string[]) => text);
+  const openTerminalView = async () => {
+    await render();
+    await click("Terminal");
+    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+  };
+
+  it("opens the tab's terminal on the Mac before watching it, and draws the agent's screen", async () => {
+    terminalMac();
+    await openTerminalView();
+    expect(mocks.app.api.openTerminal).toHaveBeenCalledWith("worktree", "claude");
+    expect(mocks.app.api.openTerminal.mock.invocationCallOrder[0]).toBeLessThan(mocks.app.api.subscribeTerminal.mock.invocationCallOrder[0]);
+    // The chat's transcript requests stop: only the terminal is shown.
+    await show({ type: "scrollback", serialized: "\x1b[?1049h\x1b[2J\x1b[1;1H\x1b[1mCodex\x1b[0m ready\x1b[3;1H› ", cols: 40, rows: 4 });
+    await vi.waitFor(() => expect(container.textContent).toContain("Codex ready"));
+    expect(container.textContent).not.toContain("\x1b[");
+    await show({ type: "resized", cols: 60, rows: 6 });
+    await show({ type: "data", chunk: "\x1b[2J\x1b[1;1Hredrawn at 60 columns" });
+    await vi.waitFor(() => expect(container.textContent).toContain("redrawn at 60 columns"));
+    expect(container.textContent).not.toContain("Codex ready");
+  });
+
+  it("types keys as the desktop terminal sends them, in the program's modes", async () => {
+    terminalMac();
+    await openTerminalView();
+    await show({ type: "scrollback", serialized: "$ ", cols: 40, rows: 4 });
+    await vi.waitFor(() => expect(button("Escape").disabled).toBe(false));
+    await type("l");
+    await click("Escape");
+    await click("Up");
+    await click("Control"); await type("c");
+    // A full-screen program turns on application cursor keys and bracketed paste.
+    await show({ type: "data", chunk: "\x1b[?1h\x1b[?2004h" });
+    await vi.waitFor(async () => { await click("Up"); expect(sent().at(-1)).toBe("\x1bOA"); });
+    // Sent whole as a paste (line breaks to Enter is `pasteSequence`'s, in keys.test.ts).
+    await click("Buffered");
+    await type("git status");
+    await click("Send terminal input");
+    expect(sent().slice(0, 4)).toEqual(["l", "\x1b", "\x1b[A", "\x03"]);
+    expect(sent().at(-1)).toBe("\x1b[200~git status\x1b[201~");
+  });
+
+  it("says why the terminal cannot open, and opens it again on request", async () => {
+    terminalMac();
+    mocks.app.api.openTerminal.mockResolvedValueOnce({ opened: false, message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." });
+    await render();
+    await click("Terminal");
+    await vi.waitFor(() => expect(container.textContent).toContain("Wait for Codex to finish this turn"));
+    expect(mocks.app.api.subscribeTerminal).not.toHaveBeenCalled();
+    expect(button("Escape").disabled).toBe(true);
+    await click("Try again");
+    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+    expect(mocks.app.api.openTerminal).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the Mac's reason when typing is refused, and keeps the keys for another try", async () => {
+    terminalMac();
+    mocks.app.api.queueInput.mockResolvedValueOnce({ accepted: false, message: "Another mobile client or terminal instance owns this driver lease." });
+    await openTerminalView();
+    await show({ type: "scrollback", serialized: "$ ", cols: 40, rows: 4 });
+    await vi.waitFor(() => expect(button("Escape").disabled).toBe(false));
+    await click("Escape");
+    expect(container.textContent).toContain("owns this driver lease");
+    await click("Tab");
+    expect(sent()).toEqual(["\x1b", "\t"]);
+    expect(container.textContent).not.toContain("owns this driver lease");
+  });
+
+  it("releases the tab's driver lease when the view goes away", async () => {
+    terminalMac();
+    await openTerminalView();
+    await click("Chat");
+    expect(mocks.app.api.releaseInput).toHaveBeenCalledWith("worktree", "claude");
+    expect(mocks.terminalListeners.has("claude")).toBe(false);
+  });
+});

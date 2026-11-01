@@ -212,6 +212,9 @@ importers:
       '@terminalx/portable':
         specifier: workspace:*
         version: link:../packages/portable
+      '@xterm/headless':
+        specifier: 6.0.0
+        version: 6.0.0
       buffer:
         specifier: 6.0.3
         version: 6.0.3
@@ -2863,6 +2866,9 @@ packages:
 
   '@xterm/addon-webgl@0.19.0':
     resolution: {integrity: sha512-b3fMOsyLVuCeNJWxolACEUED0vm7qC0cy4wRvf3oURSzDTYVQiGPhTnhWZwIHdvC48Y+oLhvYXnY4XDXPoJo6A==}
+
+  '@xterm/headless@6.0.0':
+    resolution: {integrity: sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw==}
 
   '@xterm/xterm@6.0.0':
     resolution: {integrity: sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==}
@@ -9357,6 +9363,8 @@ snapshots:
   '@xterm/addon-fit@0.11.0': {}
 
   '@xterm/addon-webgl@0.19.0(patch_hash=bbe00f1d880385d74f3812bc9418b0fd773f8db199245ff02a4071f3bc90f266)': {}
+
+  '@xterm/headless@6.0.0': {}
 
   '@xterm/xterm@6.0.0': {}
 

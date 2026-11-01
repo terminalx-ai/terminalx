@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { FlatList, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { File as ExpoFile } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
@@ -25,9 +25,9 @@ import { SessionControls } from "@mobile/ui/SessionControls";
 import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useConversationState } from "@mobile/state/conversation-state";
+import { FOREGROUND as TERMINAL_FOREGROUND, TerminalScreen, type Row as ScreenRow } from "@mobile/terminal/screen";
+import { controlSequence, keySequence, pasteSequence, type TerminalKey } from "@mobile/terminal/keys";
 
-// Keep the mobile terminal unavailable until its rendering and input are ready.
-const MOBILE_TERMINAL_ENABLED = false;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 8;
 /** Failed reconnect attempts before the transcript card stops saying "Reconnecting" and says the Mac isn't reachable. */
@@ -51,6 +51,15 @@ export default function SessionScreen() {
   const summary = app.sessions.find((item) => item.id === sessionId);
   const tabId = params.tabId ?? summary?.tabs[0]?.id ?? "";
   const [view, setView] = useState<"chat" | "terminal">("chat");
+  // An older Mac neither sizes its terminal output nor opens a tab's terminal: it gets no Terminal view.
+  const [terminalOffered, setTerminalOffered] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setTerminalOffered(false);
+    void app.api?.features().then((features) => { if (active) setTerminalOffered(features.terminal === 1); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [app.api, app.activeHost?.id]);
+  const terminal = terminalOffered && view === "terminal";
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
   const key = conversationKey(app.activeHost.id, sessionId, tabId);
@@ -63,8 +72,8 @@ export default function SessionScreen() {
       {summary.tabs.length > 1 ? <ConversationPicker key={JSON.stringify([app.activeHost.id, sessionId])} session={summary} selectedTabId={tabId} horizontal onSelect={({ href }) => router.setParams({ ...href.params, hostId: app.activeHost!.id })} /> : null}
     </> : null}
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
-    {MOBILE_TERMINAL_ENABLED ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
-    {!MOBILE_TERMINAL_ENABLED || view === "chat" ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} available={available} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
+    {terminalOffered ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
+    {!terminal ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} available={available} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
   </View>;
 }
 
@@ -389,53 +398,112 @@ function NoteCard({ note, first }: { note: ChatNote; first: boolean }) {
   return <Card style={styles.note}>{first ? <Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text> : null}<LinkedText style={[styles.body, { color: palette.ink }]}>{note.body}</LinkedText></Card>;
 }
 
+/** The keys a phone keyboard lacks, in the order a terminal user reaches for them. */
+const TERMINAL_KEYS: { key: TerminalKey; label: string; name: string }[] = [
+  { key: "escape", label: "esc", name: "Escape" }, { key: "tab", label: "tab", name: "Tab" },
+  { key: "up", label: "↑", name: "Up" }, { key: "down", label: "↓", name: "Down" }, { key: "left", label: "←", name: "Left" }, { key: "right", label: "→", name: "Right" },
+  { key: "enter", label: "⏎", name: "Enter" },
+];
+
+/**
+ * The tab's terminal, as on the desktop: the agent's own screen, emulated
+ * here from the pane's output at the pane's size, and typing that holds the
+ * tab's driver lease (the desktop cannot type into it meanwhile) until this
+ * view goes away. Opening it starts the tab's agent in its terminal, and moves
+ * a native Codex tab to Codex's own terminal for good, as the desktop does.
+ */
 function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string; sessionId: string; tabId: string; connected: boolean }) {
   const app = useApp();
   const { palette } = useTheme();
   const stateKey = conversationKey(hostId, sessionId, tabId);
-  const [output, setOutput] = useConversationState(`${stateKey}:output`, "");
   const [mode, setMode] = useConversationState<"direct" | "buffered">(`${stateKey}:mode`, "direct");
   const [input, setInput] = useConversationState(`${stateKey}:input`, "");
-  const [inputEnabled, setInputEnabled] = useState(true);
-  const outputRef = useRef(output);
+  const [rows, setRows] = useState<ScreenRow[]>([]);
+  const [opening, setOpening] = useState(true);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [control, setControl] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const screen = useRef<TerminalScreen | null>(null);
 
   useEffect(() => {
     if (!connected) return;
     let active = true;
-    let streamed = false;
-    void app.api.readTerminal(sessionId, tabId).then((text) => { if (active && !streamed && text !== null) { outputRef.current = text.slice(-100_000); setOutput(outputRef.current); } });
-    const stream = app.api.subscribeTerminal(sessionId, tabId, (value) => {
+    let unsubscribe = () => {};
+    let frame: ReturnType<typeof setTimeout> | null = null;
+    // Output is parsed in order, and drawn at most every 50 ms however fast it comes.
+    let parsed = Promise.resolve();
+    const draw = () => { if (!frame) frame = setTimeout(() => { frame = null; if (active && screen.current) setRows(screen.current.lines()); }, 50); };
+    const apply = (step: (current: TerminalScreen) => void | Promise<void>) => {
+      parsed = parsed.then(async () => { if (active && screen.current) await step(screen.current); }).then(draw, draw);
+    };
+    setOpening(true);
+    setProblem(null);
+    const ended = app.connection.onEvent((message) => {
+      if (active && message.method === "terminal.closed") setProblem((message.params as { message?: string } | null)?.message ?? "The Mac ended the terminal view.");
+    });
+    void app.api.openTerminal(sessionId, tabId).then((opened) => {
       if (!active) return;
-      const next = value.type === "scrollback" || value.type === "resized" ? value.serialized : value.type === "data" ? value.chunk : undefined;
-      if (typeof next !== "string") return;
-      streamed = true;
-      outputRef.current = value.type === "data" ? `${outputRef.current}${next}`.slice(-100_000) : next.slice(-100_000);
-      setOutput(outputRef.current);
-    });
-    const events = app.connection.onEvent((message) => {
-      if (!active || message.method !== "terminal.output") return;
-      const params = message.params as { tabId?: unknown; text?: unknown } | null;
-      if (params?.tabId === tabId && typeof params.text === "string") {
-        streamed = true;
-        outputRef.current = `${outputRef.current}${params.text}`.slice(-100_000);
-        setOutput(outputRef.current);
-      }
-    });
-    return () => { active = false; stream(); events(); };
-  }, [app.api, app.connection, connected, sessionId, tabId, setOutput]);
+      setOpening(false);
+      if (!opened.opened) { setProblem(opened.message); return; }
+      unsubscribe = app.api.subscribeTerminal(sessionId, tabId, (packet) => {
+        if (!active) return;
+        if (packet.type === "error") setProblem(packet.message ?? "The Mac ended the terminal view.");
+        else if (packet.type === "scrollback") {
+          // A new subscription (also after a reconnect) starts from the retained output.
+          screen.current?.dispose();
+          screen.current = new TerminalScreen(packet.cols ?? 80, packet.rows ?? 24);
+          setProblem(null);
+          apply((current) => current.write(packet.serialized ?? ""));
+        } else if (packet.type === "resized" && packet.cols && packet.rows) apply((current) => current.resize(packet.cols!, packet.rows!));
+        else if (packet.type === "data" && packet.chunk) apply((current) => current.write(packet.chunk!));
+      });
+    }, (cause: unknown) => { if (active) { setOpening(false); setProblem(cause instanceof Error ? cause.message : String(cause)); } });
+    return () => { active = false; if (frame) clearTimeout(frame); ended(); unsubscribe(); screen.current?.dispose(); screen.current = null; };
+  }, [app.api, app.connection, connected, sessionId, tabId, attempt]);
 
   useEffect(() => () => { void app.api.releaseInput(sessionId, tabId); }, [app.api, sessionId, tabId]);
 
+  const modes = () => screen.current?.modes() ?? { bracketedPaste: false, applicationCursorKeys: false };
+  const live = connected && !opening && !problem;
   const write = async (text: string) => {
-    if (!connected || !text) return false;
-    const accepted = await app.api.queueInput(sessionId, tabId, text);
-    if (!accepted) setInputEnabled(false);
-    return accepted;
+    if (!live || !text) return false;
+    const result = await app.api.queueInput(sessionId, tabId, text);
+    setRefusal(result.accepted ? null : result.message);
+    return result.accepted;
+  };
+  /** What was typed in direct mode: a character, or with Ctrl held its control code. */
+  const typed = (text: string) => {
+    if (control && text.length === 1) {
+      setControl(false);
+      const code = controlSequence(text);
+      if (code) return void write(code);
+    }
+    void write(text);
   };
 
-  return <View style={styles.flex}><View style={[styles.terminalHeader, { borderColor: palette.border }]}><View><Text style={[styles.cardTitle, { color: palette.ink }]}>Live terminal</Text><Text style={[styles.detail, { color: connected ? palette.success : palette.warning }]}>{connected ? inputEnabled ? "Input available · mobile driving" : "Read-only · write refused" : "Offline · input retained"}</Text></View><View style={[styles.segment, { backgroundColor: palette.raised, marginHorizontal: 0, marginTop: 0 }]}><Segment label="Direct" selected={mode === "direct"} onPress={() => setMode("direct")} /><Segment label="Buffered" selected={mode === "buffered"} onPress={() => setMode("buffered")} /></View></View><FlatList data={output.split("\n")} keyExtractor={(_, index) => String(index)} renderItem={({ item }) => <Text selectable style={[styles.terminalText, { color: "#e6e3df" }]}>{item || " "}</Text>} style={{ backgroundColor: palette.terminal }} contentContainerStyle={styles.terminalOutput} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" />
-    <View style={[styles.terminalInputBar, { backgroundColor: palette.card, borderColor: palette.border }]}><TextInput value={input} onChangeText={(value) => { if (mode === "direct" && connected && inputEnabled) { const addition = value.startsWith(input) ? value.slice(input.length) : value; setInput(""); void write(addition); } else setInput(value); }} onKeyPress={({ nativeEvent }) => { if (mode === "direct" && connected && inputEnabled && nativeEvent.key === "Backspace" && input.length === 0) void write("\x7f"); }} onSubmitEditing={() => { if (mode === "direct") void write("\r"); }} multiline={mode === "buffered"} autoCapitalize="none" autoCorrect={false} placeholder={mode === "direct" ? "Tap to type directly" : "Command"} placeholderTextColor={palette.faint} style={[styles.terminalInput, { color: palette.ink, borderColor: palette.border }]} />{mode === "buffered" || input.length > 0 ? <Pressable accessibilityRole="button" accessibilityLabel="Send terminal input" disabled={!connected || !inputEnabled || !input} onPress={() => void write(input).then((accepted) => { if (accepted) setInput(""); })} style={[styles.send, { backgroundColor: palette.accent, opacity: !connected || !inputEnabled || !input ? 0.38 : 1 }]}><ChevronUp size={19} color={palette.accentInk} /></Pressable> : null}</View>
+  const status = !connected ? "Offline · input kept" : opening ? "Opening the terminal…" : problem ? "Unavailable" : refusal ? "Input refused" : "Live · typing here pauses desktop typing";
+  return <View style={styles.flex}>
+    <View style={[styles.terminalHeader, { borderColor: palette.border }]}><View style={styles.flex}><Text style={[styles.cardTitle, { color: palette.ink }]}>Terminal</Text><Text style={[styles.detail, { color: live && !refusal ? palette.success : palette.warning }]}>{status}</Text></View><View style={[styles.segment, { backgroundColor: palette.raised, marginHorizontal: 0, marginTop: 0 }]}><Segment label="Direct" selected={mode === "direct"} onPress={() => setMode("direct")} /><Segment label="Buffered" selected={mode === "buffered"} onPress={() => setMode("buffered")} /></View></View>
+    {problem ? <Card style={styles.notice}><Text style={[styles.noticeTitle, { color: palette.ink }]}>The terminal isn't available</Text><Text style={[styles.noticeDetail, { color: palette.muted }]}>{problem}</Text><Button label="Try again" kind="secondary" disabled={!connected} onPress={() => setAttempt((n) => n + 1)} style={styles.resend} /></Card> : null}
+    {refusal ? <Text style={[styles.sendFeedback, { color: palette.danger, flex: 0, paddingHorizontal: 16, paddingVertical: 6 }]}>{refusal}</Text> : null}
+    <ScrollView horizontal style={{ flex: 1, backgroundColor: palette.terminal }} contentContainerStyle={{ flexGrow: 1 }}>
+      <FlatList inverted data={[...rows].reverse()} keyExtractor={(row) => row.key} renderItem={({ item }) => <TerminalLine row={item} />} contentContainerStyle={styles.terminalOutput} />
+    </ScrollView>
+    <View style={[styles.terminalKeys, { backgroundColor: palette.card, borderColor: palette.border }]}>
+      <Pressable accessibilityRole="button" accessibilityLabel="Control" accessibilityState={{ selected: control }} disabled={!live} onPress={() => setControl((held) => !held)} style={[styles.terminalKey, { backgroundColor: control ? palette.accent : palette.raised }]}><Text style={[styles.terminalKeyText, { color: control ? palette.accentInk : palette.ink }]}>ctrl</Text></Pressable>
+      {TERMINAL_KEYS.map(({ key, label, name }) => <Pressable key={key} accessibilityRole="button" accessibilityLabel={name} disabled={!live} onPress={() => void write(keySequence(key, modes()))} style={[styles.terminalKey, { backgroundColor: palette.raised }]}><Text style={[styles.terminalKeyText, { color: palette.ink }]}>{label}</Text></Pressable>)}
+    </View>
+    <View style={[styles.terminalInputBar, { backgroundColor: palette.card, borderColor: palette.border }]}><TextInput value={input} onChangeText={(value) => { if (mode === "direct" && live) { const addition = value.startsWith(input) ? value.slice(input.length) : value; setInput(""); typed(addition); } else setInput(value); }} onKeyPress={({ nativeEvent }) => { if (mode === "direct" && live && nativeEvent.key === "Backspace" && input.length === 0) void write(keySequence("backspace", modes())); }} onSubmitEditing={() => { if (mode === "direct") void write(keySequence("enter", modes())); }} multiline={mode === "buffered"} autoCapitalize="none" autoCorrect={false} spellCheck={false} smartInsertDelete={false} autoComplete="off" placeholder={mode === "direct" ? "Tap to type directly" : "Text to send, then ⏎"} placeholderTextColor={palette.faint} style={[styles.terminalInput, { color: palette.ink, borderColor: palette.border }]} />{mode === "buffered" || input.length > 0 ? <Pressable accessibilityRole="button" accessibilityLabel="Send terminal input" disabled={!live || !input} onPress={() => void write(pasteSequence(input, modes())).then((accepted) => { if (accepted) setInput(""); })} style={[styles.send, { backgroundColor: palette.accent, opacity: !live || !input ? 0.38 : 1 }]}><ChevronUp size={19} color={palette.accentInk} /></Pressable> : null}</View>
   </View>;
+}
+
+function TerminalLine({ row }: { row: ScreenRow }) {
+  // Dim is the colour at 60%: nested text takes a colour, not an opacity.
+  return <Text selectable style={[styles.terminalText, { color: TERMINAL_FOREGROUND }]}>{row.spans.map((span, index) => <Text key={index} style={{
+    color: span.dim ? `${span.fg ?? TERMINAL_FOREGROUND}99` : span.fg, backgroundColor: span.bg, fontWeight: span.bold ? "700" : undefined,
+    fontStyle: span.italic ? "italic" : undefined, textDecorationLine: span.underline ? "underline" : undefined,
+  }}>{span.text}</Text>)}</Text>;
 }
 
 const styles = StyleSheet.create({
@@ -488,5 +556,8 @@ const styles = StyleSheet.create({
   terminalOutput: { paddingHorizontal: 11, paddingVertical: 13 },
   terminalText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11, lineHeight: 16 },
   terminalInputBar: { borderTopWidth: StyleSheet.hairlineWidth, padding: 10, flexDirection: "row", gap: 8, alignItems: "flex-end" },
+  terminalKeys: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingTop: 8, flexDirection: "row", gap: 6 },
+  terminalKey: { minHeight: 34, minWidth: 34, flexGrow: 1, borderRadius: 8, alignItems: "center", justifyContent: "center", paddingHorizontal: 6 },
+  terminalKeyText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 13 },
   terminalInput: { flex: 1, minHeight: 42, maxHeight: 100, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) },
 });
