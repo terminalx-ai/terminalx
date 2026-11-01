@@ -13,6 +13,27 @@ use super::*;
 
 const BOTH: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
 
+#[test]
+fn sign_in_gate_retains_prompt_and_cancels_delivery_timers() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.compose("keep this prompt", 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    assert!(!rig.manager.prepare_prompt(&mut rig.rt.lock().unwrap(), Readiness::Blocked(codex::pty::SIGN_IN_REQUIRED), Some(&tx)));
+    assert!(rx.try_recv().unwrap().unwrap_err().contains("prepared prompt is retained"));
+    assert_eq!(rig.status(), TabStatus::Waiting);
+    assert_eq!(rig.banner(), Some(RecoveryKind::SignedOut));
+    assert!(!rig.turn_open());
+    assert!(!rig.delivery_pending());
+    rig.advance(std::time::Duration::from_secs(45));
+    rig.tick();
+    assert_eq!(rig.banner(), Some(RecoveryKind::SignedOut), "delivery timeout must not replace a known sign-in gate");
+    let rt = rig.rt.lock().unwrap();
+    let Engine::Cli(cli) = &rt.engine else { panic!("expected CLI") };
+    assert!(cli.accept_by.is_none());
+    assert!(cli.nudge_by.is_none());
+    assert!(!cli.echoed.back().unwrap().submitted, "nothing was typed into the sign-in menu");
+}
+
 /// What each CLI writes into its transcript, cut down to what the decoders
 /// read. Escape prompt text so fixtures can include paste tags and newlines.
 struct Cli(CliKind);

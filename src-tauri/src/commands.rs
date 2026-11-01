@@ -2085,6 +2085,12 @@ pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
     tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
 }
 
+#[tauri::command]
+pub async fn check_agent_readiness(harness: String) -> CmdResult<harness::readiness::Readiness> {
+    crate::binpath::invalidate();
+    tauri::async_runtime::spawn_blocking(move || harness::readiness::check(&harness)).await.map_err(err)
+}
+
 // ------------------------------------------------------------------ skills
 
 #[tauri::command]

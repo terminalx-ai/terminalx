@@ -40,6 +40,24 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("launch settings from preferences", () => {
+  it("uses an installed local agent when the saved agent is missing without overwriting preferences", () => {
+    setPrefs({ lastModel: { codex: "gpt-6-astra" }, lastEffort: { codex: "medium" } });
+    const agents = HARNESSES.map((h) => ({ ...h, available: h.id === "codex" }));
+    const { result } = renderHook(() => useSessionAgent(agents));
+    expect(result.current.harness?.id).toBe("codex");
+    expect(result.current.modelId).toBe("gpt-6-astra");
+    expect(result.current.effort).toBe("medium");
+    expect(getPrefs().lastAgent).toBe("claude");
+  });
+
+  it("keeps cloud and explicitly controlled choices independent of local installation", () => {
+    const agents = HARNESSES.map((h) => ({ ...h, available: h.id === "codex" }));
+    const cloud = renderHook(() => useSessionAgent(agents, false));
+    const controlled = renderHook(() => useSessionAgent(agents, true, null, { value: launchDefaults(), onChange: vi.fn() }));
+    expect(cloud.result.current.harness?.id).toBe("claude");
+    expect(controlled.result.current.harness?.id).toBe("claude");
+  });
+
   it("reads the saved mode in the picker's own spelling, and the default for one it does not offer", () => {
     setPrefs({ lastMode: "ask" });
     const { result, rerender } = renderHook(() => useSessionAgent(HARNESSES));
