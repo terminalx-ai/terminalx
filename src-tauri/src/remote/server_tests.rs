@@ -666,6 +666,7 @@ impl crate::cloud_agents::AgentOps for OneTab {
             tab_id: "tab-1".into(),
             title: None,
             harness: "claude".into(),
+            transport: Default::default(),
             model: String::new(),
             effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
             permission_mode: "default".into(),
@@ -2265,6 +2266,118 @@ async fn attaching_to_an_agent_terminal_replays_its_screen_and_never_restarts_th
     // `start` on a running CLI starts nothing.
     call(&f.rpc, &desk, "pty.control", json!({ "ptyId": AGENT_TERMINAL, "start": true })).await.unwrap();
     assert_eq!(f.terminals.pid(AGENT_TERMINAL), Some(pid));
+}
+
+/// Stands in for Codex for `session.toTerminal`: an app server whose turn
+/// never ends, a terminal-capable CLI, and a record of how it was started.
+const NATIVE_TERMINAL_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+printf '%s\n' "$*" >> "$here/launches"
+case "$1" in
+  --version) echo "codex-cli 0.166.0"; exit 0 ;;
+  --help) printf '%s\n' "Usage: codex [OPTIONS]" "      --no-daemon  Keep this session to itself"; exit 0 ;;
+  app-server) [ "$2" = "--listen" ] || exit 0 ;;
+  *) exec sleep 10 ;;
+esac
+while read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}' ;;
+  esac
+done
+"#;
+
+const NATIVE_TERMINAL_CHILD: &str = "TERMINALX_TEST_NATIVE_TERMINAL_CHILD";
+
+/// #644: in a workspace, native Codex's terminal view moves the tab to Codex's
+/// own terminal and starts it. In a process of its own, because it puts a
+/// stand-in `codex` first on the lookup path.
+#[test]
+fn a_driver_who_may_start_its_terminal_moves_native_codex_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "remote::server::tests::native_terminal_child", "--nocapture"])
+        .env(NATIVE_TERMINAL_CHILD, "1")
+        .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+        .status().unwrap();
+    assert!(status.success(), "{}", std::fs::read_to_string(dir.path().join("child.log")).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_terminal_child() {
+    use crate::store::index::AgentTransport::{ExperimentalCodexStdio as Native, Pty};
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var(NATIVE_TERMINAL_CHILD).is_err() { return; }
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let home = crate::store::root().unwrap();
+    std::env::set_var("CODEX_HOME", home.join("user-codex"));
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), NATIVE_TERMINAL_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: f.root.to_string_lossy().into_owned() };
+    f.rpc.set_agents(crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(ops), None, None, 7).unwrap());
+    shared(&f);
+    let created = f.rpc.session_create(json!({ "agent": "codex", "nativeCodex": true })).unwrap();
+    let (session, tab) = (created["sessionId"].as_str().unwrap().to_string(), created["tabId"].as_str().unwrap().to_string());
+    let transport = || index::get(&session).unwrap().tab(&tab).unwrap().transport;
+    assert_eq!(transport(), Native);
+    let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default();
+    let terminal_launches = || launches().lines().filter(|line| line.starts_with("--no-daemon")).count();
+    // As the desktop connects: the agent's terminal, and `session/3`.
+    let agent_person = |rpc: Arc<WorkspaceRpc>, device: &'static str, user: &'static str| async move {
+        let (peer, events) = Peer::for_user(device.into(), Authority::Participate, Some(user.into()));
+        let want: Vec<&str> = WITH_AGENT_PTY.iter().copied().chain(["session/3"]).collect();
+        call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": want })).await.unwrap();
+        (peer, events)
+    };
+    let mut requests = 0;
+    let mut move_as = |peer: Arc<Peer>| {
+        requests += 1;
+        let params = json!({ "sessionId": session, "tabId": tab, "clientRequestId": format!("to-terminal-{requests}") });
+        let rpc = f.rpc.clone();
+        async move { call(&rpc, &peer, "session.toTerminal", params).await }
+    };
+
+    // Viewers, and drivers who may not approve, cannot start its terminal.
+    let (bob, _bob_events) = agent_person(f.rpc.clone(), "d-bob", "bob").await;
+    let (erin, _erin_events) = agent_person(f.rpc.clone(), "d-erin", "erin").await;
+    assert_eq!(code(move_as(bob).await), "forbidden");
+    assert_eq!(code(move_as(erin).await), "forbidden");
+    assert_eq!(transport(), Native);
+
+    // Never mid-turn.
+    let (alice, _alice_events) = agent_person(f.rpc.clone(), "d-alice", "alice").await;
+    manager.send(&session, &tab, "hello".into(), Vec::new()).unwrap();
+    assert_eq!(code(move_as(alice.clone()).await), "conflict");
+    assert_eq!(transport(), Native);
+    manager.stop(&session, &tab).unwrap();
+
+    // A driver who may approve moves it, and its terminal starts.
+    move_as(alice.clone()).await.unwrap();
+    assert_eq!(transport(), Pty);
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while terminal_launches() == 0 {
+        assert!(std::time::Instant::now() < until, "the terminal Codex did not start: {:?}", launches());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Asking again changes nothing and starts nothing more.
+    move_as(alice).await.unwrap();
+    assert_eq!((transport(), terminal_launches()), (Pty, 1));
+    manager.stop(&session, &tab).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

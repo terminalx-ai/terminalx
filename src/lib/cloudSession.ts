@@ -258,6 +258,7 @@ function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
   return {
     id: tab.tabId,
     harness: info.harness,
+    transport: info.transport,
     title: info.title,
     model: info.model,
     effort: info.effort,

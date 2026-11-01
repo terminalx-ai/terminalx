@@ -76,6 +76,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.addTab": "session/2",
   "session.delete": "session/2",
   "session.interrupt": "session/3",
+  "session.toTerminal": "session/3",
   "runtime.agents": "agents/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
@@ -116,6 +117,7 @@ export const MUTATING_METHODS = new Set([
   "session.update",
   "session.addTab",
   "session.delete",
+  "session.toTerminal",
   "cleanup.remove",
   "workspace.remove",
   "workspace.sweepMerged",
@@ -190,6 +192,8 @@ export interface AgentTabInfo {
   tabId: string;
   title: string | null;
   harness: string;
+  /** Native Codex (#644): absent for an agent run in the tab's terminal. Its terminal view moves it there (`moveAgentTabToTerminal`). */
+  transport?: "experimentalCodexStdio";
   /** What the agent is running. */
   model: string;
   effort: string | null;
@@ -1040,6 +1044,15 @@ export class WorkspaceRpcClient {
   async interruptAgentTab(params: { sessionId: string; tabId: string }): Promise<{ interrupted: boolean }> {
     const result = await this.call<{ interrupted?: boolean }>("session.interrupt", params);
     return { interrupted: result.interrupted === true };
+  }
+
+  /**
+   * Native Codex's terminal view (#644): move the tab to Codex's own terminal
+   * on the same thread, for good, and start it there. The runtime refuses it
+   * mid-turn and to anyone who may not start the agent's terminal.
+   */
+  moveAgentTabToTerminal(sessionId: string, tabId: string): Promise<{ sessionId: string; tabId: string }> {
+    return this.mutate("session.toTerminal", { sessionId, tabId });
   }
 
   /** The sessions this connection may see (`session.list`). */
