@@ -134,7 +134,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             {status?.operation ? `A ${status.operation} is in progress. ` : ""}
             {status?.conflicted?.length
               ? `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
-              : "Finish or abort it in the workspace's terminal."}
+              : status?.operation === "merge" && source.unfinishedMerge
+                ? "Commit or abort it from Changes, which shows what the merge brought in."
+                : "Finish or abort it in the workspace's terminal."}
           </span>
         </div>
       )}
@@ -166,7 +168,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 <Button
                   size="sm"
                   variant="accent"
-                  disabled={!message.trim() || !files.length || !!busy}
+                  // Committing stages everything, conflict markers included.
+                  disabled={!message.trim() || !files.length || !!busy || !!status?.conflicted?.length}
                   onClick={commit}
                 >
                   {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} Commit

@@ -16,6 +16,16 @@
   to **Needs you**. A required review, a closed pull request and other stops
   that wait on someone else stay at **Needs you** until they are checked again.
   (#725)
+### Changes panel
+
+- A merge left in progress in a local checkout is shown for what it is: what
+  is being merged, and the uncommitted files split into unresolved conflicts,
+  files changed here, and files exactly as Git merged them from the base.
+  **Commit merge** (once nothing is conflicted) and **Abort merge** (after a
+  confirmation) act on that merge only. The warning before removing a
+  workspace counts only what changed while merging as lost. The Repo panel's
+  **Commit** waits until conflicts are resolved, since it would otherwise
+  commit the conflict markers. (#736)
 ### Sessions and tabs
 
 - Open the session you click. A session with no tabs open was swapped for

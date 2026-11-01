@@ -230,6 +230,38 @@ export interface Landed {
   losses: string[];
   /** Stands for exactly what this check found; a second confirmation is given for one digest. */
   digest: string;
+  /** A merge left in progress, by what its uncommitted files are; null when none is. */
+  merging?: {
+    /** What is being merged: `origin/main`, or `commit 1a2b3c4d5e`. */
+    what: string;
+    mergeHead: string;
+    conflicted: number;
+    /** Different from what Git merged by itself: what removing would lose. */
+    changedHere: number;
+    /** Exactly as Git merged them: the other side still has them. */
+    fromBase: number;
+  } | null;
+}
+
+/**
+ * A merge started in a checkout and neither committed nor aborted. Every
+ * file it brought in shows as uncommitted; these say which are which.
+ */
+export interface UnfinishedMerge {
+  /** The commit HEAD is at, which the merge goes on top of. */
+  head: string;
+  /** The commit being merged. */
+  mergeHead: string;
+  /** Branches pointing at it, remote ones first (`origin/main`); empty when none does. */
+  names: string[];
+  /** Commits it brings in that HEAD does not have. */
+  incoming: number;
+  /** Paths still unmerged in the index. */
+  conflicted: string[];
+  /** Uncommitted paths that differ from what Git merged by itself. */
+  changedHere: string[];
+  /** Uncommitted paths exactly as Git merged them. */
+  fromBase: string[];
 }
 
 export interface WorkspaceDisposition {
@@ -285,6 +317,10 @@ export interface WorkStatus {
   defaultBranch: string | null;
   aheadOfBase: number | null;
   head: string | null;
+  /** A merge, rebase, cherry-pick, revert or bisect left in progress. */
+  operation?: string | null;
+  /** Paths with unresolved conflicts. */
+  conflicted?: string[];
 }
 
 export interface BranchInfo {

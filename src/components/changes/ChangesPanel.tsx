@@ -6,9 +6,10 @@ import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { AgentEvent } from "@/types/events";
-import type { ChangedFile } from "@/types/session";
+import type { ChangedFile, UnfinishedMerge } from "@/types/session";
 import { DiffPane } from "./DiffPane";
 import { FileList, sumChanges } from "./FileList";
+import { MergeInProgress, mergeGroups, type MergeGroup } from "./MergeInProgress";
 
 type Scope = "all" | "uncommitted" | "turn";
 type Choice = { scope: Scope; target: string | null };
@@ -59,7 +60,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
   }, [events, version]);
   const [draft, setDraft] = useState(choice.target ?? "");
   const [tick, setTick] = useState(0);
-  const [result, setResult] = useState<{ range: ChangeRange; target: string; files: ChangedFile[] } | null>(null);
+  const [result, setResult] = useState<{ range: ChangeRange; target: string; files: ChangedFile[]; merge: UnfinishedMerge | null; mergeError: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const choose = (next: Choice) => {
@@ -98,8 +99,15 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
         range = review;
         target = review.target;
       }
-      const files = await source.changesBetween(range.base, range.head);
-      if (!cancelled) { setResult({ range, target, files }); setError(null); }
+      // A merge left in progress makes the base's files look like this branch's own (#736).
+      const [files, merge] = await Promise.all([
+        source.changesBetween(range.base, range.head),
+        (source.unfinishedMerge?.() ?? Promise.resolve(null)).then(
+          (merge) => ({ merge, mergeError: null }),
+          (e: unknown) => ({ merge: null, mergeError: source.errorMessage(e) }),
+        ),
+      ]);
+      if (!cancelled) { setResult({ range, target, files, ...merge }); setError(null); }
     };
     void read().catch((e) => {
       if (!cancelled) { setResult(null); setError(source.errorMessage(e)); }
@@ -127,8 +135,11 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
             : choice.scope === "uncommitted" ? `Against HEAD · tree ${result.range.base.slice(0, 7)}` : result.target
           : choice.scope === "all" ? `Target: ${choice.target ?? "automatic base branch"}` : choice.scope === "uncommitted" ? "Against HEAD" : "Turn snapshots"}</p>
       </div>
+      {result?.merge && <MergeInProgress source={source} merge={result.merge} allChanges={choice.scope === "all"} onChanged={() => setTick((t) => t + 1)} />}
+      {result?.mergeError && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">Whether a merge is in progress could not be read: {result.mergeError}</div>}
       <div className="min-h-0 flex-1">
         <ChangesBody key={`${choice.scope}:${choice.target}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
+          groups={choice.scope === "uncommitted" && result?.merge ? mergeGroups(result.merge, result.files) : null}
           label={label} empty={loading ? "Loading changes…" : error ? "Changes unavailable." : "No changes in this scope."}
           noRange={loading ? "Loading changes…" : "Changes unavailable."} />
       </div>
@@ -142,6 +153,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
 function ChangesBody({
   source,
   files,
+  groups,
   loading,
   error,
   range,
@@ -151,6 +163,8 @@ function ChangesBody({
 }: {
   source: GitSource;
   files: ChangedFile[];
+  /** The files of a merge in progress, by what they are; null to list them as one. */
+  groups: MergeGroup[] | null;
   loading: boolean;
   error: string | null;
   range: ChangeRange | null;
@@ -210,7 +224,12 @@ function ChangesBody({
       </div>
       {error && <div className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", pair ? "max-h-[40%] border-b border-hairline" : "flex-1")}>
-        <FileList files={files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} />
+        {groups?.length ? groups.map((group) => (
+          <section key={group.key} aria-label={group.title}>
+            <h3 className="px-3 pt-2 text-[11px] font-medium text-faint">{group.title} · {group.files.length}</h3>
+            <FileList files={group.files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} />
+          </section>
+        )) : <FileList files={files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} />}
       </div>
       {pairError && <div role="alert" className="px-3 py-2 text-xs text-destructive">{pairError}</div>}
       {current && !pair && !pairError && <div role="status" className="px-3 py-2 text-xs">Loading file diff…</div>}
