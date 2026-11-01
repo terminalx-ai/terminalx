@@ -177,9 +177,31 @@ Stop-all acknowledges only after managed agents and all terminal process groups
 have actually exited. A failed stop leaves the owner available solely for an
 explicit authenticated stop retry; it never reports success or accepts new work.
 Resource sampling and termination rules are evaluated by the actual owner.
-Explicit session deletion also runs there: checkout admission remains held through
-process confirmation and history removal, failed confirmations retain history,
-and other sessions sharing the same checkout remain running.
+Explicit session deletion also runs there: the session stays fenced from new
+turns through process confirmation and history removal, failed confirmations
+retain history, and other sessions sharing the same checkout remain running.
+
+Checkout admission is one app-wide lock, so it is held only for short decisions:
+whether a prompt may start a turn, and whether a checkout may be reserved for
+local checks or conflict resolution (#727). Work that stops sessions and then
+changes what they run in takes a fence (`issue_pipeline::admission::fence`)
+over just those sessions, one tab, or a checkout path, and runs its slow part
+behind it: workspace and session removal, quick-chat moves and retention, merged
+cleanup's removals and restores, Settings → Storage removal, CLI worktree
+deletion, tab closing and the idle-agent stop. Taking a fence takes admission
+for a moment only, so a prompt admitted before it has finished (and its turn is
+visible to the work's last look) and one admitted after it meets the fence. A
+prompt for a fenced session is refused with the fence's reason; one for a tab
+whose agent is being stopped for sitting idle waits for that stop and is then
+admitted as usual. Scans, sizing, merged-cleanup's GitHub calls and fetches,
+and the ledger take no fence at all. A prompt's baseline tree (`git add -A`
+into a scratch index) is read before it is admitted.
+
+Every composer send is timed in the tab's diagnostics as `send_timing` lines
+sharing its `seq`: `received` (the window's `pressed_at`, the runtime's
+`received_at`, `waited_ms`, `admitted_ms` and `answered_ms`), `delivered` (the
+agent took it) and `shown` (the window's `drawn_at`, `answered_at` and
+`shown_at`).
 
 ## Window features, updates and macOS
 

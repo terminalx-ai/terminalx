@@ -305,6 +305,27 @@ pub fn diagnose_delivery(path: &std::path::Path, seq: u64, stage: &str, elapsed:
     append_diagnostic(path, &line.to_string());
 }
 
+/// One step of a composer send, by the clocks that saw it (#727): `received`
+/// (the runtime took the send, with when the window says Send was pressed),
+/// `delivered` (the agent took the prompt) and `shown` (the window drew the
+/// message as sent). Lines of one send share its `seq`; together they say
+/// which step a slow send spent its time in.
+///
+/// Times and counts only, as for [`diagnose_delivery`].
+pub fn diagnose_send(path: &std::path::Path, seq: u64, stage: &str, detail: serde_json::Value) {
+    let mut line = serde_json::json!({
+        "type": "send_timing",
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "seq": seq,
+        "stage": stage,
+    });
+    if let (Some(line), serde_json::Value::Object(detail)) = (line.as_object_mut(), detail) {
+        line.extend(detail);
+    }
+    log::info!("send timing: {line}");
+    append_diagnostic(path, &line.to_string());
+}
+
 /// Fixed opener labels and elapsed time only, safe to include in bug reports.
 pub fn diagnose_stall(path: &std::path::Path, opener: Option<(&'static str, &'static str)>, quiet: std::time::Duration) {
     let (source, kind) = opener.unwrap_or(("unknown", "unknown"));

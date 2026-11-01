@@ -50,7 +50,8 @@ export const TurnBlock = memo(function TurnBlock({
   const changes = useMemo(() => (prefs.turnChanges && turn.completed ? turnFileChanges(turn) : []), [prefs.turnChanges, turn]);
 
   return (
-    <div className="transcript-turn" data-turn={turn.key}>
+    // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
+    <div className="transcript-turn flow-root" data-turn={turn.key}>
       {turn.prompt && <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" />}
 
       {foldable ? (
@@ -252,6 +253,23 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
 }
 
 /** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */
+/**
+ * A message the reader has just sent, before the runtime has it (#727): it is
+ * in the chat at once, said to be sending, and is replaced by the message the
+ * runtime records. Not a turn yet: nothing is measured or folded here.
+ */
+export function SendingMessage({ message, cwd }: { message: { text: string; images: { url: string; name?: string }[] }; cwd?: string }) {
+  const layout = usePrefs().transcriptLayout;
+  return (
+    <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy>
+      <ReaderMessage message={message} cwd={cwd} className="mb-1 opacity-70" />
+      <div role="status" className={cn("mb-4 flex px-1 text-[11px] text-muted-foreground", layout === "chat" && "justify-end")}>
+        Sending…
+      </div>
+    </div>
+  );
+}
+
 function ReaderMessage({
   message,
   cwd,
@@ -364,7 +382,8 @@ function ReasoningRow({ text, linkContext }: { text: string; linkContext?: { ses
 
 /** A URL the web view loads as it is, rather than a path on some computer. */
 function isLoadableUrl(p: string): boolean {
-  return p.startsWith("data:") || p.startsWith("http") || p.startsWith("asset:");
+  // `blob:`: a composer's own thumbnail, on a message drawn while it is being sent (#727).
+  return p.startsWith("data:") || p.startsWith("blob:") || p.startsWith("http") || p.startsWith("asset:");
 }
 
 export function toAssetUrl(p: string): string {

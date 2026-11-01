@@ -589,6 +589,7 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::report_send_shown,
             commands::resend_unsent,
             commands::submit_waiting_prompt,
             commands::interrupt_turn,

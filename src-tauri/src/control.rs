@@ -1002,9 +1002,9 @@ impl ControlService {
                 "A project's main checkout cannot be deleted.",
             ));
         }
-        // Keep admission through confirmed exit and removal. A failed stop
-        // cannot be discarded by a CLI caller either.
-        let _admission = crate::issue_pipeline::admission::lock();
+        // The removal fences the worktree from its stop to its end, so nothing
+        // starts there meanwhile, and no other tab's prompt waits for it
+        // (#727). A failed stop cannot be discarded by a CLI caller either.
         self.manager.accepting_work().map_err(ControlError::internal)?;
         let stop = |session: &crate::store::index::SessionEntry| {
             self.manager.stop_session_confirmed(session).map_err(|error| format!("{error:#}"))

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type ImageInput } from "@/lib/api";
-import { applyEvent, getTabLog, useTabLog } from "@/lib/agentEvents";
-import { buildTranscript, conversationEvents, type Transcript } from "@/lib/transcript";
-import { clearComposerSendError, composerSendScope, useComposerSend } from "@/lib/composerSends";
-import { getDraft, setDraft, subscribeDrafts, useDraft } from "@/lib/drafts";
+import { applyEvent, getTabLog, lastSeq, useTabLog } from "@/lib/agentEvents";
+import type { Transcript } from "@/lib/transcript";
+import { useConversationView } from "@/lib/conversationView";
+import { clearComposerSendError, composerSendScope, hasArrived, useComposerSend } from "@/lib/composerSends";
+import { setDraft, useDraft } from "@/lib/drafts";
 import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
@@ -63,6 +64,11 @@ export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: (
       : [];
   const steps = deleteWorkspace ? [...prompts, { label: "Delete workspace", run: deleteWorkspace }] : prompts;
   return steps.length ? steps : undefined;
+}
+
+/** Once the frame now being drawn is on screen. */
+function afterPaint(then: () => void) {
+  requestAnimationFrame(() => setTimeout(then, 0));
 }
 
 /** When a conversation ended, as a short local time; the day too when that was not today. */
@@ -141,13 +147,19 @@ export function TabView({
   const { models, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !local, backend.modelClient, tab.harness);
   // The tab's log holds every conversation it has held; the chat is one of them.
   const conversation = viewing ? (viewing.id ?? null) : (tab.conversation ?? null);
-  const events = useMemo(() => conversationEvents(log.events, conversation), [log.events, log.version, conversation]);
+  // Built on as the log grows (#727): `events` and the transcript stay the
+  // same objects while only a streaming preview moves, so nothing below is
+  // worked out again for it, and a new event costs as much in a long
+  // conversation as in a short one.
+  const view = useConversationView(log, conversation);
+  const events = view.events();
+  const talked = view.conversationsWithMessages();
   // The ones before the current that have anything in them, newest first.
   const earlier = useMemo(
-    () => (tab.history ?? []).filter((past) => conversationEvents(log.events, past.id ?? null).some((event) => event.payload.type === "user_message")).reverse(),
-    [tab.history, log.events, log.version],
+    () => (tab.history ?? []).filter((past) => talked.has(past.id ?? null)).reverse(),
+    [tab.history, talked],
   );
-  const eventRecovery = useMemo(() => (readOnly ? null : recoveryFromEvents(events)), [events, log.version, readOnly]);
+  const eventRecovery = useMemo(() => (readOnly ? null : recoveryFromEvents(events)), [events, readOnly]);
   // PRO-30: on a shared cloud workspace, who may send, stop and answer here.
   const shared = backend.collab ?? null;
   const collab = useCollab(shared?.key ?? `local:${session.id}`);
@@ -218,13 +230,10 @@ export function TabView({
 
   // Nothing is running in a conversation that is only being read.
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
-  const transcript = useMemo(() => buildTranscript(events, live, {
-    conversationId: conversation,
-    compactionContinuityKnown: log.compactionContinuityKnown ?? false,
-  }), [events, log.version, live, conversation, log.compactionContinuityKnown]);
+  const transcript = view.transcript(live);
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
-  const range = useMemo(() => changeRange(events, session.baseRef), [events, log.version, session.baseRef]);
+  const range = useMemo(() => changeRange(events, session.baseRef), [events, session.baseRef]);
   const changes = useChanges(local ? (session.cwd ? localGitSource(session.cwd) : undefined) : gitSource, range, isGit && active && !live);
 
   // Once the worktree's pull request has merged, the chat offers to delete
@@ -238,31 +247,43 @@ export function TabView({
 
   const blockedRef = useRef<string | null>(null);
   blockedRef.current = gate?.blocked ?? null;
+  // The composer has already put the message in the chat and taken it back
+  // out of the draft (#727); a failure puts it back there.
   const send = useCallback(
     async (text: string, images: ImageInput[]) => {
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
       if (blockedRef.current) throw new Error(blockedRef.current);
       setError(null);
       setStopped(false);
-      let draftEdited = false;
-      const unsubscribeDraft = subscribeDrafts((id) => {
-        if (id === tab.id) draftEdited = true;
-      });
+      // Each local send is timed, by this window's clock: Send pressed, the
+      // message first on screen as sending, the runtime's answer here, and the
+      // message on screen as sent. The runtime notes when it received the
+      // send and when the agent took it, beside these.
+      const pressedAt = Date.now();
+      let drawnAt: number | undefined;
+      afterPaint(() => { drawnAt = Date.now(); });
       try {
-        const out = await backend.send(tab.id, text, images);
+        const out = await (local ? backend.send(tab.id, text, images, { pressedAt }) : backend.send(tab.id, text, images));
+        const answeredAt = Date.now();
         for (const ev of out.events) applyEvent(ev);
         if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
+        const seq = out.events.find((ev) => ev.payload.type === "user_message")?.seq;
+        if (local && seq != null) {
+          afterPaint(() => void agentApi.reportSendShown(backend.logSessionId, tab.id, seq, { pressedAt, drawnAt, answeredAt, shownAt: Date.now() }).catch(() => {}));
+        }
       } catch (e) {
         setError(local ? safeError(e) : commandError(e));
         backend.setTabStatus(tab.id, "waiting");
-        if (!draftEdited) setDraft(tab.id, getDraft(tab.id) || text);
         throw e;
-      } finally {
-        unsubscribeDraft();
       }
     },
     [backend, local, tab.id],
   );
+  const sentAfter = useCallback(() => lastSeq(backend.logSessionId, tab.id), [backend.logSessionId, tab.id]);
+  // The message being sent, until its own event is in the conversation: the
+  // runtime's broadcast of it can come before its answer to the send.
+  const pendingMessage = sendState.pending?.message ?? null;
+  const sending = useMemo(() => (pendingMessage && !readOnly && !hasArrived(events, pendingMessage) ? pendingMessage : null), [pendingMessage, events, readOnly]);
 
   // The provider interrupts and delivers its own queue; acceptance updates the transcript.
   const sendQueuedNow = useCallback(
@@ -493,6 +514,7 @@ export function TabView({
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
+      sending={sending}
       footer={
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
@@ -542,6 +564,7 @@ export function TabView({
             if (collabLive && v) presenceTyping(shared!.key);
           }}
           onSend={send}
+          sentAfter={sentAfter}
           history={history}
           // Stop is Escape first; once that went unanswered, the same control ends the process.
           onStop={interrupts && !unanswered ? interrupt : stop}

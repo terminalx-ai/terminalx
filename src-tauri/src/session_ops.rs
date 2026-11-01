@@ -11,6 +11,7 @@ use crate::sink::EventSink;
 use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, SessionKind, TabEntry, TabStatus};
 use crate::store::projects;
 use crate::{git, names, store};
+use crate::issue_pipeline::admission;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -475,6 +476,8 @@ pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str
         return Ok(entry);
     }
     let scratch = store::quick::is_scratch(&entry.id, &target);
+    // Nothing starts in the old folder between the stop and the move.
+    let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
     carry_conversations(&entry, &target);
     let branch = if scratch { None } else { git::current_branch(Path::new(&target)) };
@@ -511,6 +514,7 @@ pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_
     let entry = quick_chat(session_id)?;
     let project = projects::add(project_path).map_err(err)?.path;
     projects::refuse_mirror(&project).map_err(err)?;
+    let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
     carry_conversations(&entry, &project);
     let branch = git::current_branch(Path::new(&project));
@@ -565,7 +569,15 @@ pub(crate) fn sweep_idle_quick_chats_fallible(sink: &dyn EventSink, days: u32, b
         let last = chrono::DateTime::parse_from_rfc3339(&session.modified).ok();
         session.is_quick() && !session.pinned && !session.archived && !working && last.is_some_and(|last| last < cutoff)
     };
-    let doomed: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
+    let candidates: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Looked at again behind a fence: a prompt sent since the first look has
+    // opened its turn by now, and keeps its chat; none can be sent after.
+    let _deleting = admission::fence(admission::Kind::Refuse(admission::SESSION_DELETED), candidates.iter().map(|session| admission::Scope::Session(session.id.clone())));
+    let chosen: std::collections::HashSet<&str> = candidates.iter().map(|session| session.id.as_str()).collect();
+    let doomed: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| chosen.contains(session.id.as_str()) && idle(session) && !busy(session)).collect();
     for session in &doomed {
         stop(session)?;
     }
@@ -875,6 +887,10 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     if !permitted(&before, &request.confirmation) {
         return Err(needs_confirmation(&before, &request.confirmation, "Nothing was removed."));
     }
+    // From the stop to the end nothing starts in the workspace: a prompt to
+    // one of its sessions is refused, and every other session's is admitted
+    // as usual while the folder goes (#727). The fetch above was outside it.
+    let _removing = admission::fence(admission::Kind::Refuse(admission::WORKSPACE_REMOVED), [admission::Scope::checkout(&target)]);
     for session in &affected {
         stop(session)?;
     }
@@ -1124,6 +1140,7 @@ pub(crate) fn delete_session_blocking(sink: &dyn EventSink, session_id: &str, st
 /// A stop error leaves the workspace and conversation records intact.
 pub(crate) fn delete_session_blocking_fallible(sink: &dyn EventSink, session_id: &str, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<SessionEntry> {
     let entry = index::get(session_id).map_err(err)?;
+    let _deleting = admission::fence(admission::Kind::Refuse(admission::SESSION_DELETED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
     remove_session_entries(std::slice::from_ref(&entry))?;
     notify_sessions_deleted(sink, std::slice::from_ref(&entry));

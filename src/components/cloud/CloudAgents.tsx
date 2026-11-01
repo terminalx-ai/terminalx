@@ -1,5 +1,5 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Bot, Loader2, Plus, X } from "@/icons";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
@@ -15,9 +15,10 @@ import { AgentLoginsLink } from "./AgentLoginsLink";
 import { managesOrganization } from "@/lib/multiOrg";
 import { openAgentLogins } from "@/lib/settingsLinks";
 import type { AgentLoginProvider } from "@/lib/api";
-import { useTabLog } from "@/lib/agentEvents";
+import { lastSeq, useTabLog } from "@/lib/agentEvents";
+import { hasArrived, useComposerSend } from "@/lib/composerSends";
 import { setDraft as setTabDraft, useDraft } from "@/lib/drafts";
-import { buildTranscript } from "@/lib/transcript";
+import { useConversationView } from "@/lib/conversationView";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionStore } from "@/lib/sessions";
 import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
@@ -558,7 +559,12 @@ function CloudAgentPane({
   const [loadingCheckpoint, setLoadingCheckpoint] = useState(false);
   const exited = info.process === "exited";
   const live = (info.status === "in_progress" || info.status === "waiting") && !exited;
-  const transcript = useMemo(() => buildTranscript(log.events, live), [log.events, log.version, live]);
+  // Built on as the log grows, not again for every event (#727).
+  const conversation = useConversationView(log, undefined);
+  const transcript = conversation.transcript(live);
+  // The composer's message on its way, drawn in the chat as sending (#727). Its scope is the tab's id.
+  const pendingMessage = useComposerSend(tab.tabId).pending?.message ?? null;
+  const sending = pendingMessage && !hasArrived(conversation.events(), pendingMessage) ? pendingMessage : null;
   const entries = outboxFor(snapshot, tab.tabId);
   const turnOpen = transcript.turns.length > 0 && !transcript.turns[transcript.turns.length - 1]!.completed;
   const endedMidTurn = exited && (info.status === "in_progress" || info.status === "waiting" || turnOpen);
@@ -729,6 +735,7 @@ function CloudAgentPane({
             askDetail={!!you}
             onAnswerPermission={(requestId, optionId) => decide({ requestId, optionId })}
             onAnswerQuestions={(requestId, answers) => decide({ requestId, answers })}
+            sending={sending}
             footer={
               <div className="flex flex-col">
                 {live && draft.trim() && !isDevScope(scope) && !blocked && (
@@ -752,6 +759,7 @@ function CloudAgentPane({
                   draft={draft}
                   onDraftChange={changeDraft}
                   onSend={send}
+                  sentAfter={() => lastSeq(info.sessionId, tab.tabId)}
                   history={sentMessages(transcript, { entries, followUps: info.followUps })}
                   onStop={stop}
                   onSetModel={(model) => configure({ model })}

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
-import { getDraft, subscribeDrafts } from "./drafts";
+import { getDraft, setDraft, subscribeDrafts } from "./drafts";
+import type { AgentEvent } from "@/types/events";
 
 /** Connection generations govern attachment, not an unresolved mailbox enqueue. */
 export function composerSendScope(backend: { kind: string; key: string; logSessionId: string }, tabId: string): string {
@@ -8,11 +9,27 @@ export function composerSendScope(backend: { kind: string; key: string; logSessi
   return JSON.stringify([backend.kind, backend.key, backend.logSessionId, tabId]);
 }
 
+/**
+ * A message on its way (#727). The composer hands it to the chat as soon as
+ * Send is pressed, where it is drawn as sending until the runtime has it.
+ */
+export interface SendingMessage {
+  text: string;
+  /** Thumbnails of the images it carries. */
+  images: { url: string; name?: string }[];
+  /** When Send was pressed, by this window's clock (milliseconds since the epoch). */
+  pressedAt: number;
+  /** The tab's newest event when Send was pressed: the message's own comes after it. */
+  afterSeq: number;
+}
+
 // UI ownership only, not a delivery receipt or a transport retry token.
 export interface ComposerSend {
   edited: boolean;
   ownsDraft: () => boolean;
   release: () => void;
+  /** What is being sent, for the chat to draw meanwhile. */
+  message: SendingMessage | null;
 }
 interface Snapshot {
   pending: ComposerSend | null;
@@ -37,10 +54,10 @@ export function useComposerSend(key: string): Snapshot {
     };
   }, () => states.get(key) ?? EMPTY, () => EMPTY);
 }
-export function beginComposerSend(key: string, tabId: string): ComposerSend | null {
+export function beginComposerSend(key: string, tabId: string, message: SendingMessage | null = null): ComposerSend | null {
   if (states.get(key)?.pending) return null;
   const initialDraft = getDraft(tabId);
-  const operation: ComposerSend = { edited: false, ownsDraft: () => !operation.edited && getDraft(tabId) === initialDraft, release: () => {} };
+  const operation: ComposerSend = { edited: false, ownsDraft: () => !operation.edited && getDraft(tabId) === initialDraft, release: () => {}, message };
   // This subscription belongs to the request, so edits while its view is absent
   // (including identical writes) still invalidate draft ownership.
   operation.release = subscribeDrafts((id) => {
@@ -62,4 +79,35 @@ export function finishComposerSend(key: string, operation: ComposerSend, error: 
 export function clearComposerSendError(key: string) {
   const state = states.get(key);
   if (state?.error != null) publish(key, { ...state, error: null });
+}
+
+/**
+ * The draft once a message that was not sent has come back to it (#727):
+ * alone in an empty draft, else ahead of what has been typed since, unless
+ * that already holds it. Nothing typed is lost.
+ */
+export function withReturned(draft: string, text: string): string {
+  if (!text || draft.includes(text)) return draft;
+  return draft.trim() ? `${text}\n\n${draft}` : text;
+}
+
+/** `withReturned` for a tab whose composer is not on screen: into its saved draft. */
+export function returnToDraft(tabId: string, text: string) {
+  const now = getDraft(tabId);
+  const back = withReturned(now, text);
+  if (back !== now) setDraft(tabId, back);
+}
+
+/**
+ * Whether a message being sent has its own event in the conversation yet: a
+ * message of the same text after Send was pressed. The runtime's broadcast of
+ * it can come before its answer to the send.
+ */
+export function hasArrived(events: readonly AgentEvent[], message: Pick<SendingMessage, "text" | "afterSeq">): boolean {
+  for (let index = events.length - 1; index >= 0 && events[index].seq > message.afterSeq; index--) {
+    const payload = events[index].payload;
+    // A shared tab's message carries who it is from ahead of the text.
+    if (payload.type === "user_message" && (payload.text === message.text || payload.text.endsWith(message.text))) return true;
+  }
+  return false;
 }

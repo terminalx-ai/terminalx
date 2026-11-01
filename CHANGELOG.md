@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Chat
+
+- Show a sent message at once. Pressing Send puts the message in the chat,
+  marked as sending, and clears the composer for the next one; it is marked
+  as sent once the runtime has it. A message that could not be sent goes back
+  to the composer with the error, ahead of anything typed since, images and
+  all. (#727)
+- Keep long conversations quick. The chat is built on as events arrive instead
+  of being rebuilt for each one, and only the turns in and near the view are
+  drawn, so a message in a conversation of thousands of events appears as fast
+  as in a short one. (#727)
+
+### Background sessions
+
+- Never hold a send behind slow work. Merged-workspace cleanup, Settings →
+  Storage (scanning, sizing and removal), workspace and session removal,
+  `terminalx worktrees delete` and stopping an idle agent no longer hold the
+  lock every send takes; each closes only the sessions it changes, and a send
+  to any other tab goes through at once. Checking the worktree's tree before a
+  prompt, which reads the whole checkout, now happens before the send waits
+  for anything. A send to a session that is being removed or moved is refused
+  with the reason, and one to an agent being stopped for sitting idle waits
+  for that stop and starts it again. (#727)
+- Time every send. Each tab's diagnostics note when Send was pressed, when the
+  runtime received the send and how long it waited, when the agent took the
+  prompt, and when the window showed it, so a slow send can be traced to the
+  step that took the time. (#727)
+
 ## 0.2.22
 
 ### Background sessions

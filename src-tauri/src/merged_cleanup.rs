@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::git;
 use crate::github::BranchPr;
+use crate::issue_pipeline::admission;
 use crate::landed::{self, Fetch, Landed};
 use crate::session_ops::{self, Confirmation, SessionsFate, WorkspaceRemoval};
 use crate::sink::EventSink;
@@ -454,6 +455,25 @@ impl Pass<'_> {
             return;
         }
 
+        // GitHub, the fetch and the grace period were weighed without a
+        // fence. From here nothing starts in the workspace (#727), so it is
+        // looked at once more: a prompt sent meanwhile opened a turn that
+        // this sees, and the workspace stays.
+        let _removing = admission::fence(admission::Kind::Refuse(admission::WORKSPACE_REMOVED), [admission::Scope::checkout(path)]);
+        let sessions = match index::load() {
+            Ok(sessions) => sessions,
+            Err(error) => return keep(self, ids, "the session index could not be read".into(), Some(format!("{error:#}"))),
+        };
+        let roots = Roots::of(self.run.host, &sessions);
+        let live = (self.run.host.live)(&sessions);
+        let candidate = cleanup::inspect(self.run.host, &roots, repository, entry, &sessions, &live, Activity::Engaged);
+        let ids: Vec<String> = candidate.sessions.iter().map(|session| session.id.clone()).collect();
+        if candidate.verdict != Verdict::Eligible {
+            return keep(self, ids, brief_of(&candidate), candidate.reason.clone());
+        }
+        if candidate.branch.as_deref() != Some(branch) {
+            return keep(self, ids, "its branch changed while it was being checked".into(), None);
+        }
         match remove(self.run, self.scope, repository, entry, &candidate, &checked, &seen.pr) {
             Err((reason, detail)) => keep(self, ids, reason, detail),
             Ok(record) => {
@@ -728,7 +748,9 @@ pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Ut
     }
 
     // A session goes back only as it was left: one used since has gone on
-    // from the project, and its conversation is there now.
+    // from the project, and its conversation is there now. Nothing starts in
+    // them while that is decided and they are moved.
+    let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), record.sessions_kept.iter().map(|id| admission::Scope::Session(id.clone())));
     let removed_at = parse(&record.removed_at);
     let mut used_since = Vec::new();
     let moved = index::update(|sessions| {

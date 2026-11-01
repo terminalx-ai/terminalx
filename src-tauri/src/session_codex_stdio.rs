@@ -178,9 +178,12 @@ impl SessionManager {
         let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
         let actions = if engine.ready { engine.prompt(text, wire_images)? } else { engine.start(text, wire_images)? };
         // No user message or user turn for manual compaction (#524/#566).
-        let events = if manual { Vec::new() } else { vec![self.publish(rt, Payload::UserMessage {
-            author: prompt.author, text: prompt.display, images, baseline: git::snapshot_tree(Path::new(&entry.cwd)).ok(), queued: false, cwd: Some(entry.cwd.clone()),
-        }, None)] };
+        let events = if manual { Vec::new() } else {
+            let baseline = rt.baseline_for(&entry.cwd);
+            vec![self.publish(rt, Payload::UserMessage {
+                author: prompt.author, text: prompt.display, images, baseline, queued: false, cwd: Some(entry.cwd.clone()),
+            }, None)]
+        };
         // Every prompt replaces what the last one left: a desktop prompt is
         // held to nothing, a phone's or a share's to its permits.
         rt.stdio_authority = (prompt.mobile.is_some() || prompt.shared_connection.is_some()).then(|| Authority {

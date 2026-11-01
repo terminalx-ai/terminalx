@@ -24,6 +24,8 @@ let dispatchedTop = 0;
 const observers: ResizeObserverCallback[] = [];
 
 const heightOf = (el: Element) => {
+  // A spacer standing for turns that are not drawn is as tall as its style says.
+  if (el.hasAttribute("data-spacer")) return parseFloat((el as HTMLElement).style.height) || 0;
   const key = el.getAttribute("data-turn");
   return key ? heights.get(key) ?? TURN : OTHER;
 };
@@ -279,36 +281,26 @@ describe("chat scroll follow", () => {
     expect(distFromBottom()).toBe(0);
   });
 
-  it("holds the reader's paragraph while older turns backfill above, including scrolling during a step", () => {
-    vi.useFakeTimers();
-    const { transcript, turnTop } = setup(40);
-    const reading = transcript.turns[transcript.turns.length - 3].key;
-    wheel(-400);
-    const seen = turnTop(reading);
+  // #727: only the turns near the view are drawn. One drawn for the first
+  // time is rarely as tall as its spacer took it to be; the turn the reader
+  // is on stays exactly where their scrolling put it.
+  it("draws only the turns near the view, and holds the reader's turn as turns above are drawn", () => {
+    const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
+    keys.forEach((key, index) => heights.set(key, 180 + (index % 7) * 60));
+    const { turnTop } = setup(200);
+    const drawn = () => content.querySelectorAll("[data-turn]").length;
+    expect(drawn()).toBeLessThan(25);
+    expect(content.querySelector(`[data-turn="${keys.at(-1)}"]`)).not.toBeNull();
+    expect(distFromBottom()).toBe(0);
 
-    act(() => {
-      vi.advanceTimersByTime(0);
-      // The reader keeps scrolling while the step renders.
-      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -50 }));
-      setTop(top - 50);
-    });
-    frame();
-    act(() => {
-      vi.advanceTimersToNextFrame();
-    });
-    expect(turnTop(reading)).toBe(seen + 50);
-
-    for (let i = 0; i < 4; i++) {
-      act(() => {
-        vi.advanceTimersByTime(0);
-      });
-      frame();
-      act(() => {
-        vi.advanceTimersToNextFrame();
-      });
+    for (let step = 0; step < 30; step++) {
+      const reading = [...content.querySelectorAll<HTMLElement>("[data-turn]")].find((node) => node.getBoundingClientRect().top >= 0)!.dataset.turn!;
+      const seen = turnTop(reading);
+      wheel(-250);
+      expect(turnTop(reading), `step ${step}`).toBe(seen + 250);
+      expect(drawn()).toBeLessThan(25);
     }
-    expect(content.querySelectorAll("[data-turn]")).toHaveLength(40);
-    expect(turnTop(reading)).toBe(seen + 50);
+    expect(content.querySelector(`[data-turn="${keys.at(-1)}"]`)).toBeNull();
     expect(latestShown()).toBe(true);
   });
 });

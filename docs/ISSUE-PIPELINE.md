@@ -56,7 +56,7 @@ default). The implementation uses merges, preserving published history.
 ## TerminalX-run local checks
 
 `localCheckCommand` runs through `/bin/sh` in the checkout, with a 30-minute
-timeout and checkout admission held for its duration. Success is bound to both
+timeout and the checkout reserved for its duration. Success is bound to both
 the head and command; a dirty or moved checkout invalidates it. GitHub and project
 policy are reread after the command finishes. By default these checks supplement
 hosted CI. `localChecksOnly` may replace optional hosted checks only when GitHub

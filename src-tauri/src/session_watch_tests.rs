@@ -263,6 +263,7 @@ impl Rig {
             stopping_pid: None,
             background: None,
             left_at: None,
+            prepared_baseline: None,
             log_path: dir.path().join("tab.jsonl"),
             me: std::sync::Weak::new(),
         }));
@@ -2005,9 +2006,11 @@ fn continuation_entered_unacknowledged(rig: &Rig, seq: u64) -> std::sync::mpsc::
     heard
 }
 
+/// The `prompt_delivery` stages in the tab's diagnostics; a send's own timings (`send_timing`, #727) are beside them.
 fn delivery_stages(rig: &Rig) -> Vec<String> {
     let path = rig.rt.lock().unwrap().diagnostics_path();
-    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()).filter_map(|v| v["stage"].as_str().map(String::from)).collect()
+    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| v["type"] == "prompt_delivery").filter_map(|v| v["stage"].as_str().map(String::from)).collect()
 }
 
 #[test]
