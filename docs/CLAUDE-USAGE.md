@@ -31,7 +31,8 @@ Changed percentages or reset deadlines publish immediately. Identical samples
 remain deduplicated, including across tabs. Partial live and OAuth responses keep
 omitted weekly/Fable windows.
 
-For the same account/window key, a later reset deadline wins over an earlier one.
+For the same account/window key, a later reset deadline wins over an earlier one,
+except an earlier endpoint deadline still ahead when the request started (#737).
 Deadlines within 60 seconds are the same window (#729), and there the newer
 observation wins; OAuth observation time is request start. Live data wins a
 timestamp tie against OAuth. See "Matching and refresh outcomes" below. Snapshot revisions
@@ -122,13 +123,26 @@ Each received window now gets a verdict against the window shown under its key
 (`judge` in `status/usage.rs`):
 
 - **Taken**: nothing shown under the key; a deadline more than 60 s later (the
-  next window); the same window (deadlines within 60 s) observed later; or no
-  deadline once the shown window's deadline has passed (a window not started).
-- **Refused**: a deadline more than 60 s earlier (a late receipt of the previous
-  window, such as an idle tab's last sample); the same window observed no later;
-  a deadline that had passed when the shown window was observed; or no deadline
-  from a status line while the shown window still runs. Only the endpoint's fresh
-  answer may say a running window has none.
+  next window); the same window (deadlines within 60 s) observed later; no
+  deadline once the shown window's deadline has passed (a window not started);
+  or an endpoint deadline more than 60 s earlier that was still ahead when the
+  request started, observed later than the shown window (#737).
+- **Refused**: a deadline more than 60 s earlier from a status line (a late
+  receipt of the previous window, such as an idle tab's last sample) or from an
+  endpoint window already over when the request started; the same window
+  observed no later; a deadline that had passed when the shown window was
+  observed; or no deadline from a status line while the shown window still
+  runs. Only the endpoint's fresh answer may say a running window has none.
+
+An earlier deadline is not always the previous window (#737). Windows under
+one key follow each other and never overlap. If the endpoint says at request
+start T that a window runs until D, with D after T, no later window had started
+at T, so a shown window with a later deadline is the wrong one. Before this
+fix the reply was refused until the shown deadline passed, up to a week for a
+7d window. A status line's time is when its sample arrived, not when it was
+taken, so its earlier deadline is still refused. If a sample arrived while the
+request was out, the reply is the older observation and the next request
+decides.
 
 The endpoint names an account window with nothing running (`five_hour`,
 `seven_day`) as `null`, or with neither utilization nor deadline. That is read as

@@ -137,6 +137,7 @@ pub struct CodexRefresh {
 #[serde(rename_all = "camelCase")]
 pub enum Refusal {
     /// Its reset deadline is earlier: a late receipt of the previous window.
+    /// From the endpoint, that window had already ended when it was asked.
     EarlierWindow,
     /// The same window, observed no later than the one shown.
     OlderObservation,
@@ -427,6 +428,9 @@ enum Taken {
     Newer,
     /// The shown window is over and the provider has none running yet.
     NotStarted,
+    /// An earlier deadline the endpoint gave while that window still ran: the
+    /// shown window, with its later deadline, had not started (#737).
+    Running,
 }
 
 impl Taken {
@@ -436,6 +440,7 @@ impl Taken {
             Taken::NextWindow => "later reset: the next window",
             Taken::Newer => "same window, newer observation",
             Taken::NotStarted => "shown window is over; none started",
+            Taken::Running => "earlier reset, still running when asked",
         }
     }
 }
@@ -465,11 +470,26 @@ fn later_observation(incoming: &UsageWindow, current: &UsageWindow) -> bool {
 /// previous window (an idle tab repeating its last sample) never beats the
 /// next one. Deadlines within `RESET_TOLERANCE_MS` are one window, where the
 /// later observation wins.
+///
+/// An earlier deadline is not always the previous window. Windows under one
+/// key follow each other without overlapping, so when the endpoint says at
+/// request start that a window runs until a later moment, no later window had
+/// started then (#737). Unlike a status line, which may repeat an old sample,
+/// that answer is fresh: it replaces the shown window if observed later.
 fn judge(incoming: &UsageWindow, current: Option<&UsageWindow>) -> Verdict {
     let Some(current) = current else { return Verdict::Take(Taken::First) };
     match (incoming.resets_at, current.resets_at) {
         (Some(next), Some(shown)) if !same_deadline(next, shown) => {
-            if next > shown { Verdict::Take(Taken::NextWindow) } else { Verdict::Refuse(Refusal::EarlierWindow) }
+            if next > shown {
+                Verdict::Take(Taken::NextWindow)
+            } else if incoming.source != "oauth" || next <= incoming.updated_at {
+                Verdict::Refuse(Refusal::EarlierWindow)
+            } else if later_observation(incoming, current) {
+                Verdict::Take(Taken::Running)
+            } else {
+                // What is shown arrived after the request started.
+                Verdict::Refuse(Refusal::OlderObservation)
+            }
         }
         // What is shown was observed after this window had already ended.
         (Some(next), None) if next <= current.updated_at.saturating_add(RESET_TOLERANCE_MS) => {
@@ -1609,11 +1629,29 @@ mod tests {
     }
 
     const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
     /// A seven-day deadline in whole epoch seconds, as the status line sends it.
     const WEEK_RESET: i64 = 1_788_757_220;
+    /// Three days into that week, when the status line reported it.
+    const WEEK_SEEN: i64 = WEEK_RESET * 1000 - 3 * DAY;
 
     fn shown(inner: &Inner, key: &str) -> UsageWindow {
         inner.windows[&("claude".to_string(), key.to_string())].clone()
+    }
+
+    fn week_sample(used: u32, reset: i64) -> Value {
+        json!({"rate_limits": {"seven_day": {"used_percentage": used, "resets_at": reset}}})
+    }
+
+    /// The 7d window at 24% until `WEEK_RESET`, from a status line at `WEEK_SEEN`.
+    fn week_shown() -> Inner {
+        let mut inner = Inner::default();
+        assert!(apply_claude_live(&mut inner, &week_sample(24, WEEK_RESET), WEEK_SEEN));
+        inner
+    }
+
+    fn week_reply(resets_at: &str, at: i64) -> Vec<UsageWindow> {
+        claude_oauth::parse_response(&json!({"seven_day": {"utilization": 30.0, "resets_at": resets_at}}), at)
     }
 
     /// #729: the endpoint's fractional deadline for the window the status line
@@ -1690,30 +1728,97 @@ mod tests {
         assert_eq!(claude_revalidate_at(&inner), Some(70_000));
     }
 
+    /// #737: the endpoint's 7d deadline was two hours before the shown one and
+    /// still ahead when the request started. No later window had started then,
+    /// so the shown one was wrong, yet the reply was refused as the previous
+    /// window until the shown deadline passed.
+    #[test]
+    fn an_endpoint_window_still_running_when_asked_replaces_a_later_shown_one() {
+        const RUNNING: &str = "2026-09-07T03:00:20.373000+00:00";
+        let running = WEEK_RESET * 1000 - 2 * HOUR + 373;
+        let mut inner = week_shown();
+        let now = WEEK_SEEN + HOUR;
+        assert!(begin_claude_refresh(&mut inner, now, true, None));
+        let reply = week_reply(RUNNING, now);
+        assert_eq!(judge(&reply[0], Some(&shown(&inner, "seven_day"))), Verdict::Take(Taken::Running));
+        finish_claude_refresh(&mut inner, 0, Ok(reply), now, now + 300).unwrap();
+        let week = shown(&inner, "seven_day");
+        assert_eq!((week.used_percent, week.resets_at, week.updated_at, week.source.as_str()), (30.0, Some(running), now, "oauth"));
+        assert_eq!((inner.claude.last_updated, inner.claude.refused.clone()), (Some(now), vec![]));
+        assert_eq!(claude_revalidate_at(&inner), Some(running), "the reply's deadline is the one checked next");
+
+        // The reply must be the later observation. A sample that arrived while
+        // the request was out is newer, and the next request settles it.
+        let mut inner = week_shown();
+        assert!(begin_claude_refresh(&mut inner, now, true, None));
+        assert!(apply_claude_live(&mut inner, &week_sample(25, WEEK_RESET), now + 100));
+        finish_claude_refresh(&mut inner, 0, Ok(week_reply(RUNNING, now)), now, now + 300).unwrap();
+        assert_eq!((shown(&inner, "seven_day").used_percent, inner.claude.last_updated), (25.0, None));
+        assert_eq!(inner.claude.refused, vec![RefusedWindow { key: "seven_day".into(), label: "7d".into(), reason: Refusal::OlderObservation }]);
+        let next = now + MINUTE;
+        assert!(begin_claude_refresh(&mut inner, next, true, None));
+        finish_claude_refresh(&mut inner, 0, Ok(week_reply(RUNNING, next)), next, next + 300).unwrap();
+        assert_eq!((shown(&inner, "seven_day").used_percent, shown(&inner, "seven_day").resets_at), (30.0, Some(running)));
+    }
+
+    /// #737: the same earlier window from a status line is still the previous
+    /// one. Its time is when it arrived, and an idle tab repeats old samples.
+    #[test]
+    fn the_same_earlier_window_from_a_status_line_is_still_refused() {
+        let mut inner = week_shown();
+        let now = WEEK_SEEN + HOUR;
+        let sample = week_sample(30, WEEK_RESET - 2 * 3600);
+        let received = parse_claude(&sample, now);
+        assert_eq!(judge(&received[0], Some(&shown(&inner, "seven_day"))), Verdict::Refuse(Refusal::EarlierWindow));
+        assert!(!apply_claude_live(&mut inner, &sample, now));
+        let week = shown(&inner, "seven_day");
+        assert_eq!((week.used_percent, week.resets_at, week.updated_at), (24.0, Some(WEEK_RESET * 1000), WEEK_SEEN));
+    }
+
+    /// #737: an endpoint window whose deadline had passed when the request
+    /// started is over. The later shown window is the next one and stays.
+    #[test]
+    fn an_endpoint_window_over_before_the_request_does_not_replace_a_later_one() {
+        let now = WEEK_SEEN + HOUR;
+        let at_request = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now).unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
+        // Last week's window, and one whose deadline is the request's start.
+        for over in ["2026-08-31T05:00:20.000000+00:00", at_request.as_str()] {
+            let mut inner = week_shown();
+            assert!(begin_claude_refresh(&mut inner, now, true, None));
+            finish_claude_refresh(&mut inner, 0, Ok(week_reply(over, now)), now, now + 300).unwrap();
+            let week = shown(&inner, "seven_day");
+            assert_eq!((week.used_percent, week.resets_at, week.source.as_str()), (24.0, Some(WEEK_RESET * 1000), "statusline"), "{over}");
+            assert_eq!(inner.claude.refused, vec![RefusedWindow { key: "seven_day".into(), label: "7d".into(), reason: Refusal::EarlierWindow }], "{over}");
+            assert_eq!(inner.claude.last_updated, None, "{over}");
+        }
+    }
+
     /// #729: "Last refreshed just now" came from an answer that replaced
     /// nothing. Such an answer leaves `lastUpdatedAt` alone and says why.
     #[test]
     fn a_refresh_that_replaces_nothing_says_so_and_why() {
         let store = UsageStore::default();
         let mut inner = store.inner.lock().unwrap();
-        apply_claude_live(&mut inner, &json!({"rate_limits": {"seven_day": {"used_percentage": 24, "resets_at": WEEK_RESET}}}), HOUR);
-        assert!(begin_claude_refresh(&mut inner, HOUR, false, None));
-        finish_claude_refresh(&mut inner, 0, Ok(parse_claude(&json!({"rate_limits": {"seven_day": {"used_percentage": 24, "resets_at": WEEK_RESET}}}), HOUR + 1)), HOUR + 1, HOUR + 300).unwrap();
-        assert_eq!(inner.claude.last_updated, Some(HOUR + 1));
-        let now = 2 * HOUR;
+        let start = WEEK_SEEN;
+        apply_claude_live(&mut inner, &week_sample(24, WEEK_RESET), start);
+        assert!(begin_claude_refresh(&mut inner, start, false, None));
+        finish_claude_refresh(&mut inner, 0, Ok(parse_claude(&week_sample(24, WEEK_RESET), start + 1)), start + 1, start + 300).unwrap();
+        assert_eq!(inner.claude.last_updated, Some(start + 1));
+        let now = start + HOUR;
         assert!(begin_claude_refresh(&mut inner, now, true, None));
-        // A turn lands while the request is out, and the reply's 7d deadline
-        // is two hours before the shown one.
+        // A turn lands while the request is out, and the reply's 7d window is
+        // last week's, over before the request started (#737).
         apply_claude_live(&mut inner, &session_sample(5, WEEK_RESET), now + 100);
         let reply = claude_oauth::parse_response(&json!({
             "five_hour": {"utilization": 4.0, "resets_at": "2026-09-07T05:00:20.373000+00:00"},
-            "seven_day": {"utilization": 30.0, "resets_at": "2026-09-07T03:00:20.000000+00:00"}
+            "seven_day": {"utilization": 30.0, "resets_at": "2026-08-31T05:00:20.000000+00:00"}
         }), now);
         finish_claude_refresh(&mut inner, 0, Ok(reply), now, now + 300).unwrap();
         drop(inner);
         let snapshot = store.snapshot_at(&HashSet::new(), now + 300);
         assert_eq!(snapshot.claude.last_success_at, Some(now));
-        assert_eq!(snapshot.claude.last_updated_at, Some(HOUR + 1));
+        assert_eq!(snapshot.claude.last_updated_at, Some(start + 1));
         let mut refused = snapshot.claude.refused.clone();
         refused.sort_by(|a, b| a.key.cmp(&b.key));
         assert_eq!(refused, vec![
@@ -1724,7 +1829,7 @@ mod tests {
         let mut reasons: Vec<_> = value["refused"].as_array().unwrap().iter().map(|refused| refused["reason"].clone()).collect();
         reasons.sort_by_key(|reason| reason.to_string());
         assert_eq!(reasons, vec![json!("earlierWindow"), json!("olderObservation")]);
-        assert_eq!(value["lastUpdatedAt"], json!(HOUR + 1));
+        assert_eq!(value["lastUpdatedAt"], json!(start + 1));
     }
 
     /// #729: live usage turned away for an account mismatch went stale
