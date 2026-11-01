@@ -148,6 +148,12 @@ pub fn offered(claude: Vec<Model>, codex: Vec<Model>) -> Vec<Model> {
     out
 }
 
+/// [`offered`], asking each agent in turn: for a phone's picker, which the
+/// runtime answers off the desktop's thread pool. `refresh` re-reads both lists.
+pub fn list(codex: &crate::harness::codex::models::Cache, refresh: bool) -> Vec<Model> {
+    offered(crate::harness::claude::models::get(refresh), codex.get(refresh))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

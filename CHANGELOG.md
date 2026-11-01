@@ -39,6 +39,13 @@
   goes under one id, and a Mac that already has it answers as it did the first
   time, so the phone reports it sent and clears the box. Older Macs behave as
   before. (#675)
+- Control a session from the phone as from the desktop: Stop and Interrupt a
+  working agent; Retry safely, Resend last prompt, Continue here and Stop from
+  the recovery banner; change the model, effort and permission mode with the
+  desktop's choices, pending states and Bypass confirmation; and Continue in
+  new session with a chosen agent, settings and context. A read-only phone sees
+  the settings but cannot change them, and each control is checked against the
+  phone's access on the Mac. Shown only for a Mac that offers them.
 - Report each connection path's failure as it happens. A Relay refusal shows on
   the Sessions card while LAN addresses are still pending, and LAN addresses that
   have not answered get 3 more seconds once Relay has failed, not 15. Log

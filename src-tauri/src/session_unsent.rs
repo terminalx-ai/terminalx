@@ -170,12 +170,19 @@ impl SessionManager {
     /// "Resend last prompt": the last prompt the tab's agent never answered,
     /// sent again as the reader sent it, images and all.
     pub fn resend_unsent(&self, session_id: &str, tab_id: &str) -> Result<SendOutcome> {
+        let (text, images) = self.unsent_prompt(session_id, tab_id)?;
+        self.send(session_id, tab_id, text, images)
+    }
+
+    /// The last prompt the tab's agent never answered, as it was sent: what
+    /// "Resend last prompt" sends again, from the desktop or a phone.
+    pub fn unsent_prompt(&self, session_id: &str, tab_id: &str) -> Result<(String, Vec<ImageInput>)> {
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         let log = store::log_path(session_id, tab_id)?;
         let last = said_in(&log, tab.follow.conversation.as_deref()).since.pop().ok_or_else(|| anyhow!("There is no unanswered prompt to send again."))?;
         let images = last.images.iter().map(image_input).collect::<Result<Vec<_>>>()?;
-        self.send(session_id, tab_id, last.text, images)
+        Ok((last.text, images))
     }
 }
 

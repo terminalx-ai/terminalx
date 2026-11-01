@@ -5227,6 +5227,10 @@ mod watch_tests;
 mod mobile_admission_tests;
 
 #[cfg(test)]
+#[path = "session_mobile_controls_tests.rs"]
+mod mobile_controls_tests;
+
+#[cfg(test)]
 #[path = "session_follow_tests.rs"]
 mod follow_tests;
 
