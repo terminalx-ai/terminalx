@@ -465,6 +465,7 @@ describe("the same SessionView for local and cloud sessions", () => {
     guard.local = () => [];
     guard.handlers.review_range = () => ({ target: "main", base: "base-tree", head: "live-tree" });
     guard.handlers.changes_between = () => [];
+    guard.handlers.unfinished_merge = () => null;
     guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 });
     const local: SessionEntry = {
       id: "local-1",

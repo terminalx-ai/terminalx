@@ -1,10 +1,15 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { GitSource } from "@/lib/gitSource";
 import type { AgentEvent } from "@/types/events";
+import type { UnfinishedMerge } from "@/types/session";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => { throw new Error(`A source-backed panel called ${command}`); }) }));
+const { invoke, ask } = vi.hoisted(() => ({
+  invoke: vi.fn(async (command: string) => { throw new Error(`A source-backed panel called ${command}`); }),
+  ask: vi.fn(async (_message: string, _options?: unknown) => false),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ ask }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("./DiffPane", () => ({ DiffPane: ({ path, before, after }: { path: string; before: string; after: string }) => <pre data-testid="diff">{`${path}:${before}->${after}`}</pre> }));
 
@@ -40,7 +45,75 @@ function fakeSource(key: string): GitSource & { changesBetween: ReturnType<typeo
   } as never;
 }
 
-afterEach(() => { cleanup(); localStorage.clear(); invoke.mockClear(); });
+afterEach(() => { cleanup(); localStorage.clear(); invoke.mockClear(); ask.mockReset(); ask.mockResolvedValue(false); });
+
+/** A source whose checkout holds `merge`, until it is committed or aborted. */
+function merging(key: string, merge: UnfinishedMerge, files: { path: string; status: "added" | "modified"; additions: number; deletions: number }[]) {
+  const source = fakeSource(key);
+  source.changesBetween.mockResolvedValue(files);
+  const unfinishedMerge = vi.fn(async (): Promise<UnfinishedMerge | null> => merge);
+  const settle = async () => { unfinishedMerge.mockResolvedValue(null); };
+  const commitMerge = vi.fn(settle);
+  const abortMerge = vi.fn(settle);
+  Object.assign(source, { unfinishedMerge, commitMerge, abortMerge });
+  return { source, commitMerge, abortMerge };
+}
+
+it("tells a merge's own changes from what it brought in, and commits it", async () => {
+  const { source, commitMerge } = merging("merging", { mergeHead: "995514cb", name: "995514c", conflicted: [], changedHere: ["CHANGELOG.md"], incoming: ["src-tauri/src/worktree_control.rs", "src/lib/terminal.ts"] }, [
+    { path: "CHANGELOG.md", status: "modified", additions: 21, deletions: 0 },
+    { path: "src-tauri/src/worktree_control.rs", status: "added", additions: 317, deletions: 0 },
+    { path: "src/lib/terminal.ts", status: "modified", additions: 18, deletions: 0 },
+  ]);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  const here = await screen.findByRole("region", { name: "Changed here" });
+  expect(within(here).getAllByRole("button").map((row) => row.textContent)).toEqual([expect.stringContaining("CHANGELOG.md")]);
+  expect(within(screen.getByRole("region", { name: "From 995514c" })).getAllByRole("button")).toHaveLength(2);
+  const notice = screen.getByRole("status", { name: "Merge in progress" });
+  expect(notice.textContent).toContain("Merging 995514c, not committed yet. 1 file changed here · 2 files from 995514c, as Git merged them.");
+
+  fireEvent.click(within(notice).getByRole("button", { name: "Commit merge" }));
+  await waitFor(() => expect(commitMerge).toHaveBeenCalledWith("995514cb"));
+  await waitFor(() => expect(screen.queryByRole("status", { name: "Merge in progress" })).toBeNull());
+  expect(screen.queryByRole("region", { name: "Changed here" })).toBeNull();
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("aborts a merge only once the person confirms what it loses, and never commits one still in conflict", async () => {
+  const { source, commitMerge, abortMerge } = merging("aborting", { mergeHead: "abc1234", name: "main", conflicted: ["a.txt"], changedHere: ["notes.txt"], incoming: ["b.txt"] }, [
+    { path: "a.txt", status: "modified", additions: 3, deletions: 1 },
+    { path: "b.txt", status: "added", additions: 1, deletions: 0 },
+    { path: "notes.txt", status: "added", additions: 1, deletions: 0 },
+  ]);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  const notice = await screen.findByRole("status", { name: "Merge in progress" });
+  expect(notice.textContent).toContain("1 file still in conflict · 1 file changed here · 1 file from main, as Git merged it. Resolve the conflicts to commit it.");
+  expect((within(notice).getByRole("button", { name: "Commit merge" }) as HTMLButtonElement).disabled).toBe(true);
+  // All changes also holds the branch's own commits: not sorted by the merge.
+  expect(screen.queryByRole("region", { name: "From main" })).toBeNull();
+
+  fireEvent.click(within(notice).getByRole("button", { name: "Abort merge" }));
+  await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+  expect(ask.mock.calls[0][0]).toContain("1 file resolved, changed or added by hand and 1 file still in conflict in this merge will be lost. main keeps its own changes.");
+  expect(abortMerge).not.toHaveBeenCalled();
+
+  ask.mockResolvedValue(true);
+  abortMerge.mockRejectedValueOnce("A different merge is in progress now");
+  fireEvent.click(within(notice).getByRole("button", { name: "Abort merge" }));
+  expect((await within(notice).findByRole("alert")).textContent).toBe("source: A different merge is in progress now");
+  fireEvent.click(within(notice).getByRole("button", { name: "Abort merge" }));
+  await waitFor(() => expect(abortMerge).toHaveBeenLastCalledWith("abc1234"));
+  await waitFor(() => expect(screen.queryByRole("status", { name: "Merge in progress" })).toBeNull());
+  expect(commitMerge).not.toHaveBeenCalled();
+});
+
+it("shows no merge for a source that cannot read one", async () => {
+  const source = fakeSource("no-merge-capability");
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  await screen.findByRole("button", { name: /turn.ts/ });
+  expect(screen.queryByRole("status", { name: "Merge in progress" })).toBeNull();
+});
 
 it("diffs the turn's range and reads both sides through the given source", async () => {
   const source = fakeSource("cloud:w1|repo");

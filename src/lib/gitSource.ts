@@ -2,7 +2,7 @@ import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
-import type { BranchInfo, ChangedFile, CommitInfo, WorkStatus } from "@/types/session";
+import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, plus what only a cloud repository reports so far. */
 export interface SourceStatus extends WorkStatus {
@@ -41,6 +41,12 @@ export interface GitSource {
   fetch?(): Promise<string | null>;
   /** Local only: discarding in a cloud workspace is left to its terminal. */
   discard?(path: string): Promise<void>;
+  /** Local only: a merge stopped before its commit, its files told apart (#736). */
+  unfinishedMerge?(): Promise<UnfinishedMerge | null>;
+  /** Local only: abort the merge of `mergeHead`, if it is still the one in progress. */
+  abortMerge?(mergeHead: string): Promise<void>;
+  /** Local only: commit the merge of `mergeHead` with Git's own message. */
+  commitMerge?(mergeHead: string): Promise<void>;
   ghAvailable(): Promise<boolean>;
   prs(branch: string): Promise<PullRequest[]>;
   /** Durable transport locator, separate from the repository/PR URL identity. */
@@ -78,6 +84,9 @@ export function localGitSource(cwd: string): GitSource {
     push: () => git.push(cwd).then(() => null),
     pull: () => git.pull(cwd).then(() => null),
     discard: (path) => git.discard(cwd, path),
+    unfinishedMerge: () => git.unfinishedMerge(cwd),
+    abortMerge: (mergeHead) => git.abortMerge(cwd, mergeHead),
+    commitMerge: (mergeHead) => git.commitMerge(cwd, mergeHead).then(() => undefined),
     ghAvailable: () => gh.available(),
     prs: (branch) => gh.list(cwd, branch),
     prScope: { kind: "local", cwd },

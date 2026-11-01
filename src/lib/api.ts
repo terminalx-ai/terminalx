@@ -26,6 +26,7 @@ import type {
   WorkspaceDisposition,
   TabEntry,
   TabStatus,
+  UnfinishedMerge,
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
@@ -1953,6 +1954,12 @@ export const git = {
   push: (cwd: string) => invoke<string>("git_push", { cwd }),
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
   discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
+  /** The merge in progress, its uncommitted files told apart (#736). */
+  unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
+  /** Abort the merge of `mergeHead`; refused if another merge is in progress now. */
+  abortMerge: (cwd: string, mergeHead: string) => invoke<void>("git_abort_merge", { cwd, mergeHead }),
+  /** Commit the merge of `mergeHead` with Git's message; refused while a conflict is left. */
+  commitMerge: (cwd: string, mergeHead: string) => invoke<string>("git_commit_merge", { cwd, mergeHead }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string) => invoke<[string, ChangedFile[]]>("working_changes", { cwd }),
 };

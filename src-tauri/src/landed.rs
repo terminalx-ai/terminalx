@@ -108,6 +108,10 @@ pub struct Landed {
     /// What the branch was compared with, e.g. `origin/main`.
     pub base: Option<String>,
     pub uncommitted: u32,
+    /// A merge stopped before its commit. Most of its uncommitted files are
+    /// what it brought in, which what was merged still has (#736).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unfinished_merge: Option<crate::git::UnfinishedMerge>,
     /// Stash entries made on this branch. The stash is shared by every
     /// worktree, and deleting the branch orphans what was stashed on it.
     pub stashes: u32,
@@ -157,12 +161,13 @@ pub enum State {
 impl Landed {
     fn describe_digest(&self) -> String {
         format!(
-            "checked={} head={} branch={} uncommitted={}:{:016x} stashes={} merged={:?} unmerged={} fresh={} unverified={}",
+            "checked={} head={} branch={} uncommitted={}:{:016x} merging={} stashes={} merged={:?} unmerged={} fresh={} unverified={}",
             self.checked,
             self.head.as_deref().unwrap_or("-"),
             self.branch.as_deref().unwrap_or("-"),
             self.uncommitted,
             self.changes,
+            self.unfinished_merge.as_ref().map(|merge| format!("{}:{}/{}/{}", merge.merge_head, merge.conflicted.len(), merge.changed_here.len(), merge.incoming.len())).unwrap_or_else(|| "-".into()),
             self.stashes,
             self.merged,
             self.unmerged_commits,
@@ -197,7 +202,22 @@ impl Landed {
             out.push("This folder is not on disk, or is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work.".to_string());
             return out;
         }
-        if self.uncommitted > 0 {
+        if let Some(merge) = &self.unfinished_merge {
+            // Its incoming files are not this branch's work: say what is.
+            let name = &merge.name;
+            let count = |files: &[String]| files.len() as u32;
+            let mut line = format!("A merge of {name} is unfinished.");
+            if !merge.incoming.is_empty() {
+                line.push_str(&format!(" {} in {name}'s changes, which {name} still has.", plural(count(&merge.incoming), "uncommitted file only brings", "uncommitted files only bring")));
+            }
+            out.push(line);
+            if !merge.changed_here.is_empty() {
+                out.push(format!("{} would be lost.", plural(count(&merge.changed_here), "file resolved, changed or added by hand in it", "files resolved, changed or added by hand in it")));
+            }
+            if !merge.conflicted.is_empty() {
+                out.push(format!("{} would be lost with it.", plural(count(&merge.conflicted), "file still in conflict", "files still in conflict")));
+            }
+        } else if self.uncommitted > 0 {
             out.push(format!("{} would be lost.", plural(self.uncommitted, "uncommitted file", "uncommitted files")));
         }
         if self.stashes > 0 {
@@ -552,6 +572,7 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     let status = listing.as_ref().map(|out| out.lines().count() as u32);
     let stashes = stashes_on(path, branch.as_deref());
     landed.uncommitted = status.unwrap_or(0);
+    landed.unfinished_merge = git::unfinished_merge(path);
     landed.changes = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1195,6 +1216,32 @@ mod tests {
         // A stash made on another branch is not this workspace's.
         let other = PathBuf::from(git::create_worktree(&f.project, "calm-teal-bee", Some("main")).unwrap().path);
         assert!(check(&f.project, &other, Fetch::Skip).clean);
+    }
+
+    #[test]
+    fn an_unfinished_merge_is_told_apart_from_the_branchs_own_uncommitted_work() {
+        let f = Fixture::new();
+        let wt = f.worktree("quiet-amber-fox");
+        commit(&wt, "a.txt", "branch\n");
+        std::fs::write(f.project.join("b.txt"), "from main\n").unwrap();
+        std::fs::write(f.project.join("c.txt"), "from main too\n").unwrap();
+        commit(&f.project, "a.txt", "main\n");
+        assert!(git::run(&wt, &["merge", "--no-ff", "--no-commit", "main"]).is_err(), "a.txt conflicts");
+        std::fs::write(wt.join("a.txt"), "branch\nmain\n").unwrap();
+
+        let landed = check(&f.project, &wt, Fetch::Skip);
+        assert!(!landed.clean && !landed.safe);
+        assert_eq!(landed.uncommitted, 3);
+        assert_eq!(landed.losses[0], "A merge of main is unfinished. 2 uncommitted files only bring in main's changes, which main still has.");
+        assert_eq!(landed.losses[1], "1 file resolved, changed or added by hand in it would be lost.");
+        assert!(!landed.losses.iter().any(|line| line.contains("uncommitted files would be lost")));
+
+        let merging = landed.digest;
+        sh(&wt, &["merge", "--abort"]);
+        let landed = check(&f.project, &wt, Fetch::Skip);
+        assert!(landed.unfinished_merge.is_none());
+        assert_eq!(landed.uncommitted, 0);
+        assert_ne!(landed.digest, merging, "what the person was shown changed");
     }
 
     #[test]

@@ -2747,6 +2747,23 @@ pub async fn git_discard(cwd: String, path: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || git::discard_file(Path::new(&cwd), &path).map_err(err)).await.map_err(err)?
 }
 
+/// The merge in progress in the checkout, with its uncommitted files told
+/// apart: brought in by the merge, or changed here (#736).
+#[tauri::command]
+pub async fn unfinished_merge(cwd: String) -> CmdResult<Option<git::UnfinishedMerge>> {
+    tauri::async_runtime::spawn_blocking(move || git::unfinished_merge(Path::new(&cwd))).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn git_abort_merge(cwd: String, merge_head: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::abort_merge(Path::new(&cwd), &merge_head).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_commit_merge(cwd: String, merge_head: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || git::commit_merge(Path::new(&cwd), &merge_head).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || git::checkout_branch(Path::new(&cwd), &name, create).map_err(err)).await.map_err(err)?

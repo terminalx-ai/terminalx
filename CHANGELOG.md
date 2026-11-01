@@ -16,6 +16,27 @@
   to **Needs you**. A required review, a closed pull request and other stops
   that wait on someone else stay at **Needs you** until they are checked again.
   (#725)
+- Never leave a conflict resolver's merge half finished. The resolver now
+  commits the merge as soon as no conflict is left and runs the project's
+  checks after, amending a fix they need into that one merge commit. When its
+  turn ends without a pushed result and the checkout still holds its
+  uncommitted merge, TerminalX aborts it and says so in the pipeline's record,
+  instead of leaving the base branch's changes in the checkout looking like the
+  branch's own work. A pull request merged or closed while the resolver works
+  now ends the pipeline at once, and the resolver is told to stop rather than
+  finish its checks. A stopped pipeline's checkout, and one whose resolver a
+  person interrupted, are left as they are. (#736)
+
+### Changes
+
+- Show an unfinished merge for what it is. When a checkout is part way through
+  a `git merge`, the Changes panel says what is being merged and, under
+  Uncommitted changes, lists its files as still in conflict, changed here, or
+  brought in exactly as Git merged them, with Commit merge and Abort merge
+  (which asks first). Removing such a workspace no longer warns that every one
+  of those files would be lost: it says which were changed by hand and which
+  only bring in the other side's changes, which it still has. (#736)
+
 ### Sessions and tabs
 
 - Open the session you click. A session with no tabs open was swapped for

@@ -105,6 +105,10 @@ pub trait Host: Send + Sync {
     fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _behind: bool) -> Result<Option<super::Resolution>> { Ok(None) }
     fn open_resolver(&self, _pipeline: &Pipeline, _author: &SessionEntry) -> Result<SessionRef> { bail!("Conflict resolution is not available on this host") }
     fn verify_resolution(&self, _cwd: &Path, _resolution: &super::Resolution, _head: &str, _branch: &str) -> Result<()> { bail!("Resolution verification is not available on this host") }
+    /// Abort the merge `resolution` asked for if the checkout still holds it
+    /// unfinished: HEAD at the original head, the pinned base being merged.
+    /// `true` when it was aborted; anything else in the checkout is left.
+    fn abort_unfinished_merge(&self, _cwd: &Path, _resolution: &super::Resolution) -> Result<bool> { Ok(false) }
     fn defer_local_check(&self, _pipeline_id: &str) -> bool { false }
     fn run_local_check(&self, _cwd: &Path, _command: &str) -> Result<()> { bail!("Local check execution is unavailable on this host") }
     fn workspace(&self, cwd: &Path) -> Result<Workspace>;
@@ -613,10 +617,18 @@ impl Step<'_> {
                 Ok(AgentStop::NotRunning) => {}
                 Ok(AgentStop::Busy) if role == Role::Author => left.push(the),
                 Ok(AgentStop::Busy) => {
-                    // A resolver part way through its merge is left to finish
-                    // it: told to stop, it could leave the checkout half merged.
+                    // A resolver part way through its merge for a pipeline
+                    // that ended is told to stop at once: the merge would never
+                    // be pushed, and one it leaves unfinished is aborted when
+                    // its turn ends (#736). One a person stopped is left to
+                    // finish it, as a stopped pipeline's checkout is left as it is.
                     let resolving = role == Role::Resolver && self.p.resolution.is_some();
-                    match (!resolving).then(|| self.host.send(&who, &prompts::pipeline_ended(&why))) {
+                    let notice = match (resolving, ending) {
+                        (true, Ending::Stopped) => None,
+                        (true, _) => Some(prompts::resolution_ended(&why)),
+                        (false, _) => Some(prompts::pipeline_ended(&why)),
+                    };
+                    match notice.map(|notice| self.host.send(&who, &notice)) {
                         Some(Ok(())) => told.push(the),
                         Some(Err(error)) => {
                             log::warn!("issue pipeline {}: telling {the} the pipeline ended: {error:#}", self.p.id);
@@ -654,8 +666,11 @@ impl Step<'_> {
     /// used; one that was told of the end while in that turn now has its agent stopped.
     fn late_reply(&mut self, role: Role, who: &SessionRef, ending: Ending) -> Result<()> {
         if role == Role::Resolver {
-            // Its turn is over: it holds the checkout no longer.
-            self.p.resolution = None;
+            // Its turn is over: it holds the checkout no longer, and the merge
+            // it was making for a pipeline that ended is never pushed.
+            if let Some(resolution) = self.p.resolution.take() {
+                self.abort_unfinished_merge(&resolution);
+            }
         }
         let after = match ending {
             Ending::Merged => "after the merge",
@@ -880,7 +895,13 @@ impl Step<'_> {
         let Some(resolution) = self.p.resolution.clone() else { return Ok(()) };
         // The resolver has ended: release admission even if verification fails.
         self.p.resolution = None;
+        // Whatever it reports, a merge it did not commit is never pushed.
+        let aborted = self.abort_unfinished_merge(&resolution);
         match verdict::author_report(message) {
+            AuthorReport::Done { checks: LocalChecks::Passed | LocalChecks::None, .. } if aborted => {
+                self.needs_you(StopReason::Failed { step: "Resolving conflicts".into(), message: "The resolver reported the merge done without committing it.".into() });
+                return Ok(());
+            }
             AuthorReport::Done { checks: LocalChecks::Passed | LocalChecks::None, .. } => {}
             AuthorReport::Done { checks: LocalChecks::Failed, .. } => { self.needs_you(StopReason::LocalChecksFailed); return Ok(()); }
             AuthorReport::NotDone { reason } => { self.needs_you(StopReason::Failed { step: "Resolving conflicts".into(), message: reason.unwrap_or_else(|| "The resolver could not complete the merge.".into()) }); return Ok(()); }
@@ -898,6 +919,33 @@ impl Step<'_> {
         // review explicitly replaces them. They never authorize the new head.
         if self.p.pr.is_some() { self.request_review(false) }
         else { self.enter(resolution.return_stage, "Base updated. Waiting for the author to finish the work."); Ok(()) }
+    }
+
+    /// The resolver's turn is over. A merge it left unfinished is aborted, so
+    /// the base's changes are not left in the checkout as if they were the
+    /// branch's own uncommitted work (#736). A merge it committed, and a
+    /// checkout holding anything else, are left alone, and so is the checkout
+    /// of a pipeline a person stopped: nothing further happens to it until it
+    /// is resumed, and what the resolver left is theirs to inspect. `true`
+    /// when a merge was aborted.
+    fn abort_unfinished_merge(&mut self, resolution: &super::Resolution) -> bool {
+        let (_, stopped) = self.switches();
+        if stopped || self.p.stopped {
+            return false;
+        }
+        let what = format!("its merge of {} at {}", resolution.base, short(&resolution.base_commit));
+        match self.host.abort_unfinished_merge(&self.cwd, resolution) {
+            Ok(false) => false,
+            Ok(true) => {
+                self.record("resolutionAborted", format!("The conflict resolver left {what} unfinished. TerminalX aborted it; the checkout is back at {}.", short(&resolution.head))).commit = Some(resolution.head.clone());
+                true
+            }
+            Err(error) => {
+                let error = format!("{error:#}");
+                self.record("resolutionLeft", format!("The conflict resolver left {what} unfinished, and TerminalX could not abort it: {}. Abort it in the Changes panel, or with git merge --abort.", error.trim_end_matches('.')));
+                false
+            }
+        }
     }
 
     // ---- the stages ------------------------------------------------------
@@ -1671,8 +1719,13 @@ pub fn turn_failed(host: &dyn Host, session_id: &str, tab_id: &str, detail: &str
         };
         // Termination releases the checkout even if Stop changed the state
         // while the resolver was still running. Stop itself must not release it.
-        if role == Role::Resolver && step.p.resolution.take().is_some() {
-            if step.p.stopped {
+        let resolution = if role == Role::Resolver { step.p.resolution.take() } else { None };
+        if let Some(resolution) = resolution {
+            if matches!(ending_of(&step.p), Some(Ending::Merged | Ending::Closed)) {
+                // Its pipeline is over, and the merge it was making with it:
+                // there is nothing left in it for a person to inspect.
+                step.abort_unfinished_merge(&resolution);
+            } else if step.p.stopped {
                 step.record("resolutionStopped", format!("{detail} The conflict resolver released the checkout; inspect its changes before continuing."));
             } else {
                 step.needs_you(StopReason::SessionStopped { role: role.label().into(), detail: detail.to_string() });
@@ -1921,6 +1974,12 @@ pub fn poll(host: &dyn Host) {
             // be put back halfway through that turn. One whose turn's end was
             // never heard is looked at as before once it sits idle.
             if step.p.answered.is_some() && step.host.agent_busy(&step.p.author) {
+                return if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) };
+            }
+            // While the resolver works, and after it gave up: a pull request
+            // merged or closed meanwhile ends the pipeline, and the resolver
+            // is told at once that its merge will never be pushed (#736).
+            if step.p.stage == Stage::Resolve {
                 return if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) };
             }
             if step.watch_conflicts()? { return Ok(()); }
