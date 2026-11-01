@@ -85,6 +85,9 @@ pub(super) struct MobileRuntime {
     /// Shared by every connection: the retry of a send whose reply was lost
     /// comes over the connection that replaced the one that dropped (#675).
     send_ids: SendIds,
+    /// The desktop's own Codex model list, so a phone choosing a model for a
+    /// new session sees what the new-session view offers.
+    codex_models: OnceLock<Arc<crate::harness::codex::models::Cache>>,
 }
 
 impl MobileRuntime {
@@ -97,7 +100,12 @@ impl MobileRuntime {
             notification_seq: std::sync::atomic::AtomicU64::new(0),
             notes: Mutex::new(()),
             send_ids: SendIds::new(),
+            codex_models: OnceLock::new(),
         }
+    }
+
+    pub(super) fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
+        let _ = self.codex_models.set(cache);
     }
 
     pub(super) fn configure(&self, sink: Arc<dyn EventSink>) -> Result<()> {
@@ -411,6 +419,14 @@ pub(super) fn dispatch(
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(connection, params)))
         }
         "steerLease.release" => parse_params(params).and_then(|params| release_input(connection, params)),
+        "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager)),
+        "sessions.create" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| create_session(manager, connection, params)))
+        }
+        "mac.settings" => no_params(&params).and_then(|_| connection.call("settings", json!({}))),
+        "mac.setSettings" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params: MacSettingsPatch| connection.call("setSettings", json!({"nativeCodex": params.native_codex}))))
+        }
         "notifications.missedSince" => parse_params(params).map(|params| missed_notifications(manager, params)),
         "notifications.subscribe" => sink
             .as_ref()
@@ -428,7 +444,9 @@ fn capabilities() -> Value {
     // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
     // `sessionControls`: stop, interrupt, recovery, settings and continuing in
     // a new tab, as the desktop offers them.
-    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1 })
+    // `sessionCreate`: `sessions.options` and `sessions.create` start a session
+    // as the desktop does. `macSettings`: `mac.settings` and `mac.setSettings`.
+    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1 })
 }
 
 /// One tab, for a control that takes nothing else.
@@ -1029,6 +1047,117 @@ fn send_digest(text: &str, attachments: &[RemoteAttachmentInput]) -> String {
         .collect();
     let canonical = serde_json::to_vec(&json!([text.trim(), attachments])).expect("a JSON value serializes");
     format!("{:x}", Sha256::digest(canonical))
+}
+
+/// What the desktop's new-session view lets a person choose, for a phone to
+/// choose the same: projects (by an id that is not their path), the agents
+/// with their models and efforts, and the permission modes.
+fn new_session_options(manager: &PairingManager) -> Result<Value> {
+    let projects = phone_projects()?;
+    let codex = manager.mobile.codex_models.get().map(|cache| cache.get(false)).unwrap_or_default();
+    let models = crate::models::offered(crate::harness::claude::models::get(false), codex);
+    let agents: Vec<Value> = crate::harness::offered().into_iter().map(|agent| {
+        let models: Vec<Value> = models.iter().filter(|model| model.harness == agent.id).map(|model| json!({
+            "id": model.id, "label": model.label, "isDefault": model.is_default,
+            "efforts": model.efforts, "defaultEffort": model.default_effort,
+        })).collect();
+        json!({"id": agent.id, "name": agent.name, "available": agent.available, "installHint": agent.install_hint,
+            "effort": agent.caps.effort, "permissionModes": agent.caps.permission_modes, "models": models})
+    }).collect();
+    // As the desktop labels them (`PERMISSION_MODES`).
+    let modes = json!([
+        {"id": "plan", "label": "Plan"}, {"id": "manual", "label": "Ask every time"}, {"id": "auto", "label": "Auto"},
+        {"id": "acceptEdits", "label": "Accept edits"}, {"id": "bypassPermissions", "label": "Bypass permissions"},
+    ]);
+    Ok(json!({"projects": projects, "agents": agents, "modes": modes, "defaultMode": index::DEFAULT_PERMISSION_MODE,
+        "nativeCodex": store::settings::load().experimental.native_codex}))
+}
+
+/// The projects a phone may start a session in: not archived, named, and
+/// known by an id that is not their path.
+fn phone_projects() -> Result<Vec<Value>> {
+    let (projects, last) = store::projects::list()?;
+    Ok(projects.iter().filter(|project| !project.archived).map(|project| json!({
+        "id": store::projects::public_id(&project.path),
+        "name": project.name,
+        "git": project.kind == store::projects::ProjectKind::Git,
+        "lastUsed": last.as_deref() == Some(project.path.as_str()),
+    })).collect())
+}
+
+/// Where a new session's id is remembered for a repeat (#675): never a tab's.
+const NEW_SESSION_KEY: &str = "new-session";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionCreateParams {
+    #[serde(default)]
+    quick: bool,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    use_worktree: bool,
+    agent: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    /// The first message, sent to the new session as the phone sends any.
+    text: String,
+    #[serde(default)]
+    attachments: Vec<RemoteAttachmentInput>,
+    #[serde(default)]
+    client_message_id: Option<String>,
+}
+
+/// Start a session from the phone, then send it the first message through
+/// the phone's own send. With a `clientMessageId`, a repeat after a lost reply
+/// finds the session the first try made instead of making another, and its
+/// message is answered once as any send is. A first message that could not be
+/// sent leaves the session, and says why, for the phone to open and retry.
+fn create_session(manager: &PairingManager, connection: &MobileConnection, params: SessionCreateParams) -> Result<Value> {
+    if params.text.trim().is_empty() && params.attachments.is_empty() {
+        bail!("A new session needs a first message.");
+    }
+    let message = checked_message_id(params.client_message_id.clone())?;
+    let request = json!({"quick": params.quick, "projectId": params.project_id, "useWorktree": params.use_worktree,
+        "agent": params.agent, "model": params.model, "effort": params.effort, "mode": params.mode,
+        "title": params.title, "prompt": params.text});
+    let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!([&request, send_digest(&params.text, &params.attachments)]))?));
+    let created = create_once(&manager.mobile.send_ids, message.as_deref(), digest, || connection.call("create", request.clone()))?;
+    let session_id = created["sessionId"].as_str().context("The Mac did not say which session it started.")?.to_string();
+    let tab_id = created["tabId"].as_str().context("The Mac did not say which session it started.")?.to_string();
+    let first = SessionSendParams { tab_id: tab_id.clone(), text: params.text, attachments: params.attachments, client_message_id: message };
+    let sent = match send_session(manager, connection, first) {
+        Ok(reply) => json!({"sent": reply}),
+        Err(error) => json!({"sendError": format!("{error:#}")}),
+    };
+    let mut reply = json!({"sessionId": session_id, "tabId": tab_id, "title": created["title"], "native": created["native"]});
+    reply.as_object_mut().expect("an object").extend(sent.as_object().expect("an object").clone());
+    Ok(reply)
+}
+
+/// The session a phone's create made, made once per message id (#675): a
+/// repeat of the same request gets the first session, and the id with another
+/// request is refused. Without an id, each request makes one.
+fn create_once(ids: &SendIds, message: Option<&str>, digest: String, create: impl FnOnce() -> Result<Value>) -> Result<Value> {
+    match message {
+        None => create(),
+        Some(id) => {
+            let key = SendKey { tab_id: NEW_SESSION_KEY.into(), client_message_id: id.into() };
+            ids.once(key, digest, || Ok(Reply::Settled(create()?)))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MacSettingsPatch {
+    native_codex: bool,
 }
 
 #[derive(Deserialize)]
@@ -2195,6 +2324,53 @@ mod tests {
             calls.borrow_mut().push((tab_id.into(), text.into(), attachments.len(), message.map(str::to_owned)));
             Ok(serde_json::from_value(answer)?)
         })
+    }
+
+    #[test]
+    fn a_phone_starting_a_session_again_after_a_lost_reply_gets_the_first_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = SendIds::at(dir.path().join("sends.json"));
+        let made = std::cell::Cell::new(0);
+        let create = || { made.set(made.get() + 1); Ok(json!({ "sessionId": format!("session-{}", made.get()), "tabId": "tab" })) };
+        let first = create_once(&ids, Some("draft-0001"), "request".into(), create).unwrap();
+        assert_eq!(create_once(&ids, Some("draft-0001"), "request".into(), create).unwrap(), first);
+        assert_eq!(made.get(), 1);
+        // The id with another request is refused, and makes nothing.
+        assert_eq!(create_once(&ids, Some("draft-0001"), "another request".into(), create).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(made.get(), 1);
+        // A create that failed made nothing to answer with: the next try makes one.
+        assert!(create_once(&ids, Some("draft-0002"), "request".into(), || bail!("Codex is not installed on this Mac.")).is_err());
+        assert_eq!(create_once(&ids, Some("draft-0002"), "request".into(), create).unwrap()["sessionId"], "session-2");
+        // An id never names a tab's send: the same draft id's message to the new tab is its own.
+        assert!(ids.once(SendKey { tab_id: "tab".into(), client_message_id: "draft-0001".into() }, "message".into(), || Ok(Reply::Settled(json!({"status":"sent"})))).is_ok());
+        // Without an id every request makes a session.
+        create_once(&ids, None, "request".into(), create).unwrap();
+        create_once(&ids, None, "request".into(), create).unwrap();
+        assert_eq!(made.get(), 4);
+    }
+
+    #[test]
+    fn a_phone_names_projects_by_id_and_never_sends_a_path() {
+        assert_eq!((capabilities()["sessionCreate"].clone(), capabilities()["macSettings"].clone()), (json!(1), json!(1)));
+        let create: SessionCreateParams = serde_json::from_value(json!({ "projectId": "abc", "useWorktree": true, "agent": "codex", "model": "gpt-5", "effort": "high", "mode": "auto", "title": "Fix it", "text": "Fix the login", "clientMessageId": "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11" })).unwrap();
+        assert_eq!((create.project_id.as_deref(), create.use_worktree, create.agent.as_str()), (Some("abc"), true, "codex"));
+        for path in [json!({ "projectPath": "/Users/me/repo" }), json!({ "cwd": "/tmp" }), json!({ "baseRef": "main" })] {
+            let mut params = json!({ "quick": true, "agent": "codex", "text": "hi" });
+            params.as_object_mut().unwrap().extend(path.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<SessionCreateParams>(params).is_err(), "a phone cannot name a folder");
+        }
+        assert!(serde_json::from_value::<MacSettingsPatch>(json!({ "nativeCodex": true, "linearApiKey": "lin_secret" })).is_err());
+
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        for name in ["repo", "old"] { std::fs::create_dir_all(root.join(name)).unwrap(); }
+        let repo = store::projects::add(root.join("repo").to_str().unwrap()).unwrap();
+        let old = store::projects::add(root.join("old").to_str().unwrap()).unwrap();
+        store::projects::update(&old.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
+        let projects = phone_projects().unwrap();
+        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "lastUsed": false })]);
+        assert!(!serde_json::to_string(&projects).unwrap().contains(&root.to_string_lossy().into_owned()));
+        assert_eq!(store::projects::by_public_id(projects[0]["id"].as_str().unwrap()).unwrap().path, repo.path);
     }
 
     #[test]

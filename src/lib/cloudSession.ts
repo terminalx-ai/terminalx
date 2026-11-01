@@ -5,7 +5,7 @@ import { collabGranted } from "@terminalx/portable/workspaceCollab";
 import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/portable/workspaceGit";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { useAccount } from "@/lib/account";
-import type { CloudWorkspaceConnection, CloudWorkspaceListItem } from "@/lib/api";
+import { experimental, type CloudWorkspaceConnection, type CloudWorkspaceListItem } from "@/lib/api";
 import {
   closeCloudConnection,
   noteCloudWorkspaceListed,
@@ -258,6 +258,7 @@ function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
   return {
     id: tab.tabId,
     harness: info.harness,
+    transport: info.transport,
     title: info.title,
     model: info.model,
     effort: info.effort,
@@ -769,7 +770,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     async (params: { agent: string; model?: string; effort?: string | null; mode?: string }) => {
       if (backend.readOnlyReason) throw new Error(backend.readOnlyReason);
       if (!client || !connected) throw new Error("Agent tabs are added once the workspace is connected.");
-      const added = await client.addSessionTab(runtimeSessionId, params);
+      const nativeCodex = (await experimental.nativeCodexFor(params.agent)) || undefined;
+      const added = await client.addSessionTab(runtimeSessionId, { ...params, nativeCodex });
       await syncLiveTabs(scope, client).catch(() => undefined);
       if (added.session) setRuntimeSession(added.session);
       selectSessionTab(key, { kind: "agent", id: added.tabId });

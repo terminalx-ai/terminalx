@@ -13,7 +13,7 @@ vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("@mobile/ui/PairingScanner", () => ({ PairingScanner: () => null }));
 vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: mocks.navigate, dismissTo: mocks.dismissTo, push: vi.fn() }) }));
 vi.mock("expo-camera", () => ({ useCameraPermissions: () => [{ granted: true }, vi.fn()], CameraView: () => null }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X", "Search", "MoreVertical"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X", "Search", "MoreVertical", "Plus"].map((name) => [name, () => null])));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
 vi.mock("@mobile/data/conversations", () => ({ conversationRows: () => [], statusLabel: () => "" }));
 vi.mock("react-native", () => {
@@ -79,6 +79,7 @@ beforeEach(() => {
     connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingMachines: false, loadingSessions: false, error: null,
     connection: { restart: vi.fn() }, clearError: vi.fn(), refreshMachines: vi.fn(), refreshSessions: vi.fn(), connectHost: vi.fn(async () => true),
     renameHost: vi.fn(async () => undefined), reconnectHost: vi.fn(async () => true), forgetHost: vi.fn(async () => undefined),
+    api: { features: async () => ({}) },
   };
   container = document.createElement("div");
   document.body.append(container);
