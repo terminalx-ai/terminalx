@@ -1318,6 +1318,11 @@ impl SessionManager {
         &self.terminals
     }
 
+    /// Where this manager tells the windows what changed.
+    pub fn sink(&self) -> &Arc<dyn EventSink> {
+        &self.sink
+    }
+
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
         let key = key_of(session_id, tab_id);
         one_per_key(&self.tabs, &key, || {
@@ -1893,7 +1898,7 @@ impl SessionManager {
         // (`cloud_config`) first, so a grant always wins.
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
-        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env }, sink)?;
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -2166,6 +2171,10 @@ impl SessionManager {
         }
         if prompt.mobile.is_some() && (rt.turn_open || !rt.pending.is_empty()) {
             return Err(crate::local_runtime::mobile::Busy.into());
+        }
+        if self.codex_stdio_falls_back(&rt, &tab)? {
+            entry = index::get(session_id)?;
+            tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         }
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
@@ -3219,13 +3228,18 @@ impl SessionManager {
         let _admission = crate::issue_pipeline::admission::lock();
         self.accepting_work()?;
         let rt_arc = self.runtime(session_id, tab_id)?;
-        let entry = index::get(session_id)?;
-        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        let mut entry = index::get(session_id)?;
+        let mut tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         // A tab that is a terminal is opened as one: its shell, and no agent.
         // So is one whose hand-started agent is no longer being followed.
         let following = matches!(&rt_arc.lock().unwrap().engine, Engine::Cli(p) if p.by_hand.is_some());
         if tab.is_terminal() || (tab.by_hand() && !following) {
             return self.shell_for(session_id, tab_id);
+        }
+        // Started like any Codex tab when native Codex cannot serve it.
+        if self.codex_stdio_falls_back(&rt_arc.lock().unwrap(), &tab)? {
+            entry = index::get(session_id)?;
+            tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         }
         if codex_stdio::selected(&tab) || pty_first(&tab.harness).is_none() {
             return Ok(());
@@ -3588,15 +3602,20 @@ impl SessionManager {
             self.publish(rt, Payload::Status { text }, None);
         }
 
-        // A conversation started by the old headless engine lives in the
-        // reader's own home, where a `codex resume` against ours would not
-        // look for it.
+        // A conversation started by native Codex or the old headless engine
+        // lives in their home (in a cloud workspace native Codex's own, else
+        // the reader's), where a `codex resume` against ours would not look.
         let mut resume = tab.provider_session_id.clone();
-        if let (Some(id), Some(user)) = (&resume, codex::home::user_root()) {
-            match codex::home::adopt_rollout(&home, &user, id) {
-                Ok(true) => log::info!("brought Codex conversation {id} into the managed home"),
-                Ok(false) => {}
-                Err(e) => log::warn!("could not adopt Codex conversation {id}: {e:#}"),
+        if let Some(id) = &resume {
+            for source in [codex::home::native_root_if_made(), codex::home::user_root()].into_iter().flatten() {
+                match codex::home::adopt_rollout(&home, &source, id) {
+                    Ok(true) => {
+                        log::info!("brought Codex conversation {id} into the managed home");
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(e) => log::warn!("could not adopt Codex conversation {id}: {e:#}"),
+                }
             }
         }
         let rollout = resume.as_deref().and_then(|id| codex::home::find_rollout(&home, id));

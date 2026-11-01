@@ -32,6 +32,15 @@
 
 ### Mobile
 
+- Start sessions from the phone as the Mac's new-session view does: a project's
+  session in a new worktree (named for the work) or on its checkout, or a quick
+  chat, with the agent, model, effort, permission mode, title and first
+  message. Codex sessions follow Settings → Experimental → Native Codex. A
+  retry after a lost reply opens the first session instead of a second one.
+  Projects reach the phone by an id, never their path. Read-only and revoked
+  phones cannot start sessions.
+- Settings → This Mac on the phone turns Native Codex on or off for the Mac's
+  next Codex sessions; the Mac's own Settings follows it while open.
 - Open a tab's terminal view on the phone, as on the desktop. The agent's own
   screen is emulated on the phone with the desktop's terminal (xterm.js) at the
   size the Mac draws it, so full-screen CLIs like Codex and Claude Code show as
@@ -124,6 +133,18 @@
   that Codex never took because it failed or was stopped first is offered back
   with **Resend last prompt**, after a restart too, and is never sent again on
   its own. (#644)
+- Add Settings → Experimental with a **Native Codex** switch, off by default. When
+  it is on, new Codex sessions and tabs started from the app or the `terminalx`
+  command line connect to Codex directly, for reliable compaction status. Sessions
+  from issues, automations and Ask every time keep the terminal.
+  A tab whose Codex is older than 0.164.0 when it first starts switches to the
+  terminal and sends as usual, with no error. Existing sessions are unchanged. (#644)
+- Native Codex in cloud workspaces: with the switch on, Codex sessions and tabs
+  the app starts in an existing workspace connect to Codex directly too. Codex
+  signs in with the workspace's credential and takes the creator's route and the
+  workspace's variables, secrets, instructions and MCP servers, in a home of its
+  own where no TerminalX hook runs; sign-in problems are reported as for other
+  sessions, and the terminal view moves the tab as on a Mac. (#644)
 
 ### Status bar
 

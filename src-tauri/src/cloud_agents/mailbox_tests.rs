@@ -35,6 +35,7 @@ impl AgentOps for FakeOps {
             tab_id: "tab-1".into(),
             title: None,
             harness: Some(self.harness.lock().unwrap().clone()).filter(|harness| !harness.is_empty()).unwrap_or_else(|| "claude".into()),
+            transport: Default::default(),
             model: String::new(),
             effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
             permission_mode: "default".into(),

@@ -186,6 +186,11 @@ impl PairingManager {
         let _ = self.sessions.set(sessions);
     }
 
+    /// A phone starting a session chooses from the models the desktop offers.
+    pub fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
+        self.mobile.attach_models(cache);
+    }
+
     pub(crate) fn attach_runtime(&self, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
         *self.runtime.lock().unwrap() = Some(runtime);
     }
@@ -1804,6 +1809,9 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "notifications.unsubscribe",
         "host.describe",
         "pairing.forget",
+        // What a new session can be started with, and this Mac's phone-visible settings.
+        "sessions.options",
+        "mac.settings",
     ];
     const DRIVER: &[&str] = &[
         "pairing.getEndpoints",
@@ -1821,6 +1829,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.promoteToAgent",
         "session.send",
         "permission.respond",
+        "sessions.create",
+        "mac.setSettings",
         // The session controls a phone has as the desktop does (#706).
         "session.stop",
         "session.interrupt",
@@ -1873,6 +1883,16 @@ mod tests {
             DeviceScope::Driver,
             "pairing.provisionRelay"
         ));
+        // Starting a session and changing this Mac's settings: any paired
+        // phone may see the choices, only a driver may act on them.
+        for read in ["sessions.options", "mac.settings"] {
+            assert!(allowed_method(DeviceScope::Viewer, read), "{read}");
+            assert!(allowed_method(DeviceScope::Driver, read), "{read}");
+        }
+        for write in ["sessions.create", "mac.setSettings"] {
+            assert!(!allowed_method(DeviceScope::Viewer, write), "{write}");
+            assert!(allowed_method(DeviceScope::Driver, write), "{write}");
+        }
         for denied in [
             "files.read",
             "git.push",
@@ -1882,6 +1902,130 @@ mod tests {
         ] {
             assert!(!allowed_method(DeviceScope::Driver, denied), "{denied}");
         }
+    }
+
+    /// Through the router a phone actually reaches, with a real local runtime
+    /// as owner: a viewer may read the new-session choices and the settings but
+    /// neither start a session nor change one, a driver may do all four, and a
+    /// revoked phone none.
+    #[test]
+    fn a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows() {
+        use std::os::unix::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(root.path().join("router.log")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pairing::tests::phone_router_child_fixture", "--nocapture"])
+            .env("TERMINALX_TEST_PHONE_ROUTER", "1")
+            .env("TERMINALX_HOME", root.path().join("store"))
+            .env("CLAUDE_CONFIG_DIR", root.path().join("claude"))
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+            .process_group(0).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let result = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if std::time::Instant::now() >= deadline {
+                // SAFETY: the private process group just made for this fixture,
+                // its disposable runtime owner included.
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                child.wait().unwrap();
+                panic!("phone router fixture exceeded its deadline: {}", std::fs::read_to_string(root.path().join("router.log")).unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(result.success(), "{}", std::fs::read_to_string(root.path().join("router.log")).unwrap());
+    }
+
+    #[tokio::test]
+    async fn phone_router_child_fixture() {
+        if std::env::var("TERMINALX_TEST_PHONE_ROUTER").as_deref() != Ok("1") { return; }
+        use serde_json::json;
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        // Installed agents as far as the owner can tell: the stand-ins only exit.
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for agent in ["codex", "claude"] {
+            std::fs::write(bin.join(agent), "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(bin.join(agent), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // The desktop side answers `sessions.options` from its own lookup.
+        assert!(crate::binpath::set_priority_dir(&bin));
+        let devices = json!({"devices":[
+            {"id":"driver","label":"Phone","platform":"test","token":"fixture-hash","scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":"2026-11-01T00:00:00Z"},
+            {"id":"viewer","label":"Tablet","platform":"test","token":"fixture-hash-2","scope":"viewer","provenance":"explicit","bindingGeneration":0,"createdAt":"2026-11-01T00:00:00Z"},
+        ]});
+        crate::store::write_json(&root.join("devices.json"), &devices).unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+        let log = std::fs::File::create(root.join("owner.log")).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        // The runtime the desktop reaches its phones through, as `serve` runs it.
+        let mut owner = Child(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "serve::tests::sharing_reply_owner_fixture", "--nocapture"])
+            .env("TERMINALX_TEST_SHARING_REPLY_OWNER", &root)
+            .env("TERMINALX_HOME", &root).env("CLAUDE_CONFIG_DIR", root.join("claude")).env("PATH", path)
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let client = loop {
+            if let Ok(client) = crate::local_runtime::client::Client::connect(&root) { break client; }
+            assert!(owner.0.try_wait().unwrap().is_none(), "owner exited: {}", std::fs::read_to_string(root.join("owner.log")).unwrap());
+            assert!(std::time::Instant::now() < until, "owner startup deadline");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        let runtime = Arc::new(crate::local_runtime::desktop::Desktop::connect(client, Arc::new(crate::sink::BroadcastSink::new(256))).unwrap());
+        let pairing = Arc::new(PairingManager::new(Arc::new(crate::account::AccountManager::default())));
+        pairing.attach_runtime(runtime.clone());
+        let device = |index: usize| -> DeviceEntry { serde_json::from_value(devices["devices"][index].clone()).unwrap() };
+        let (driver, viewer) = (device(0), device(1));
+        let connect = |device: DeviceEntry| {
+            let pairing = pairing.clone();
+            async move {
+                let (outbound, inbound) = mpsc::channel(64);
+                (Arc::new(mobile::MobileConnection::open(&pairing, &device, outbound, wire::Transport::Direct).await.unwrap()), inbound)
+            }
+        };
+        let ((phone, _phone_inbound), (tablet, _tablet_inbound)) = (connect(driver.clone()).await, connect(viewer.clone()).await);
+        let context = PairingConnectionContext::Direct { direct_auth_id: "fixture".into() };
+        let ask = |device: &DeviceEntry, connection: &Arc<mobile::MobileConnection>, method: &str, params: serde_json::Value| {
+            let request = json!({"id": method, "method": method, "params": params});
+            let (pairing, device, connection, context) = (pairing.clone(), device.clone(), connection.clone(), context.clone());
+            async move { pairing.rpc_response(&request, &device, &context, &connection).await }
+        };
+        let refused = |response: &serde_json::Value| (response["ok"].clone(), response["error"]["code"].clone());
+        let create = json!({"quick": true, "agent": "claude", "text": "Hi from the phone", "clientMessageId": "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11"});
+
+        // A viewer reads the choices and the settings, and acts on neither.
+        assert_eq!(ask(&viewer, &tablet, "sync.capabilities", json!({})).await["result"]["sessionCreate"], 1);
+        let options = ask(&viewer, &tablet, "sessions.options", json!({})).await;
+        assert_eq!(options["ok"], true, "{options}");
+        assert!(options["result"]["agents"].as_array().unwrap().iter().any(|agent| agent["id"] == "claude" && agent["available"] == true), "{options}");
+        assert_eq!(ask(&viewer, &tablet, "mac.settings", json!({})).await["result"], json!({"nativeCodex": false}));
+        assert_eq!(refused(&ask(&viewer, &tablet, "sessions.create", create.clone()).await), (json!(false), json!("forbidden")));
+        assert_eq!(refused(&ask(&viewer, &tablet, "mac.setSettings", json!({"nativeCodex": true})).await), (json!(false), json!("forbidden")));
+        assert!(crate::store::index::load().unwrap().is_empty());
+        assert!(!crate::store::settings::load().experimental.native_codex);
+
+        // A driver does both, and starting the same draft again finds the first session.
+        assert_eq!(ask(&driver, &phone, "mac.setSettings", json!({"nativeCodex": true})).await["result"], json!({"nativeCodex": true}));
+        assert!(crate::store::settings::load().experimental.native_codex);
+        let started = ask(&driver, &phone, "sessions.create", create.clone()).await;
+        assert_eq!(started["ok"], true, "{started}");
+        let session = started["result"]["sessionId"].as_str().unwrap().to_string();
+        assert!(crate::store::index::get(&session).unwrap().is_quick());
+        assert_eq!(ask(&driver, &phone, "sessions.create", create.clone()).await["result"]["sessionId"], session.as_str());
+        assert_eq!(crate::store::index::load().unwrap().len(), 1);
+
+        // A revoked phone reads and changes nothing, and starts nothing.
+        pairing.fence_runtime_mobile("revoke", json!({"deviceId": "driver"})).unwrap();
+        for (method, params) in [("mac.settings", json!({})), ("sessions.options", json!({})), ("mac.setSettings", json!({"nativeCodex": false})),
+            ("sessions.create", json!({"quick": true, "agent": "claude", "text": "Again"}))] {
+            assert_eq!(ask(&driver, &phone, method, params).await["ok"], false, "{method}");
+        }
+        assert!(crate::store::settings::load().experimental.native_codex);
+        assert_eq!(crate::store::index::load().unwrap().len(), 1);
+        runtime.stop_all().unwrap();
+        drop(owner);
     }
 
     #[test]

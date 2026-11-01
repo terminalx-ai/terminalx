@@ -109,9 +109,7 @@ impl Sessions {
     }
 
     pub fn add_tab(&self, session: &str, tab: &crate::session_ops::NewTab) -> Result<crate::store::index::TabEntry> {
-        self.call("runtime.session.addTab", json!({"sessionId":session, "tab":{
-            "harness":tab.harness,"model":tab.model,"effort":tab.effort,"permissionMode":tab.permission_mode
-        }}))
+        self.call("runtime.session.addTab", add_tab_params(session, tab))
     }
 
     pub fn pane_agents(&self) -> Result<Vec<crate::session::follow::PaneAgent>> {
@@ -242,5 +240,28 @@ impl Sessions {
 
     pub fn to_terminal(&self, session: &str, tab: &str) -> Result<()> {
         self.tab("toTerminal", session, tab, json!({}))
+    }
+}
+
+/// The tab as the runtime makes it, transport included: a native Codex tab
+/// chosen on the desktop side must not arrive as a terminal one.
+fn add_tab_params(session: &str, tab: &crate::session_ops::NewTab) -> Value {
+    json!({"sessionId":session, "tab":{
+        "harness":tab.harness,"model":tab.model,"effort":tab.effort,"permissionMode":tab.permission_mode,
+        "transport":tab.transport
+    }})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_tab_reaches_the_runtime_with_its_transport() {
+        let tab = crate::session_ops::NewTab { transport: crate::store::index::AgentTransport::ExperimentalCodexStdio, harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some("auto".into()) };
+        let params = add_tab_params("s", &tab);
+        let decoded: crate::session_ops::NewTab = serde_json::from_value(params["tab"].clone()).unwrap();
+        assert_eq!(decoded.transport, crate::store::index::AgentTransport::ExperimentalCodexStdio);
+        assert_eq!(params["tab"]["transport"], "experimentalCodexStdio");
     }
 }
