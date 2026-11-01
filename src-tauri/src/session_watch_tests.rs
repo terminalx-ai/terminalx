@@ -261,6 +261,7 @@ impl Rig {
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
+            parked: false,
             left_at: None,
             log_path: dir.path().join("tab.jsonl"),
             me: std::sync::Weak::new(),

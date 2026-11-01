@@ -47,6 +47,46 @@ pub struct Settings {
     /// None follows the computer's own name (`pairing::MachineName`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_name: Option<String>,
+    /// When an agent nobody is using is stopped (`idle_agents.rs`). The
+    /// runtime that owns the agents reads it for itself.
+    pub agents: AgentSettings,
+}
+
+/// Agents the app started that sit idle are stopped after a while (#696),
+/// and their next message starts them again on the same conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentSettings {
+    /// Minutes an agent may sit idle before it is stopped; 0 never stops one
+    /// for that alone.
+    #[serde(deserialize_with = "idle_stop_minutes")]
+    pub idle_stop_minutes: u32,
+}
+
+/// The idle limits the settings control offers; 0 is "never".
+pub const IDLE_STOP_MINUTES: [u32; 7] = [0, 30, 60, 120, 240, 480, 1440];
+/// An hour: by then a model's prompt cache has gone cold, so resuming the
+/// conversation costs what keeping the agent up would have saved nothing on.
+const DEFAULT_IDLE_STOP_MINUTES: u32 = 60;
+
+/// A hand-edited or damaged value falls back to the default rather than
+/// stopping agents at a pace nobody chose.
+fn idle_stop_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    let minutes = serde_json::Value::deserialize(deserializer)?.as_u64().and_then(|value| u32::try_from(value).ok());
+    Ok(minutes.filter(|value| IDLE_STOP_MINUTES.contains(value)).unwrap_or(DEFAULT_IDLE_STOP_MINUTES))
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES }
+    }
+}
+
+impl AgentSettings {
+    /// How long an agent may sit idle, or `None` when it may for ever.
+    pub fn idle_limit(&self) -> Option<std::time::Duration> {
+        (self.idle_stop_minutes > 0).then(|| std::time::Duration::from_secs(u64::from(self.idle_stop_minutes) * 60))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -219,6 +259,7 @@ impl Default for Settings {
             merged_cleanup: MergedCleanupSettings::default(),
             work_status: WorkStatusSettings::default(),
             machine_name: None,
+            agents: AgentSettings::default(),
         }
     }
 }
@@ -310,6 +351,28 @@ mod tests {
         for invalid in ["0", "1", "-10", "7.5", "\"10\"", "null", "99999999999"] {
             let damaged: Settings = serde_json::from_str(&format!(r#"{{"mergedCleanup":{{"graceMinutes":{invalid}}}}}"#)).unwrap();
             assert_eq!(damaged.merged_cleanup.grace_minutes, 10, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn idle_agents_stop_after_an_hour_unless_another_offered_limit_is_chosen() {
+        let read = |raw: &str| serde_json::from_str::<Settings>(raw).unwrap().agents;
+        // A settings file written before the limit existed.
+        let older = read(r#"{"notifications":true}"#);
+        assert_eq!(older.idle_stop_minutes, 60);
+        assert_eq!(older.idle_limit(), Some(std::time::Duration::from_secs(3600)));
+
+        for minutes in IDLE_STOP_MINUTES {
+            let chosen = read(&format!(r#"{{"agents":{{"idleStopMinutes":{minutes}}}}}"#));
+            assert_eq!(chosen.idle_stop_minutes, minutes);
+            let written = serde_json::to_value(&Settings { agents: chosen.clone(), ..Settings::default() }).unwrap();
+            assert_eq!(serde_json::from_value::<Settings>(written).unwrap().agents, chosen);
+        }
+        assert_eq!(read(r#"{"agents":{"idleStopMinutes":0}}"#).idle_limit(), None);
+        assert_eq!(read(r#"{"agents":{"idleStopMinutes":240}}"#).idle_limit(), Some(std::time::Duration::from_secs(4 * 3600)));
+
+        for invalid in ["1", "-30", "59.5", "\"60\"", "null", "99999999999"] {
+            assert_eq!(read(&format!(r#"{{"agents":{{"idleStopMinutes":{invalid}}}}}"#)).idle_stop_minutes, 60, "{invalid}");
         }
     }
 

@@ -531,6 +531,8 @@ fn start(options: &Options) -> Result<Runtime> {
         crate::automations::recover_open_runs(&automation_host);
         crate::issue_pipeline::runtime::start_local(pipeline_host);
         crate::automations::start_recovered_scheduler(automation_host);
+        // Agents nobody is using are stopped, here where they run (#696).
+        crate::idle_agents::start(manager.clone());
             std::thread::spawn(|| {
                 if let Err(error) = crate::github::recover_workspace_prs() {
                     let detail = format!("{error:#}").to_lowercase();

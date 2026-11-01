@@ -169,27 +169,36 @@ async function registerTabPty() {
  * then. In-flight calls are shared, because two starts racing is exactly how a
  * tab ended up with two CLIs fighting over one conversation.
  */
-const starting = new Map<string, Promise<void>>();
+const starting = new Map<string, { run: Promise<void>; opened: boolean }>();
 
-export async function startTabAgent(session: SessionEntry, tab: TabEntry) {
+/**
+ * `opened`: the tab is only being shown, in its chat. An agent nobody is about to use is then left for its next message
+ * to start (`agent.startOnOpen`, #696); the terminal view, a restart and "New shell" start it whatever it is.
+ */
+export async function startTabAgent(session: SessionEntry, tab: TabEntry, how: { opened?: boolean } = {}) {
   if (!isPtyFirst(tab.harness) || removedHere(tab.id)) return;
+  const opened = how.opened === true;
   const key = tab.id;
   const token = lifetime(tab.id);
   const inflight = starting.get(key);
-  if (inflight) return inflight;
+  // One under way answers for another like it, and for a mere showing. A start asked for while only a showing is under
+  // way goes after it: the showing may have left the agent stopped.
+  if (inflight && (opened || !inflight.opened)) return inflight.run;
+  const before = inflight?.run;
   const run = (async () => {
+    await before;
     await subscribeTabPty();
     if (!current(tab.id, token)) return;
     try {
-      await agent.ensureStarted(session.id, tab.id);
+      await (opened ? agent.startOnOpen(session.id, tab.id) : agent.ensureStarted(session.id, tab.id));
       if (!current(tab.id, token)) return;
       await adoptTabPane(session.id, tab.id, token);
       if (current(tab.id, token)) clearTabViewError(tab.id);
     } catch (e) {
       if (current(tab.id, token)) set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
     }
-  })().finally(() => { if (starting.get(key) === run) starting.delete(key); });
-  starting.set(key, run);
+  })().finally(() => { if (starting.get(key)?.run === run) starting.delete(key); });
+  starting.set(key, { run, opened });
   return run;
 }
 

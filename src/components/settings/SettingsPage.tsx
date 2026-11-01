@@ -23,6 +23,7 @@ import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
+import { AgentIdleSettings } from "./AgentIdleSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
@@ -598,6 +599,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul>
+      <AgentIdleSettings />
     </div>
   );
 }

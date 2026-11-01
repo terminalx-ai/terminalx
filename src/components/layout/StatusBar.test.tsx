@@ -540,6 +540,28 @@ it("distinguishes overview-only recovery from a sampled empty process list", () 
   expect(screen.queryByText("Process details have not been sampled yet.")).toBeNull();
 });
 
+/** #696: an idle tab agent is stopped from here once confirmed, and is said to be stopped, not killed. */
+it("asks before stopping an idle tab agent, and stops it once confirmed", async () => {
+  resourceFixture();
+  statusState.resourceSample!.processes = [{ paneId: "tab:t1", tabId: "t1", tabTitle: "Claude Code", sessionId: "s1", sessionTitle: "Review #590",
+    projectPath: "/fixture", projectName: "fixture", cwd: "/fixture", kind: "agent", harness: "claude", orphaned: false,
+    pid: 42, cpuPercent: 0, rssBytes: 512 * 1024 * 1024, childCount: 3, killRule: "stop" }];
+  const rpc = vi.spyOn(statusBar, "killResource")
+    .mockResolvedValueOnce({ killed: false, confirmation: "Stop the agent in Review #590? Its conversation is kept, and your next message starts it again." })
+    .mockResolvedValueOnce({ killed: true, confirmation: null });
+  render(resourceBar());
+  openResources();
+  expect(screen.queryByRole("button", { name: "Kill Claude Code" })).toBeNull();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Stop Claude Code" })));
+  const dialog = screen.getByRole("dialog", { name: "Stop agent?" });
+  expect(within(dialog).getByText(/Its conversation is kept/)).toBeTruthy();
+  // Asked about, and nothing more: the first call only asks.
+  expect(rpc.mock.calls).toEqual([["tab:t1", false]]);
+  await act(async () => fireEvent.click(within(dialog).getByRole("button", { name: "Stop agent" })));
+  expect(rpc.mock.calls).toEqual([["tab:t1", false], ["tab:t1", true]]);
+  expect(screen.queryByRole("dialog", { name: "Stop agent?" })).toBeNull();
+});
+
 it("rejects confirmation clicks invalidated before React renders and ignores late confirmed replies", async () => {
   resourceFixture();
   const confirmed = delayedKill();

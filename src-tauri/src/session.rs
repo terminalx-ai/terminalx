@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 #[path = "session_compaction.rs"]
@@ -63,6 +63,18 @@ pub struct PendingPermission {
     pub tool_name: String,
     pub input: Value,
     pub options: Vec<String>,
+}
+
+/// What became of a request to stop an agent nothing is using
+/// ([`SessionManager::stop_if_idle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStop {
+    /// It sat idle, and its process (with anything it left running) is gone.
+    Stopped,
+    /// There was no agent process to stop.
+    NotRunning,
+    /// It is in a turn, or has a prompt waiting: left as it is.
+    Busy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -662,6 +674,9 @@ pub struct TabRuntime {
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
+    /// Its agent was stopped because nothing was using it ([`SessionManager::stop_if_idle`]):
+    /// showing the tab does not start it again, its next prompt does (#696).
+    pub parked: bool,
     /// The transcript the tab's last CLI was writing, and how far it had been
     /// read when that CLI was let go of: where to read on from if a CLI is
     /// started on the same conversation by hand (#437).
@@ -1355,6 +1370,7 @@ impl SessionManager {
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
+                parked: false,
                 left_at: None,
                 log_path,
                 me: std::sync::Weak::new(),
@@ -1795,7 +1811,8 @@ impl SessionManager {
     }
 
     pub(crate) fn resource_kill(&self, pane: &str, confirmed: bool) -> Result<crate::status::resources::KillResult> {
-        self.status.resources.kill(&self.terminals, pane, confirmed)
+        let stop = |session: &str, tab: &str| self.stop_if_idle(session, tab, crate::idle_agents::STOPPED_FROM_RESOURCES, Duration::ZERO);
+        self.status.resources.kill(&self.terminals, pane, confirmed, &stop)
     }
 
     pub fn usage_snapshot(&self) -> crate::status::usage::UsageSnapshot {
@@ -2489,11 +2506,114 @@ impl SessionManager {
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        self.stop_with(session_id, tab_id, false)
+    }
+
+    /// Stop a tab's agent, and whatever it left running, if nothing is using
+    /// it: no turn, no prompt waiting to be taken or answered, no question,
+    /// no restart or stop under way, and nothing drawn or done for `quiet` at
+    /// least ([`Self::idle_for`]). `note` is left in its transcript first. The
+    /// conversation stays, and a reply nobody has looked at stays unread. Its
+    /// next prompt starts the agent again; showing the tab does not
+    /// ([`Self::start_on_open`]). A terminal, and an agent a person started by
+    /// hand in one, are never stopped (#696).
+    pub fn stop_if_idle(&self, session_id: &str, tab_id: &str, note: &str, quiet: Duration) -> Result<AgentStop> {
+        let Ok(session) = index::get(session_id) else { return Ok(AgentStop::NotRunning) };
+        let Some(tab) = session.tab(tab_id) else { return Ok(AgentStop::NotRunning) };
+        if tab.is_terminal() || tab.by_hand() {
+            return Ok(AgentStop::NotRunning);
+        }
+        // Held from the look to the stop: a prompt sent meanwhile is not cut off.
+        let _admission = crate::issue_pipeline::admission::lock();
+        if !self.is_running(session_id, tab_id) {
+            return Ok(AgentStop::NotRunning);
+        }
+        if self.idle_for(session_id, tab_id, Instant::now()).is_none_or(|idle| idle < quiet) {
+            return Ok(AgentStop::Busy);
+        }
+        if let Err(error) = self.publish_external(session_id, tab_id, Payload::Status { text: note.to_string() }) {
+            log::warn!("note in {session_id}:{tab_id} before stopping its agent: {error:#}");
+        }
+        self.stop_with(session_id, tab_id, true)?;
+        self.runtime(session_id, tab_id)?.lock().unwrap().parked = true;
+        Ok(AgentStop::Stopped)
+    }
+
+    /// How long a tab's running agent has had nothing to do
+    /// ([`Self::stop_if_idle`]): since it last drew anything or was last
+    /// told anything. `None` while it has something to do, when it was
+    /// started by hand, or when it is not running.
+    pub(crate) fn idle_for(&self, session_id: &str, tab_id: &str, now: Instant) -> Option<Duration> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let rt = runtime.lock().unwrap();
+        self.quiet(&rt, now)
+    }
+
+    /// Every running agent that has nothing to do, with how long it has had
+    /// nothing to do: `(session id, tab id, idle for)`.
+    pub(crate) fn idle_agents(&self, now: Instant) -> Vec<(String, String, Duration)> {
+        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        runtimes
+            .into_iter()
+            .filter_map(|runtime| {
+                let rt = runtime.lock().unwrap();
+                let quiet = self.quiet(&rt, now)?;
+                Some((rt.session_id.clone(), rt.tab_id.clone(), quiet))
+            })
+            .collect()
+    }
+
+    fn quiet(&self, rt: &TabRuntime, now: Instant) -> Option<Duration> {
+        let busy = rt.turn_open
+            || rt.stopping
+            || rt.stop_in_flight
+            || rt.restart_claim.is_some()
+            || rt.stdio_starting
+            || !rt.pending.is_empty()
+            || !rt.queued.is_empty()
+            || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting);
+        if busy {
+            return None;
+        }
+        let drawn = match &rt.engine {
+            Engine::Cli(cli) => {
+                if cli.by_hand.is_some() || cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || !cli.held.is_empty() || !self.terminals.is_running(&cli.pane_id) {
+                    return None;
+                }
+                self.terminals.last_output(&cli.pane_id)
+            }
+            Engine::None => return None,
+            // A headless agent is running while it has its process.
+            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) if rt.child.is_none() => return None,
+            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) => None,
+        };
+        let last = drawn.map_or(rt.last_activity, |drawn| drawn.max(rt.last_activity));
+        Some(now.saturating_duration_since(last))
+    }
+
+    /// The window showed the tab. Its agent is started as
+    /// [`Self::ensure_started`] starts it, unless nobody is about to use it
+    /// (#696): its session is archived or its workspace was removed, or the
+    /// agent was stopped for sitting idle. Its transcript reads the same
+    /// without one, and its next prompt (or its terminal view) starts it.
+    pub fn start_on_open(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?;
+        if !tab.is_terminal() && !tab.by_hand() && !self.is_running(session_id, tab_id) {
+            let set_aside = entry.archived || entry.worktree_removed;
+            if set_aside || self.runtime(session_id, tab_id)?.lock().unwrap().parked {
+                return Ok(());
+            }
+        }
+        self.ensure_started(session_id, tab_id)
+    }
+
+    fn stop_with(&self, session_id: &str, tab_id: &str, keep_unread: bool) -> Result<()> {
         self.mobile.invalidate_tab(session_id, tab_id);
         let key = key_of(session_id, tab_id);
         let rt_arc = self.runtime(session_id, tab_id)?;
         if matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(_)) {
-            return self.stop_codex_stdio(&rt_arc);
+            return self.stop_codex_stdio(&rt_arc, keep_unread);
         }
         if matches!(&rt_arc.lock().unwrap().engine, Engine::Cli(p) if p.by_hand.is_some()) {
             return self.stop_by_hand(&rt_arc);
@@ -2515,15 +2635,19 @@ impl SessionManager {
             rt.stopping_pid = pid;
             // Settle before waiting for the OS. Late exits cannot reopen this turn.
             self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
-            let pane = self.release_cli(&mut rt);
+            // Its status is settled below.
+            let pane = self.let_go_of_cli(&mut rt);
             crate::cloud_grants::forget_launch(&key);
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
-            // A headless engine's process is gone too (`release_cli` has
+            // A headless engine's process is gone too (`let_go_of_cli` has
             // done this for a CLI's).
             self.settle_settings_without_process(&mut rt);
-            self.set_status(&mut rt, TabStatus::Idle);
+            // A reply nobody has read yet is still unread once its agent goes.
+            if !(keep_unread && rt.status == TabStatus::Completed) {
+                self.set_status(&mut rt, TabStatus::Idle);
+            }
             (pane, pid)
         };
         if let Some(pane) = pane {
@@ -3062,7 +3186,7 @@ impl SessionManager {
             self.restart_for_settings(session_id, tab_id)?;
         }
         if stop_stdio {
-            self.stop_codex_stdio(&rt_arc)?;
+            self.stop_codex_stdio(&rt_arc, false)?;
         }
         drop(sharing);
         Ok(())
@@ -3310,6 +3434,8 @@ impl SessionManager {
                 return Ok(false);
             }
         }
+        // In use again: a stop for idleness is over.
+        rt.parked = false;
         // An orderly idle exit left history, not a process to kill. Keep
         // those bytes for the newly resumed CLI's terminal stream.
         if self.terminals.is_live(&pane) {
@@ -3724,6 +3850,14 @@ impl SessionManager {
     /// resumes. Returns the pane the caller must kill — outside the tab lock,
     /// because waiting for the process to go is a wait on another process.
     fn release_cli(&self, rt: &mut TabRuntime) -> Option<String> {
+        let pane = self.let_go_of_cli(rt)?;
+        self.set_status(rt, TabStatus::Idle);
+        Some(pane)
+    }
+
+    /// [`Self::release_cli`], with the tab's status left for the caller to
+    /// settle: a stop for idleness keeps a reply nobody has read unread.
+    fn let_go_of_cli(&self, rt: &mut TabRuntime) -> Option<String> {
         rt.restart_claim = None;
         let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
@@ -3735,7 +3869,6 @@ impl SessionManager {
         rt.engine = Engine::None;
         rt.turn_open = false;
         self.settle_settings_without_process(rt);
-        self.set_status(rt, TabStatus::Idle);
         Some(pane)
     }
 
@@ -5292,6 +5425,10 @@ mod follow_tests;
 #[cfg(test)]
 #[path = "session_unsent_tests.rs"]
 mod unsent_tests;
+
+#[cfg(all(test, unix))]
+#[path = "session_idle_tests.rs"]
+mod idle_tests;
 
 #[cfg(test)]
 mod tests {

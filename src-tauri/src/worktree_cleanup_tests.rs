@@ -38,6 +38,10 @@ struct Fixture {
     projects: Vec<Project>,
     live: Mutex<Live>,
     events: Arc<Events>,
+    /// The sessions whose agents a removal stopped, in order.
+    stopped: Mutex<Vec<String>>,
+    /// Set: stopping an agent fails with it.
+    refuse_stop: Mutex<Option<String>>,
 }
 
 impl Fixture {
@@ -45,7 +49,7 @@ impl Fixture {
         let home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
-        let mut fixture = Self { _home: home, _dir: dir, base, projects: Vec::new(), live: Mutex::new(Live::default()), events: Arc::new(Events::default()) };
+        let mut fixture = Self { _home: home, _dir: dir, base, projects: Vec::new(), live: Mutex::new(Live::default()), events: Arc::new(Events::default()), stopped: Mutex::new(Vec::new()), refuse_stop: Mutex::new(None) };
         fixture.project("alpha");
         fixture
     }
@@ -141,7 +145,14 @@ impl Fixture {
 
     fn with_host<R>(&self, protected: &[PathBuf], confine: Option<&Path>, f: impl FnOnce(&Host<'_>) -> R) -> R {
         let live = |_: &[SessionEntry]| self.live.lock().unwrap().clone();
-        f(&Host { projects: &self.projects, protected, confine, live: &live, fetch: Fetch::Fresh })
+        let stop_agents = |session: &SessionEntry| match self.refuse_stop.lock().unwrap().clone() {
+            Some(error) => Err(error),
+            None => {
+                self.stopped.lock().unwrap().push(session.id.clone());
+                Ok(())
+            }
+        };
+        f(&Host { projects: &self.projects, protected, confine, live: &live, fetch: Fetch::Fresh, stop_agents: Some(&stop_agents) })
     }
 
     fn scan(&self) -> Vec<ProjectScan> {
@@ -400,6 +411,28 @@ fn declared_patterns_cover_what_is_below_them_and_nothing_else() {
         assert!(covered(entry), "{entry} is declared");
     }
     for entry in [".env", "src-tauri/", "src-tauri/generated/", "src-tauri/gen", "other/src-tauri/gen/", "src-tauri/binaries/secret.key", "sdk/v10/cache", ".swiftpm"] {
+        assert!(!covered(entry), "{entry} is not declared");
+    }
+}
+
+/// This repository's own declaration covers every file its build leaves in
+/// `src-tauri/binaries` (#696): with the launcher left out, ten of eleven
+/// merged workspaces were kept for "ignored local files", agents and all.
+#[test]
+fn this_repository_declares_what_its_own_build_leaves_in_binaries() {
+    let declared = parse_declared(include_str!("../../.terminalx/cleanup"));
+    let covered = |entry: &str| declared.iter().any(|declared| declared.covers(entry));
+    for entry in [
+        "src-tauri/gen/schemas/",
+        "src-tauri/binaries/agent-browser-aarch64-apple-darwin",
+        "src-tauri/binaries/terminalx-aarch64-apple-darwin",
+        "src-tauri/binaries/terminalx-x86_64-apple-darwin.tmp-4242",
+        "src-tauri/binaries/.terminalx-launcher",
+        "src-tauri/binaries/rustcYxk2Pq/",
+    ] {
+        assert!(covered(entry), "{entry} is declared");
+    }
+    for entry in ["src-tauri/binaries/", "src-tauri/binaries/README", "src-tauri/binaries/rustc-notes", ".env"] {
         assert!(!covered(entry), "{entry} is not declared");
     }
 }
@@ -685,6 +718,34 @@ fn a_retry_after_a_partial_removal_reconciles_without_removing_more() {
     assert!(again.sessions_kept.is_empty());
     assert_eq!(index::get(&main.id).unwrap(), main);
     assert!(alpha.join("a.txt").exists());
+}
+
+/// Finishing a removal that was cut short stops the agents of the sessions
+/// it files under the project first (#696): one left running would work on
+/// from the project's own checkout. One that cannot be stopped keeps its
+/// session where it was.
+#[test]
+fn a_reconciled_removal_stops_its_sessions_agents_before_filing_them() {
+    let f = Fixture::new();
+    let alpha = f.alpha();
+    let wt = f.pushed(&alpha, "cut-short");
+    let session = f.session(&alpha, &wt, TabStatus::Idle);
+    let main = f.session(&alpha, &alpha, TabStatus::Idle);
+    let item = f.item(&f.find(&wt));
+    sh(&alpha, &["worktree", "remove", wt.to_str().unwrap()]);
+
+    *f.refuse_stop.lock().unwrap() = Some("Agent exit could not be confirmed.".into());
+    let refused = f.remove_one(item.clone());
+    assert_eq!(refused.outcome, Outcome::Failed, "{:?}", refused.reason);
+    assert!(refused.reason.as_deref().unwrap().contains("Agent exit could not be confirmed."), "{:?}", refused.reason);
+    assert_eq!(index::get(&session.id).unwrap(), session, "left as it was");
+
+    *f.refuse_stop.lock().unwrap() = None;
+    let done = f.remove_one(item);
+    assert_eq!(done.outcome, Outcome::AlreadyRemoved, "{:?}", done.reason);
+    assert_eq!(*f.stopped.lock().unwrap(), std::slice::from_ref(&session.id), "only the sessions filed, and only once filed");
+    assert!(index::get(&session.id).unwrap().worktree_removed);
+    assert_eq!(index::get(&main.id).unwrap(), main);
 }
 
 #[test]

@@ -55,15 +55,7 @@ pub struct Workspace {
 }
 
 /// What became of a request to stop a conversation's agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentStop {
-    /// It sat idle, and its process (with anything it left running) is gone.
-    Stopped,
-    /// There was no agent process to stop.
-    NotRunning,
-    /// It is in a turn, or has a prompt waiting: left as it is.
-    Busy,
-}
+pub use crate::session::AgentStop;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Diff {

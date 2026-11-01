@@ -2209,7 +2209,11 @@ impl WorkspaceRpc {
         let busy: HashSet<(String, String)> = tabs.iter().filter(|tab| tab.process == "running").map(|tab| (tab.session_id.clone(), tab.tab_id.clone())).chain(turns.iter().cloned()).collect();
         let running = |session: &str, tab: &str| busy.contains(&(session.to_string(), tab.to_string())) || self.sessions.as_ref().is_some_and(|manager| manager.is_running(session, tab));
         let live = |sessions: &[SessionEntry]| crate::worktree_cleanup::Live { turns: turns.clone(), ..crate::worktree_cleanup::Live::observe(&self.terminals, sessions, &running) };
-        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh }))
+        let stop_agents = |entry: &SessionEntry| match self.sessions.as_ref() {
+            Some(manager) => manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}")),
+            None => Ok(()),
+        };
+        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents) }))
     }
 
     /// `cleanup/1`: every worktree of the workspace's repositories with

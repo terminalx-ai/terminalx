@@ -2436,11 +2436,17 @@ pub async fn tab_pane(state: State<'_, AppState>, session_id: String, tab_id: St
 }
 
 /// Start a tab's own CLI. PTY-first tabs are the CLI, so opening one starts
-/// it; harnesses that still run headless do nothing here.
+/// it; harnesses that still run headless do nothing here. `opened`: the tab
+/// was only shown, which leaves the agent of a set-aside session, or one
+/// stopped for sitting idle, for its next message to start (#696).
 #[tauri::command]
-pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, tab_id: String, opened: Option<bool>) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || m.ensure_started(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || {
+        if opened == Some(true) { m.start_on_open(&session_id, &tab_id) } else { m.ensure_started(&session_id, &tab_id) }.map_err(err)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Stopping and the three settings below all wait for the CLI in the pane to
@@ -4241,6 +4247,25 @@ pub fn set_work_status_settings(share_with_team: bool, state: tauri::State<'_, c
     store::settings::save(&settings).map_err(err)?;
     state.work_claims.nudge();
     Ok(settings.work_status)
+}
+
+/// When an agent nobody is using is stopped (#696).
+#[tauri::command]
+pub fn agent_settings() -> crate::store::settings::AgentSettings {
+    store::settings::load().agents
+}
+
+/// The runtime that owns the agents reads the limit again at its next look,
+/// within a minute.
+#[tauri::command]
+pub fn set_agent_idle_stop_minutes(minutes: u32) -> CmdResult<crate::store::settings::AgentSettings> {
+    if !crate::store::settings::IDLE_STOP_MINUTES.contains(&minutes) {
+        return Err(format!("{minutes} minutes is not one of the idle limits offered."));
+    }
+    let mut settings = store::settings::load();
+    settings.agents.idle_stop_minutes = minutes;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.agents)
 }
 
 type OrgWorkStatusResult = Result<crate::work_claims::client::OrganizationWorkStatus, crate::work_claims::client::WorkClaimsError>;

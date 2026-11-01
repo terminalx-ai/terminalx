@@ -24,7 +24,7 @@ import { sessionStatus, type SessionEntry } from "@/types/session";
 import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { PROJECT_COLORS, colorCss } from "./PixelMascot";
 import { BotFace } from "./BotFace";
-import { FilteredEmpty, RowContextMenu, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { FilteredEmpty, RemovedWorkspaces, RowContextMenu, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations } from "./CloudOrganizations";
@@ -69,6 +69,19 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
     [filter, store.sessions, store.selectedSessionId],
   );
   const showAgents = useMemo(() => mixesAgents(conversations), [conversations]);
+  // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
+  const live = conversations.filter((session) => !session.worktreeRemoved);
+  const removed = conversations.filter((session) => session.worktreeRemoved);
+  const chatRow = (session: SessionEntry) => (
+    <ChatRow
+      key={session.id}
+      session={session}
+      selected={store.selectedSessionId === session.id}
+      link={conversationLink(session, store.projects, chatsPath, store.workspaces)}
+      summaries={summaries}
+      showAgent={showAgents}
+    />
+  );
   const summaries = useSessionSummaries(conversations, true);
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -105,16 +118,16 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           </button>
         ) : (
           <ul className="flex flex-col gap-px">
-            {conversations.map((session) => (
-              <ChatRow
-                key={session.id}
-                session={session}
-                selected={store.selectedSessionId === session.id}
-                link={conversationLink(session, store.projects, chatsPath, store.workspaces)}
-                summaries={summaries}
-                showAgent={showAgents}
-              />
-            ))}
+            {live.map(chatRow)}
+            {removed.length > 0 && (
+              <RemovedWorkspaces
+                id="chats"
+                count={new Set(removed.map((session) => session.removedWorkspace?.path ?? session.id)).size}
+                opened={filter.active || removed.some((session) => session.id === store.selectedSessionId)}
+              >
+                {removed.map(chatRow)}
+              </RemovedWorkspaces>
+            )}
           </ul>
         )}
         <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
