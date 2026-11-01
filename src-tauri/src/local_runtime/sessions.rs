@@ -186,6 +186,10 @@ impl Sessions {
         self.tab("resendUnsent", session, tab, json!({}))
     }
 
+    pub fn resend_message(&self, session: &str, tab: &str, seq: u64) -> Result<SendOutcome> {
+        self.tab("resendMessage", session, tab, json!({"seq":seq}))
+    }
+
     pub fn submit_waiting(&self, session: &str, tab: &str, seq: u64) -> Result<bool> {
         self.tab("submitWaiting", session, tab, json!({"seq":seq}))
     }

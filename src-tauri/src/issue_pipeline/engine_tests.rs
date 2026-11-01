@@ -13,7 +13,7 @@ use crate::github::{PinnedMerge, PrCheck, PrSnapshot};
 use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
-use super::engine::{self, act, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, AgentStop, Diff, Host, Workspace};
+use super::engine::{self, act, answered, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, AgentStop, Diff, Host, Workspace};
 use super::gate::StopReason;
 use super::verdict::Severity;
 use super::engine::set_resolve_conflicts;
@@ -2783,4 +2783,272 @@ fn an_overdue_verdict_that_cannot_be_asked_for_is_left_to_a_person() {
     assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
     // From there a person asks for the review again.
     assert_eq!(act(&run.host, &run.id, Action::Advance).unwrap().stage, Stage::Review);
+}
+
+// ---- a person answering the author (#725) -------------------------------------------
+
+/// The author's last message of a turn in which it is not done.
+fn not_done(reason: &str) -> String {
+    format!("Stuck.\n\n```terminalx-status\n{{\"status\": \"blocked\", \"checks\": \"none\", \"reason\": \"{reason}\"}}\n```")
+}
+
+const ANSWERED: &str = "Answered; waiting for the author session to report.";
+
+/// GitHub finds the pull request in conflict with its base.
+fn conflict(run: &Run) {
+    let mut world = run.host.world();
+    let pr = world.pr.as_mut().unwrap();
+    pr.mergeable = "CONFLICTING".into();
+    pr.merge_state = "DIRTY".into();
+}
+
+impl Run {
+    /// A person sends the author a message, and its agent takes it: what
+    /// the session manager tells the pipeline once the tab has it.
+    fn answer(&self) -> Pipeline {
+        self.host.agent(&author_tab(), true);
+        answered(&self.host, "author", "t1");
+        self.pipeline()
+    }
+
+    /// The turn the answer started ends with `message`.
+    fn answered_turn(&self, message: &str) -> Pipeline {
+        self.host.agent(&author_tab(), false);
+        self.author(message)
+    }
+}
+
+/// Stopped because the author is not done, then answered: working again at
+/// once, announced, and carried on from there when that turn ends done.
+fn an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(issue: &IssueRef) {
+    let run = Run::start(issue, false);
+    let blocked = run.author(&not_done("Which table holds the plans?"));
+    assert_eq!((blocked.stage, blocked.state), (Stage::Work, State::NeedsYou));
+    let announced = run.host.world().announced;
+
+    let working = run.answer();
+    assert_eq!((working.stage, working.state, working.reason.clone()), (Stage::Work, State::Working, None), "{}", issue.identifier);
+    assert_eq!(working.note.as_deref(), Some(ANSWERED));
+    assert_eq!(working.answered, Some(StopReason::AuthorNotDone { detail: "Which table holds the plans?".into() }));
+    // Announced as it happens: the Issues list hears it when the session's sidebar does, not when the turn ends.
+    assert_eq!(run.host.world().announced, announced + 1);
+    let line = working.events.last().unwrap();
+    assert_eq!((line.kind.as_str(), line.session_id.as_deref()), ("answered", Some("author")));
+    // Nothing is pushed or opened on an answer: only the turn's end decides that.
+    assert!(run.host.world().pushes.is_empty() && run.host.world().pr.is_none());
+
+    let reviewing = run.answered_turn(&done("The plans are in billing_plans."));
+    assert_eq!((reviewing.stage, reviewing.state, reviewing.answered), (Stage::Review, State::Working, None));
+}
+
+#[test]
+fn a_message_to_an_author_that_is_not_done_puts_a_github_issues_pipeline_to_work_at_once() {
+    an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(&github_issue());
+}
+
+#[test]
+fn a_message_to_an_author_that_is_not_done_puts_a_linear_issues_pipeline_to_work_at_once() {
+    an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(&linear_issue());
+}
+
+#[test]
+fn an_answered_turn_that_ends_not_done_stops_for_a_person_again() {
+    let run = Run::start(&github_issue(), false);
+    run.author(&not_done("Which table holds the plans?"));
+    assert_eq!(run.answer().state, State::Working);
+    let again = run.answered_turn(&not_done("The plans table has no owner column."));
+    assert_eq!((again.stage, again.state, again.answered.clone()), (Stage::Work, State::NeedsYou, None));
+    assert_eq!(again.reason, Some(StopReason::AuthorNotDone { detail: "The plans table has no owner column.".into() }));
+    assert!(run.host.world().pushes.is_empty());
+    // And it can be answered again, as many times as it takes.
+    assert_eq!(run.answer().state, State::Working);
+    assert_eq!(run.answered_turn(&done("Added the column.")).stage, Stage::Review);
+}
+
+#[test]
+fn a_message_to_the_author_does_not_clear_a_required_review() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.merge_state = "BLOCKED".into();
+        pr.review_decision = Some("REVIEW_REQUIRED".into());
+    }
+    let required = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((required.state, required.reason.clone()), (State::NeedsYou, Some(StopReason::ReviewRequired)));
+    let announced = run.host.world().announced;
+    // GitHub wants an approval, which nothing the author does gives.
+    assert_eq!(run.answer(), required);
+    assert_eq!(run.host.world().announced, announced, "nothing changed, so nothing is announced");
+    // Its turn ends: the gate is asked again, and says the same.
+    assert_eq!(run.answered_turn(&done("Nothing to change.")).reason, Some(StopReason::ReviewRequired));
+    // Once approved, a look at it again carries it on.
+    run.host.world().pr.as_mut().unwrap().review_decision = Some("APPROVED".into());
+    run.host.world().pr.as_mut().unwrap().merge_state = "CLEAN".into();
+    assert_eq!(run.poll().state, State::Merged);
+}
+
+#[test]
+fn only_the_authors_answer_to_a_stop_of_its_own_puts_the_pipeline_back_to_work() {
+    let run = Run::start(&github_issue(), false);
+    let blocked = run.author(&not_done("Which table holds the plans?"));
+    // A message that never reached a running agent (the tab refused it, the agent is gone) is no answer.
+    answered(&run.host, "author", "t1");
+    assert_eq!(run.pipeline(), blocked);
+    // Nor is one stopped by a person: nothing happens until it is resumed.
+    act(&run.host, &run.id, Action::Stop).unwrap();
+    let stopped = run.answer();
+    assert_eq!(stopped.state, State::Stopped);
+    // Resumed, it waits for the author's report as before; answering a working pipeline changes nothing.
+    run.host.agent(&author_tab(), false);
+    let resumed = act(&run.host, &run.id, Action::Resume).unwrap();
+    assert_eq!(run.answer(), resumed);
+    drop(run);
+
+    // The reviewer, answered while the pipeline is stopped on it, is not the author.
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    let no_verdict = run.reviewer("Looks fine to me.");
+    assert!(no_verdict.reminded);
+    let stopped = run.reviewer("Still fine.");
+    assert!(matches!(stopped.reason, Some(StopReason::NoVerdict { .. })), "{:?}", stopped.reason);
+    run.host.agent(&reviewer, true);
+    answered(&run.host, &reviewer.session_id, &reviewer.tab_id);
+    assert_eq!(run.pipeline(), stopped);
+    // And the author's answer does not clear a stop on the reviewer's verdict either.
+    assert_eq!(run.answer(), stopped);
+    drop(run);
+
+    // A pull request closed without merging ended the pipeline.
+    let run = Run::start(&github_issue(), false);
+    run.to_gate();
+    run.host.world().pr.as_mut().unwrap().state = "CLOSED".into();
+    let closed = run.poll();
+    assert_eq!(closed.reason, Some(StopReason::PullRequestClosed));
+    assert_eq!(run.answer(), closed);
+}
+
+#[test]
+fn a_pull_request_that_could_not_be_opened_is_working_once_its_author_is_answered() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().workspace.dirty = vec!["notes.txt".into()];
+    let dirty = run.author(&done("Done."));
+    assert_eq!((dirty.stage, dirty.state), (Stage::PullRequest, State::NeedsYou));
+    let working = run.answer();
+    assert_eq!((working.stage, working.state, working.note.as_deref()), (Stage::PullRequest, State::Working, Some(ANSWERED)));
+    // The author asks which file: the turn settles nothing, and the stop is back as it was.
+    let again = run.answered_turn("Which file do you mean?");
+    assert_eq!((again.stage, again.state), (Stage::PullRequest, State::NeedsYou));
+    assert_eq!(again.reason, Some(StopReason::UncommittedChanges { files: vec!["notes.txt".into()] }));
+    assert!(run.host.prompts_to("author").is_empty(), "it is not nagged for the block");
+    // Answered again, it commits the file and reports done: the pull request opens.
+    run.answer();
+    run.host.world().workspace.dirty.clear();
+    assert_eq!(run.answered_turn(&done("Committed the notes too.")).stage, Stage::Review);
+    assert_eq!(run.host.world().created.len(), 1);
+    drop(run);
+
+    // A refused push, likewise.
+    let run = Run::start(&github_issue(), true);
+    run.host.world().push_error = Some("remote: Permission to acme/widgets denied".into());
+    assert!(matches!(run.author(&done("Done.")).reason, Some(StopReason::Failed { .. })));
+    assert_eq!(run.answer().state, State::Working);
+    assert_eq!(run.answered_turn(&done("The remote is fixed.")).stage, Stage::Review);
+}
+
+#[test]
+fn conflicts_answered_by_a_person_are_left_to_the_authors_turn_not_put_back_by_the_poller() {
+    let run = Run::start(&github_issue(), false);
+    run.to_review();
+    let conflicting = |conflict: bool| {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.mergeable = if conflict { "CONFLICTING" } else { "MERGEABLE" }.into();
+        pr.merge_state = if conflict { "DIRTY" } else { "CLEAN" }.into();
+    };
+    conflicting(true);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
+    let working = run.answer();
+    assert_eq!((working.stage, working.state, working.answered.clone()), (Stage::Merge, State::Working, Some(StopReason::Conflicts)));
+    // GitHub still shows the conflict while the author works on it: the poller leaves it to the turn.
+    let polled = run.poll();
+    assert_eq!((polled.state, polled.note.as_deref()), (State::Working, Some(ANSWERED)));
+    // The turn ends with the conflict still there: stopped for it again.
+    assert_eq!(run.answered_turn(&done("Merged main.")).reason, Some(StopReason::Conflicts));
+    // Answered again; by the end of this turn GitHub has it resolved.
+    run.answer();
+    conflicting(false);
+    let ready = run.answered_turn(&done("Merged main again."));
+    assert_eq!((ready.state, ready.answered), (State::ReadyToMerge, None));
+    drop(run);
+
+    // A merge made elsewhere while the author works on an answer is still noticed.
+    let run = Run::start(&github_issue(), false);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "failure")];
+    let failed = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert!(matches!(failed.reason, Some(StopReason::ChecksFailed { .. })), "{:?}", failed.reason);
+    assert_eq!(run.answer().state, State::Working);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    assert_eq!(run.poll().state, State::Merged);
+}
+
+#[test]
+fn a_message_sent_while_the_author_works_answers_the_stop_its_turn_ends_on() {
+    let run = Run::start(&github_issue(), false);
+    // A person sends a message while the author works; it waits for the turn's end.
+    run.host.agent(&author_tab(), true);
+    answered(&run.host, "author", "t1");
+    assert_eq!((run.pipeline().state, run.pipeline().answered), (State::Working, None));
+    // The turn ends not done, and the next one starts on that message at once.
+    let working = run.author(&not_done("Which table holds the plans?"));
+    assert_eq!((working.state, working.note.as_deref()), (State::Working, Some(ANSWERED)));
+    assert_eq!(working.answered, Some(StopReason::AuthorNotDone { detail: "Which table holds the plans?".into() }));
+    assert!(run.kinds().ends_with(&["needsYou".to_string(), "answered".to_string()]), "{:?}", run.kinds());
+    assert_eq!(run.answered_turn(&done("Found it.")).stage, Stage::Review);
+}
+
+#[test]
+fn an_answered_turn_cut_short_or_lost_to_a_restart_is_a_persons_again() {
+    let interrupted = StopReason::SessionStopped { role: "author".into(), detail: "Its turn was interrupted.".into() };
+    let closed = StopReason::SessionStopped { role: "author".into(), detail: "TerminalX was closed before it finished.".into() };
+    // Answered at a stage that does not wait on the author, its turn is interrupted.
+    let run = Run::start(&github_issue(), true);
+    run.host.world().workspace.dirty = vec!["notes.txt".into()];
+    run.author(&done("Done."));
+    run.answer();
+    turn_failed(&run.host, "author", "t1", "Its turn was interrupted.");
+    let stopped = run.pipeline();
+    assert_eq!((stopped.stage, stopped.state, stopped.reason.clone(), stopped.answered), (Stage::PullRequest, State::NeedsYou, Some(interrupted), None));
+    // Answered again, and TerminalX closes during that turn.
+    assert_eq!(run.answer().state, State::Working);
+    recover(&run.host);
+    assert_eq!((run.pipeline().state, run.pipeline().reason), (State::NeedsYou, Some(closed.clone())));
+    drop(run);
+
+    // At the merge stage too, where a working pipeline is otherwise the poller's.
+    let run = Run::start(&github_issue(), false);
+    run.to_review();
+    conflict(&run);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
+    run.answer();
+    recover(&run.host);
+    let recovered = run.pipeline();
+    assert_eq!((recovered.stage, recovered.state, recovered.reason), (Stage::Merge, State::NeedsYou, Some(closed)));
+    drop(run);
+
+    // A cloud workspace's runtime that restarts during the answered turn says so when it wakes.
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_review();
+    conflict(&run);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
+    run.answer();
+    // Another tab's turn ended with it: the author is still at work on the answer.
+    resume(&run.host, &[("someone".into(), "else".into())]);
+    assert_eq!(run.pipeline().state, State::Working);
+    resume(&run.host, &[("author".into(), "t1".into())]);
+    let woke = run.pipeline();
+    assert_eq!(woke.state, State::NeedsYou);
+    assert!(matches!(&woke.reason, Some(StopReason::SessionStopped { role, detail }) if role == "author" && detail.contains("restarted")), "{:?}", woke.reason);
 }

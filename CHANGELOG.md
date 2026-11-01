@@ -2,6 +2,94 @@
 
 ## Unreleased
 
+### Issue pipelines
+
+- Answering the author of a pipeline at **Needs you** puts it back to
+  **Working** at once, and the Issues list chip changes with the session for
+  GitHub and Linear issues alike. Before, it kept saying **Needs you** until
+  the author's turn ended, often for minutes. This applies to stops the author
+  can act on: the work not done, failed checks, a pull request that could not
+  be opened, a turn that stopped short, and conflicts with the base branch.
+  Sending a message, answering a question or a permission request, or typing
+  into the agent's own terminal all count, and so does a message that was
+  queued behind the turn. If the turn still isn't done, the pipeline goes back
+  to **Needs you**. A required review, a closed pull request and other stops
+  that wait on someone else stay at **Needs you** until they are checked again.
+  (#725)
+### Sessions and tabs
+
+- Open the session you click. A session with no tabs open was swapped for
+  another session in the same folder that had tabs, a quick chat or another
+  project's included, so it could not be opened, and neither could its history
+  or its closed tabs. It now stays selected and shows its own page: its closed
+  tabs, newest first, each with Reopen to resume that conversation in this
+  session, plus New tab and Reopen closed tab. Opening a session no longer
+  starts a shell in it by itself; opening a checkout from the command palette
+  still does. (#721)
+- Keep a row of tabs to real siblings: with a branch's sessions shown as tabs,
+  a row holds the sessions of the same project and branch only, as the sidebar
+  lists them, never a quick chat or another project's session that runs in the
+  same folder. A session on that branch with no tab open has nothing in the
+  row of tabs to click, so it keeps a sidebar row of its own under the
+  branch's, and a browser page another session opened in the folder no longer
+  hides its page until it is picked. (#721)
+- Offer Undo when closing a session's last running tab. The notice says its
+  agent stopped, and Undo reopens the tab on the same conversation. (#721)
+- Archive conversations nobody has written in for a week (Settings → Agents:
+  a day to a month, or never). Idle counts from the last message in any tab,
+  not from when the session was made. A conversation stays while it is pinned
+  or open, while a tab is working, waiting for you or holding a queued message,
+  while its last reply is unread, while its worktree has uncommitted or
+  unpushed work, and while its issue pipeline's pull request is open. A new
+  message to an archived session, from the app, the CLI, a phone or an
+  automation, brings it back. Archiving deletes nothing. (#718)
+- Find archived conversations again. View → Show archived lists each
+  project's archived conversations, and the chats', under an "Archived" fold,
+  with Unarchive on each row; a project taken out of TerminalX comes back there
+  with the conversations removing it archived. The command palette finds an
+  archived conversation by its title and says it is archived. (#718)
+- Select several conversations in the sidebar (⌘-click, Shift-click, or
+  Select in a row's menu), then archive, unarchive or delete them together.
+  (#718)
+### Chat
+
+- Never type a message into an agent's input box that already holds text. The
+  app used to clear the box with Ctrl+U, which deletes only the row the cursor
+  is on: when Claude Code had put a dropped prompt back in its box, the prompt
+  lost its last wrapped row and the rest was sent with the next message glued
+  to it. The app now reads the box from the agent's screen (Claude Code and
+  Codex), and a message waits while the box holds something, saying so in the
+  chat, until that text is sent or cleared in the terminal. (#722)
+- Show a prompt Claude Code dropped before answering as not answered, with Send
+  again, when it takes another prompt in its place; one sent again from its
+  input box stays the one message. A message the agent received inside a longer
+  prompt is shown once, as received, with what was sent behind it, and its
+  queued bubble clears. (#722)
+- Cut more credentials from the redacted detail line that a refused sign-in or
+  an agent that exits early shows in the chat: `key: value` and JSON forms,
+  escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's
+  secret-looking value, including one that runs on over lines. Errors such as
+  `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
+  readable. (#717)
+### Command line
+
+- `terminalx worktrees delete` no longer deletes sessions it never named. Without
+  `--yes`, or with `--dry-run`, it lists every session it would delete, marking
+  sessions of another project, quick chats and archived ones, with the tabs
+  still running in them and the git state, and removes nothing. `--sessions
+  ID,…` names the sessions you were shown: if the worktree holds any other set,
+  nothing is removed and the sessions that differ are named, as in the desktop
+  dialog. The result gives each deleted session's title and project, not only
+  its id. `terminalx sessions list --worktree` lists what the delete would take,
+  `worktrees list` gives each worktree's sessions, and `sessions list
+  --project` now finds a session that names its project through a symlink.
+  (#719)
+- `terminalx sessions archive|unarchive SESSION...` run the app's own
+  archive, so the sidebar updates at once. `sessions list` now lists what the
+  sidebar does, and `sessions list --archived` the archived sessions. (#718)
+
+## 0.2.22
+
 ### Background sessions
 
 - Reconnect to the background runtime automatically, with backoff and no attempt
@@ -12,6 +100,13 @@
   window whose terminal output alone dropped recovers without affecting others.
   The notice stays quiet for short gaps and asks for action only when retrying
   cannot help or has not helped for minutes. (#643)
+- Keep the live connection up when a window falls behind. A terminal that
+  cannot keep up is redrawn from its scrollback on its own, while the others
+  in the window keep streaming. Events the window missed are read again,
+  without reconnecting. Each window's terminal connection now carries terminal
+  output only. Every lost connection is now logged: which connection, why, how
+  long it was down and how many attempts it took to reconnect. The log is
+  `desktop.log`, beside `runtime.log` in `~/Library/Logs`. (#716)
 - Stop agents nobody is using. An agent the app started that has had nothing to
   do for an hour (Settings → Agents: 30 minutes to a day, or never) is stopped
   with its MCP servers, and its next message starts it again on the same
@@ -34,25 +129,13 @@
   about 1 GB. (#696)
 - Merged workspaces of this repository are no longer kept for the CLI launcher
   the build leaves in `src-tauri/binaries`. (#696)
-- Archive conversations nobody has written in for a week (Settings → Agents:
-  a day to a month, or never). Idle counts from the last message in any tab,
-  not from when the session was made. A conversation stays while it is pinned
-  or open, while a tab is working, waiting for you or holding a queued message,
-  while its last reply is unread, while its worktree has uncommitted or
-  unpushed work, and while its issue pipeline's pull request is open. A new
-  message to an archived session, from the app, the CLI, a phone or an
-  automation, brings it back. Archiving deletes nothing. (#718)
-- Find archived conversations again. View → Show archived lists each
-  project's archived conversations, and the chats', under an "Archived" fold,
-  with Unarchive on each row; a project taken out of TerminalX comes back there
-  with the conversations removing it archived. The command palette finds an
-  archived conversation by its title and says it is archived. (#718)
-- Select several conversations in the sidebar (⌘-click, Shift-click, or
-  Select in a row's menu), then archive, unarchive or delete them together.
-  (#718)
-- `terminalx sessions archive|unarchive SESSION...` run the app's own
-  archive, so the sidebar updates at once. `sessions list` now lists what the
-  sidebar does, and `sessions list --archived` the archived sessions. (#718)
+- A terminal that stops reading its input no longer locks up the background
+  runtime, and with it TerminalX, until the Mac restarts. A write gives up after
+  10 seconds, app commands that call the runtime run off the main thread with
+  15-second timeouts, and a runtime that stops answering offers **Restart
+  runtime**. The runtime keeps its log in
+  `~/Library/Logs/com.terminalx.next/runtime.log`. (#678)
+
 ### Relay
 
 - Poll the account service for pairing grants and revocations once every 30
@@ -70,6 +153,11 @@
   how far it got, in `relay-diagnostics.json`. Run paired-device calls to the
   local runtime off the workers Relay runs on, so a stalled runtime cannot stop
   Relay reconnecting. (#666)
+- Keep Relay messages within the cell's 1 MiB limit, so long conversations load
+  on mobile data. Transcript pages are sized to the connection, an oversized
+  event is sent alone or shortened with a note, and larger messages, such as
+  5 MB attachments, cross in fragments once both ends support it. A message that
+  still cannot fit fails only its own request, and the connection stays up. (#679)
 
 ### Mobile
 
@@ -111,6 +199,11 @@
   cancelled attempts and Relay director errors, race the paths again when the
   phone changes network, and wait 1 second, rising, before reconnecting a
   connection that keeps dropping straight after connecting. (#666)
+- Explain connection failures on the phone's conversation screen in plain words:
+  **Reconnecting…**, which keeps the saved transcript, or **Your Mac isn't
+  reachable**, with a Retry that reconnects at once. A failed send offers **Send
+  again**. A transcript page that drops the connection twice over the same path
+  is not requested again, and the Relay close code and reason are logged. (#674)
 
 ### Organizations
 
@@ -186,6 +279,28 @@
   workspace's variables, secrets, instructions and MCP servers, in a home of its
   own where no TerminalX hook runs; sign-in problems are reported as for other
   sessions, and the terminal view moves the tab as on a Mac. (#644)
+- Add **Continue here** to the recovery banner and the Session closed bar. It
+  sends "continue" in the same session, without stopping it, after a failure,
+  a capacity error, a dropped connection, a sign-out or a usage limit that has
+  reset. (#673)
+- Recognise a revoked or expired Codex or Claude Code login. The turn ends as
+  signed out with a redacted detail line, the tab offers **Sign in again**, and
+  Agent logins shows Sign-in required. Cloud runtimes report the refused login
+  and sync again, so Start agent works once you have signed in. (#683)
+- Settings → Agents and the New Session form show whether each local agent is
+  installed and signed in (Not installed, Installed · sign in required, Ready ·
+  local login found, or Login not checked), with its version, path and the
+  command that installs it or signs in. Create and Ask refuse to start only when
+  the agent is known to be missing or signed out, and keep the draft and
+  attachments; a check that cannot be read never blocks. (#715)
+- A Codex tab that opens on Codex's sign-in menu is blocked with a **Sign in**
+  banner that opens `codex login`, instead of having the first prompt typed into
+  the menu and timing out as delivery unconfirmed; the next launch offers the
+  prompt back. Claude Code's first-run screens keep their banner instead of
+  setting the tab to Idle. (#715)
+- Question-card options whose label contains a comma show as selected, and
+  multi-select choices no longer overwrite one another. Options with the same
+  label, and questions with the same text, no longer share a selection. (#708)
 
 ### Status bar
 
@@ -208,6 +323,9 @@
   "You · on This Mac". Macs that saved "This Mac" get their real name without
   renaming, and a name chosen earlier is kept. Settings → Account shows this
   Mac's name with a Rename button, with or without Relay. (#686)
+- The work chip's hover card in the issues list holds its contents: long titles
+  and branches end in … at its edge, it stays opaque in macOS glass mode, and it
+  no longer dims rows for work that went quiet. (#714)
 
 ### Cloud workspaces
 
@@ -253,6 +371,34 @@
   it, such as a `cargo check` that outlived rust-analyzer, and lists any other
   process there by name. Programs detached on purpose (`screen`, `tmux`,
   `nohup`, tunnels) are never stopped. (#689)
+
+### Issues
+
+- Create and edit issues from a project whose `origin` still uses a renamed
+  GitHub repository's old name. Writes go to the repository's current name; a
+  write GitHub still redirects names the new repository and the
+  `git remote set-url` command that updates the remote. (#710)
+
+### Command line
+
+- `terminalx wait` reports `permission` only when there is a request or question
+  to answer. A failed agent is reported as `recovery` with its kind, and right
+  after a send it waits for the new turn instead of returning the status from
+  before it. (#677)
+
+### Development
+
+- Build the dev and test profiles without incremental caches and with line-table
+  debug info only, so each checkout's `src-tauri/target` stays far smaller. Set
+  `CARGO_PROFILE_DEV_DEBUG=2` for full debug info or `CARGO_INCREMENTAL=1` for
+  incremental builds. (#697)
+- Ignore the `rustc*` scratch folder a killed launcher build leaves in
+  `src-tauri/binaries`, which stopped this repository's issue pipelines at
+  "uncommitted changes". (#693)
+- Keep three idle-agent tests and a store lock test from failing on a loaded
+  machine, as they did on main's CI: they measured quiet before the pane's first
+  draw or the tail's read, or retried a lock with no wait. A runtime test now
+  expects App resources to stop an idle agent after asking, as #696 made it.
 
 ## 0.2.21
 

@@ -91,10 +91,20 @@ impl Rig {
         self.manager.is_running(SESSION, TAB)
     }
 
-    /// Started, and then quiet for the limit.
+    /// Started, its prompt drawn, and then quiet for the limit. Until the
+    /// pane has drawn, quiet counts from the launch: a slow start would pass
+    /// for the limit a moment before the prompt's draw starts it again.
     fn idle_for_the_limit(&self) {
         self.wait("the CLI to run", || self.running() && self.ran.exists());
+        self.wait("the CLI to draw its prompt", || self.drawn());
         self.wait("the agent to be quiet for the limit", || self.manager.idle_for(SESSION, TAB, Instant::now()).is_some_and(|idle| idle >= LIMIT));
+    }
+
+    fn drawn(&self) -> bool {
+        match &self.rt().lock().unwrap().engine {
+            Engine::Cli(cli) => self.manager.terminals.last_output(&cli.pane_id).is_some(),
+            _ => false,
+        }
     }
 
     fn statuses(&self) -> Vec<String> {
@@ -208,21 +218,28 @@ fn an_agent_waiting_on_a_background_command_is_not_stopped_until_it_reports_in()
     let cleared = claude::transcript::transcript_in(&crate::agent_data::claude_projects_root().unwrap(), rig.checkout.to_str().unwrap(), "0b6c2f3e-6f4d-4f0e-9d37-7d2f4c1b9a21");
     std::fs::create_dir_all(cleared.parent().unwrap()).unwrap();
     tail.retarget(&cleared);
-    let write = |record: serde_json::Value| {
+    // Each call is one append, read by the tail whole.
+    let write = |records: &[serde_json::Value]| {
         use std::io::Write;
-        std::fs::OpenOptions::new().create(true).append(true).open(&cleared).unwrap().write_all(format!("{record}\n").as_bytes()).unwrap();
+        let lines: String = records.iter().map(|record| format!("{record}\n")).collect();
+        std::fs::OpenOptions::new().create(true).append(true).open(&cleared).unwrap().write_all(lines.as_bytes()).unwrap();
     };
-    write(json!({ "type": "assistant", "uuid": "a-1", "timestamp": index::now(), "message": { "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_ci", "name": "Bash", "input": { "command": "gh run watch", "run_in_background": true } }] } }));
-    write(json!({ "type": "user", "uuid": "u-1", "timestamp": index::now(), "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_ci", "content": "Command running in background with ID: bci" }] }, "toolUseResult": { "backgroundTaskId": "bci" } }));
-    // The tail reads them too; quiet again for the limit, it has nothing else to do.
+    let before = Instant::now();
+    write(&[
+        json!({ "type": "assistant", "uuid": "a-1", "timestamp": index::now(), "message": { "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_ci", "name": "Bash", "input": { "command": "gh run watch", "run_in_background": true } }] } }),
+        json!({ "type": "user", "uuid": "u-1", "timestamp": index::now(), "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_ci", "content": "Command running in background with ID: bci" }] }, "toolUseResult": { "backgroundTaskId": "bci" } }),
+    ]);
+    // The tail reads them too, a poll later, and that is activity: quiet
+    // counts again from then. Quiet again for the limit, it has nothing else to do.
+    rig.wait("the tail to read them", || rig.rt().lock().unwrap().last_activity >= before);
     rig.idle_for_the_limit();
 
     assert!(rig.sweep(Some(LIMIT)).is_empty());
     assert!(rig.running());
     assert_eq!(rig.manager.background_work(SESSION, TAB).as_deref(), Some("a background command it has not heard back from"));
 
-    write(json!({ "type": "attachment", "uuid": "n-1", "timestamp": index::now(), "attachment": { "type": "queued_command", "commandMode": "task-notification",
-        "prompt": "<task-notification>\n<task-id>bci</task-id>\n<tool-use-id>toolu_ci</tool-use-id>\n<status>completed</status>\n</task-notification>" } }));
+    write(&[json!({ "type": "attachment", "uuid": "n-1", "timestamp": index::now(), "attachment": { "type": "queued_command", "commandMode": "task-notification",
+        "prompt": "<task-notification>\n<task-id>bci</task-id>\n<tool-use-id>toolu_ci</tool-use-id>\n<status>completed</status>\n</task-notification>" } })]);
     rig.wait("the watch to be heard back from", || rig.manager.background_work(SESSION, TAB).is_none());
     rig.idle_for_the_limit();
     assert_eq!(rig.sweep(Some(LIMIT)), [crate::idle_agents::Why::Idle(LIMIT)]);

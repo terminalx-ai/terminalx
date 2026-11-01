@@ -8,6 +8,10 @@
 //! that restarted or starts one that exited. Windows then re-attach their
 //! terminals and re-read what they show: nothing reloads, and no request that
 //! was in flight is sent again, so no agent restarts and no prompt repeats.
+//!
+//! Every loss is logged with which connection it was and why it ended, and
+//! every recovery with how long it was down and how many attempts it took
+//! (#716), in the desktop's log beside the runtime's.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -49,9 +53,31 @@ pub enum ConnectionState {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Target { Events, View(String) }
 
+impl std::fmt::Display for Target {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Events => write!(out, "the background runtime's event connection"),
+            Self::View(window) => write!(out, "terminal output of window {window:?}"),
+        }
+    }
+}
+
+/// What an attempt to re-establish a connection came to, for the log.
+#[derive(Debug, PartialEq)]
+enum Report {
+    Recovered { tries: u32, down: Duration },
+    /// Still down. Not every failure is reported: the first, any whose reason
+    /// differs from the one before, and then the 2nd, 4th, 8th and so on, so
+    /// a runtime that stays away all day costs the log some twenty lines.
+    Failed { tries: u32, down: Duration, message: String, retry_in: Duration },
+}
+
 #[derive(Debug)]
 struct Retry {
     attempt: u32,
+    /// Attempts made since this connection was lost. `attempt` carries over
+    /// from a recovery that did not last, for the backoff; this does not.
+    tries: u32,
     since: Instant,
     due: Instant,
     /// The loss this retry answers. A newer one while an attempt runs makes
@@ -79,10 +105,19 @@ struct Inner {
 fn ms(duration: Duration) -> u64 { duration.as_millis().try_into().unwrap_or(u64::MAX) }
 
 impl Inner {
-    fn lose(&mut self, target: Target, generation: u64, message: &str, now: Instant, jitter: f64) -> bool {
-        if self.halted || generation < self.generation { return false; }
+    /// Why a loss of `target` needs no attempt of its own, if it does not.
+    fn moot(&self, target: &Target, generation: u64) -> Option<&'static str> {
+        if self.halted { return Some("the app is quitting"); }
+        if generation < self.generation { return Some("it belonged to an attachment that has since been replaced"); }
         // A new attachment opens new view connections: none to repair first.
-        if matches!(target, Target::View(_)) && self.pending.contains_key(&Target::Events) { return false; }
+        if matches!(target, Target::View(_)) && self.pending.contains_key(&Target::Events) {
+            return Some("the event connection is being re-established, and brings new terminal connections");
+        }
+        None
+    }
+
+    fn lose(&mut self, target: Target, generation: u64, message: &str, now: Instant, jitter: f64) -> bool {
+        if self.moot(&target, generation).is_some() { return false; }
         self.losses += 1;
         let loss = self.losses;
         if let Some(retry) = self.pending.get_mut(&target) {
@@ -92,7 +127,7 @@ impl Inner {
         let attempt = self.recovered.get(&target)
             .filter(|(at, _)| now.saturating_duration_since(*at) < STABLE)
             .map_or(0, |(_, attempt)| attempt.saturating_add(1));
-        self.pending.insert(target, Retry { attempt, since: now, due: now + backoff(attempt, jitter),
+        self.pending.insert(target, Retry { attempt, tries: 0, since: now, due: now + backoff(attempt, jitter),
             loss, message: message.into(), blocked: false });
         true
     }
@@ -110,28 +145,37 @@ impl Inner {
         }
     }
 
-    fn settle(&mut self, target: &Target, loss: u64, outcome: Result<u64, (String, bool)>, now: Instant, jitter: f64) {
+    fn settle(&mut self, target: &Target, loss: u64, outcome: Result<u64, (String, bool)>, now: Instant, jitter: f64) -> Option<Report> {
         if let (Target::Events, Ok(generation)) = (target, &outcome) {
             self.generation = self.generation.max(*generation);
             self.pending.retain(|target, _| *target == Target::Events);
         }
-        let Some(retry) = self.pending.get_mut(target) else { return };
+        let retry = self.pending.get_mut(target)?;
+        retry.tries = retry.tries.saturating_add(1);
+        let (tries, down) = (retry.tries, now.saturating_duration_since(retry.since));
         match outcome {
             Ok(_) if retry.loss == loss => {
                 let attempt = retry.attempt;
                 self.pending.remove(target);
                 self.recovered.insert(target.clone(), (now, attempt));
+                Some(Report::Recovered { tries, down })
             }
             Ok(_) => {
                 // Lost again while this attempt ran: go on, not from the start.
+                // That loss was reported as it happened.
                 retry.attempt = retry.attempt.saturating_add(1);
                 retry.due = now + backoff(retry.attempt, jitter);
+                None
             }
             Err((message, blocked)) => {
                 retry.attempt = retry.attempt.saturating_add(1);
-                retry.due = now + if blocked { BACKOFF_CEILING } else { backoff(retry.attempt, jitter) };
+                let retry_in = if blocked { BACKOFF_CEILING } else { backoff(retry.attempt, jitter) };
+                retry.due = now + retry_in;
+                let changed = message != retry.message;
                 retry.message = message;
                 retry.blocked = blocked;
+                (changed || tries.is_power_of_two())
+                    .then(|| Report::Failed { tries, down, message: retry.message.clone(), retry_in })
             }
         }
     }
@@ -193,7 +237,8 @@ impl Supervisor {
                 }
                 let reattached = match (&target, &outcome) { (Target::Events, Ok(generation)) => Some(*generation), _ => None };
                 if reattached.is_some() { state.runtime_health.clear(); }
-                supervisor.inner.lock().unwrap().settle(&target, loss, outcome, Instant::now(), jitter());
+                let report = supervisor.inner.lock().unwrap().settle(&target, loss, outcome, Instant::now(), jitter());
+                if let Some(report) = report { log_report(&target, &report); }
                 supervisor.emit();
                 // Every window re-reads what the gap may have changed.
                 if let Some(generation) = reattached { let _ = app.emit("local_runtime_reattached", serde_json::json!({"generation": generation})); }
@@ -218,18 +263,27 @@ impl Supervisor {
         if let Some(app) = self.app.get() { let _ = app.emit("local_runtime_state", ()); }
     }
 
-    fn lose(&self, target: Target, generation: u64, message: &str) {
-        if self.inner.lock().unwrap().lose(target, generation, message, Instant::now(), jitter()) {
-            self.wake.notify_all();
-            self.emit();
+    fn lose(&self, target: Target, generation: u64, message: &str, reason: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(moot) = inner.moot(&target, generation) {
+            drop(inner);
+            log::info!("{target} closed: {reason}; it is not reconnected on its own, as {moot}");
+            return;
         }
+        let again = inner.pending.contains_key(&target);
+        inner.lose(target.clone(), generation, message, Instant::now(), jitter());
+        drop(inner);
+        if again { log::warn!("lost {target} again while reconnecting it: {reason}"); }
+        else { log::warn!("lost {target}: {reason}; reconnecting"); }
+        self.wake.notify_all();
+        self.emit();
     }
 
     /// A connection ended by itself, or was dropped on purpose (`Desktop::disconnect`).
     pub(crate) fn lost(&self, lost: Lost) {
         match lost {
-            Lost::Events { generation } => self.lose(Target::Events, generation, LOST_EVENTS),
-            Lost::View { generation, window } => self.lose(Target::View(window), generation, LOST_VIEW),
+            Lost::Events { generation, reason } => self.lose(Target::Events, generation, LOST_EVENTS, &reason),
+            Lost::View { generation, window, reason } => self.lose(Target::View(window), generation, LOST_VIEW, &reason),
         }
     }
 
@@ -249,7 +303,8 @@ impl Supervisor {
             Some(blocked) => (blocked.0.clone(), true),
             None => (format!("Could not connect to the background runtime: {error:#}"), false),
         };
-        inner.settle(&Target::Events, loss, Err(failure), now, jitter());
+        // Logged as the launch's own failure to attach.
+        let _ = inner.settle(&Target::Events, loss, Err(failure), now, jitter());
         drop(inner);
         self.wake.notify_all();
         self.emit();
@@ -283,8 +338,9 @@ impl Supervisor {
             Some((_, false)) => None,
             None => Some(inner.generation),
         };
-        if let Some(generation) = lost { inner.lose(Target::Events, generation, LOST_EVENTS, Instant::now(), jitter()); }
+        let lost = lost.is_some_and(|generation| inner.lose(Target::Events, generation, LOST_EVENTS, Instant::now(), jitter()));
         drop(inner);
+        if lost { log::warn!("{} was closed while the app stopped its runtime; reconnecting", Target::Events); }
         self.wake.notify_all();
         self.emit();
     }
@@ -302,8 +358,25 @@ impl Supervisor {
         };
         let status = inner.status(window, attached, unattached, now);
         drop(inner);
-        if resumed { self.wake.notify_all(); self.emit(); }
+        if resumed {
+            log::warn!("{} was found closed with nothing reconnecting it; reconnecting", Target::Events);
+            self.wake.notify_all();
+            self.emit();
+        }
         status
+    }
+}
+
+fn log_report(target: &Target, report: &Report) {
+    use super::log_file::span;
+    let attempts = |tries: u32| if tries == 1 { "1 attempt".to_string() } else { format!("{tries} attempts") };
+    match report {
+        Report::Recovered { tries, down } => {
+            log::info!("reconnected {target} after {}; it was down for {}", attempts(*tries), span(*down));
+        }
+        Report::Failed { tries, down, message, retry_in } => {
+            log::warn!("{target} is still down after {} and {}: {message}; trying again in {}", attempts(*tries), span(*down), span(*retry_in));
+        }
     }
 }
 
@@ -364,9 +437,54 @@ mod tests {
 
     /// Run the attempt that is due at `now`, if any, with `outcome`.
     fn attempt(inner: &mut Inner, now: Instant, outcome: Result<u64, (String, bool)>) -> Target {
+        attempt_reported(inner, now, outcome).0
+    }
+
+    fn attempt_reported(inner: &mut Inner, now: Instant, outcome: Result<u64, (String, bool)>) -> (Target, Option<Report>) {
         let (target, loss) = inner.due(now).expect("an attempt is due");
-        inner.settle(&target, loss, outcome, now, 0.5);
-        target
+        let report = inner.settle(&target, loss, outcome, now, 0.5);
+        (target, report)
+    }
+
+    /// #716: the log says how long each connection was down and how many
+    /// attempts it took to bring back, and leaves out most failures of a
+    /// long outage without leaving out one whose reason is new.
+    #[test]
+    fn a_recovery_is_reported_with_how_long_it_was_down_and_how_many_attempts_it_took() {
+        let start = Instant::now();
+        let mut inner = Inner { generation: 1, ..Default::default() };
+        inner.lose(Target::View("main".into()), 1, LOST_VIEW, start, 0.5);
+        let mut now = start;
+        let mut reported = Vec::new();
+        for attempt in 1..=9 {
+            now += 10 * SECOND;
+            let message = if attempt == 6 { "refused for a new reason" } else { "refused" };
+            let (_, report) = attempt_reported(&mut inner, now, Err((message.into(), false)));
+            if let Some(Report::Failed { tries, .. }) = report { reported.push(tries); }
+        }
+        assert_eq!(reported, [1, 2, 4, 6, 7, 8], "first, doubling, and each change of reason (into the new one and back)");
+        now += 10 * SECOND;
+        let (target, report) = attempt_reported(&mut inner, now, Ok(9));
+        assert_eq!(target.to_string(), "terminal output of window \"main\"");
+        assert_eq!(report, Some(Report::Recovered { tries: 10, down: 100 * SECOND }));
+
+        // Failing again soon after keeps the backoff, but counts its attempts afresh.
+        inner.lose(Target::View("main".into()), 1, LOST_VIEW, now + SECOND, 0.5);
+        let due = inner.pending[&Target::View("main".into())].due;
+        assert_eq!(attempt_reported(&mut inner, due, Ok(10)).1, Some(Report::Recovered { tries: 1, down: due - (now + SECOND) }));
+    }
+
+    #[test]
+    fn a_loss_that_needs_no_attempt_of_its_own_says_why() {
+        let now = Instant::now();
+        let mut inner = Inner { generation: 2, ..Default::default() };
+        assert_eq!(inner.moot(&Target::Events, 2), None);
+        assert!(inner.moot(&Target::Events, 1).is_some_and(|why| why.contains("replaced")));
+        inner.lose(Target::Events, 2, LOST_EVENTS, now, 0.5);
+        assert!(inner.moot(&Target::View("main".into()), 2).is_some_and(|why| why.contains("event connection")));
+        inner.halted = true;
+        assert_eq!(inner.moot(&Target::Events, 2), Some("the app is quitting"));
+        assert_eq!(Target::Events.to_string(), "the background runtime's event connection");
     }
 
     #[test]

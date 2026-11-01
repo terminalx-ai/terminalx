@@ -80,9 +80,14 @@
 //! login stands refused by either word, every [`REFUSED_RECHECK`] after, so
 //! a login signed in again reaches the same tab without a restart; a launch
 //! of that agent first waits briefly for a fresh one.
-//! The mark goes when a grant of another version or epoch arrives, when the
-//! credential stops being connected (the server's own state then speaks), or
-//! when the provider answers an agent started on that grant after all.
+//! The refusal is read from the agent's own output, so it is a hint, and the
+//! server settles it in the grant list, not in its reply to the report. The
+//! mark goes when a grant of another version or epoch arrives (the forced
+//! refresh worked), when the credential stops being connected (the server's
+//! own state then speaks), or when the provider answers an agent started on
+//! that grant after all. The same grant, still connected, after the server
+//! took the report, is a check not settled yet (queued, or a refresh that
+//! failed for now), and the mark stays; that grant is not reported again.
 //!
 //! A credential that is revoked, disconnected or unavailable, or that the
 //! server stops sending a grant for, stops being injected into new sessions
@@ -1425,6 +1430,8 @@ impl GrantStore {
 
         // A refused grant stands until a grant of another version or epoch
         // replaces it, or the server says the credential is not connected.
+        // A server that took the report answers here, not in its 2xx: the
+        // same grant, still connected, is a check that has not settled.
         state.refused.retain(|provider, refusal| {
             let connected = credentials.get(provider).is_some_and(|entry| entry.state == CONNECTED && entry.credential_id == refusal.identity.0);
             let replaced = next.get(provider).is_some_and(|grant| grant.identity() != refusal.identity);
@@ -2641,6 +2648,8 @@ mod tests {
         fetches: RefCell<usize>,
         /// Answer the next fetch with key_required, as after a rotation.
         forget_key: RefCell<bool>,
+        /// Answer the next fetch with a transient failure.
+        fail_fetch: RefCell<bool>,
         /// Answer everything with 401.
         reject: RefCell<bool>,
         refresh_after: RefCell<Option<u64>>,
@@ -2707,6 +2716,9 @@ mod tests {
                 return Err(GrantCallError::Rejected);
             }
             *self.fetches.borrow_mut() += 1;
+            if std::mem::take(&mut *self.fail_fetch.borrow_mut()) {
+                return Err(GrantCallError::Transient(anyhow!("HTTP 503")));
+            }
             if std::mem::take(&mut *self.forget_key.borrow_mut()) {
                 *self.enrolled.borrow_mut() = None;
                 return Err(GrantCallError::KeyRequired);
@@ -3279,9 +3291,12 @@ mod tests {
         assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), Some(refused.clone()));
         assert_eq!(store.status(t0)["credentials"][0]["providerRefused"], true);
 
-        // Unreported until the server has it; a transient failure goes again.
+        // Unreported until the server has it; a transient failure goes again,
+        // and the mark stands meanwhile.
         *server.refusal_answer.borrow_mut() = Some(GrantCallError::Transient(anyhow!("HTTP 503")));
         send_refusal_reports(&store, &server);
+        store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), Some(refused.clone()));
         send_refusal_reports(&store, &server);
         send_refusal_reports(&store, &server);
         let reports = server.refusals.borrow().clone();
@@ -3289,8 +3304,14 @@ mod tests {
         assert_eq!(reports[1], json!({ "v": 1, "provider": "claude", "credentialId": "cred_c", "grantId": "grant_1", "version": 1, "epoch": 1, "reason": "provider-refused" }));
         assert!(!reports[1].to_string().contains("fake-oauth"), "a report carries no credential");
 
-        // The same grant again (a server that kept it) is still refused.
+        // The server took the report, but the same grant again is a check not
+        // settled yet (queued, or a refresh that failed for now): still
+        // refused, whatever its 2xx said.
         store.sync(&server, t0, NOW).unwrap();
+        assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), Some(refused.clone()));
+        // A fetch that fails says nothing either.
+        *server.fail_fetch.borrow_mut() = true;
+        assert!(store.sync(&server, t0, NOW).is_err());
         assert_eq!(store.sign_in_required(Provider::Claude, &[], t0), Some(refused));
         assert!(store.awaits_sign_in(Some(Provider::Claude)) && store.awaits_sign_in(None));
         assert!(!store.awaits_sign_in(Some(Provider::Codex)));

@@ -96,6 +96,22 @@ pub(super) fn said_in(log: &Path, conversation: Option<&str>) -> Said {
     said
 }
 
+/// The message the tab published under `seq`, as its log has it: the
+/// reader's own, not a subagent's.
+pub(super) fn sent_at(log: &Path, seq: u64) -> Option<Sent> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(log).ok()?;
+    std::io::BufReader::new(file).lines().map_while(std::result::Result::ok).find_map(|line| {
+        let event = serde_json::from_str::<Value>(&line).ok()?;
+        let payload = &event["payload"];
+        (event["seq"].as_u64() == Some(seq) && payload["type"] == "user_message" && event["subagent"].is_null()).then(|| Sent {
+            seq,
+            text: payload["text"].as_str().unwrap_or_default().to_string(),
+            images: serde_json::from_value(payload["images"].clone()).unwrap_or_default(),
+        })
+    })
+}
+
 /// What a launch does about a conversation with no file. `its_own` is
 /// whether what its agent answered would have been in that file: not so for
 /// a fork made again from its parent, nor for a Codex tab that never had a
@@ -174,6 +190,17 @@ impl SessionManager {
     pub fn resend_unsent(&self, session_id: &str, tab_id: &str) -> Result<SendOutcome> {
         let (text, images) = self.unsent_prompt(session_id, tab_id)?;
         self.send(session_id, tab_id, text, images)
+    }
+
+    /// "Send again" on a message the agent dropped unanswered, taking
+    /// another prompt in its place (#722): sent as a new message, as it was
+    /// sent, images and all. The one it replaces stays in the chat as it is,
+    /// marked as never answered.
+    pub fn resend_message(&self, session_id: &str, tab_id: &str, seq: u64) -> Result<SendOutcome> {
+        let log = store::log_path(session_id, tab_id)?;
+        let sent = sent_at(&log, seq).ok_or_else(|| anyhow!("That message is no longer in this conversation's record."))?;
+        let images = sent.images.iter().map(image_input).collect::<Result<Vec<_>>>()?;
+        self.send(session_id, tab_id, sent.text, images)
     }
 
     /// The last prompt the tab's agent never answered, as it was sent: what
@@ -262,6 +289,22 @@ mod tests {
         // A fork made again from its parent still has what was answered; only
         // what was sent since is missing.
         assert_eq!(restart(said_in(&path, None), Some(1), false), Some(Restart::Unsent(sent(4, "and then"))));
+    }
+
+    #[test]
+    fn a_message_is_read_back_by_the_seq_it_was_published_under() {
+        let subagent = format!("{}\n", serde_json::json!({ "id": "e3", "sessionId": "s", "tabId": "t", "harness": "claude", "seq": 3, "ts": "t", "subagent": { "id": "a", "kind": "task" }, "payload": { "type": "user_message", "text": "a task's prompt" } }));
+        let (_dir, path) = log(&[
+            prompt(1, "first, never answered"),
+            line(2, serde_json::json!({ "type": "prompt_replaced", "promptSeq": 1 })),
+            subagent,
+            prompt(4, "what took its place"),
+        ]);
+        assert_eq!(sent_at(&path, 1), Some(sent(1, "first, never answered")));
+        assert_eq!(sent_at(&path, 4), Some(sent(4, "what took its place")));
+        assert_eq!(sent_at(&path, 2), None, "not a message");
+        assert_eq!(sent_at(&path, 3), None, "a subagent's, not the reader's");
+        assert_eq!(sent_at(&path.with_file_name("missing.jsonl"), 1), None);
     }
 
     #[test]

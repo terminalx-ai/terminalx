@@ -188,6 +188,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   };
   const agentName = providers.find((p) => p.id === settings?.harness)?.name ?? "the agent";
   const delivery = {
+    input_occupied: `Holding off: ${agentName}'s input box already has text in it. Send or clear that text in its terminal, and the handoff follows…`,
     body_written: `Typing the handoff into ${agentName}…`,
     submit_written: `Waiting for ${agentName} to take the handoff…`,
     nudged: `Pressed Enter again: ${agentName} had not taken the handoff yet…`,

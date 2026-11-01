@@ -76,6 +76,8 @@ export interface IssuePipeline {
   reason?: PipelineStopReason | null;
   /** What it is doing, waiting for, or stopped on, in a sentence. */
   note?: string | null;
+  /** The stop a person answered the author out of: it is working on that answer, and its turn's end decides again (#725). */
+  answered?: PipelineStopReason | null;
   pr?: { number: number; url: string; base: string } | null;
   round: number;
   maxRounds: number;

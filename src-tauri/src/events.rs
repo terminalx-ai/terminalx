@@ -331,6 +331,29 @@ pub enum Payload {
     PromptAbsorbed {
         prompt_seq: u64,
     },
+    /// The `user_message` at `prompt_seq` has not been typed, because the
+    /// agent's input box already holds something (#722): what the reader
+    /// typed in the terminal, or a prompt the agent put back there. It goes
+    /// in once the box is empty; `occupied: false` says the wait is over.
+    InputOccupied {
+        prompt_seq: u64,
+        occupied: bool,
+    },
+    /// The agent dropped the turn of the `user_message` at `prompt_seq`
+    /// before answering it, and took another prompt in its place (#722):
+    /// Claude Code recorded a later prompt as following the same point in
+    /// the conversation. The message was never answered.
+    PromptReplaced {
+        prompt_seq: u64,
+    },
+    /// What the agent recorded for the `user_message` at `prompt_seq` is
+    /// `text`, not what was sent (#722): the message reached the agent inside
+    /// a longer prompt, or changed on the way. The chat shows `text`, once,
+    /// as what the agent received.
+    PromptChanged {
+        prompt_seq: u64,
+        text: String,
+    },
     AssistantText {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block: Option<BlockRef>,

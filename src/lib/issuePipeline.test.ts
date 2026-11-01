@@ -87,6 +87,16 @@ describe("where a pipeline stands", () => {
     expect(pipelineHeadline(pipeline({ stage: "merge", state: "waiting", note: "Waiting for GitHub to work out whether the branch merges." })).label).toBe("Waiting for GitHub");
   });
 
+  it("says Working once a person answered the author, at whatever stage it was stopped (#725)", async () => {
+    const { pipelineHeadline } = await load();
+    const note = "Answered; waiting for the author session to report.";
+    for (const [stage, kind] of [["work", "authorNotDone"], ["pullRequest", "uncommittedChanges"], ["address", "noChangesMade"], ["merge", "conflicts"]] as const) {
+      expect(pipelineHeadline(pipeline({ stage, state: "working", note, answered: { kind } })), stage).toEqual({ label: "Working", tone: "info" });
+    }
+    // Not answered, the stage's own work is what it is doing.
+    expect(pipelineHeadline(pipeline({ stage: "merge", state: "working", note: "Checking the pull request." })).label).toBe("Checking");
+  });
+
   it("lays the five stages out with the one in hand marked", async () => {
     const { pipelineSteps } = await load();
     const statuses = (value: IssuePipeline) => pipelineSteps(value).map((step) => step.status);
@@ -274,7 +284,7 @@ describe("a pipeline as the app stores it", () => {
     const declared: (keyof IssuePipeline)[] = [
       "id", "projectPath", "issue", "branch", "author", "reviewer", "autoMerge", "stopped", "stage", "state", "reason", "note", "pr",
       "round", "maxRounds", "reviewCommit", "verdict", "securityAreas", "merged", "events", "created", "modified",
-      "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks", "reviewPendingSince", "releasing",
+      "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks", "reviewPendingSince", "releasing", "answered",
     ];
     const engineOnly = ["summary", "reminded", "reviewRequestedAt", "findingsSentRound", "waitingSince", "mergeRequested", "mergeRefused"];
     expect(Object.keys(fixture).filter((key) => !(declared as string[]).includes(key) && !engineOnly.includes(key))).toEqual([]);
@@ -299,6 +309,23 @@ describe("what the window knows of the pipelines", () => {
     // Booting twice subscribes once.
     await bootIssuePipelines();
     expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an answered author's pipeline working the moment it is announced, and stopped again when its turn says so (#725)", async () => {
+    const { bootIssuePipelines, getIssuePipelines, pipelineHeadline } = await load();
+    list.mockResolvedValue([pipeline({ state: "needsYou", reason: { kind: "authorNotDone", detail: "Which table holds the plans?" } })]);
+    await bootIssuePipelines();
+    const headline = () => pipelineHeadline(getIssuePipelines()[0]).label;
+    expect(headline()).toBe("Needs you");
+    // As the engine announces it when a person answers: no list, no refresh.
+    listeners.get("issue_pipeline")!({ payload: pipeline({ state: "working", note: "Answered; waiting for the author session to report.", answered: { kind: "authorNotDone", detail: "Which table holds the plans?" } }) });
+    expect(headline()).toBe("Working");
+    expect(list).toHaveBeenCalledTimes(1);
+    // The turn ends not done: Needs you again, and that is news.
+    const again = pipeline({ state: "needsYou", reason: { kind: "authorNotDone", detail: "No owner column." } });
+    listeners.get("issue_pipeline")!({ payload: again });
+    expect(headline()).toBe("Needs you");
+    expect(notePipelineState).toHaveBeenLastCalledWith(again);
   });
 
   it("raises a notice when a pipeline comes to rest, not on every line of its record", async () => {

@@ -92,14 +92,14 @@ sign-in is the secondary, temporary one. Cursor connects with an API key.
 ## A login the provider no longer accepts (#667)
 
 The service marks a stored login whose provider refuses it (a revoked or
-expired refresh, or a workspace runtime's report of a refused grant,
-terminalx-saas #241) with `state: "sign-in-required"` in the list. The row
-says **Sign-in required** instead of Connected, and its sign-in button reads
-"Sign in again with ChatGPT" (or Claude). Such a login is not usable: a
-member's create check and the workspaces' grants treat it as missing. A
-request the service refuses for it answers
-`cloud_agent_credential_reauth_required`, which the create form words as
-"sign in again" (it is in `known_error_code`).
+expired refresh, or a workspace runtime's report of a refused grant that a
+forced refresh then confirms, terminalx-saas #241) with
+`state: "sign-in-required"` in the list. The row says **Sign-in required**
+instead of Connected, and its sign-in button reads "Sign in again with
+ChatGPT" (or Claude). Such a login is not usable: a member's create check
+and the workspaces' grants treat it as missing. A request the service
+refuses for it answers `cloud_agent_credential_reauth_required`, which the
+create form words as "sign in again" (it is in `known_error_code`).
 
 **Sign in again** over a cloud tab (an owner's or admin's) opens this page
 for the tab's organization with that agent's sign-in already opened at its

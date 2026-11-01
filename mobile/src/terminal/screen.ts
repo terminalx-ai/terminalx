@@ -1,3 +1,5 @@
+// First: xterm reads `navigator` as soon as it loads, and React Native's has none of what it reads.
+import "./xterm-platform";
 import { Terminal, type IBufferCell } from "@xterm/headless";
 
 /**

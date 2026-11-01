@@ -57,6 +57,11 @@ pub(crate) mod supervisor;
 pub mod ui;
 
 pub const PROTOCOL: u64 = 1;
+/// What the event socket understands within [`PROTOCOL`], so a desktop and a
+/// runtime of different builds still attach. 2 (#716): a hello names the one
+/// stream its connection carries, and the runtime says when a terminal view
+/// fell behind or events were missed instead of closing the connection.
+pub const STREAM_VERSION: u64 = 2;
 pub const IDLE_GRACE: Duration = Duration::from_secs(60);
 const LEASE_TIME: Duration = Duration::from_secs(20);
 const MAX_CLIENTS: usize = 64;
@@ -234,7 +239,7 @@ impl Lifetime {
         let loop_age = self.turned.lock().unwrap().map(|turned| now.saturating_duration_since(turned).as_millis() as u64);
         json!({ "protocol": PROTOCOL, "epoch": self.epoch, "attachedClients": state.leases.len(),
             "stopping": state.stop_requested || state.exiting, "idleGraceSeconds": self.grace.as_secs(),
-            "eventSocket": self.stream_socket.get(), "nativeTray": native_tray(), "loopAgeMs": loop_age })
+            "eventSocket": self.stream_socket.get(), "streamVersion": STREAM_VERSION, "nativeTray": native_tray(), "loopAgeMs": loop_age })
     }
 
     pub(crate) fn attachment(&self, epoch: &str, lease: &str) -> anyhow::Result<Arc<Attachment>> {

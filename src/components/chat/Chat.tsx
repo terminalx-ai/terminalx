@@ -45,6 +45,7 @@ export function Chat({
   loading = false,
   footer,
   onSendQueuedNow,
+  onSendAgain,
 }: {
   sessionId: string;
   transcript: Transcript;
@@ -64,6 +65,8 @@ export function Chat({
   footer: React.ReactNode;
   /** Send a message queued behind the running turn now, where the backend can (local). */
   onSendQueuedNow?: (seq: number) => void;
+  /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
+  onSendAgain?: (seq: number) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -232,6 +235,7 @@ export function Chat({
                 streamingTool={isLast && live ? streamingTool : undefined}
                 // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
+                onSendAgain={live ? onSendAgain : undefined}
               />
             );
           })}

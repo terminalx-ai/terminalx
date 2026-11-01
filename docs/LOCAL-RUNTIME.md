@@ -749,3 +749,57 @@ below keep one such pane from taking anything else down.
   ~/Library/Logs/<identifier>/runtime.log`. Its stdout and stderr point there
   too, so panics are kept. At 8 MB the log moves to `runtime.log.1` and a new
   file starts.
+
+## A connection that falls behind (#716)
+
+On 0.2.21 a window showed "Live connection unavailable" while every agent ran
+normally. A window's connections to the event socket could close for being
+read too slowly, and nothing recorded which one closed or why. Each limit was
+the whole connection's: 64 frames or 2 MiB queued, one frame over 1 MiB, a
+subscriber falling 1024 events behind (every pane's output was an event too),
+or one write taking 10 s. Attaching four terminals with full scrollback was
+enough to pass 2 MiB. The guarantees below replace that.
+
+- **One stream per connection.** The runtime advertises `streamVersion: 2` in
+  its status. A desktop that sees it names the stream in its hello:
+  `"stream": "events"`, or `"stream": "terminals"` with the `window` label.
+  An event connection takes no terminal views; a terminal-output connection
+  takes no events. Events are followed on `BroadcastSink::subscribe_app`,
+  which carries no `pty_data`, so busy terminals cannot put it behind. A hello
+  without `stream` is a desktop from before #716: it gets both on one
+  connection, and the old behaviour of losing the connection when anything
+  falls behind. A new desktop sends the old hello to a runtime that does not
+  advertise version 2, which refuses unknown hello fields.
+- **A view that falls behind is let go alone.** Each view has its own 2 MiB
+  queue, inside the connection's 8 MiB. A view that acknowledges what it draws
+  never has more than about 1.4 MiB outstanding (`pty::FLOW_HIGH` and a chunk
+  as base64, a full replay included), so only a view whose window stopped
+  reading fills it. Its pane then stops sending to it, and the runtime queues
+  `{"type":"lagged","id","token"}`. Greetings, pongs and notices use a separate
+  256 KiB budget, so the notice can always be queued. The bridge drops the
+  view and emits `pty_view_lagged`. The window's terminal with that attachment
+  token attaches again: on screen it is reset and redrawn from the pane's
+  scrollback, off screen it is let go. Other views on the connection go on.
+- **No frame is refused for its size.** A full scrollback replay (512 KiB,
+  683 KiB as base64) is one frame, as before. Longer output would be split, so
+  no view is handed a frame over the 1 MiB limit, which would make it fall
+  behind on every attach.
+- **Missed events are counted, not fatal.** An event connection that falls
+  behind the app's events, finds its queue full, or meets an event over 1 MiB
+  counts the event missed. 250 ms after the first, it sends
+  `{"type":"missed","events":n}`. The bridge emits `local_runtime_reattached`
+  with `missedEvents`, and every window re-reads what it shows, as after a
+  reconnect.
+- **What still closes a connection.** The client sends something malformed,
+  stops reading altogether (one frame not read within 10 s), or reads
+  none of 256 KiB of pongs and notices. The desktop gives up on silence after
+  15 s. Each of these means one side has stopped working, not that it is slow.
+- **Every end is logged.** The runtime logs each connection's end, at info when
+  the desktop closed it and warn otherwise. The line names the connection, how
+  long it was up, the reason, and how many views fell behind or events were
+  missed. Views falling behind and missed events are logged as they happen.
+  The desktop keeps its own log, `~/Library/Logs/<identifier>/desktop.log`,
+  beside `runtime.log`, rotated the same way. It records each lost connection
+  with its reason. It records failed attempts sparsely: the first, each with a
+  new reason, and the 2nd, 4th, 8th and so on. Each recovery is recorded with
+  how long the connection was down and how many attempts it took.

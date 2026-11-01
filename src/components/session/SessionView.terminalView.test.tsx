@@ -365,8 +365,10 @@ describe("a local session's row of tabs under the title bar", () => {
   it("has no continuation action without an active agent tab", async () => {
     const header = show({ tabs: [], activeTab: null });
     expect(within(header).queryByRole("button", { name: "Continue in New Session…" })).toBeNull();
-    // Let the empty session finish opening its shell before the next test.
-    await screen.findByRole("tab", { name: "Terminal 1" });
+    // A session with no tabs shows its own page; opening it starts nothing (#721).
+    expect(await screen.findByRole("heading", { name: "No tabs open" })).toBeTruthy();
+    await settle();
+    expect(spawned()).toHaveLength(0);
   });
 
   it("names each tab's panel by its tab in the strip", () => {
