@@ -921,8 +921,19 @@ fn resource_projection_and_stop_rules_are_checked_by_the_owner() {
     let sample = sessions.resource_sample().unwrap();
     let process = sample["processes"].as_array().unwrap().iter().find(|entry| entry["paneId"] == pane).unwrap();
     assert_eq!(process["tabId"], tab);
-    assert_eq!(process["killRule"], "none");
-    assert!(sessions.resource_kill(&pane, true).is_err(), "resource controls cannot bypass an agent tab's ordered Stop");
+    // An idle agent the app started can be stopped from App resources (#696):
+    // asked first, then stopped as its tab's own Stop would, never by ending
+    // its pane, so its conversation is kept and the note says why.
+    assert_eq!(process["killRule"], "stop");
+    let asked = sessions.resource_kill(&pane, false).unwrap();
+    assert_eq!(asked["killed"], false);
+    assert!(asked["confirmation"].as_str().is_some_and(|question| question.starts_with("Stop the agent in")), "{asked}");
+    assert_eq!(sessions.resource_overview().unwrap()["agentCount"], 1, "asking stops nothing");
+    assert_eq!(sessions.resource_kill(&pane, true).unwrap()["killed"], true);
+    serve.wait_events(tab, "the stop's note in the conversation", |events| {
+        events.iter().any(|event| event["payload"]["type"] == "status" && event["payload"]["text"].as_str().is_some_and(|text| text.starts_with("Stopped from App resources.")))
+    });
+    common::agent::wait_until("the agent stopped through its tab", || (sessions.resource_overview().unwrap()["agentCount"] == 0).then_some(()));
     let status = serve.control("status", json!({}));
     serve.control("runtime.stopAll", json!({"epoch":status["localRuntime"]["epoch"]}));
     stopped(&mut serve);
