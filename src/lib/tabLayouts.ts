@@ -56,10 +56,10 @@ function listedProject(session: Pick<SessionEntry, "id" | "projectPath" | "link"
  * the sidebar lists them (`conversationBranch`). Two conversations in a
  * project's own checkout that work on different branches are two rows in the
  * sidebar, and so two rows of tabs; a quick chat, or a session of another
- * project, that runs in the same folder is never a sibling (#721). Only
- * branches known to differ part two sessions: one whose branch is not known
- * (a chat linked with none, a checkout not listed yet) stays with its
- * workspace. `session` is always one of them, known to `sessions` or not: a
+ * project, that runs in the same folder is never a sibling (#721). A
+ * session whose branch is not known (a chat linked with none, a checkout not
+ * listed yet) is on "No branch", a row of its own in the sidebar and so in
+ * the tab bar. `session` is always one of them, known to `sessions` or not: a
  * row never lacks its own session's tabs.
  */
 export function workspaceSessions(
@@ -71,12 +71,11 @@ export function workspaceSessions(
   const key = workspaceKey(session, chatsPath);
   const project = listedProject(session, chatsPath);
   const branch = conversationBranch(session, chatsPath, workspaces);
-  const sameBranch = (other: string | null) => branch == null || other == null || other === branch;
   const sibling = (other: SessionEntry) =>
     !other.archived &&
     workspaceKey(other, chatsPath) === key &&
     listedProject(other, chatsPath) === project &&
-    sameBranch(conversationBranch(other, chatsPath, workspaces));
+    conversationBranch(other, chatsPath, workspaces) === branch;
   const members = sessions.filter((other) => other.id === session.id || sibling(other));
   return members.some((member) => member.id === session.id) ? members : [session, ...members];
 }

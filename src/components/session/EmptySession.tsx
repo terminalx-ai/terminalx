@@ -1,14 +1,14 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { ChevronDown, Loader2, Plus, RotateCcw } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/menu";
 import { EmptyView } from "@/components/start/EmptyView";
 import { errorMessage } from "@/lib/api";
+import { useShortcut } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
-import { useTabRow } from "@/lib/sessionTabs";
 import { keycaps, useKeymap } from "@/lib/shortcuts";
-import { canReopenTab, reopenClosedAgentTab, reopenClosedTab } from "@/lib/tabActions";
+import { reopenClosedAgentTab } from "@/lib/tabActions";
 import { tabLabel } from "@/lib/tabFront";
 import { closedTabsOf, useTabState } from "@/lib/tabLayouts";
 import { relativeTime } from "@/lib/time";
@@ -29,24 +29,38 @@ function closedWhen(iso: string): string {
  * one whose tabs were all closed is reached again: its closed tabs, newest
  * first, each reopened on its conversation in this session; a new tab; and
  * "Reopen closed tab", the action welcome keeps after the last tab closes.
+ *
+ * Everything here is this session's own: Reopen closed tab, and ⌘⌥T while
+ * the page is shown, bring back this session's newest closed tab, never a
+ * sibling's from the branch's row of tabs (which ⌘⌥T reopens elsewhere).
  */
 export function EmptySession({ session }: { session: SessionEntry }) {
   const store = useSessionStore();
   const saved = useTabState();
-  const row = useTabRow(session);
   const keymap = useKeymap();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const closed = closedTabsOf(saved, [session.id]).sort((a, b) => (Date.parse(b.closedAt) || 0) - (Date.parse(a.closedAt) || 0));
   const agentName = (harness: string) => store.harnesses.find((candidate) => candidate.id === harness)?.name ?? harness;
-  const run = (key: string, work: () => Promise<unknown>) => {
-    if (busy) return;
+  // Read when a key is pressed: the binding is made once.
+  const now = useRef({ busy, newest: closed[0]?.tab.id ?? null });
+  now.current = { busy, newest: closed[0]?.tab.id ?? null };
+  const run = useCallback((key: string, work: () => Promise<unknown>) => {
+    if (now.current.busy) return;
+    now.current.busy = key;
     setBusy(key);
     setError(null);
     void work()
       .catch((cause: unknown) => setError(errorMessage(cause)))
       .finally(() => setBusy(null));
-  };
+  }, []);
+  const reopen = useCallback((tabId: string) => run(tabId, () => reopenClosedAgentTab(session.id, tabId)), [run, session.id]);
+  // Ahead of the row's own ⌘⌥T; with nothing of this session's to bring back, the row's handles it.
+  useShortcut("session.reopenTab", useCallback(() => {
+    const { newest } = now.current;
+    if (!newest) return false;
+    reopen(newest);
+  }, [reopen]), { priority: 1 });
   const reopenKeys = keymap["session.reopenTab"][0];
   return (
     <EmptyView
@@ -64,7 +78,7 @@ export function EmptySession({ session }: { session: SessionEntry }) {
             <LocalNewTabItems session={session} />
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button variant="secondary" size="sm" disabled={!!busy || !canReopenTab(row, saved)} onClick={() => run("last", () => reopenClosedTab(row))}>
+        <Button variant="secondary" size="sm" disabled={!!busy || !closed.length} onClick={() => closed.length && reopen(closed[0].tab.id)}>
           <RotateCcw aria-hidden /> Reopen closed tab
           {reopenKeys ? (
             <span className="ml-1 flex gap-0.5" aria-hidden>
@@ -91,7 +105,7 @@ export function EmptySession({ session }: { session: SessionEntry }) {
                       {agentName(tab.harness)} · closed {closedWhen(closedAt)}
                     </div>
                   </div>
-                  <Button variant="ghost" size="sm" aria-label={`Reopen ${label}`} disabled={!!busy} onClick={() => run(tab.id, () => reopenClosedAgentTab(session.id, tab.id))}>
+                  <Button variant="ghost" size="sm" aria-label={`Reopen ${label}`} disabled={!!busy} onClick={() => reopen(tab.id)}>
                     {busy === tab.id ? <Loader2 aria-hidden className="animate-spin" /> : <RotateCcw aria-hidden />} Reopen
                   </Button>
                 </li>

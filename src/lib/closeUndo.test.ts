@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { UNDO_OFFERED_MS, dismissCloseUndo, forgetCloseUndoFor, getCloseUndos, lastRunning, offerCloseUndo, resetCloseUndos } from "./closeUndo";
+import { UNDO_OFFERED_MS, dismissCloseUndo, forgetCloseUndoFor, getCloseUndos, holdCloseUndo, lastRunning, offerCloseUndo, resetCloseUndos } from "./closeUndo";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 const tab = (id: string, patch: Partial<TabEntry> = {}): TabEntry => ({ id, harness: "claude", title: id, model: "", permissionMode: "default", status: "idle", created: "", modified: "", ...patch });
@@ -45,6 +45,16 @@ describe("Undo for a closed tab", () => {
     expect(getCloseUndos()).toHaveLength(0);
     // Dismissing what has gone already does nothing.
     dismissCloseUndo(second);
+    expect(getCloseUndos()).toHaveLength(0);
+  });
+
+  it("stays, once held, until it is dismissed: its Undo is under way, and a failure must be read", () => {
+    vi.useFakeTimers();
+    const id = offerCloseUndo("a", [tab("a1")]);
+    holdCloseUndo(id);
+    vi.advanceTimersByTime(UNDO_OFFERED_MS * 3);
+    expect(getCloseUndos().map((offer) => offer.id)).toEqual([id]);
+    dismissCloseUndo(id);
     expect(getCloseUndos()).toHaveLength(0);
   });
 

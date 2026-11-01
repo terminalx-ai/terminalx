@@ -310,11 +310,10 @@ describe("the conversation list", () => {
   it("keeps a branch to one row, for whichever of its sessions is open, when its sessions are tabs in the tab bar", async () => {
     prefs.setPrefs({ branchSessions: "tabs" });
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
-    // m1, the newer, has no tabs open (its tabs were closed); m2 has one.
-    await boot([session("m1", "/repos/web", at(9), { tabs: [], activeTab: null }), session("m2", "/repos/web", at(8), { tabs: [{ id: "m2-tab", title: "Talk m2", harness: "claude", model: "", permissionMode: "auto", status: "waiting", created: "", modified: "" }] })]);
+    await boot([session("m1", "/repos/web", at(9)), session("m2", "/repos/web", at(8), { tabs: [{ id: "m2-tab", title: "Talk m2", harness: "claude", model: "", permissionMode: "auto", status: "waiting", created: "", modified: "" }] })]);
     mount();
     const web = screen.getByRole("group", { name: "web" });
-    // Not a count with the sessions under it: one row, named by the branch, that opens its latest session with tabs.
+    // Not a count with the sessions under it: one row, named by the branch, that opens its latest session.
     const main = within(web).getByRole("button", { name: "main, 2 sessions" });
     expect(within(web).queryByText("Talk m1")).toBeNull();
     expect(within(web).queryByText("Talk m2")).toBeNull();
@@ -323,8 +322,28 @@ describe("the conversation list", () => {
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();
-    // The row stands for the branch's row of tabs: it opens the session with tabs to show (m2), not the newer m1 that has none (#721).
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+  });
+
+  // #721: a session whose tabs were all closed has nothing in the branch's row of tabs to click; it was unreachable here.
+  it("keeps a row of its own for a session of the branch with no tab open, which opens that session", async () => {
+    prefs.setPrefs({ branchSessions: "tabs" });
+    const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+    // m1, the newest, had its last tab closed; m2 and m3 have tabs.
+    await boot([session("m1", "/repos/web", at(9), { tabs: [], activeTab: null }), session("m2", "/repos/web", at(8)), session("m3", "/repos/web", at(7))]);
+    mount();
+    const web = screen.getByRole("group", { name: "web" });
+    // The branch's row stands for the sessions whose tabs are in its row of tabs.
+    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
+    const bare = within(web).getByRole("button", { name: /^Session m1/ });
+    fireEvent.click(bare);
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBe("true");
+    expect(main.getAttribute("aria-current")).toBeNull();
+    // The branch's row opens a session with tabs: the latest of them.
+    fireEvent.click(within(web).getByRole("button", { name: "main, 2 sessions" }));
     expect(store.getSessionStore().selectedSessionId).toBe("m2");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBeNull();
   });
 
   it("invites a first chat when there is none, and no project to show", async () => {

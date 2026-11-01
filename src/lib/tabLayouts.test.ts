@@ -55,8 +55,9 @@ describe("a workspace's tabs", () => {
     const all = [onMain, onFix, unsaid];
     expect(workspaceSessions(all, onMain, null, workspaces).map((s) => s.id)).toEqual(["on-main", "unsaid"]);
     expect(workspaceSessions(all, onFix, null, workspaces).map((s) => s.id)).toEqual(["on-fix"]);
-    // Before the listing says, a branch not known parts nobody.
-    expect(workspaceSessions(all, unsaid).map((s) => s.id)).toEqual(["on-main", "on-fix", "unsaid"]);
+    // Before the listing says, it is on "No branch": a row of its own, as the sidebar lists it, never in every branch's row.
+    expect(workspaceSessions(all, unsaid).map((s) => s.id)).toEqual(["unsaid"]);
+    expect(workspaceSessions(all, onMain).map((s) => s.id)).toEqual(["on-main"]);
     // A worktree's sessions share its branch, whatever each last recorded.
     const wt = (id: string, branch: string) => session(id, { cwd: "/repo/wt", worktreeName: "wt", branch });
     const worktree = { "/repo": [{ path: "/repo/wt", name: "wt", branch: "topic", isMain: false }] } as unknown as Parameters<typeof workspaceSessions>[3];
@@ -71,12 +72,16 @@ describe("a workspace's tabs", () => {
     const unlinked = chat("loose", null);
     expect(workspaceKey(linked, chats)).toBe("/repo");
     expect(workspaceKey(unlinked, chats)).toBe("chat:loose");
-    const all = [session("main"), linked, chat("again", { path: "/repo" }), other, unlinked, chat("loose2", null)];
-    expect(workspaceSessions(all, linked, chats).map((s) => s.id)).toEqual(["main", "hi", "again"]);
-    expect(workspaceSessions(all, session("main"), chats).map((s) => s.id)).toEqual(["main", "hi", "again"]);
+    // The checkout is on main, as the workspace listing says; a chat linked with no branch is on "No branch", as in the sidebar.
+    const workspaces = { "/repo": [{ path: "/repo", name: "repo", branch: "main", isMain: true }] } as unknown as Parameters<typeof workspaceSessions>[3];
+    const all = [session("main"), linked, chat("again", { path: "/repo", branch: "main" }), chat("unsaid", { path: "/repo" }), other, unlinked, chat("loose2", null)];
+    expect(workspaceSessions(all, linked, chats, workspaces).map((s) => s.id)).toEqual(["main", "hi", "again"]);
+    expect(workspaceSessions(all, session("main"), chats, workspaces).map((s) => s.id)).toEqual(["main", "hi", "again"]);
+    expect(workspaceSessions(all, all[3], chats, workspaces).map((s) => s.id)).toEqual(["unsaid"]);
     expect(workspaceSessions(all, unlinked, chats).map((s) => s.id)).toEqual(["loose"]);
-    // Without the chats folder known, the chats share their folder as any sessions do.
-    expect(workspaceSessions(all, linked).map((s) => s.id)).toEqual(["hi", "again", "other", "loose", "loose2"]);
+    // Without the chats folder known, the chats share their folder as any sessions do, by the branch each names.
+    expect(workspaceSessions(all, linked).map((s) => s.id)).toEqual(["hi", "again"]);
+    expect(workspaceSessions(all, other).map((s) => s.id)).toEqual(["unsaid", "other", "loose", "loose2"]);
   });
 });
 

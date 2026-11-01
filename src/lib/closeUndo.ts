@@ -84,6 +84,14 @@ function clearTimer(id: string) {
   timers.delete(id);
 }
 
+/**
+ * Keep an offer up until it is dismissed: its Undo is under way, and how that
+ * ends (an error that says why it could not) must still be there to read.
+ */
+export function holdCloseUndo(id: string) {
+  clearTimer(id);
+}
+
 export function dismissCloseUndo(id: string) {
   clearTimer(id);
   if (offers.some((offer) => offer.id === id)) set(offers.filter((offer) => offer.id !== id));

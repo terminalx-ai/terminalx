@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { Fragment, createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Archive, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -460,23 +460,48 @@ function ProjectGroup({
   const removed = branches.filter((entry) => entry.key.startsWith("removed:"));
   const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
   const more = !filtered && (live.length > shown.length || (all && live.length > PEEK));
+  const branchRow = (key: string, branch: string, sessions: SessionEntry[]) => (
+    <ConversationRow
+      key={key}
+      // The branch's row opens the session that is open on it, else its latest.
+      session={sessions.find((session) => session.id === selectedId) ?? sessions[0]}
+      peers={sessions}
+      selected={sessions.some((session) => session.id === selectedId)}
+      branch={!sessions[0].worktreeRemoved && placeholders.has(branch) ? null : branch || null}
+      named={!sessions[0].worktreeRemoved && placeholders.has(branch) ? "title" : "branch"}
+      merged={!sessions[0].worktreeRemoved && merged.has(branch)}
+      onNewSession={newSessionOn(branch, sessions)}
+      label={labels[branch]}
+      onRenameBranch={renameBranch(branch)}
+      linkTo={null}
+    />
+  );
+  // As tabs, a branch's row stands for the sessions whose tabs are in its row of tabs. A session with no tab open has
+  // nothing there to click, so it keeps a row of its own under the branch's, named by its title: that row opens it,
+  // with its own page, closed tabs and history (#721). Once it has a tab again it is one of the branch's tabs.
+  const tabsRows = (key: string, branch: string, sessions: SessionEntry[]) => {
+    const tabbed = sessions.filter((session) => session.tabs.length > 0);
+    const bare = sessions.filter((session) => !session.tabs.length);
+    if (!bare.length || sessions.length === 1) return branchRow(key, branch, sessions);
+    return (
+      <Fragment key={key}>
+        {tabbed.length > 0 && branchRow(key, branch, tabbed)}
+        {bare.map((session) => (
+          <ConversationRow
+            key={session.id}
+            session={session}
+            selected={session.id === selectedId}
+            branch={!session.worktreeRemoved && placeholders.has(branch) ? null : branch || null}
+            label={labels[branch]}
+            linkTo={null}
+          />
+        ))}
+      </Fragment>
+    );
+  };
   const row = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) =>
     sessions.length === 1 || asTabs ? (
-      <ConversationRow
-        key={key}
-        // The branch's row opens the session that is open on it, else its latest with tabs to show, else its latest.
-        // A session with no tabs is opened as itself from its own row (the chat list's, or a branch's list): #721.
-        session={sessions.find((session) => session.id === selectedId) ?? sessions.find((session) => session.tabs.length > 0) ?? sessions[0]}
-        peers={sessions}
-        selected={sessions.some((session) => session.id === selectedId)}
-        branch={!sessions[0].worktreeRemoved && placeholders.has(branch) ? null : branch || null}
-        named={!sessions[0].worktreeRemoved && placeholders.has(branch) ? "title" : "branch"}
-        merged={!sessions[0].worktreeRemoved && merged.has(branch)}
-        onNewSession={newSessionOn(branch, sessions)}
-        label={labels[branch]}
-        onRenameBranch={renameBranch(branch)}
-        linkTo={null}
-      />
+      tabsRows(key, branch, sessions)
     ) : (
       <BranchRow
         key={key}

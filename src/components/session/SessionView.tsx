@@ -843,8 +843,10 @@ export function SessionView({
                   <BrowserView session={session} page={page} active={selected?.kind === "browser" && page.id === selected.id} />
                 </div>
               ))}
-              {/* A local session with no tabs has a page of its own; a cloud one says what state its workspace is in. */}
-              {!session.tabs.length && !shellPanes.length && !browserPages.length && !cloudTerminals.length && !cloud && <EmptySession session={session} />}
+              {/* A local session with no tabs of its own on screen has a page of its own; a cloud one says what state its workspace is in.
+                  A browser page belongs to the folder, so one another session there opened is listed in this row too, but it is
+                  shown only when picked: until then this session's page is, with its closed tabs (#721). */}
+              {!session.tabs.length && !shellPanes.length && !selected && !cloud && <EmptySession session={session} />}
               {!session.tabs.length && !cloudTerminals.length && cloud && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
                   {cloud.locked ? (

@@ -13,9 +13,12 @@
   starts a shell in it by itself; opening a checkout from the command palette
   still does. (#721)
 - Keep a row of tabs to real siblings: with a branch's sessions shown as tabs,
-  a row holds the sessions of the same project and branch only, never a quick
-  chat or another project's session that runs in the same folder, and the
-  sidebar's branch row opens a session that has tabs to show. (#721)
+  a row holds the sessions of the same project and branch only, as the sidebar
+  lists them, never a quick chat or another project's session that runs in the
+  same folder. A session on that branch with no tab open has nothing in the
+  row of tabs to click, so it keeps a sidebar row of its own under the
+  branch's, and a browser page another session opened in the folder no longer
+  hides its page until it is picked. (#721)
 - Offer Undo when closing a session's last running tab. The notice says its
   agent stopped, and Undo reopens the tab on the same conversation. (#721)
 
