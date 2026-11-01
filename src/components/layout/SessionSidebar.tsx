@@ -28,7 +28,7 @@ import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
-import { branchMerged, checkoutLabel, worktreeCheckout } from "@/lib/checkout";
+import { branchMerged, conversationBranch } from "@/lib/checkout";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
 import { addProject, archiveSession, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
 import { copyText } from "@/lib/clipboard";
@@ -75,27 +75,17 @@ export function conversationLink(
   chatsPath: string | null,
   workspaces: Record<string, Workspace[]> = {},
 ): { path: string; project: Project | null; name: string; branch: string | null } | null {
+  // The branch is named the same way the tab strip groups a branch's sessions by (`conversationBranch`).
+  const branch = conversationBranch(session, chatsPath, workspaces);
   if (canon(session.projectPath) === chatsPath) {
     // A chat links itself to whichever repo its agent last worked in.
     if (!session.link) return null;
     const linked = canon(session.link.path);
     const project = projects.find((entry) => canon(entry.path) === linked) ?? null;
-    return { path: session.link.path, project, name: project?.name ?? (linked.split("/").pop() || linked), branch: session.link.branch ?? null };
+    return { path: session.link.path, project, name: project?.name ?? (linked.split("/").pop() || linked), branch };
   }
   const path = canon(session.projectPath);
   const project = projects.find((entry) => canon(entry.path) === path) ?? null;
-  const checkout = (workspaces[session.projectPath] ?? []).find((workspace) => canon(workspace.path) === canon(session.cwd));
-  // A worktree has its branch to itself, so it names what is checked out there
-  // now (its agent may have switched it, or left it on a bare commit). A
-  // conversation in the project's own checkout shares it, so it names the
-  // branch its agent last worked on (or started on), not wherever another
-  // conversation has since switched it.
-  const own = worktreeCheckout(session, workspaces);
-  const branch = session.worktreeRemoved
-    ? (session.removedWorkspace?.branch ?? null)
-    : session.worktreeName
-    ? ((own && checkoutLabel(own)) ?? session.branch ?? session.worktreeName)
-    : (session.link?.branch ?? session.branch ?? checkout?.branch ?? null);
   return { path: session.projectPath, project, name: project?.name ?? (path.split("/").pop() || path), branch };
 }
 
@@ -474,8 +464,9 @@ function ProjectGroup({
     sessions.length === 1 || asTabs ? (
       <ConversationRow
         key={key}
-        // The branch's row opens the session that is open on it, else its latest.
-        session={sessions.find((session) => session.id === selectedId) ?? sessions[0]}
+        // The branch's row opens the session that is open on it, else its latest with tabs to show, else its latest.
+        // A session with no tabs is opened as itself from its own row (the chat list's, or a branch's list): #721.
+        session={sessions.find((session) => session.id === selectedId) ?? sessions.find((session) => session.tabs.length > 0) ?? sessions[0]}
         peers={sessions}
         selected={sessions.some((session) => session.id === selectedId)}
         branch={!sessions[0].worktreeRemoved && placeholders.has(branch) ? null : branch || null}

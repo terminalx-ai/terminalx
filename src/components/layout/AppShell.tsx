@@ -32,6 +32,7 @@ import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
+import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
@@ -204,6 +205,7 @@ export function AppShell() {
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <StarReminder />
         <MergedCleanupNotices />
+        <CloseUndoNotices />
         <Toasts />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />

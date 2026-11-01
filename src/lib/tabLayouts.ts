@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type ClosedTab, type TabLayout, type TabState } from "@/lib/api";
+import { conversationBranch } from "@/lib/checkout";
 import type { Prefs } from "@/lib/prefs";
-import type { SessionEntry } from "@/types/session";
+import type { SessionEntry, Workspace } from "@/types/session";
 
 /**
  * How each workspace's tabs are arranged: their order, which are pinned or
@@ -41,13 +42,42 @@ export function workspaceKey(
 }
 
 /**
- * The sessions whose tabs are listed with `session`'s: the ones open in the
- * same workspace. `session` is always one of them, known to `sessions` or not:
- * a row never lacks its own session's tabs.
+ * The project a conversation is listed under in the sidebar: a chat's is the
+ * repo it is linked to, any other conversation's is its own project.
  */
-export function workspaceSessions(sessions: readonly SessionEntry[], session: SessionEntry, chatsPath: string | null = null): SessionEntry[] {
+function listedProject(session: Pick<SessionEntry, "id" | "projectPath" | "link">, chatsPath: string | null): string {
+  if (chatsPath != null && canon(session.projectPath) === canon(chatsPath)) return session.link ? canon(session.link.path) : `chat:${session.id}`;
+  return canon(session.projectPath);
+}
+
+/**
+ * The sessions whose tabs are listed with `session`'s: its siblings, the ones
+ * open in the same workspace, of the same project and on the same branch, as
+ * the sidebar lists them (`conversationBranch`). Two conversations in a
+ * project's own checkout that work on different branches are two rows in the
+ * sidebar, and so two rows of tabs; a quick chat, or a session of another
+ * project, that runs in the same folder is never a sibling (#721). Only
+ * branches known to differ part two sessions: one whose branch is not known
+ * (a chat linked with none, a checkout not listed yet) stays with its
+ * workspace. `session` is always one of them, known to `sessions` or not: a
+ * row never lacks its own session's tabs.
+ */
+export function workspaceSessions(
+  sessions: readonly SessionEntry[],
+  session: SessionEntry,
+  chatsPath: string | null = null,
+  workspaces: Record<string, Workspace[]> = {},
+): SessionEntry[] {
   const key = workspaceKey(session, chatsPath);
-  const members = sessions.filter((other) => other.id === session.id || (!other.archived && workspaceKey(other, chatsPath) === key));
+  const project = listedProject(session, chatsPath);
+  const branch = conversationBranch(session, chatsPath, workspaces);
+  const sameBranch = (other: string | null) => branch == null || other == null || other === branch;
+  const sibling = (other: SessionEntry) =>
+    !other.archived &&
+    workspaceKey(other, chatsPath) === key &&
+    listedProject(other, chatsPath) === project &&
+    sameBranch(conversationBranch(other, chatsPath, workspaces));
+  const members = sessions.filter((other) => other.id === session.id || sibling(other));
   return members.some((member) => member.id === session.id) ? members : [session, ...members];
 }
 
@@ -255,6 +285,11 @@ export function forgetClosed(key: string) {
 /** A closed tab is on its way back: it is not offered again while the backend restores it. */
 export function dropClosedTab(sessionId: string, tabId: string) {
   set({ closed: state.closed.filter((closed) => !(closed.sessionId === sessionId && closed.tab.id === tabId)) });
+}
+
+/** Read the saved state again, after the backend refused a change: what is shown must be what is saved. */
+export function refreshTabState(): Promise<void> {
+  return api.tabState().then(receive, () => undefined);
 }
 
 /** The closed agent tabs of these sessions, as the backend keeps them. */

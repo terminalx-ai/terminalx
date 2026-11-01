@@ -13,16 +13,16 @@ import { SessionIssueWork } from "@/components/issues/IssueWork";
 import { linkText } from "@/lib/issueWork";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { useShortcut } from "@/lib/hotkeys";
-import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 import { checkoutLabel, worktreeCheckout } from "@/lib/checkout";
 import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { TabView } from "./TabView";
+import { EmptySession } from "./EmptySession";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
-import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
@@ -462,34 +462,26 @@ export function SessionView({
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
 
-  // A local session with no agent opens a shell. A cloud one never opens
-  // anything by itself: that could wake a stopped workspace.
+  // Opening a session shows that session (#721). One with no tabs shows its
+  // own page (`EmptySession`): its closed tabs, a new tab, Reopen. It is
+  // never swapped for another session in the same folder, and nothing is
+  // opened in it that the reader did not ask for. Closing the main window's
+  // last tab returns to welcome. A cloud session never opens anything by
+  // itself either: that could wake a stopped workspace.
   //
-  // Opening an empty checkout still opens its shell. Closing the main
-  // window's last tab returns to welcome instead; do not start a shell while
-  // that navigation settles. The compact floating window keeps its fallback.
-  // An existing shell or page is never replaced when an agent tab closes.
+  // The compact floating window has no room for that page: a local session
+  // there with no agent opens a shell, on opening and when its last tab
+  // closes. An existing shell or page is never replaced when an agent tab closes.
   const shownKind = useRef(selectedKind);
   shownKind.current = selectedKind;
   const openedOn = useRef<string | null>(null);
-  // Another session in the same checkout with an agent: its tabs share this row, so there is something to show already.
-  const siblingWithAgents = branchSessionsAsTabs(prefs) ? store.sessions.find((other) => other.id !== session.id && other.cwd === session.cwd && !other.archived && other.tabs.length > 0) : undefined;
-  const siblingAgents = !!siblingWithAgents;
-  // An empty session beside one with agents shows nothing of its own: open the one with the agents, whose tab is then selected.
-  useEffect(() => {
-    // Not when it has terminals or pages of its own, or one of its tabs was picked: those are what it shows.
-    const ownTabs = shellPanes.length > 0 || browserPages.length > 0 || !!terminals.selected[session.id];
-    if (local && !compact && !session.tabs.length && siblingWithAgents && !ownTabs) selectSession(siblingWithAgents.id);
-  }, [local, compact, session.id, session.tabs.length, siblingWithAgents?.id, shellPanes.length, browserPages.length]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const opening = openedOn.current !== session.id;
     openedOn.current = session.id;
-    if (!local || session.tabs.length || siblingAgents || shownKind.current === "browser" || shownKind.current === "terminal") return;
-    if (!opening && (!compact || shownKind.current)) return;
-    // A compact window has no panel to open.
-    if (!compact && !getPrefs().panelOpen) setPrefs({ panelOpen: true });
+    if (!compact || !local || session.tabs.length || shownKind.current === "browser" || shownKind.current === "terminal") return;
+    if (!opening && shownKind.current) return;
     void activateLatestTerminal(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
-  }, [local, compact, session.id, session.cwd, session.tabs.length, siblingAgents]);
+  }, [local, compact, session.id, session.cwd, session.tabs.length]);
 
   // PRO-30 presence: what this person looks at in a shared workspace.
   const presenceKey = cloud?.collab.live ? cloud.collab.key : null;
@@ -851,12 +843,14 @@ export function SessionView({
                   <BrowserView session={session} page={page} active={selected?.kind === "browser" && page.id === selected.id} />
                 </div>
               ))}
-              {!session.tabs.length && !shellPanes.length && !browserPages.length && !cloudTerminals.length && (
+              {/* A local session with no tabs has a page of its own; a cloud one says what state its workspace is in. */}
+              {!session.tabs.length && !shellPanes.length && !browserPages.length && !cloudTerminals.length && !cloud && <EmptySession session={session} />}
+              {!session.tabs.length && !cloudTerminals.length && cloud && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
-                  {cloud?.locked ? (
+                  {cloud.locked ? (
                     // No access (never shared, or removed): the lock pane replaces the whole session body.
                     <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
-                  ) : cloud ? (
+                  ) : (
                     // One state at a time: stopped, loading, or empty (with what this person can do about it).
                     cloud.asleep ? (
                       <>
@@ -876,11 +870,6 @@ export function SessionView({
                         </span>
                       </>
                     )
-                  ) : (
-                    <>
-                      <span>Workspace open</span>
-                      <span className="text-xs text-faint">Open a new terminal or add an agent tab.</span>
-                    </>
                   )}
                 </div>
               )}
