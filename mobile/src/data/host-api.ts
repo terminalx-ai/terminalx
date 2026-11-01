@@ -22,8 +22,13 @@ export interface ChatNote { id: string; body: string; createdAt: number; author:
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
 export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
-/** What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675). */
-export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number }
+/**
+ * What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675).
+ * `terminal`: `terminal.open`, and terminal output that says the pane's size, which the terminal view needs.
+ */
+export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; terminal?: number }
+/** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
+export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
@@ -169,7 +174,13 @@ export class HostApi {
     return { answered: false, message: result.ok ? "The host did not answer this request." : result.refusal.message };
   }
 
-  subscribeTerminal(sessionId: string, tabId: string, listener: (value: { type: string; chunk?: string; serialized?: string }) => void): () => void {
+  /** Start the tab's agent in its terminal, as opening the desktop's terminal view does; a native Codex tab moves there for good. */
+  async openTerminal(sessionId: string, tabId: string): Promise<{ opened: true } | { opened: false; message: string }> {
+    const result = await this.connection.request("terminal.open", { worktreeId: sessionId, tabId });
+    return result.ok ? { opened: true } : { opened: false, message: result.refusal.message };
+  }
+
+  subscribeTerminal(sessionId: string, tabId: string, listener: (value: TerminalPacket) => void): () => void {
     return this.connection.subscribe("terminal.subscribe", {
       worktreeId: sessionId,
       tabId,
@@ -178,21 +189,19 @@ export class HostApi {
       capabilities: { terminalBinaryStream: 1, mobileInputLeaseOnly: 1, writeUnavailable: 1 },
     }, (result) => {
       if (!result || typeof result !== "object") return;
-      const value = result as { type?: unknown; chunk?: unknown; serialized?: unknown };
+      const value = result as { type?: unknown; chunk?: unknown; serialized?: unknown; cols?: unknown; rows?: unknown; error?: { message?: unknown } };
       if (typeof value.type !== "string") return;
-      listener({ type: value.type, ...(typeof value.chunk === "string" ? { chunk: value.chunk } : {}), ...(typeof value.serialized === "string" ? { serialized: value.serialized } : {}) });
+      if (value.type === "error") { listener({ type: "error", message: typeof value.error?.message === "string" ? value.error.message : "The Mac ended the terminal view." }); return; }
+      const size = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n > 0 && n <= 1000;
+      listener({ type: value.type, ...(typeof value.chunk === "string" ? { chunk: value.chunk } : {}), ...(typeof value.serialized === "string" ? { serialized: value.serialized } : {}),
+        ...(size(value.cols) && size(value.rows) ? { cols: value.cols as number, rows: value.rows as number } : {}) });
     });
   }
 
-  async readTerminal(sessionId: string, tabId: string): Promise<string | null> {
-    const result = await this.connection.request<unknown>("terminal.read", { worktreeId: sessionId, tabId });
-    if (!result.ok) return null;
-    const value = result.value as { text?: unknown };
-    return typeof value?.text === "string" ? value.text : null;
-  }
-
-  async queueInput(sessionId: string, tabId: string, text: string): Promise<boolean> {
-    return (await this.connection.request("steerLease.queueInput", { worktreeId: sessionId, tabId, text })).ok;
+  /** Type into the tab's terminal; the phone holds the tab's driver lease until it releases it. Refused with the Mac's reason. */
+  async queueInput(sessionId: string, tabId: string, text: string): Promise<{ accepted: true } | { accepted: false; message: string }> {
+    const result = await this.connection.request("steerLease.queueInput", { worktreeId: sessionId, tabId, text });
+    return result.ok ? { accepted: true } : { accepted: false, message: result.refusal.message };
   }
 
   async releaseInput(sessionId: string, tabId: string): Promise<void> {

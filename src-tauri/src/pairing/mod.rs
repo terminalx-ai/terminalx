@@ -1804,6 +1804,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "pairing.getEndpoints",
         "pairing.provisionRelay",
         "terminal.send",
+        // Starts the tab's agent, and moves a native Codex tab to its terminal.
+        "terminal.open",
         "terminal.control.get",
         "terminal.control.acquire",
         "terminal.control.release",
@@ -1837,6 +1839,8 @@ mod tests {
         assert!(allowed_method(DeviceScope::Viewer, "session.tail"));
         assert!(!allowed_method(DeviceScope::Viewer, "terminal.send"));
         assert!(!allowed_method(DeviceScope::Viewer, "session.send"));
+        assert!(!allowed_method(DeviceScope::Viewer, "terminal.open"));
+        assert!(allowed_method(DeviceScope::Driver, "terminal.open"));
         assert!(allowed_method(DeviceScope::Driver, "terminal.send"));
         assert!(allowed_method(DeviceScope::Driver, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "permission.respond"));
