@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Command line
+
+- `terminalx worktrees delete` no longer deletes sessions it never named. Without
+  `--yes`, or with `--dry-run`, it lists every session it would delete, marking
+  sessions of another project, quick chats and archived ones, with the tabs
+  still running in them and the git state, and removes nothing. `--sessions
+  ID,…` names the sessions you were shown: if the worktree holds any other set,
+  nothing is removed and the sessions that differ are named, as in the desktop
+  dialog. The result gives each deleted session's title and project, not only
+  its id. `terminalx sessions list --worktree` lists what the delete would take,
+  `worktrees list` gives each worktree's sessions, and `sessions list
+  --project` now finds a session that names its project through a symlink.
+  (#719)
+
+## 0.2.22
+
 ### Background sessions
 
 - Reconnect to the background runtime automatically, with backoff and no attempt
@@ -34,6 +50,13 @@
   about 1 GB. (#696)
 - Merged workspaces of this repository are no longer kept for the CLI launcher
   the build leaves in `src-tauri/binaries`. (#696)
+- A terminal that stops reading its input no longer locks up the background
+  runtime, and with it TerminalX, until the Mac restarts. A write gives up after
+  10 seconds, app commands that call the runtime run off the main thread with
+  15-second timeouts, and a runtime that stops answering offers **Restart
+  runtime**. The runtime keeps its log in
+  `~/Library/Logs/com.terminalx.next/runtime.log`. (#678)
+
 ### Relay
 
 - Poll the account service for pairing grants and revocations once every 30
@@ -51,6 +74,11 @@
   how far it got, in `relay-diagnostics.json`. Run paired-device calls to the
   local runtime off the workers Relay runs on, so a stalled runtime cannot stop
   Relay reconnecting. (#666)
+- Keep Relay messages within the cell's 1 MiB limit, so long conversations load
+  on mobile data. Transcript pages are sized to the connection, an oversized
+  event is sent alone or shortened with a note, and larger messages, such as
+  5 MB attachments, cross in fragments once both ends support it. A message that
+  still cannot fit fails only its own request, and the connection stays up. (#679)
 
 ### Mobile
 
@@ -92,6 +120,11 @@
   cancelled attempts and Relay director errors, race the paths again when the
   phone changes network, and wait 1 second, rising, before reconnecting a
   connection that keeps dropping straight after connecting. (#666)
+- Explain connection failures on the phone's conversation screen in plain words:
+  **Reconnecting…**, which keeps the saved transcript, or **Your Mac isn't
+  reachable**, with a Retry that reconnects at once. A failed send offers **Send
+  again**. A transcript page that drops the connection twice over the same path
+  is not requested again, and the Relay close code and reason are logged. (#674)
 
 ### Organizations
 
@@ -167,6 +200,28 @@
   workspace's variables, secrets, instructions and MCP servers, in a home of its
   own where no TerminalX hook runs; sign-in problems are reported as for other
   sessions, and the terminal view moves the tab as on a Mac. (#644)
+- Add **Continue here** to the recovery banner and the Session closed bar. It
+  sends "continue" in the same session, without stopping it, after a failure,
+  a capacity error, a dropped connection, a sign-out or a usage limit that has
+  reset. (#673)
+- Recognise a revoked or expired Codex or Claude Code login. The turn ends as
+  signed out with a redacted detail line, the tab offers **Sign in again**, and
+  Agent logins shows Sign-in required. Cloud runtimes report the refused login
+  and sync again, so Start agent works once you have signed in. (#683)
+- Settings → Agents and the New Session form show whether each local agent is
+  installed and signed in (Not installed, Installed · sign in required, Ready ·
+  local login found, or Login not checked), with its version, path and the
+  command that installs it or signs in. Create and Ask refuse to start only when
+  the agent is known to be missing or signed out, and keep the draft and
+  attachments; a check that cannot be read never blocks. (#715)
+- A Codex tab that opens on Codex's sign-in menu is blocked with a **Sign in**
+  banner that opens `codex login`, instead of having the first prompt typed into
+  the menu and timing out as delivery unconfirmed; the next launch offers the
+  prompt back. Claude Code's first-run screens keep their banner instead of
+  setting the tab to Idle. (#715)
+- Question-card options whose label contains a comma show as selected, and
+  multi-select choices no longer overwrite one another. Options with the same
+  label, and questions with the same text, no longer share a selection. (#708)
 
 ### Status bar
 
@@ -189,6 +244,9 @@
   "You · on This Mac". Macs that saved "This Mac" get their real name without
   renaming, and a name chosen earlier is kept. Settings → Account shows this
   Mac's name with a Rename button, with or without Relay. (#686)
+- The work chip's hover card in the issues list holds its contents: long titles
+  and branches end in … at its edge, it stays opaque in macOS glass mode, and it
+  no longer dims rows for work that went quiet. (#714)
 
 ### Cloud workspaces
 
@@ -235,19 +293,33 @@
   process there by name. Programs detached on purpose (`screen`, `tmux`,
   `nohup`, tunnels) are never stopped. (#689)
 
-### CLI
+### Issues
 
-- `terminalx worktrees delete` no longer deletes sessions it never named. Without
-  `--yes`, or with `--dry-run`, it lists every session it would delete, marking
-  sessions of another project, quick chats and archived ones, with the tabs
-  still running in them and the git state, and removes nothing. `--sessions
-  ID,…` names the sessions you were shown: if the worktree holds any other set,
-  nothing is removed and the sessions that differ are named, as in the desktop
-  dialog. The result gives each deleted session's title and project, not only
-  its id. `terminalx sessions list --worktree` lists what the delete would take,
-  `worktrees list` gives each worktree's sessions, and `sessions list
-  --project` now finds a session that names its project through a symlink.
-  (#719)
+- Create and edit issues from a project whose `origin` still uses a renamed
+  GitHub repository's old name. Writes go to the repository's current name; a
+  write GitHub still redirects names the new repository and the
+  `git remote set-url` command that updates the remote. (#710)
+
+### Command line
+
+- `terminalx wait` reports `permission` only when there is a request or question
+  to answer. A failed agent is reported as `recovery` with its kind, and right
+  after a send it waits for the new turn instead of returning the status from
+  before it. (#677)
+
+### Development
+
+- Build the dev and test profiles without incremental caches and with line-table
+  debug info only, so each checkout's `src-tauri/target` stays far smaller. Set
+  `CARGO_PROFILE_DEV_DEBUG=2` for full debug info or `CARGO_INCREMENTAL=1` for
+  incremental builds. (#697)
+- Ignore the `rustc*` scratch folder a killed launcher build leaves in
+  `src-tauri/binaries`, which stopped this repository's issue pipelines at
+  "uncommitted changes". (#693)
+- Keep three idle-agent tests and a store lock test from failing on a loaded
+  machine, as they did on main's CI: they measured quiet before the pane's first
+  draw or the tail's read, or retried a lock with no wait. A runtime test now
+  expects App resources to stop an idle agent after asking, as #696 made it.
 
 ## 0.2.21
 
