@@ -49,6 +49,18 @@
   input box stays the one message. A message the agent received inside a longer
   prompt is shown once, as received, with what was sent behind it, and its
   queued bubble clears. (#722)
+- Read the input box of an agent started by hand in a shell tab too, before
+  typing into it; it had no check and no Ctrl+U, so a half-typed line or a
+  prompt put back in the box went out glued to the next message. Every
+  message waiting behind a full input box says so, not only the first. Stop
+  withdraws a message still waiting on the box, marked as not sent with Send
+  again, instead of typing it whenever the box next empties. A model or effort
+  change made while the box holds text is refused with the reason rather than
+  typed later. Queued messages the agent receives as one prompt all clear, and
+  a message sent from the chat with a dropped prompt's words is shown as its
+  own. A prompt an idle agent recorded shorter or edited is shown once, as
+  changed, and a waiting note left behind when the app quit mid-wait is
+  cleared on load. (#722)
 - Cut more credentials from the redacted detail line that a refused sign-in or
   an agent that exits early shows in the chat: `key: value` and JSON forms,
   escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's

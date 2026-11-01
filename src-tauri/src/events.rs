@@ -354,6 +354,20 @@ pub enum Payload {
         prompt_seq: u64,
         text: String,
     },
+    /// The agent received the `user_message` at `prompt_seq` inside the
+    /// prompt it recorded for the message at `into_seq`, which shows it
+    /// (#722): typed into an input box that held that one, or held with it.
+    /// Its own bubble goes; what was sent stays with the message it joined.
+    PromptJoined {
+        prompt_seq: u64,
+        into_seq: u64,
+    },
+    /// The reader stopped the turn while the `user_message` at `prompt_seq`
+    /// was waiting on what the agent's input box held (#722): it was never
+    /// typed, and will not be. It can be sent again.
+    PromptWithdrawn {
+        prompt_seq: u64,
+    },
     AssistantText {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block: Option<BlockRef>,

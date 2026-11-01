@@ -150,6 +150,10 @@ export type Payload =
   | { type: "prompt_replaced"; promptSeq: number }
   /** The agent recorded the `user_message` at `promptSeq` as `text`, not as it was sent (#722). */
   | { type: "prompt_changed"; promptSeq: number; text: string }
+  /** The agent received the `user_message` at `promptSeq` inside the prompt shown for the one at `intoSeq` (#722). */
+  | { type: "prompt_joined"; promptSeq: number; intoSeq: number }
+  /** Stopped while the `user_message` at `promptSeq` waited on the agent's input box: never typed (#722). */
+  | { type: "prompt_withdrawn"; promptSeq: number }
   | { type: "assistant_text"; block?: BlockRef; text: string }
   | { type: "reasoning"; block?: BlockRef; text: string }
   | ({ type: "delta" } & Delta)

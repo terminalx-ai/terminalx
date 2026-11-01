@@ -110,5 +110,6 @@ describe("what became of a message on its way to the agent (#722)", () => {
     expect(deliveryNote({})).toBeUndefined();
     expect(deliveryNote({ inputOccupied: true, sent: "x" })).toMatch(/input box already has text in it/);
     expect(deliveryNote({ replaced: true, inputOccupied: true })).toMatch(/^Not answered/);
+    expect(deliveryNote({ withdrawn: true })).toMatch(/^Not sent/);
   });
 });

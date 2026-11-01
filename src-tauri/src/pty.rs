@@ -170,12 +170,13 @@ struct Pane {
     /// How much of the scrollback this pane's own program printed. The rest
     /// came before it: what the pane's last program left (`respawn`).
     printed: Arc<AtomicU64>,
-    /// The screen the pane's program has drawn, kept as it draws, for a pane
-    /// opened on a command (an agent's CLI). Its raw output is no use for
-    /// this: a TUI redraws only the cells that changed, so what one row
-    /// shows now can have been drawn long before the scrollback's window
-    /// (#722).
-    screen: Option<Arc<Mutex<vt100::Parser>>>,
+    /// The screen the pane's program has drawn, kept as it draws. Its raw
+    /// output is no use for this: a TUI redraws only the cells that changed,
+    /// so what one row shows now can have been drawn long before the
+    /// scrollback's window (#722). Every pane keeps one: an agent's CLI runs
+    /// in a shell tab too, when the reader starts it there by hand (#437),
+    /// and the app types into it all the same.
+    screen: Arc<Mutex<vt100::Parser>>,
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
@@ -612,11 +613,11 @@ impl Terminals {
         let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
         append_scrollback(&scrollback, &printed);
         let own = Arc::new(AtomicU64::new(0));
-        let screen = command.is_some().then(|| {
+        let screen = {
             let mut parser = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
             parser.process(&printed);
             Arc::new(Mutex::new(parser))
-        });
+        };
         let tap = self.tap_slot(id);
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
@@ -668,9 +669,7 @@ impl Terminals {
                         // or from its tap.
                         let mut views = tap.0.lock().unwrap();
                         append_own_output(&scrollback, &own, acc);
-                        if let Some(screen) = &screen {
-                            screen.lock().unwrap_or_else(|e| e.into_inner()).process(acc);
-                        }
+                        screen.lock().unwrap_or_else(|e| e.into_inner()).process(acc);
                         views.0.retain_mut(|view| {
                             let received = (view.tap)(acc);
                             if received {
@@ -961,16 +960,14 @@ impl Terminals {
         let panes = self.panes.lock().unwrap();
         let pane = panes.get(id).context("no such terminal")?;
         pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
-        if let Some(screen) = &pane.screen {
-            screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(rows), screen_size(cols));
-        }
+        pane.screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(rows), screen_size(cols));
         Ok(())
     }
 
     /// Read the screen pane `id`'s program has drawn, as it stands now.
-    /// `None` for a pane that keeps none: a shell tab, or no such pane.
+    /// `None` when there is no such pane.
     pub fn screen<R>(&self, id: &str, read: impl FnOnce(&vt100::Screen) -> R) -> Option<R> {
-        let screen = self.panes.lock().unwrap().get(id)?.screen.clone()?;
+        let screen = self.panes.lock().unwrap().get(id)?.screen.clone();
         let parser = screen.lock().unwrap_or_else(|e| e.into_inner());
         Some(read(parser.screen()))
     }
@@ -1720,6 +1717,29 @@ mod tests {
         let mut left: Vec<String> = terminals.panes().into_iter().map(|pane| pane.id).collect();
         left.sort();
         assert_eq!(left, ["s10:a", "tab:s1"]);
+        terminals.kill_all();
+    }
+
+    /// A shell tab keeps the screen it draws, as an agent's pane does: the
+    /// reader can start an agent's CLI in it by hand (#437), and the app reads
+    /// that CLI's input box before typing into it (#722).
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_tab_keeps_the_screen_it_draws() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: None, env: &[] };
+        terminals.spawn(sink, "session-a:1", spec).unwrap();
+        terminals.write("session-a:1", b"printf 'SCREEN-%s\\n' DRAWN\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !terminals.screen("session-a:1", |screen| screen.contents()).unwrap().contains("SCREEN-DRAWN") {
+            assert!(Instant::now() < deadline, "the shell's screen never showed what it printed");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        terminals.resize("session-a:1", 100, 30).unwrap();
+        assert_eq!(terminals.screen("session-a:1", |screen| screen.size()).map(|(rows, cols)| (rows.get(), cols.get())), Some((30, 100)));
+        assert!(terminals.screen("session-z:9", |_| ()).is_none(), "no pane, no screen");
         terminals.kill_all();
     }
 
