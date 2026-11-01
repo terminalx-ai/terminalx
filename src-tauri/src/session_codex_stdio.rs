@@ -28,12 +28,16 @@ impl SessionManager {
     pub fn codex_stdio_to_terminal(&self, session_id: &str, tab_id: &str) -> Result<()> {
         let _admission = crate::issue_pipeline::admission::lock();
         self.accepting_work()?;
-        if !index::get(session_id)?.tab(tab_id).is_some_and(selected) { return Ok(()); }
         let rt_arc = self.runtime(session_id, tab_id)?;
+        let experimental = index::get(session_id)?.tab(tab_id).is_some_and(selected);
         let running = {
+            // Decided under the runtime lock as well as by the index: a live
+            // connection is never left behind a tab that reads as moved.
             let rt = rt_arc.lock().unwrap();
+            let running = matches!(rt.engine, Engine::CodexStdio(_));
+            if !experimental && !running { return Ok(()); }
             anyhow::ensure!(!rt.turn_open, "Wait for Codex to finish this turn, or interrupt it, before opening its terminal.");
-            matches!(rt.engine, Engine::CodexStdio(_))
+            running
         };
         if running { self.stop_codex_stdio(&rt_arc)?; }
         index::update_tab(session_id, tab_id, |tab| { tab.transport = AgentTransport::Pty; Ok(()) })?;
