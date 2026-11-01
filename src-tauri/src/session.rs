@@ -614,9 +614,10 @@ pub struct TabRuntime {
     compaction: compaction::Admission,
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
-    stdio_writer: Option<std::sync::mpsc::SyncSender<codex::stdio::Outbound>>,
-    /// The phone or share a native Codex prompt came from, held to its
-    /// permits when the frame that delivers it is written.
+    /// Each frame with the phone or share a prompt came from, if any.
+    stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
+    /// The phone or share the prompt just sent came from, until its frame is
+    /// queued with it: it is held to its permits when that frame is written.
     stdio_authority: Option<codex_stdio::Authority>,
     /// A continuation sent to experimental Codex, answered once Codex takes
     /// its turn or the connection ends before it does.

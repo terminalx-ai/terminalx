@@ -87,6 +87,7 @@ impl SessionManager {
         // Every prompt replaces what the last one left: a desktop prompt is
         // held to nothing, a phone's or a share's to its permits.
         rt.stdio_authority = (prompt.mobile.is_some() || prompt.shared_connection.is_some()).then(|| Authority {
+            session: rt.session_id.clone(), tab: rt.tab_id.clone(),
             seq: events.first().map(|event| event.seq), mobile: prompt.mobile, shared: prompt.shared_connection,
         });
         // As for the PTY engine: the brief this tab was opened with, which
@@ -139,8 +140,8 @@ impl SessionManager {
             drop(rt_arc);
             // Only this worker writes. It may wait for admission, but reader
             // settlement and the Host terminal receipt never wait for it.
-            while let Ok(line) = rx.recv() {
-                if let Err(error) = manager.write_codex_frame(&runtime, &launch, line) {
+            while let Ok((line, sender)) = rx.recv() {
+                if let Err(error) = manager.write_codex_frame(&runtime, &launch, line, sender) {
                     if let Some(rt_arc) = runtime.upgrade() {
                         let mut rt = rt_arc.lock().unwrap();
                         if same_launch(&rt, &launch) && !rt.stopping {
@@ -207,19 +208,32 @@ impl SessionManager {
         self.set_status(rt, TabStatus::Idle);
     }
 
-    fn write_codex_frame(&self, runtime: &std::sync::Weak<Mutex<TabRuntime>>, launch: &Arc<()>, frame: Outbound) -> Result<()> {
+    /// `sender`: the phone's or share's authority a prompt frame carries,
+    /// checked before its first byte. It is taken in the order every sender
+    /// takes it (`send_mobile`, `type_prompt`, a phone's reconcile): sharing,
+    /// the share's admission, the phone's permit, the share owner's
+    /// attachment, and only then the tab's runtime, never under it.
+    fn write_codex_frame(&self, runtime: &std::sync::Weak<Mutex<TabRuntime>>, launch: &Arc<()>, frame: Outbound, sender: Option<Authority>) -> Result<()> {
         let mut bytes = frame.line.as_bytes().to_vec();
         bytes.push(b'\n');
         let mut offset = 0;
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut sender = sender;
         while offset < bytes.len() {
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
             {
                 let _admission = crate::issue_pipeline::admission::lock();
-                // A prompt's sender is admitted in the order its send was:
-                // sharing, then its permits, then the tab.
-                let first_prompt_byte = offset == 0 && frame.delivers_prompt();
-                let mut sharing = first_prompt_byte.then(|| self.sharing.lock().unwrap());
+                // Delivery that has begun under a current permit is finished:
+                // a stream takes no half frame back.
+                let sender = if offset == 0 { sender.take() } else { None };
+                let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
+                let mut owner_attachment = None;
+                let admitted = match &sender {
+                    None => Ok(None),
+                    Some(sender) => admit_codex_prompt(sender, sharing.as_deref_mut(), &mut owner_attachment)
+                        .and_then(|()| sender.mobile.as_ref().map(|permit| permit.enter()).transpose()),
+                };
+                let owner = admitted.as_ref().ok().and(owner_attachment.as_ref()).map(|attachment| attachment.enter()).transpose();
                 let rt_arc = runtime.upgrade().context("Codex runtime was removed")?;
                 let mut rt = rt_arc.lock().unwrap();
                 self.accepting_work()?;
@@ -233,31 +247,20 @@ impl SessionManager {
                     engine.retire_write(&frame, false);
                     return Ok(());
                 }
-                let entry = index::get(&rt.session_id)?;
-                anyhow::ensure!(entry.tab(&rt.tab_id).is_some_and(selected), "Codex tab was closed or changed");
-                anyhow::ensure!(rt.child.as_ref().is_some_and(|child| self.host.get(&rt.key()).is_some_and(|live| Arc::ptr_eq(&live, child))), "Codex child has been replaced or exited");
-                // The launch is the instance a PTY prompt's pane stands for,
-                // and it was checked above. Delivery that has begun under a
-                // current permit is finished: a stream takes no half frame back.
-                let authority = if first_prompt_byte { rt.stdio_authority.take() } else { None };
-                let mut owner_attachment = None;
-                let admitted = match &authority {
-                    None => Ok(None),
-                    Some(authority) => admit_codex_prompt(authority, sharing.as_deref_mut(), &entry, &rt.tab_id, &mut owner_attachment)
-                        .and_then(|()| authority.mobile.as_ref().map(|permit| permit.enter()).transpose()),
-                };
-                let owner = admitted.as_ref().ok().and(owner_attachment.as_ref()).map(|attachment| attachment.enter()).transpose();
                 let (_mobile, _owner) = match (admitted, owner) {
                     (Ok(mobile), Ok(owner)) => (mobile, owner),
                     (Err(error), _) | (_, Err(error)) => {
+                        engine.withdraw(&frame);
                         log::warn!("[{}] withdrew a Codex prompt before delivery: {error:#}", rt.key());
-                        let seq = authority.as_ref().and_then(|authority| authority.seq);
-                        if let Engine::CodexStdio(engine) = &mut rt.engine { engine.withdraw(&frame); }
-                        self.withdraw_codex_prompt(&mut rt, seq);
+                        self.withdraw_codex_prompt(&mut rt, sender.as_ref().and_then(|sender| sender.seq));
                         return Ok(());
                     }
                 };
+                let entry = index::get(&rt.session_id)?;
+                anyhow::ensure!(entry.tab(&rt.tab_id).is_some_and(selected), "Codex tab was closed or changed");
+                // The launch is the instance a PTY prompt's pane stands for.
                 let child = rt.child.as_ref().context("Codex child is missing")?;
+                anyhow::ensure!(self.host.get(&rt.key()).is_some_and(|live| Arc::ptr_eq(&live, child)), "Codex child has been replaced or exited");
                 // A nonblocking syscall is the only physical write under the
                 // authority locks. Reader/Stop can run between attempts, even
                 // when the child never reads or produces a full stdout pipe.
@@ -286,8 +289,11 @@ impl SessionManager {
             match action {
                 StdioAction::Write(line) => {
                     anyhow::ensure!(!rt.stopping && matches!(&rt.engine, Engine::CodexStdio(e) if !e.exited && !e.blocked), "Codex connection is no longer writable");
+                    // The frame carries its sender, so the writer can check
+                    // the sender's permits without holding this runtime.
+                    let sender = if line.delivers_prompt() { rt.stdio_authority.take() } else { None };
                     rt.stdio_writer.as_ref().context("Codex writer is closed")?
-                        .try_send(line).context("Codex writer queue unavailable; input will not be replayed")?;
+                        .try_send((line, sender)).context("Codex writer queue unavailable; input will not be replayed")?;
                 }
                 StdioAction::ThreadReady(id) => {
                     let Engine::CodexStdio(engine) = &rt.engine else { bail!("Codex owner was replaced") };
@@ -469,6 +475,8 @@ pub(super) fn recovery_on_open(tab: &TabEntry, log: &Path, kind: RecoveryKind) -
 /// sender may give is decided again when its frame is written, and a prompt
 /// refused there is withdrawn with nothing of it sent.
 pub(super) struct Authority {
+    session: String,
+    tab: String,
     /// The user message it was published as; none for a manual compaction.
     seq: Option<u64>,
     mobile: Option<crate::local_runtime::mobile::WritePermit>,
@@ -476,18 +484,20 @@ pub(super) struct Authority {
 }
 
 /// What `type_prompt` asks of a share and of a phone before it types, with
-/// the sharing mutex held: the share's own admission and a mode it allows,
-/// and the phone's mode unchanged. The guards are taken by the caller.
-fn admit_codex_prompt(authority: &Authority, sharing: Option<&mut crate::local_sharing::Sharing>, entry: &index::SessionEntry, tab_id: &str,
+/// the sharing mutex held and the tab's runtime not: the share's own
+/// admission and a mode it allows, and the phone's mode unchanged. The
+/// guards are taken by the caller.
+fn admit_codex_prompt(sender: &Authority, sharing: Option<&mut crate::local_sharing::Sharing>,
     owner: &mut Option<Arc<crate::local_runtime::Attachment>>) -> Result<()> {
-    if let Some(connection) = &authority.shared {
-        let share = sharing.and_then(|sharing| sharing.sessions.get_mut(&entry.id)).context("Sharing ended before prompt delivery.")?;
-        share.admit_at_writer(connection, tab_id, chrono::Utc::now().timestamp_millis())?;
+    if let Some(connection) = &sender.shared {
+        let share = sharing.and_then(|sharing| sharing.sessions.get_mut(&sender.session)).context("Sharing ended before prompt delivery.")?;
+        share.admit_at_writer(connection, &sender.tab, chrono::Utc::now().timestamp_millis())?;
         *owner = share.owner.as_ref().map(|owner| owner.attachment.clone());
-        let tab = entry.tab(tab_id).context("Tab closed before prompt delivery.")?;
+        let entry = index::get(&sender.session)?;
+        let tab = entry.tab(&sender.tab).context("Tab closed before prompt delivery.")?;
         anyhow::ensure!(settings::allowed_while_shared(&tab.permission_mode), "The shared tab changed before prompt delivery.");
     }
-    if let Some(permit) = &authority.mobile { permit.check_mode(&entry.id, tab_id)?; }
+    if let Some(permit) = &sender.mobile { permit.check_mode(&sender.session, &sender.tab)?; }
     Ok(())
 }
 
