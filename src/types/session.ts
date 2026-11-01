@@ -22,6 +22,12 @@ export interface TabEntry {
   /** A mode asked for that waits for the restart that applies it. Drawn as pending, never as current. */
   requestedPermissionMode?: string | null;
   providerSessionId?: string | null;
+  /**
+   * How the app reaches the agent. Absent is its CLI in the tab's terminal.
+   * An experimental Codex connection has no terminal: opening the terminal
+   * view moves the tab to Codex's own, on the same thread, for good.
+   */
+  transport?: "experimentalCodexStdio";
   status: TabStatus;
   created: string;
   modified: string;

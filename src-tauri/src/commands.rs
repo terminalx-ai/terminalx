@@ -2418,6 +2418,15 @@ pub async fn tab_handoff(state: State<'_, AppState>, session_id: String, tab_id:
     tauri::async_runtime::spawn_blocking(move || m.handoff(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
+/// Opening the terminal view of an experimental Codex tab: Codex continues in
+/// its own terminal interface on the same thread, and the tab stays there.
+/// It waits for admission and a confirmed exit, so never on the main thread.
+#[tauri::command]
+pub async fn tab_to_terminal(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.to_terminal(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
 /// The terminal pane a tab's CLI is running in, or nothing if it is not.
 /// A window that opened after the CLI did never saw the pane announced.
 #[tauri::command]

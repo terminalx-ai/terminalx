@@ -575,6 +575,7 @@ pub fn run() {
             commands::interrupt_turn,
             commands::stop_tab,
             commands::tab_handoff,
+            commands::tab_to_terminal,
             commands::ensure_tab_started,
             commands::tab_pane,
             commands::cancel_queued,

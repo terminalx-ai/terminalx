@@ -95,6 +95,10 @@
 - Change the model, effort or permission mode of an experimental Codex session
   instead of creating a new one. Model and effort apply from the next turn; a
   permission mode is taken between turns by resuming the thread under it. (#644)
+- Opening the terminal view of an experimental Codex session moves it to Codex's
+  own terminal interface on the same thread, instead of an empty terminal. The
+  chat keeps its history without repeating it; the move is one-way and waits for
+  a running turn to finish. (#644)
 
 ### Status bar
 
