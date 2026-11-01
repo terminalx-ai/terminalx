@@ -79,6 +79,9 @@
   after a lost connection: the next message resumes the same Codex thread, with
   nothing replayed, and **Retry safely** works for them. They accept Codex 0.164.0
   or newer instead of exactly 0.164.0. (#644)
+- Change the model, effort or permission mode of an experimental Codex session
+  instead of creating a new one. Model and effort apply from the next turn; a
+  permission mode is taken between turns by resuming the thread under it. (#644)
 
 ### Status bar
 

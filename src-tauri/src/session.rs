@@ -2700,7 +2700,6 @@ impl SessionManager {
     /// moves when the provider is running it (`harness::settings`): at once
     /// when nothing is running, on the provider's word when something is.
     pub fn set_model(&self, session_id: &str, tab_id: &str, model: &str) -> Result<()> {
-        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if HarnessId::parse(&rt.harness).settings().model == Apply::Restart {
@@ -2738,6 +2737,8 @@ impl SessionManager {
                 self.apply_actions(&mut rt, actions);
             }
             Engine::OpenCode(o) => o.model = Some(model.into()),
+            // Experimental Codex names the model on each turn it starts.
+            Engine::CodexStdio(e) => e.set_model(&after.model),
             _ => {}
         }
         drop(rt);
@@ -2985,15 +2986,15 @@ impl SessionManager {
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(mode) {
             bail!("Stop sharing this session before switching to {}.", settings::mode_label(mode));
         }
-        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if let Some(refusal) = Self::by_hand_refusal(&rt, "the permission mode") {
             bail!(refusal);
         }
         let turn_open = rt.turn_open;
+        let stdio = self.codex_stdio_mode_change(session_id, tab_id, mode, turn_open)?;
         let waits = turn_open && matches!(rt.engine, Engine::Cli(_));
-        let (_, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
+        let (before, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
         let mut restart = false;
         match &mut rt.engine {
             Engine::Cli(p) => {
@@ -3016,9 +3017,13 @@ impl SessionManager {
             Engine::OpenCode(o) => o.mode = mode.into(),
             _ => {}
         }
+        let stop_stdio = stdio && before.permission_mode != after.permission_mode && matches!(rt.engine, Engine::CodexStdio(_));
         drop(rt);
         if restart {
             self.restart_for_settings(session_id, tab_id)?;
+        }
+        if stop_stdio {
+            self.stop_codex_stdio(&rt_arc)?;
         }
         drop(sharing);
         Ok(())
@@ -3029,7 +3034,6 @@ impl SessionManager {
     /// headless peers have no effort setting at all, and say so rather than
     /// take a value that would change nothing.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
-        self.refuse_codex_stdio_operation(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if HarnessId::parse(&rt.harness).settings().effort == Apply::Unsupported && effort.is_some_and(|e| !e.is_empty()) {
@@ -3062,6 +3066,7 @@ impl SessionManager {
                 }
             }
             Engine::Acp(_) | Engine::OpenCode(_) => {}
+            Engine::CodexStdio(e) => e.set_effort(after.effort.as_deref()),
             _ => respawn = !turn_open,
         }
         if respawn {

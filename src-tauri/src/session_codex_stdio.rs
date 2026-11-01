@@ -19,6 +19,16 @@ impl SessionManager {
         anyhow::ensure!(!entry.tab(tab).is_some_and(selected), "This operation is not supported for experimental Codex stdio. Create a new session with the desired settings; no PTY handoff or thread migration is performed.");
         Ok(())
     }
+    /// A permission mode is an approval policy and a sandbox, which Codex
+    /// takes when a thread starts or resumes: between turns, an experimental
+    /// tab's connection is stopped so its next send resumes under the new one.
+    pub(super) fn codex_stdio_mode_change(&self, session: &str, tab: &str, mode: &str, turn_open: bool) -> Result<bool> {
+        if !index::get(session)?.tab(tab).is_some_and(selected) { return Ok(false); }
+        Stdio::validate_mode(mode)?;
+        anyhow::ensure!(!turn_open, "Experimental Codex changes permission mode between turns. Wait for this turn to finish or interrupt it, then change it.");
+        Ok(true)
+    }
+
     pub(super) fn send_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry,
         prompt: PromptText, images: Vec<ImageRef>, wire_images: Vec<(String, String)>) -> Result<SendOutcome> {
         let tab = entry.tab(&rt.tab_id).context("tab not found")?;

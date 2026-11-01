@@ -122,9 +122,10 @@ after Stop, or after a lost connection, the next message sent resumes the same
 Codex thread in a new connection; nothing earlier is replayed. The owner handles local
 send, command/file approvals, interrupt, Stop and `/compact`. Manual compaction
 adds system status, not a user message. Unsupported modes or protocol requests
-fail explicitly. Shared/mobile input, issue pipelines, continuation delivery,
-terminal handoff and changing model/effort/mode in place are not supported.
-Create a new experimental session with the desired settings instead.
+fail explicitly. Shared/mobile input, issue pipelines, continuation delivery and
+terminal handoff are not supported. A new model or effort applies from the next
+turn. A new permission mode (other than Ask every time) is taken between turns:
+the connection stops and the next message resumes the thread under that mode.
 
 Confirmed compaction events update the existing chat indicator. If the connection
 ends, retained status records loss of continuity; it does not invent completion
