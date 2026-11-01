@@ -141,6 +141,7 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     term,
     fit,
     restorable: true,
+    attachedAs: (token) => !released && view.token === token,
     reattach: () => {
       if (released) return;
       retire(view);

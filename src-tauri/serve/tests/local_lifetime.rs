@@ -203,7 +203,7 @@ fn native_client_pins_its_owner_and_cannot_send_to_a_replacement() {
     };
     let mut serve = start();
     let client = raccoon_lib::local_runtime::client::Client::connect(&world.data).unwrap();
-    let mut events = client.stream().unwrap();
+    let mut events = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     writeln!(events.writer().unwrap(), "{}", json!({"method":"ping"})).unwrap();
     assert_eq!(events.receive().unwrap()["type"], "pong");
     let status: serde_json::Value = client.call("status", json!({})).unwrap();
@@ -274,8 +274,8 @@ fn native_bridge_replays_bytes_and_releases_only_its_own_views() {
     });
     let client = Client::connect(&world.data).unwrap();
     let sink = Arc::new(raccoon_lib::sink::BroadcastSink::new(16));
-    let first = Bridge::connect(&client, sink.clone(), None).unwrap();
-    let second = Bridge::connect(&client, sink, None).unwrap();
+    let first = Bridge::connect_views(&client, sink.clone(), "first", None).unwrap();
+    let second = Bridge::connect_views(&client, sink, "second", None).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     first.attach(&id, "same-token", Box::new(move |bytes| tx.send(bytes.to_vec()).is_ok())).unwrap();
     let (tx2, rx2) = std::sync::mpsc::channel();
@@ -305,7 +305,7 @@ fn launcher_process_fixture() {
     let Some(home) = std::env::var_os("TERMINALX_LAUNCHER_FIXTURE_HOME") else { return };
     let source = std::env::var_os("TERMINALX_LAUNCHER_FIXTURE_BINARY").unwrap();
     let client = raccoon_lib::local_runtime::launch::connect_or_start(std::path::Path::new(&source), std::path::Path::new(&home)).unwrap();
-    let _connection = client.stream().unwrap();
+    let _connection = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     // Deliberately skip all Rust drops: actual UI process exit must release
     // its socket without sending stop-all or owning the runtime's lifetime.
     std::process::exit(0);
@@ -351,7 +351,7 @@ fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
     struct Stop(std::sync::Arc<Client>);
     impl Drop for Stop { fn drop(&mut self) { let _ = self.0.stop_all(); } }
     let cleanup = Stop(client.clone());
-    let _connection = client.stream().unwrap();
+    let _connection = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     let before: serde_json::Value = client.call("status", json!({})).unwrap();
     // Replace the bundle source inode, then remove it altogether. The signed
     // installed image and hook command paths must remain outside that source.
@@ -484,7 +484,7 @@ fn typed_session_adapter_reattaches_to_a_pending_turn_and_answers_without_recove
     let world = AgentWorld::new();
     let mut serve = Serve::start(world.command(), &world.data);
     let first_client = Client::connect(&world.data).unwrap();
-    let first_stream = first_client.stream().unwrap();
+    let first_stream = first_client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     let epoch = first_stream.attachment().epoch.clone();
     let created = serve.control("sessions.create", json!({
         "project":world.project,"agent":"claude","prompt":"ask:echo pending-while-detached",
@@ -496,7 +496,7 @@ fn typed_session_adapter_reattaches_to_a_pending_turn_and_answers_without_recove
     drop(first_client);
     assert_eq!(serve.control("wait", json!({"target":tab,"timeoutSeconds":10}))["reason"], "permission");
     let client = Client::connect(&world.data).unwrap();
-    let stream = client.stream().unwrap();
+    let stream = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     assert_eq!(stream.attachment().epoch, epoch);
     let sessions = Sessions::new(client.clone());
     let pending = sessions.pending_permissions().unwrap();
@@ -686,7 +686,9 @@ fn a_hung_owner_is_noticed_and_attaching_again_neither_replaces_it_nor_replays()
     signal("-STOP");
     let lost = lost_rx.recv_timeout(liveness * 5);
     signal("-CONT");
-    assert_eq!(lost.expect("a hung owner went unnoticed"), Lost::Events { generation: desktop.generation() });
+    let Lost::Events { generation, reason } = lost.expect("a hung owner went unnoticed") else { panic!("the event connection was lost") };
+    assert_eq!(generation, desktop.generation());
+    assert_eq!(reason, "the background runtime sent nothing, not even a pong, for 2.0 s", "the log says why");
     assert!(desktop.sessions().is_err(), "a hung owner's attachment must not look connected");
     let next = desktop.reconnect(Client::connect(&world.data).unwrap()).unwrap();
     assert_eq!(next.attachment().unwrap().epoch, old.epoch, "an owner that answers again is attached to, not replaced");
@@ -700,9 +702,15 @@ fn a_hung_owner_is_noticed_and_attaching_again_neither_replaces_it_nor_replays()
     stopped(&mut serve);
 }
 
+/// #716: a view whose window has all but stopped reading falls behind on its
+/// own. Only that view is let go, and its window told to attach it again: the
+/// connection stays up, the other window's output keeps coming, and the view
+/// attached again starts from the pane's scrollback.
 #[test]
-fn a_window_view_that_stops_reading_is_dropped_alone_and_its_window_attaches_again() {
-    use raccoon_lib::local_runtime::{client::Client, desktop::{Desktop, Lost}};
+fn a_window_view_that_stops_reading_is_let_go_alone_and_attached_again_on_the_same_connection() {
+    use raccoon_lib::local_runtime::{client::Client, desktop::Desktop};
+    use raccoon_lib::sink::EventSink;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     let world = AgentWorld::new();
     let mut serve = Serve::start(world.command(), &world.data);
@@ -714,8 +722,11 @@ fn a_window_view_that_stops_reading_is_dropped_alone_and_its_window_attaches_aga
     let (quiet, flood) = (format!("{session}:11"), format!("{session}:12"));
     serve.control("runtime.pty.spawn", json!({"id":quiet,"cwd":world.project,"cols":80,"rows":24,
         "command":"sh -c 'stty -echo; printf quiet-ready; exec cat'"}));
+    let sink = Arc::new(raccoon_lib::sink::BroadcastSink::new(32));
+    let (lagged_tx, lagged_rx) = std::sync::mpsc::channel();
+    sink.listen("pty_view_lagged", Box::new(move |payload| { let _ = lagged_tx.send(payload.to_owned()); }));
     let (lost_tx, lost_rx) = std::sync::mpsc::channel();
-    let desktop = Desktop::connect_watched(Client::connect(&world.data).unwrap(), Arc::new(raccoon_lib::sink::BroadcastSink::new(32)),
+    let desktop = Desktop::connect_watched(Client::connect(&world.data).unwrap(), sink,
         Some(Arc::new(move |lost| { let _ = lost_tx.send(lost); }))).unwrap();
     let text = |buffer: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
     type Tap = Box<dyn Fn(&[u8]) -> bool + Send>;
@@ -726,32 +737,35 @@ fn a_window_view_that_stops_reading_is_dropped_alone_and_its_window_attaches_aga
     let floating = Arc::new(Mutex::new(Vec::new()));
     desktop.attach("floating", &quiet, "floating-view", collect(&floating)).unwrap();
     common::agent::wait_until("the floating window's replay", || text(&floating).contains("quiet-ready").then_some(()));
-    // The main window stops reading, as a frozen page would: its first frame
-    // is held until the owner has given up on the connection.
-    let (release, held) = std::sync::mpsc::channel::<()>();
-    let held = Mutex::new(held);
+    // The main window reads a piece every quarter of a second and never says
+    // what it drew, while its pane prints as fast as it can.
+    let slow = Arc::new(AtomicBool::new(true));
+    let drawing = slow.clone();
     serve.control("runtime.pty.spawn", json!({"id":flood,"cwd":world.project,"cols":80,"rows":24,
         "command":"sh -c 'exec yes output-that-no-one-reads'"}));
-    desktop.attach("main", &flood, "main-view", Box::new(move |_| { let _ = held.lock().unwrap().recv(); true })).unwrap();
-    common::agent::wait_until("the owner to drop the window that fell behind", || {
-        (serve.control("runtime.pty.stats", json!({}))["views"] == 1).then_some(())
-    });
-    drop(release);
-    let lost = lost_rx.recv_timeout(Duration::from_secs(10)).expect("the lost view went unreported");
-    assert_eq!(lost, Lost::View { generation: desktop.generation(), window: "main".into() });
-    assert!(lost_rx.recv_timeout(Duration::from_millis(500)).is_err(), "one window's view must not report the app connection lost");
+    let main_quiet = Arc::new(Mutex::new(Vec::new()));
+    desktop.attach("main", &quiet, "main-quiet", collect(&main_quiet)).unwrap();
+    desktop.attach("main", &flood, "main-view", Box::new(move |_| {
+        if drawing.load(Ordering::Relaxed) { std::thread::sleep(Duration::from_millis(250)); }
+        true
+    })).unwrap();
+    let lagged = lagged_rx.recv_timeout(Duration::from_secs(90)).expect("the view that fell behind was never let go");
+    slow.store(false, Ordering::Relaxed);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&lagged).unwrap(), json!({"id":flood, "token":"main-view"}));
+    assert!(lost_rx.recv_timeout(Duration::from_millis(500)).is_err(), "no connection was lost: {:?}", lost_rx.try_recv());
+    assert_eq!(serve.control("runtime.pty.stats", json!({}))["views"], 2, "only the view that fell behind was let go");
     assert!(desktop.sessions().is_ok(), "the app-wide event connection is unaffected");
-    // The other window keeps receiving live output throughout.
+    // The other pane on the same connection, and the other window, keep receiving live output.
     desktop.terminals().unwrap().write(&quiet, b"still-live\n").unwrap();
+    common::agent::wait_until("live output beside the view that fell behind", || text(&main_quiet).contains("still-live").then_some(()));
     common::agent::wait_until("live output in the healthy window", || text(&floating).contains("still-live").then_some(()));
-    // No reconnect: the window's view is opened again and reads the tail.
-    let renewed = desktop.reopen_view("main").unwrap();
-    assert_eq!(desktop.renewed("main"), renewed);
-    assert_eq!(desktop.renewed("floating"), 0, "a healthy window has nothing to attach again");
+    // Attached again over the same connection, the view starts from the pane's scrollback.
     let main = Arc::new(Mutex::new(Vec::new()));
-    desktop.attach("main", &quiet, "main-view-again", collect(&main)).unwrap();
-    common::agent::wait_until("the main window's replay after it attached again", || text(&main).contains("still-live").then_some(()));
-    assert_eq!(serve.control("runtime.pty.output", json!({"id":flood}))["running"], true, "a lost view never stops its process");
+    desktop.attach("main", &flood, "main-view-again", collect(&main)).unwrap();
+    common::agent::wait_until("the main window's replay after it attached again", || text(&main).contains("output-that-no-one-reads").then_some(()));
+    assert_eq!(desktop.renewed("main"), 0, "the window's connection was never replaced");
+    assert!(lost_rx.try_recv().is_err());
+    assert_eq!(serve.control("runtime.pty.output", json!({"id":flood}))["running"], true, "a view let go never stops its process");
     desktop.terminals().unwrap().kill(&flood).unwrap();
     desktop.stop_all().unwrap();
     stopped(&mut serve);
