@@ -1850,8 +1850,11 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 #[tauri::command]
-pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<SessionEntry> {
-    tauri::async_runtime::spawn_blocking(move || create_session_blocking(&app, req))
+pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::session_ops::prefer_native_codex_session(&mut req);
+        create_session_blocking(&app, req)
+    })
         .await
         .map_err(err)?
 }
@@ -1866,9 +1869,10 @@ fn announce_session(app: &AppHandle, session_id: &str) {
 }
 
 #[tauri::command]
-pub async fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
+pub async fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, mut tab: NewTab) -> CmdResult<TabEntry> {
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
+        crate::session_ops::prefer_native_codex(&mut tab, false);
         let tab = sessions.add_tab(&session_id, &tab).map_err(err)?;
         announce_session(&app, &session_id);
         Ok(tab)
@@ -2007,8 +2011,11 @@ pub fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> Cmd
 /// Create a quick chat: a session with no project, in a scratch directory of
 /// its own (or in `req.cwd`, which does not become a project).
 #[tauri::command]
-pub async fn create_quick_chat(app: AppHandle, req: crate::session_ops::NewQuickChat) -> CmdResult<SessionEntry> {
-    tauri::async_runtime::spawn_blocking(move || crate::session_ops::create_quick_chat_blocking(&app, req))
+pub async fn create_quick_chat(app: AppHandle, mut req: crate::session_ops::NewQuickChat) -> CmdResult<SessionEntry> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(tab) = &mut req.tab { crate::session_ops::prefer_native_codex(tab, false) }
+        crate::session_ops::create_quick_chat_blocking(&app, req)
+    })
         .await
         .map_err(err)?
 }
@@ -4266,6 +4273,21 @@ pub fn set_agent_idle_stop_minutes(minutes: u32) -> CmdResult<crate::store::sett
     settings.agents.idle_stop_minutes = minutes;
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.agents)
+}
+
+/// Settings → Experimental. Read when a tab is made, so a change applies to
+/// the next new session and leaves existing ones as they are.
+#[tauri::command]
+pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
+    store::settings::load().experimental
+}
+
+#[tauri::command]
+pub fn set_experimental_settings(native_codex: bool) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+    let mut settings = store::settings::load();
+    settings.experimental.native_codex = native_codex;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.experimental)
 }
 
 type OrgWorkStatusResult = Result<crate::work_claims::client::OrganizationWorkStatus, crate::work_claims::client::WorkClaimsError>;

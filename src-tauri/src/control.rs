@@ -782,7 +782,9 @@ impl ControlService {
         if p.experimental_codex_stdio && (p.agent != "codex" || p.issue.is_some()) {
             return Err(ControlError::invalid("Experimental stdio requires a new Codex session without an issue pipeline."));
         }
-        let first_tab = NewTab { transport: if p.experimental_codex_stdio { index::AgentTransport::ExperimentalCodexStdio } else { index::AgentTransport::Pty }, harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
+        let mut first_tab = NewTab { transport: if p.experimental_codex_stdio { index::AgentTransport::ExperimentalCodexStdio } else { index::AgentTransport::Pty }, harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
+        // Without the flag, Settings → Experimental → Native Codex decides.
+        if !p.experimental_codex_stdio { crate::session_ops::prefer_native_codex(&mut first_tab, p.issue.is_some()); }
         let mut issue = None;
         let entry = match p.project.as_deref() {
             None => {
@@ -832,7 +834,8 @@ impl ControlService {
         };
         let mut pipeline = Value::Null;
         let mut pipeline_note = Value::Null;
-        let pipeline_default = crate::store::projects::issue_pipeline_settings(&entry.project_path).is_ok_and(|settings| settings.enabled && (settings.auto_merge || settings.resolve_conflicts));
+        // A session not started from an issue gets a pipeline only where the project turned a switch on.
+        let pipeline_default = crate::store::projects::issue_pipeline_settings(&entry.project_path).is_ok_and(|settings| settings.enabled && (settings.auto_merge == Some(true) || settings.resolve_conflicts == Some(true)));
         if (issue.is_some() || p.auto_merge.is_some() || pipeline_default) && !p.no_pipeline {
             match self.start_pipeline(&entry.id, &tab.id, p.auto_merge) {
                 Ok((started, brief)) => {

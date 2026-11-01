@@ -164,8 +164,10 @@ function verbFor(tool: string): string {
 }
 
 /**
- * AskUserQuestion as a form. Item names are the question text, so the
- * answers map is already keyed the way the harness matches.
+ * AskUserQuestion as a form. Choices are kept by position (question index →
+ * the indices of its chosen options), so a label holding ", ", or two equal
+ * labels or questions, stay distinct. Only Answer turns them into the agent's
+ * format: keyed by question text, labels joined with ", ".
  */
 export function QuestionCard({
   ask,
@@ -183,8 +185,10 @@ export function QuestionCard({
   aside?: ReactNode;
 }) {
   const blocked = !!blockedReason;
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [free, setFree] = useState<Record<string, string>>({});
+  /** Per question index, the chosen option indices, in the order they were picked. */
+  const [chosen, setChosen] = useState<Record<number, number[]>>({});
+  /** Per question index, the typed answer. */
+  const [free, setFree] = useState<Record<number, string>>({});
   const textProps = usePromptTextProps();
   const ref = useRef<HTMLFormElement>(null);
   useEffect(() => {
@@ -194,21 +198,20 @@ export function QuestionCard({
   }, []);
   const questions = ask.questions ?? [];
 
-  const toggle = (q: string, label: string, multi: boolean) => {
-    setAnswers((a) => {
-      if (!multi) return { ...a, [q]: label };
-      const cur = a[q] ? a[q].split(", ").filter(Boolean) : [];
-      const next = cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label];
-      return { ...a, [q]: next.join(", ") };
+  const toggle = (question: number, option: number, multi: boolean) => {
+    setChosen((c) => {
+      const cur = c[question] ?? [];
+      const next = !multi ? [option] : cur.includes(option) ? cur.filter((i) => i !== option) : [...cur, option];
+      return { ...c, [question]: next };
     });
   };
 
   const submit = () => {
     const out: Record<string, string> = {};
-    for (const q of questions) {
-      const v = free[q.question]?.trim() || answers[q.question];
+    questions.forEach((q, qi) => {
+      const v = free[qi]?.trim() || (chosen[qi] ?? []).map((oi) => q.options[oi].label).join(", ");
       if (v) out[q.question] = v;
-    }
+    });
     onAnswer(out);
   };
 
@@ -238,20 +241,19 @@ export function QuestionCard({
         }
       >
         <div className="space-y-5">
-          {questions.map((q) => {
-            const picked = answers[q.question] ?? "";
-            const pickedSet = new Set(picked.split(", ").filter(Boolean));
+          {questions.map((q, qi) => {
+            const picked = chosen[qi] ?? [];
             return (
-              <div key={q.question}>
+              <div key={qi}>
                 <div className="text-[14px] font-medium leading-snug text-foreground"><LinkedText text={q.question} /></div>
                 {q.multiSelect && <div className="mt-0.5 text-[12px] text-faint">Choose any that apply</div>}
                 <div className="mt-3 flex flex-col gap-1.5">
-                  {q.options.map((o) => {
-                    const on = pickedSet.has(o.label);
+                  {q.options.map((o, oi) => {
+                    const on = picked.includes(oi);
                     return (
                       <div
-                        key={o.label}
-                        onClick={() => toggle(q.question, o.label, q.multiSelect)}
+                        key={oi}
+                        onClick={() => toggle(qi, oi, q.multiSelect)}
                         className={cn(
                           "group flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors",
                           on ? "border-accent/50 bg-accent/[0.07]" : "border-hairline hover:border-hairline-strong hover:bg-veil-card",
@@ -263,7 +265,7 @@ export function QuestionCard({
                           data-choice
                           aria-label={o.label}
                           aria-pressed={on}
-                          onClick={(event) => { event.stopPropagation(); toggle(q.question, o.label, q.multiSelect); }}
+                          onClick={(event) => { event.stopPropagation(); toggle(qi, oi, q.multiSelect); }}
                           className={cn(
                             "mt-0.5 flex size-4 shrink-0 items-center justify-center border transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                             q.multiSelect ? "rounded-[4px]" : "rounded-full",
@@ -282,8 +284,8 @@ export function QuestionCard({
                   {q.freeText && (
                     <input
                       {...textProps}
-                      value={free[q.question] ?? ""}
-                      onChange={(e) => setFree((f) => ({ ...f, [q.question]: e.target.value }))}
+                      value={free[qi] ?? ""}
+                      onChange={(e) => setFree((f) => ({ ...f, [qi]: e.target.value }))}
                       placeholder="Or type your own answer"
                       className="mt-1 h-9 rounded-lg border border-hairline bg-well px-3 text-[13px] outline-none placeholder:text-faint focus:border-ring/60"
                     />

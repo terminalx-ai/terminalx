@@ -183,6 +183,8 @@ export type IssueOpErrorKind =
   | "network"
   | "unsupported"
   | "invalid"
+  /** GitHub redirected a write: the repository was renamed or moved, or the issue transferred. Nothing was written. */
+  | "moved"
   | "not_implemented"
   | "other";
 

@@ -113,6 +113,9 @@ pub struct SpawnSpec<'a> {
     pub args: &'a [String],
     pub cwd: &'a Path,
     pub env: &'a [(String, String)],
+    /// Inherited variables the child must not see, such as a credential a
+    /// cloud grant replaces (`cloud_grants::LaunchGrant::env`).
+    pub unset: &'a [String],
 }
 
 impl Host {
@@ -148,6 +151,9 @@ impl Host {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for name in spec.unset {
+            cmd.env_remove(name);
+        }
         for (k, v) in spec.env {
             cmd.env(k, v);
         }
@@ -577,7 +583,7 @@ mod tests {
         let sink = Arc::new(S(Mutex::new(tx)));
         let args = vec!["-c".to_string(), "read l; echo got:$l; echo oops 1>&2; exit 3".to_string()];
         let child = host
-            .spawn("k", SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: Path::new("/"), env: &[] }, sink)
+            .spawn("k", SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: Path::new("/"), env: &[], unset: &[] }, sink)
             .unwrap();
         child.write_line("hello").unwrap();
         let mut got = Vec::new();
@@ -598,10 +604,10 @@ mod tests {
         let sink = Arc::new(S(Mutex::new(tx)));
         let args = vec!["-c".to_string(), "sleep 30".to_string()];
         let a = host
-            .spawn("k", SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: Path::new("/"), env: &[] }, sink.clone())
+            .spawn("k", SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: Path::new("/"), env: &[], unset: &[] }, sink.clone())
             .unwrap();
         let b = host
-            .spawn("k", SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: Path::new("/"), env: &[] }, sink)
+            .spawn("k", SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: Path::new("/"), env: &[], unset: &[] }, sink)
             .unwrap();
         assert_ne!(a.pid, b.pid);
         assert_eq!(host.get("k").unwrap().pid, b.pid);

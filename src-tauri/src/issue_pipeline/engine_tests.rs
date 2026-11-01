@@ -1418,7 +1418,7 @@ fn a_pipeline_starts_for_any_session_on_a_branch_of_its_own() {
     let _home = crate::store::temp_home();
     let host = FakeHost::new(&github_issue());
     // The project's default for the switch is what an issue starts at.
-    host.world().settings.auto_merge = true;
+    host.world().settings.auto_merge = Some(true);
     host.world().settings.max_rounds = 5;
     let pipeline = start(&host, "author", "t1", None, None).unwrap();
     assert!(pipeline.auto_merge);
@@ -1440,6 +1440,51 @@ fn a_pipeline_starts_for_any_session_on_a_branch_of_its_own() {
     host.world().settings.enabled = false;
     assert!(start(&host, "main", "t1", None, None).unwrap_err().to_string().contains("turned off for this project"));
     assert_eq!(store::list().unwrap().len(), 2);
+}
+
+/// What `terminalx sessions create --issue` with no merge flag, and an issue
+/// started from the palette, get: the switches as the project leaves them (#700).
+#[test]
+fn a_session_from_an_issue_starts_set_to_resolve_and_merge_unless_the_project_says_otherwise() {
+    /// The issue session "author"'s new pipeline, in a store of its own.
+    fn started(host: &FakeHost, auto_merge: Option<bool>) -> Pipeline {
+        let _home = crate::store::temp_home();
+        start(host, "author", "t1", auto_merge, None).unwrap()
+    }
+    let kinds = |pipeline: &Pipeline| pipeline.events.iter().map(|event| event.kind.clone()).collect::<Vec<_>>();
+    for issue in [github_issue(), linear_issue()] {
+        let _home = crate::store::temp_home();
+        let host = FakeHost::new(&issue);
+        host.world().sessions.insert("plain".into(), session("plain", None));
+        let pipeline = start(&host, "author", "t1", None, None).unwrap();
+        assert!(pipeline.auto_merge && pipeline.resolve_conflicts, "{}", issue.provider);
+        assert_eq!(kinds(&pipeline), ["started", "autoMerge"]);
+        // A session not started from an issue is as it was: both off.
+        let plain = start(&host, "plain", "t1", None, None).unwrap();
+        assert!(!plain.auto_merge && !plain.resolve_conflicts);
+    }
+
+    // `--no-auto-merge` turns off the merge for that session only; resolving stays.
+    let pipeline = started(&FakeHost::new(&github_issue()), Some(false));
+    assert!(!pipeline.auto_merge && pipeline.resolve_conflicts);
+
+    // A project that turned them off keeps them off.
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.auto_merge = Some(false);
+    host.world().settings.resolve_conflicts = Some(false);
+    let pipeline = started(&host, None);
+    assert!(!pipeline.auto_merge && !pipeline.resolve_conflicts);
+
+    // Where a person does the merge it is never set to merge by itself.
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.require_person = true;
+    let pipeline = started(&host, None);
+    assert!(!pipeline.auto_merge && pipeline.resolve_conflicts);
+    assert_eq!(kinds(&pipeline), ["started"]);
+
+    // Nor in a cloud workspace, which never merges.
+    let pipeline = started(&cloud_host(&linear_issue()), None);
+    assert!(!pipeline.auto_merge && pipeline.resolve_conflicts);
 }
 
 #[test]
@@ -1590,7 +1635,11 @@ fn only_the_pipelines_own_branch_is_ever_pushed() {
 
 #[test]
 fn a_pull_request_that_still_shows_the_old_head_after_a_push_is_given_a_moment() {
-    let run = Run::start(&github_issue(), true);
+    // The review's own reads are counted: the conflict watcher, which reads the
+    // pull request too, is off as the project turned it off.
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.resolve_conflicts = Some(false);
+    let run = Run::start_in(host, true);
     run.to_review();
     run.reviewer(&reviewed(C1, "changes", HIGH));
     run.host.commit(C2);

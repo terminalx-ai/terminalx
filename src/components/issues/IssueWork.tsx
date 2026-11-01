@@ -11,11 +11,15 @@ function PlaceIcon({ worker, className }: { worker: IssueWorker; className?: str
   return <Icon className={cn("size-3 shrink-0", className)} />;
 }
 
-/** One person's work on the issue: who and where, the session, its branch and state, and when it was last active. */
-function WorkerRow({ worker, now }: { worker: IssueWorker; now: number }) {
+/**
+ * One person's work on the issue: who and where, the session, its branch and
+ * state, and when it was last active. `fade` dims work that went quiet; its
+ * "Was working on this" line says so either way.
+ */
+function WorkerRow({ worker, now, fade }: { worker: IssueWorker; now: number; fade: boolean }) {
   const where = worker.place === "this" ? "this Mac" : worker.place === "machine" ? worker.machine : worker.place === "cloud" || worker.cloud ? "cloud" : null;
   return (
-    <li className={cn("flex min-w-0 items-start gap-2", worker.phase === "faded" && "opacity-70")} data-testid="issue-worker">
+    <li className={cn("flex min-w-0 items-start gap-2", fade && worker.phase === "faded" && "opacity-70")} data-testid="issue-worker">
       <PlaceIcon worker={worker} className="mt-0.5" />
       <div className="min-w-0 flex-1">
         <div className="truncate text-foreground">
@@ -33,11 +37,11 @@ function WorkerRow({ worker, now }: { worker: IssueWorker; now: number }) {
   );
 }
 
-export function IssueWorkList({ workers, now = Date.now(), className }: { workers: IssueWorker[]; now?: number; className?: string }) {
+export function IssueWorkList({ workers, now = Date.now(), fade = true, className }: { workers: IssueWorker[]; now?: number; fade?: boolean; className?: string }) {
   return (
     <ul className={cn("flex flex-col gap-2 text-[11px]", className)}>
       {workers.map((worker) => (
-        <WorkerRow key={worker.key} worker={worker} now={now} />
+        <WorkerRow key={worker.key} worker={worker} now={now} fade={fade} />
       ))}
     </ul>
   );
@@ -65,8 +69,13 @@ export function IssueWorkChip({ workers, now = Date.now(), className }: { worker
           {workers.length > 1 && <span className="shrink-0 rounded-sm bg-veil-strong px-1 text-[10px] text-muted-foreground">+{workers.length - 1}</span>}
         </span>
       </TooltipTrigger>
-      <TooltipContent side="bottom" align="start" className="max-w-72 items-start">
-        <IssueWorkList workers={workers} now={now} />
+      {/* The card is a flex row, so the list has to be allowed to shrink
+          below its longest line: otherwise that line sets the list's width,
+          runs past the card's edge and is never cut with "…" (#713). Its
+          lines lie over the rows below, so keep it opaque even in macOS
+          glass mode, and dim none of its rows. */}
+      <TooltipContent side="bottom" align="start" className="max-w-72 items-start bg-(--surface-card)" data-testid="issue-work-card">
+        <IssueWorkList workers={workers} now={now} fade={false} className="min-w-0 flex-1" />
       </TooltipContent>
     </Tooltip>
   );

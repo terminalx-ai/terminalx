@@ -452,8 +452,10 @@ export function SessionView({
   const own = worktreeCheckout(session, store.workspaces);
   const movedTo = own && own.branch !== session.branch ? checkoutLabel(own) : null;
   // One action for local and cloud tabs, so a remapped shortcut switches either.
+  // A cloud tab's terminal is the runtime's, which also moves a native Codex tab there (#644).
+  const viewPlace = { remote: !local, toTerminal: local ? undefined : backend.toTerminal };
   useShortcut("session.toggleTerminalView", () => {
-    if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, { remote: !local });
+    if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, viewPlace);
   });
   const ed = useEditors();
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
@@ -717,7 +719,7 @@ export function SessionView({
                   aria-label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal}
                   aria-pressed={activeInTerminal}
                   disabled={switching}
-                  onClick={() => void toggleTabView(session, activeTab, { remote: !local })}
+                  onClick={() => void toggleTabView(session, activeTab, viewPlace)}
                   className={cn(activeInTerminal && "bg-veil-strong text-foreground")}
                 >
                   {activeInTerminal ? <MessageSquare /> : <Terminal />}

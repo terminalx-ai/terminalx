@@ -13,7 +13,104 @@ pub(super) fn selected(tab: &TabEntry) -> bool {
     tab.transport == AgentTransport::ExperimentalCodexStdio
 }
 
+/// The words a shell would make of `text`, for arguments `cloud_config` and
+/// `cloud_grants` quote for a terminal launch: split on unquoted whitespace,
+/// `'…'` taken literally, `"…"` with `\` escaping `"`, `\`, `$` and a
+/// backquote, and `\` escaping any one character outside quotes.
+fn shell_words(text: &str) -> Vec<String> {
+    let (mut words, mut word, mut started) = (Vec::new(), String::new(), false);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => { started = true; word.extend(chars.by_ref().take_while(|&c| c != '\'')); }
+            '"' => {
+                started = true;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match chars.next() {
+                            Some(next @ ('"' | '\\' | '$' | '`')) => word.push(next),
+                            Some(next) => { word.push('\\'); word.push(next); }
+                            None => word.push('\\'),
+                        },
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => { started = true; if let Some(next) = chars.next() { word.push(next); } }
+            c if c.is_whitespace() => if started || !word.is_empty() { words.push(std::mem::take(&mut word)); started = false; },
+            c => { started = true; word.push(c); }
+        }
+    }
+    if started || !word.is_empty() { words.push(word); }
+    words
+}
+
+/// What a native launch takes from a cloud workspace, as a terminal launch
+/// does (`start_cli`): the creator's route, the workspace's configuration and
+/// the Local VM's driver as `-c` overrides ahead of the subcommand; the
+/// configured variables, then the grant's, so a credential always wins; and
+/// the names the grant clears. Empty outside a workspace.
+struct NativeLaunch {
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    unset: Vec<String>,
+    /// The model a route names, which the tab then runs on.
+    model: Option<String>,
+    /// What keeps the route from working, for the tab.
+    notice: Option<String>,
+}
+
+/// The workspace's grant snapshot and configuration for a launch under `key`.
+fn cloud_launch(key: &str, cwd: &str) -> (crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig) {
+    #[cfg(test)]
+    if let Some(stand_in) = tests::cloud_stand_in() { return stand_in; }
+    (crate::cloud_grants::launch_grant("codex", Path::new(cwd)), crate::cloud_config::launch_config("codex", key))
+}
+
+fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud_config::LaunchConfig, computer: &str) -> NativeLaunch {
+    let route = grant.route.as_ref();
+    let mut args = route.map(|route| shell_words(&route.codex_args)).unwrap_or_default();
+    args.extend(shell_words(&config.args));
+    args.extend(shell_words(computer));
+    args.extend(["app-server".into(), "--listen".into(), "stdio://".into()]);
+    let mut env = config.env.clone();
+    let mut unset = Vec::new();
+    for (name, value) in &grant.env {
+        match value {
+            Some(value) => env.push((name.clone(), value.clone())),
+            None => unset.push(name.clone()),
+        }
+    }
+    NativeLaunch { args, env, unset, model: route.and_then(|route| route.model.clone()), notice: route.and_then(|route| route.notice.clone()) }
+}
+
+/// Whether the installed Codex can serve the app-server connection.
+fn codex_supported() -> bool {
+    let Some(program) = crate::binpath::resolve("codex") else { return false };
+    let mut probe = std::process::Command::new(&program);
+    probe.arg("--version").env("PATH", crate::binpath::login_path());
+    crate::git::output_within(probe, Duration::from_secs(5)).is_ok_and(|version| codex::stdio::supported(&version))
+}
+
 impl SessionManager {
+    /// Native Codex is tried, not required (#644): a tab that has not started
+    /// its thread runs on the terminal engine instead when this Codex is older
+    /// than the app server's minimum, or missing. Decided at its first launch,
+    /// so an update since the tab was made is followed, and under admission
+    /// like the terminal engine's own `--help` probe. Says whether it moved.
+    pub(super) fn codex_stdio_falls_back(&self, rt: &TabRuntime, tab: &TabEntry) -> Result<bool> {
+        let first_launch = selected(tab) && tab.provider_session_id.is_none() && tab.fork_from.is_none()
+            && matches!(rt.engine, Engine::None) && rt.child.is_none();
+        if !first_launch || codex_supported() { return Ok(false); }
+        index::update_tab(&rt.session_id, &rt.tab_id, |tab| {
+            if selected(tab) && tab.provider_session_id.is_none() { tab.transport = AgentTransport::Pty; }
+            Ok(())
+        })?;
+        if let Ok(session) = index::get(&rt.session_id) { self.sink.emit("session_updated", &session); }
+        Ok(true)
+    }
+
     pub(super) fn refuse_codex_stdio_operation(&self, session: &str, tab: &str) -> Result<()> {
         let entry = index::get(session)?;
         anyhow::ensure!(!entry.tab(tab).is_some_and(selected), "This operation is not supported for experimental Codex stdio. Create a new session with the desired settings; no PTY handoff or thread migration is performed.");
@@ -174,15 +271,34 @@ impl SessionManager {
         let version = crate::git::output_within(probe, Duration::from_secs(5)).map_err(|_| anyhow!("Could not verify experimental Codex stdio version. No prompt was sent."))?;
         anyhow::ensure!(codex::stdio::supported(&version), "Experimental stdio requires Codex {} or newer (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::MIN_VERSION, version.trim());
         current()?;
-        let env = vec![
+        let mut env = vec![
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
             ("RACCOON_HOOK_TOKEN".into(), uuid::Uuid::now_v7().to_string()),
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
         ];
+        // A cloud workspace's credential, route and configuration, from one
+        // grant snapshot like a terminal launch's; read here, off every lock,
+        // because the first grant sync may still be on its way.
+        let key = key_of(session, tab);
+        let (grant, config) = cloud_launch(&key, cwd);
+        let native = native_launch(&grant, &config, &crate::local_vm::launch_args("codex", false));
+        // In a workspace Codex signs in with the workspace's credential, in a
+        // home of its own with no Raccoon hooks; on a Mac, the reader's home.
+        if grant.codex_auth.is_some() {
+            let home = codex::home::prepare_native(cwd, grant.codex_auth.clone()).context("prepare the native Codex home")?;
+            env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+        }
+        env.extend(native.env);
+        current()?;
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            if let Some(text) = native.notice { self.publish(&mut rt, Payload::Status { text }, None); }
+            if let (Some(model), Engine::CodexStdio(engine)) = (native.model, &mut rt.engine) { engine.route_model(model); }
+        }
+        crate::cloud_grants::record_launch(&key, &grant);
         let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
-        let args = vec!["app-server".into(), "--listen".into(), "stdio://".into()];
-        let child = self.host.spawn(&key_of(session, tab), SpawnSpec { program: &program, args: &args, cwd: Path::new(cwd), env: &env }, sink)?;
+        let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink)?;
         let cancelled = {
             let mut rt = rt_arc.lock().unwrap();
             // Stop retains the launch until startup has settled. Even a late
@@ -441,6 +557,7 @@ impl SessionManager {
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
         rt.child = None; rt.child_pid = None; rt.stdio_compaction = None; rt.stdio_authority = None;
+        crate::cloud_grants::forget_launch(&rt.key());
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
         if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent); }

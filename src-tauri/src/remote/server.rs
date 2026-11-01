@@ -936,7 +936,7 @@ impl WorkspaceRpc {
                 .with_data(json!({ "role": Role::None, "reason": "access-unknown" })));
         }
         let needed = match method {
-            "pty.write" | "pty.resize" | "pty.control" | "lease.acquire" | "lease.release" => Role::Driver,
+            "pty.write" | "pty.resize" | "pty.control" | "session.toTerminal" | "lease.acquire" | "lease.release" => Role::Driver,
             // Escape for a running turn is driving it, as a mailbox stop is.
             "session.interrupt" => Role::Driver,
             // Bytes sent to a port are input to whatever listens there.
@@ -949,7 +949,7 @@ impl WorkspaceRpc {
         // agent's settings, read its tokens or start an agent with other
         // flags. So typing into one needs what changing those settings
         // needs (PRO-88): a manager, or a driver who may approve permissions.
-        if matches!(method, "pty.write" | "pty.resize" | "pty.control") && access.can_drive() && !access.can_configure() {
+        if matches!(method, "pty.write" | "pty.resize" | "pty.control" | "session.toTerminal") && access.can_drive() && !access.can_configure() {
             return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a terminal runs anything as the workspace's user"))
                 .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
         }
@@ -1064,6 +1064,7 @@ impl WorkspaceRpc {
             "session.close" => self.session_close(params),
             "session.send" => self.session_send(peer, params),
             "session.interrupt" => self.session_interrupt(peer, params),
+            "session.toTerminal" => self.session_to_terminal(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
@@ -1900,16 +1901,42 @@ impl WorkspaceRpc {
         let Some((session_id, tab_id)) = start else { return Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref())) };
         // Outside the lock: the CLI's first output is recorded under it.
         drop(ptys);
-        self.manager()?
-            .ensure_started(session_id, tab_id)
-            .map_err(|error| RpcError::new("unavailable", format!("the agent did not start: {error:#}")))?;
-        self.tabs_changed.notify_one();
+        self.start_in_terminal(session_id, tab_id)?;
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         // The CLI starts at its default size; the controller's applies from here.
         let _ = self.terminals.resize(&pty_id, pty.cols, pty.rows);
         pty.pid = self.terminals.pid(&pty_id);
         Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
+    }
+
+    /// Native Codex's terminal view (#644): the tab moves to Codex's own
+    /// terminal on the same thread, for good, as a Mac's `toTerminal` does, and
+    /// that terminal starts, picking up the thread from the native home. Held
+    /// to what starting an agent's terminal needs (`pty.control` with `start`):
+    /// a driver who may approve, while nobody else holds the tab.
+    fn session_to_terminal(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        match self.agent_input_refusal(peer, &tab.session_id, &tab.tab_id) {
+            Some(refusal) if refusal.code == "lease_held" && self.access(peer).role == Role::Manager => {
+                let user = peer.user_id.as_deref().unwrap_or_default();
+                let busy = agents_busy(&self.agents, &tab.session_id, &tab.tab_id);
+                self.collab.claim(&tab.tab_id, user, crate::cloud_agents::now_ms(), busy, true).map_err(lease_refusal)?;
+            }
+            Some(refusal) => return Err(refusal),
+            None => {}
+        }
+        self.start_in_terminal(&tab.session_id, &tab.tab_id)?;
+        Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id }))
+    }
+
+    /// Start a tab's CLI in its terminal, moving native Codex there first.
+    fn start_in_terminal(&self, session_id: &str, tab_id: &str) -> Result<(), RpcError> {
+        let manager = self.manager()?;
+        manager.codex_stdio_to_terminal(session_id, tab_id).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
+        manager.ensure_started(session_id, tab_id).map_err(|error| RpcError::new("unavailable", format!("the agent did not start: {error:#}")))?;
+        self.tabs_changed.notify_one();
+        Ok(())
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {
@@ -2363,6 +2390,11 @@ impl WorkspaceRpc {
             worktree_name: Option<String>,
             #[serde(default)]
             repository: Option<super::session_target::RepositoryTarget>,
+            /// The desktop's Settings → Experimental → Native Codex (#644): a
+            /// Codex tab goes through the app server where it can. A runtime
+            /// that does not know the field starts a terminal tab, as before.
+            #[serde(default)]
+            native_codex: bool,
         }
         let mut p: Params = parse(params)?;
         // A blank mode is no mode: the tab takes the default launch mode.
@@ -2386,6 +2418,17 @@ impl WorkspaceRpc {
                 log::warn!("prepare the blank project folder: {error:#}");
             }
         }
+        let mut first_tab = crate::session_ops::NewTab { transport: Default::default(),
+            harness: p.agent,
+            model: p.model,
+            effort: p.effort,
+            permission_mode: p.mode,
+        };
+        // The desktop's Native Codex setting, under the same rules as a Mac's:
+        // a session that carries a pipeline keeps the terminal engine.
+        if p.native_codex {
+            crate::session_ops::native_codex(&mut first_tab, p.issue.is_some() || p.pipeline == Some(true));
+        }
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
@@ -2399,12 +2442,7 @@ impl WorkspaceRpc {
                 issue: p.issue.clone(),
                 automation: None,
                 cwd: None,
-                tab: Some(crate::session_ops::NewTab { transport: Default::default(),
-                    harness: p.agent,
-                    model: p.model,
-                    effort: p.effort,
-                    permission_mode: p.mode,
-                }),
+                tab: Some(first_tab),
             },
         )
         .map_err(RpcError::internal)?;
@@ -2696,12 +2734,16 @@ impl WorkspaceRpc {
             effort: Option<String>,
             #[serde(default)]
             mode: Option<String>,
+            /// As in `session.create`.
+            #[serde(default)]
+            native_codex: bool,
         }
         let p: Params = parse(params)?;
         let session = self.visible_session(peer, &p.session_id)?;
         let mode = index::requested_mode(p.mode);
         self.check_new_tab(&p.agent, &p.model, mode.as_deref())?;
-        let new_tab = crate::session_ops::NewTab { transport: Default::default(), harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode };
+        let mut new_tab = crate::session_ops::NewTab { transport: Default::default(), harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode };
+        if p.native_codex { crate::session_ops::native_codex(&mut new_tab, false); }
         // Through the session manager where there is one: it is the one place that refuses a Bypass tab in a shared session.
         let tab = match &self.sessions {
             Some(manager) => manager.add_tab(&session.id, &new_tab).map_err(|error| RpcError::new("refused", error.to_string()))?,

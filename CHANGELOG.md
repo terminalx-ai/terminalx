@@ -54,6 +54,24 @@
 
 ### Mobile
 
+- Start sessions from the phone as the Mac's new-session view does: a project's
+  session in a new worktree (named for the work) or on its checkout, or a quick
+  chat, with the agent, model, effort, permission mode, title and first
+  message. Codex sessions follow Settings → Experimental → Native Codex. A
+  retry after a lost reply opens the first session instead of a second one.
+  Projects reach the phone by an id, never their path. Read-only and revoked
+  phones cannot start sessions.
+- Settings → This Mac on the phone turns Native Codex on or off for the Mac's
+  next Codex sessions; the Mac's own Settings follows it while open.
+- Open a tab's terminal view on the phone, as on the desktop. The agent's own
+  screen is emulated on the phone with the desktop's terminal (xterm.js) at the
+  size the Mac draws it, so full-screen CLIs like Codex and Claude Code show as
+  they do there. Type into it directly or send text whole, with Esc, Tab, Ctrl,
+  arrow and Enter keys sent as the desktop sends them. While the phone types,
+  desktop typing waits, and leaving the view gives it back. Opening the terminal
+  starts the tab's agent if it is not running, and moves a native Codex tab to
+  Codex's own terminal on the same conversation, as the desktop does. Shown only
+  for Macs that support it.
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
 - Sending a message or worktree note again after the connection dropped no
@@ -137,6 +155,18 @@
   that Codex never took because it failed or was stopped first is offered back
   with **Resend last prompt**, after a restart too, and is never sent again on
   its own. (#644)
+- Add Settings → Experimental with a **Native Codex** switch, off by default. When
+  it is on, new Codex sessions and tabs started from the app or the `terminalx`
+  command line connect to Codex directly, for reliable compaction status. Sessions
+  from issues, automations and Ask every time keep the terminal.
+  A tab whose Codex is older than 0.164.0 when it first starts switches to the
+  terminal and sends as usual, with no error. Existing sessions are unchanged. (#644)
+- Native Codex in cloud workspaces: with the switch on, Codex sessions and tabs
+  the app starts in an existing workspace connect to Codex directly too. Codex
+  signs in with the workspace's credential and takes the creator's route and the
+  workspace's variables, secrets, instructions and MCP servers, in a home of its
+  own where no TerminalX hook runs; sign-in problems are reported as for other
+  sessions, and the terminal view moves the tab as on a Mac. (#644)
 
 ### Status bar
 
@@ -172,6 +202,20 @@
 
 ### Issue pipelines
 
+- Start a session from a GitHub or Linear issue with **Resolve conflicts
+  automatically** and **Merge when green** on: from the Issues page, an issue
+  picked in New Session, the command palette, and `terminalx sessions create
+  --issue` without `--auto-merge` or `--no-auto-merge`. Each launch can still
+  turn either off. Merge stays off where a person does the merge, where the
+  pipeline is off or unavailable, and in a cloud workspace. A merge still needs
+  the reviewed commit with its checks passed, and protected categories still
+  hold it. Other sessions start with both off, as before. In a project's
+  **Issue pipeline…** settings, each default is now **From issues**, **All
+  sessions** or **Off**, and a project set to Off keeps its issue sessions off.
+  A switch an older version saved as off whenever another setting was saved is
+  read once as **From issues**; one an older version saves after that reads as
+  Off. Continuing a session keeps its pipeline's switches as they are, and
+  starting an issue again takes the switches its pipeline holds. (#700)
 - When a pipeline's pull request is merged or closed, or the pipeline is
   stopped, stop the idle agents of its reviewer and conflict resolver (and,
   after a merge or close, its author), with the background commands and watches

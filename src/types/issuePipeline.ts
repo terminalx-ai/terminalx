@@ -133,8 +133,13 @@ export interface StartedIssuePipeline {
 /** A project's issue pipeline; stored with the project by the Rust side. */
 export interface IssuePipelineSettings {
   enabled: boolean;
-  /** What the issue's own switch starts at. */
-  autoMerge: boolean;
+  /**
+   * The project's own choice for what "Merge when green" starts at in every
+   * new session. Absent until one is made: then a session started from an
+   * issue starts with it on and any other with it off (`pipelineLaunchDefaults`).
+   */
+  autoMerge?: boolean;
+  /** The same for "Resolve conflicts automatically". */
   resolveConflicts?: boolean;
   maxResolutions?: number;
   /** A person merges whatever the switch says. */

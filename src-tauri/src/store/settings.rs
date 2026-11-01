@@ -50,6 +50,9 @@ pub struct Settings {
     /// When an agent nobody is using is stopped (`idle_agents.rs`). The
     /// runtime that owns the agents reads it for itself.
     pub agents: AgentSettings,
+    /// Settings → Experimental. Tabs are made by the Rust side, which reads
+    /// these when it makes one, so they live here.
+    pub experimental: ExperimentalSettings,
 }
 
 /// Agents the app started that sit idle are stopped after a while (#696),
@@ -87,6 +90,15 @@ impl AgentSettings {
     pub fn idle_limit(&self) -> Option<std::time::Duration> {
         (self.idle_stop_minutes > 0).then(|| std::time::Duration::from_secs(u64::from(self.idle_stop_minutes) * 60))
     }
+}
+
+/// Features that are on only when the reader turns them on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExperimentalSettings {
+    /// New Codex conversations a person starts go through Codex's app server
+    /// (#644) where it can serve them (`session_ops::prefer_native_codex`).
+    pub native_codex: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -260,6 +272,7 @@ impl Default for Settings {
             work_status: WorkStatusSettings::default(),
             machine_name: None,
             agents: AgentSettings::default(),
+            experimental: ExperimentalSettings::default(),
         }
     }
 }
@@ -308,6 +321,15 @@ mod tests {
         }
         let future: Settings = serde_json::from_str(r#"{"quitBehavior":"new-policy"}"#).unwrap();
         assert_eq!(future.quit_behavior, Some(QuitBehavior::KeepRunning));
+    }
+
+    #[test]
+    fn experimental_features_stay_off_until_turned_on() {
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(!legacy.experimental.native_codex);
+        let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
+        assert!(on.experimental.native_codex);
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true}));
     }
 
     #[test]

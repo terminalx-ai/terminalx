@@ -275,6 +275,10 @@ pub enum IssueOpErrorKind {
     Unsupported,
     /// The input is not something the provider takes, like an 11th GitHub assignee.
     Invalid,
+    /// GitHub answered a write with a redirect (301, 302, 307 or 308): the
+    /// repository was renamed or moved, or the issue was transferred. Nothing
+    /// was written.
+    Moved,
     /// Not built yet.
     NotImplemented,
     /// Anything the provider said that fits none of the above.
@@ -282,8 +286,9 @@ pub enum IssueOpErrorKind {
 }
 
 /// What a failed issue operation answers. `message` is fixed per kind and
-/// provider, or a fixed sentence of this module's own: never a token, a key
-/// or the provider's reply.
+/// provider, a fixed sentence of this module's own, or one that names a
+/// repository checked to be only a name ([`IssueOpError::repository_moved`]):
+/// never a token, a key or the provider's reply.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueOpError {
@@ -301,6 +306,21 @@ impl IssueOpError {
     /// A kind with a sentence of its own. `&'static` so no reply or secret can reach it.
     pub fn with_message(kind: IssueOpErrorKind, message: &'static str) -> Self {
         IssueOpError { kind, message: message.into() }
+    }
+
+    /// GitHub answers for the repository as `to` (`owner/name`) now. Given the
+    /// project's `origin` URL, the message has the command that points it
+    /// there. Only a checked name and a remote rebuilt from it reach the
+    /// message; a name that isn't one gives the fixed message.
+    pub fn repository_moved(to: &str, origin: Option<&str>) -> Self {
+        if !crate::issues::is_github_repo(to) {
+            return IssueOpError::new(IssueOpErrorKind::Moved, Provider::Github);
+        }
+        let message = match origin.and_then(|origin| crate::issues::github_remote_url_for(origin, to)) {
+            Some(url) => format!("GitHub now names this repository {to}, so nothing was changed. Point the project at it with git remote set-url origin {url}, then try again."),
+            None => format!("GitHub now names this repository {to}, so nothing was changed. Try again."),
+        };
+        IssueOpError { kind: IssueOpErrorKind::Moved, message }
     }
 }
 
@@ -332,6 +352,8 @@ pub fn message(kind: IssueOpErrorKind, provider: Provider) -> &'static str {
         (Unsupported, Provider::Github) => "GitHub issues don't have that.",
         (Unsupported, Provider::Linear) => "Linear issues don't have that.",
         (Invalid, _) => "That change isn't one the issue can take.",
+        (Moved, Provider::Github) => "GitHub has moved this elsewhere, so nothing was changed. The issue may now be in another repository: open it in your browser to see where.",
+        (Moved, Provider::Linear) => "Linear has moved this elsewhere, so nothing was changed. Open the issue in your browser to see where it is now.",
         (NotImplemented, _) => "TerminalX can't do this yet. Open the issue in your browser to make this change.",
         (Other, Provider::Github) => "GitHub couldn't do that. Try again, or open the issue in your browser.",
         (Other, Provider::Linear) => "Linear couldn't do that. Try again, or open the issue in your browser.",

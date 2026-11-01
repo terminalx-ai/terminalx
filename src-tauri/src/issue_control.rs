@@ -398,6 +398,7 @@ pub fn op_error(error: IssueOpError) -> ControlError {
         "rate_limited" | "network" => "Wait a minute and try once more.",
         "conflict" => "Read the issue again with terminalx issues view, then decide whether the change still applies.",
         "invalid" | "unsupported" => "Read the message and correct the command; see terminalx skills get terminalx-cli.",
+        "moved" => "Nothing was changed. Tell the person what the message says moved; when it names the repository's new name, the next try goes there.",
         _ => "Tell the person; do not retry with other credentials.",
     };
     ControlError::new(&code, error.message, Some(recovery.to_string()))

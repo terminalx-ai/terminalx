@@ -202,15 +202,36 @@ describe("where a pipeline stands", () => {
     expect(ids(all)).toEqual(["p1", "p2", "p3", "p3-again", "p4", "p5"]);
   });
 
-  it("fills a project's settings in with the defaults, which never merge", async () => {
+  it("fills a project's settings in with the defaults, which make no choice for the launch switches", async () => {
     const { DEFAULT_PIPELINE_SETTINGS, pipelineSettings } = await load();
-    expect(DEFAULT_PIPELINE_SETTINGS).toMatchObject({ enabled: true, autoMerge: false, requirePerson: false, maxRounds: 3, mergeMethod: "merge" });
+    expect(DEFAULT_PIPELINE_SETTINGS).toMatchObject({ enabled: true, requirePerson: false, maxRounds: 3, mergeMethod: "merge" });
+    expect(DEFAULT_PIPELINE_SETTINGS).not.toHaveProperty("autoMerge");
+    expect(DEFAULT_PIPELINE_SETTINGS).not.toHaveProperty("resolveConflicts");
     expect(DEFAULT_PIPELINE_SETTINGS.protected).toEqual({ migrations: true, deploy: true, security: true, paths: [] });
     expect(pipelineSettings(null)).toBe(DEFAULT_PIPELINE_SETTINGS);
     expect(pipelineSettings({ issuePipeline: null })).toBe(DEFAULT_PIPELINE_SETTINGS);
     const chosen = pipelineSettings({ issuePipeline: { ...DEFAULT_PIPELINE_SETTINGS, autoMerge: true, protected: { ...DEFAULT_PIPELINE_SETTINGS.protected, deploy: false } } });
     expect(chosen.autoMerge).toBe(true);
     expect(chosen.protected).toEqual({ migrations: true, deploy: false, security: true, paths: [] });
+  });
+
+  // #700: an issue's session starts with both switches on unless the project turned them off.
+  it("starts a session from an issue with both switches on, any other with both off, unless the project chose", async () => {
+    const { DEFAULT_PIPELINE_SETTINGS: unset, pipelineLaunchDefaults } = await load();
+    expect(pipelineLaunchDefaults(unset, true)).toEqual({ autoMerge: true, resolveConflicts: true });
+    expect(pipelineLaunchDefaults(unset, false)).toEqual({ autoMerge: false, resolveConflicts: false });
+    const off = { ...unset, autoMerge: false, resolveConflicts: false };
+    expect(pipelineLaunchDefaults(off, true)).toEqual({ autoMerge: false, resolveConflicts: false });
+    const on = { ...unset, autoMerge: true, resolveConflicts: true };
+    expect(pipelineLaunchDefaults(on, false)).toEqual({ autoMerge: true, resolveConflicts: true });
+    // Never set to merge where a person does the merge.
+    expect(pipelineLaunchDefaults({ ...on, requirePerson: true }, true)).toEqual({ autoMerge: false, resolveConflicts: true });
+  });
+
+  it("offers each switch's choice as which sessions start with it on, and stores none for issues", async () => {
+    const { switchChoiceOf, switchDefaultOf } = await load();
+    expect([undefined, true, false].map(switchDefaultOf)).toEqual(["issues", "all", "off"]);
+    expect((["issues", "all", "off"] as const).map(switchChoiceOf)).toEqual([undefined, true, false]);
   });
 });
 

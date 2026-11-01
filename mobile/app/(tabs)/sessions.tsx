@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
-import { ChevronRight, Search } from "lucide-react-native";
+import { ChevronRight, Plus, Search } from "lucide-react-native";
 import type { ColumnId } from "@terminalx/portable/dashboard";
 import { conversationRows, statusLabel, type ConversationRow } from "@mobile/data/conversations";
 import { useApp } from "@mobile/state/AppProvider";
@@ -19,6 +19,14 @@ export default function SessionsScreen() {
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
   const rows = useMemo(() => conversationRows(app.sessions, query), [app.sessions, query]);
+  // Offered only by a Mac that starts sessions for a phone.
+  const [canCreate, setCanCreate] = useState(false);
+  useEffect(() => {
+    let current = true;
+    if (app.connectionStage !== "connected") { setCanCreate(false); return; }
+    app.api.features().then((features) => { if (current) setCanCreate(features.sessionCreate === 1); }).catch(() => { if (current) setCanCreate(false); });
+    return () => { current = false; };
+  }, [app.api, app.connectionStage, app.activeHost?.id]);
   const sections = useMemo(() => columns.map((column) => ({ title: column.title, id: column.id, data: rows.filter((row) => row.column === column.id) })).filter((section) => section.data.length > 0), [rows]);
 
   if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a Mac" detail="Connect to a paired Mac before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;
@@ -27,7 +35,7 @@ export default function SessionsScreen() {
   const stageCopy = connectionCopy(app.connectionStage, app.connectionAttempt);
   return <>{menu.element}<SectionList sections={sections} keyExtractor={(item) => item.key} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" stickySectionHeadersEnabled={false} style={{ backgroundColor: palette.page }} contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={app.loadingSessions} onRefresh={() => void app.refreshSessions()} tintColor={palette.accent} />} ListHeaderComponent={<View style={styles.header}>
     <Card style={[styles.connection, { backgroundColor: app.connectionStage === "connected" ? `${palette.success}16` : `${palette.warning}18` }]}><StatusDot color={app.connectionStage === "connected" ? palette.success : palette.warning} /><View style={styles.flex}><Pressable accessibilityRole="button" accessibilityHint="Long press for device options" onLongPress={() => menu.open(app.activeHost!)}><Text numberOfLines={1} style={[styles.connectionTitle, { color: palette.ink }]}>{menu.nameOf(app.activeHost)}</Text></Pressable><Text style={[styles.detail, { color: palette.muted }]}>{stageCopy.title}</Text>{diagnostic?.detail ? <Text style={[styles.hint, { color: palette.muted }]}>{diagnostic.message}: {diagnostic.detail}</Text> : null}{stageCopy.hint ? <Text style={[styles.hint, { color: palette.warning }]}>{stageCopy.hint}</Text> : null}</View>{app.connectionStage !== "connected" ? <Button label="Retry" kind="secondary" onPress={() => app.connection.restart("retry was tapped")} /> : null}<DeviceOptionsButton name={menu.nameOf(app.activeHost)} onPress={() => menu.open(app.activeHost!)} /></Card>
-    <View style={[styles.search, { backgroundColor: palette.card, borderColor: palette.border }]}><Search size={18} color={palette.faint} /><TextInput value={query} onChangeText={setQuery} placeholder="Search sessions" placeholderTextColor={palette.faint} style={[styles.searchInput, { color: palette.ink }]} /></View>
+    <View style={styles.tools}><View style={[styles.search, { backgroundColor: palette.card, borderColor: palette.border }]}><Search size={18} color={palette.faint} /><TextInput value={query} onChangeText={setQuery} placeholder="Search sessions" placeholderTextColor={palette.faint} style={[styles.searchInput, { color: palette.ink }]} /></View>{canCreate ? <Pressable accessibilityRole="button" accessibilityLabel="New session" testID="new-session" onPress={() => router.push("/session/new")} style={({ pressed }) => [styles.newSession, { backgroundColor: palette.accent, opacity: pressed ? 0.72 : 1 }]}><Plus size={20} color={palette.accentInk} /></Pressable> : null}</View>
   </View>} renderSectionHeader={({ section }) => <View style={styles.sectionHeader}><Text style={[styles.sectionTitle, { color: palette.ink }]}>{section.title}</Text><Text style={[styles.count, { color: palette.muted, backgroundColor: palette.raised }]}>{section.data.length}</Text></View>} renderItem={({ item }) => <SessionRow session={item} onPress={() => { router.push({ pathname: "/session/[sessionId]", params: { sessionId: item.session.id, tabId: item.tab.id, hostId: app.activeHost!.id, title: item.session.title } }); }} />} ListEmptyComponent={app.loadingSessions ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." busy /> : app.connectionStage === "connected" ? <EmptyState title="No sessions" detail="Sessions running on this Mac will appear here." /> : <EmptyState title="Sessions are offline" detail="Cached transcripts remain available after you reopen a session from recent history." />} /></>;
 }
 
@@ -55,7 +63,9 @@ const styles = StyleSheet.create({
   detail: { fontSize: 13, lineHeight: 18 },
   hint: { fontSize: 12, marginTop: 3 },
   flex: { flex: 1 },
-  search: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12 },
+  tools: { flexDirection: "row", alignItems: "center", gap: 10 },
+  search: { flex: 1, minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12 },
+  newSession: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   searchInput: { flex: 1, height: 44, fontSize: 16 },
   sectionHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12, marginBottom: 2, paddingHorizontal: 3 },
   sectionTitle: { fontSize: 20, fontWeight: "700", letterSpacing: -0.3 },

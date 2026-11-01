@@ -211,6 +211,7 @@ pub fn run() {
     let status_state = Arc::new(status::StatusState::default());
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    pairing.attach_models(codex_models.clone());
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     let paired = pairing.clone();
     let work_claims = Arc::new(work_claims::WorkClaims::new(account.clone(), move || paired.host_id()));
@@ -692,6 +693,8 @@ pub fn run() {
             commands::set_work_status_settings,
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
+            commands::experimental_settings,
+            commands::set_experimental_settings,
             commands::organization_work_status,
             commands::set_organization_work_status,
             commands::session_link_issue,

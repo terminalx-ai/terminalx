@@ -1456,8 +1456,11 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
     }
     let now = stamp(host.now());
     let cloud = host.cloud();
+    // Left to the project, a session started from an issue starts with both
+    // switches on unless the project turned them off (#700).
+    let from_issue = issue.is_some();
     // A cloud workspace's pipeline has no switch to turn on: it never merges.
-    let auto_merge = !cloud && auto_merge.unwrap_or(settings.auto_merge);
+    let auto_merge = !cloud && auto_merge.unwrap_or_else(|| settings.auto_merge_at_start(from_issue));
     let issue_body = issue_body.map(str::trim).filter(|body| !body.is_empty()).map(|body| {
         let mut end = body.len().min(ISSUE_BODY_LIMIT);
         while !body.is_char_boundary(end) {
@@ -1473,7 +1476,7 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         author: SessionRef { session_id: session_id.to_string(), tab_id: tab_id.to_string() },
         reviewer: None,
         auto_merge,
-        resolve_conflicts: settings.resolve_conflicts,
+        resolve_conflicts: settings.resolve_conflicts_at_start(from_issue),
         resolutions: 0,
         resolver: None,
         resolution: None,
