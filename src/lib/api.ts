@@ -1668,11 +1668,40 @@ export interface UsageWindow {
   source?: string;
 }
 
+/** Why a received window did not replace the one shown under its key. */
+export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline";
+
+/** A manual refresh that did not reach the provider, and when the button will. */
+export interface UsageRefreshSkip {
+  at: number;
+  reason: "inFlight" | "retryPending" | "recent" | "resetInFlight";
+  nextAt: number | null;
+}
+
+/** Live usage from a Claude turn that was not used, newer than any that was. */
+export interface LiveUsageRefused {
+  at: number;
+  reason: "unidentified" | "launchMismatch" | "statuslineMismatch";
+}
+
+// The fields marked optional below are absent from a background runtime older than #729.
 export interface UsageSnapshot {
   revision?: number;
   claudeAccount?: string | null;
-  claude?: { retryAt: number | null; revalidateAt: number | null; error: string | null; lastSuccessAt?: number | null };
-  codexRefresh?: { retryAt: number | null; error: string | null; lastSuccessAt: number | null };
+  claude?: {
+    retryAt: number | null;
+    revalidateAt: number | null;
+    error: string | null;
+    /** When the provider last answered. */
+    lastSuccessAt?: number | null;
+    /** When an answer last replaced a shown window; older than `lastSuccessAt` when the latest changed nothing. */
+    lastUpdatedAt?: number | null;
+    /** Windows in the latest answer that did not replace the shown ones. */
+    refused?: Array<{ key: string; label: string; reason: UsageRefusal }>;
+    skipped?: UsageRefreshSkip | null;
+    liveRefused?: LiveUsageRefused | null;
+  };
+  codexRefresh?: { retryAt: number | null; error: string | null; lastSuccessAt: number | null; skipped?: UsageRefreshSkip | null };
   windows: UsageWindow[];
   codex?: {
     credits?: {
