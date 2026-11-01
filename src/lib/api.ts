@@ -1825,22 +1825,8 @@ export async function onPromptDelivery(sessionId: string, tabId: string, onStage
   }
 }
 
-export interface ModelInfo {
-  id: string;
-  label: string;
-  harness: string;
-  efforts: string[];
-  defaultEffort: string | null;
-  acceptsImages: boolean;
-  isDefault: boolean;
-  /** The model that replaces this one when the provider is retiring it. */
-  upgrade: string | null;
-  description: string | null;
-  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
-  alias?: boolean;
-  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
-  resolved?: string | null;
-}
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
+export type { ModelInfo };
 
 export interface HandoffInfo {
   command: string;

@@ -1794,6 +1794,11 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "terminal.read",
         "terminal.subscribe",
         "terminal.unsubscribe",
+        // What a tab runs, the models to pick from, and the context a
+        // continuation would carry: reads, as the transcript is.
+        "session.tab",
+        "models.list",
+        "session.prepareContinuation",
         "notifications.missedSince",
         "notifications.subscribe",
         "notifications.unsubscribe",
@@ -1816,6 +1821,14 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.promoteToAgent",
         "session.send",
         "permission.respond",
+        // The session controls a phone has as the desktop does (#706).
+        "session.stop",
+        "session.interrupt",
+        "session.resendUnsent",
+        "session.setModel",
+        "session.setEffort",
+        "session.setMode",
+        "session.continue",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
@@ -1841,6 +1854,17 @@ mod tests {
         assert!(!allowed_method(DeviceScope::Viewer, "session.send"));
         assert!(!allowed_method(DeviceScope::Viewer, "terminal.open"));
         assert!(allowed_method(DeviceScope::Driver, "terminal.open"));
+        // Every method the phone dispatch answers is reachable through this
+        // gate, which runs first: one left out is refused before its handler.
+        // Reads are a viewer's; whatever changes a session is a driver's only.
+        for read in ["session.tab", "models.list", "session.prepareContinuation", "terminal.read", "terminal.subscribe"] {
+            assert!(allowed_method(DeviceScope::Viewer, read), "{read}");
+        }
+        for control in ["session.stop", "session.interrupt", "session.resendUnsent", "session.setModel", "session.setEffort",
+            "session.setMode", "session.continue", "terminal.open", "steerLease.queueInput"] {
+            assert!(allowed_method(DeviceScope::Driver, control), "{control}");
+            assert!(!allowed_method(DeviceScope::Viewer, control), "{control} is a driver's");
+        }
         assert!(allowed_method(DeviceScope::Driver, "terminal.send"));
         assert!(allowed_method(DeviceScope::Driver, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "permission.respond"));

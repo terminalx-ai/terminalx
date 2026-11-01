@@ -391,6 +391,20 @@ pub(super) fn dispatch(
         "permission.respond" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_permission(connection, params)))
         }
+        // Session controls (`sessionControls`): the desktop's own operations,
+        // which the runtime checks against this device's grant again.
+        "session.tab" => parse_params(params).and_then(|params: TabControlParams| connection.call("tab", params.into_call())),
+        "models.list" => parse_params(params).and_then(|params: ModelsParams| connection.call("models", json!({"refresh": params.refresh}))),
+        "session.prepareContinuation" => parse_params(params).and_then(|params: TabControlParams| connection.call("prepareContinuation", params.into_call())),
+        "session.stop" | "session.interrupt" | "session.resendUnsent" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: TabControlParams| {
+            connection.call(method.trim_start_matches("session."), params.into_call())
+        })),
+        "session.setModel" | "session.setEffort" | "session.setMode" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: TabSettingParams| {
+            connection.call(method.trim_start_matches("session."), params.into_call(method))
+        })),
+        "session.continue" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: ContinueParams| {
+            connection.call("continue", json!({"sessionId": params.session_id, "tabId": params.tab_id, "tab": params.tab, "prompt": params.prompt}))
+        })),
         "chat.list" => parse_params(params).and_then(|params| list_notes(manager, params)),
         "chat.post" => parse_params(params).and_then(|params| post_note(manager, device, params)),
         "chat.promoteToAgent" => {
@@ -420,9 +434,77 @@ pub(super) fn dispatch(
 /// fields it does not know.
 fn capabilities() -> Value {
     // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
+    // `sessionControls`: stop, interrupt, recovery, settings and continuing in
+    // a new tab, as the desktop offers them.
     // `terminal`: `terminal.open`, and terminal observations that carry the
     // pane's size, so the phone can emulate the screen and drive it.
-    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "terminal": 1 })
+    json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "terminal": 1 })
+}
+
+/// One tab, for a control that takes nothing else.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TabControlParams {
+    session_id: String,
+    tab_id: String,
+}
+impl TabControlParams {
+    fn into_call(self) -> Value { json!({"sessionId": self.session_id, "tabId": self.tab_id}) }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelsParams {
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// A model, an effort (none for the agent's own default) or a permission mode.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TabSettingParams {
+    session_id: String,
+    tab_id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+impl TabSettingParams {
+    fn into_call(self, method: &str) -> Value {
+        let mut call = json!({"sessionId": self.session_id, "tabId": self.tab_id});
+        match method {
+            "session.setModel" => call["model"] = json!(self.model.unwrap_or_default()),
+            "session.setEffort" => call["effort"] = json!(self.effort),
+            _ => call["mode"] = json!(self.mode.unwrap_or_default()),
+        }
+        call
+    }
+}
+
+/// "Continue in new session": the source tab, the new tab's agent and
+/// settings, and the prompt built from the prepared context.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContinueParams {
+    session_id: String,
+    tab_id: String,
+    tab: ContinueTab,
+    prompt: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContinueTab {
+    harness: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    permission_mode: Option<String>,
 }
 
 fn request_id(request: &Value) -> &str {
@@ -2063,6 +2145,24 @@ mod tests {
         let open: TerminalParams = serde_json::from_value(json!({ "worktreeId": "worktree", "tabId": "tab" })).unwrap();
         assert_eq!((open.worktree_id.as_str(), open.tab_id.as_str()), ("worktree", "tab"));
         assert!(serde_json::from_value::<TerminalParams>(json!({ "worktreeId": "worktree", "tabId": "tab", "force": true })).is_err());
+    }
+
+    #[test]
+    fn session_controls_are_named_and_take_only_their_own_fields() {
+        // A phone offers the controls only to a Mac that names them.
+        assert_eq!(capabilities()["sessionControls"], 1);
+        let tab: TabControlParams = serde_json::from_value(json!({ "sessionId": "s", "tabId": "t" })).unwrap();
+        assert_eq!(tab.into_call(), json!({ "sessionId": "s", "tabId": "t" }));
+        assert!(serde_json::from_value::<TabControlParams>(json!({ "sessionId": "s", "tabId": "t", "force": true })).is_err());
+        let call = |method, value: Value| serde_json::from_value::<TabSettingParams>(value).unwrap().into_call(method);
+        assert_eq!(call("session.setModel", json!({ "sessionId": "s", "tabId": "t", "model": "opus" }))["model"], "opus");
+        assert_eq!(call("session.setEffort", json!({ "sessionId": "s", "tabId": "t", "effort": null }))["effort"], Value::Null);
+        assert_eq!(call("session.setMode", json!({ "sessionId": "s", "tabId": "t", "mode": "plan" }))["mode"], "plan");
+        let handoff: ContinueParams = serde_json::from_value(json!({ "sessionId": "s", "tabId": "t", "prompt": "carry on",
+            "tab": { "harness": "codex", "model": "", "permissionMode": "auto" } })).unwrap();
+        assert_eq!(serde_json::to_value(&handoff.tab).unwrap(), json!({ "harness": "codex", "model": "", "effort": null, "permissionMode": "auto" }));
+        assert!(serde_json::from_value::<ContinueParams>(json!({ "sessionId": "s", "tabId": "t", "prompt": "p",
+            "tab": { "harness": "codex", "transport": "experimentalCodexStdio" } })).is_err(), "a phone cannot choose a transport");
     }
 
     #[test]

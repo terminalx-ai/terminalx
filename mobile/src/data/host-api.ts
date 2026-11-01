@@ -1,4 +1,6 @@
 import * as Crypto from "expo-crypto";
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
+import type { ContinuationContext } from "@terminalx/portable/continuation";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache";
 import type { HostConnection } from "../transport/connection";
@@ -24,11 +26,28 @@ export type SendResult = { sent: true; queued: boolean } | { sent: false; messag
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
 /**
  * What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675).
+ * `sessionControls`: stop, interrupt, recovery, settings and continuing in a new tab, as on the desktop.
  * `terminal`: `terminal.open`, and terminal output that says the pane's size, which the terminal view needs.
  */
-export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; terminal?: number }
+export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; terminal?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
+/** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
+export interface TabControls {
+  harness: string;
+  model: string;
+  effort?: string | null;
+  permissionMode: string;
+  requestedModel?: string | null;
+  requestedEffort?: string | null;
+  requestedPermissionMode?: string | null;
+  status: SessionStatus;
+}
+/** The agent and settings a new tab starts with. */
+export interface NewTabSettings { harness: string; model: string; effort?: string | null; permissionMode?: string | null }
+export type ControlResult = { done: true } | { done: false; message: string };
+/** "Continue in new session": the tab exists once `started`, whether or not the handoff was confirmed. */
+export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string };
 
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
@@ -166,6 +185,70 @@ export class HostApi {
   private async messageId(messageId: string | undefined): Promise<{ clientMessageId?: string }> {
     if (!messageId) return {};
     return (await this.features()).sendIds === 1 ? { clientMessageId: messageId } : {};
+  }
+
+  /** Whether this Mac takes the session controls; an older one offers sending and answering only. */
+  async sessionControls(): Promise<boolean> {
+    return (await this.features()).sessionControls === 1;
+  }
+
+  async tabControls(sessionId: string, tabId: string): Promise<TabControls | null> {
+    const result = await this.connection.request<TabControls>("session.tab", { sessionId, tabId });
+    return result.ok && typeof result.value?.harness === "string" ? result.value : null;
+  }
+
+  /** The Mac's models, as its own pickers list them; `refresh` asks the agents again. */
+  async models(refresh = false): Promise<ModelInfo[]> {
+    const result = await this.connection.request<ModelInfo[]>("models.list", refresh ? { refresh } : {});
+    return result.ok && Array.isArray(result.value) ? result.value.filter((model) => typeof model?.id === "string" && typeof model.harness === "string") : [];
+  }
+
+  async stop(sessionId: string, tabId: string): Promise<ControlResult> {
+    return this.control("session.stop", { sessionId, tabId });
+  }
+
+  /** Escape, as the agent takes it: the running turn ends and the agent stays. */
+  async interrupt(sessionId: string, tabId: string): Promise<ControlResult> {
+    return this.control("session.interrupt", { sessionId, tabId });
+  }
+
+  async setModel(sessionId: string, tabId: string, model: string): Promise<ControlResult> {
+    return this.control("session.setModel", { sessionId, tabId, model });
+  }
+
+  /** `null`: the agent's own default effort. */
+  async setEffort(sessionId: string, tabId: string, effort: string | null): Promise<ControlResult> {
+    return this.control("session.setEffort", { sessionId, tabId, effort });
+  }
+
+  async setMode(sessionId: string, tabId: string, mode: string): Promise<ControlResult> {
+    return this.control("session.setMode", { sessionId, tabId, mode });
+  }
+
+  /** "Resend last prompt": the prompt the agent never received, as it was sent. */
+  async resendUnsent(sessionId: string, tabId: string): Promise<SendResult> {
+    const result = await this.connection.request<{ queued?: unknown }>("session.resendUnsent", { sessionId, tabId });
+    if (!result.ok) return { sent: false, message: result.refusal.message };
+    return typeof result.value?.queued === "boolean" ? { sent: true, queued: result.value.queued } : { sent: false, message: "The host did not send the prompt again." };
+  }
+
+  async prepareContinuation(sessionId: string, tabId: string): Promise<ContinuationContext> {
+    const result = await this.connection.request<ContinuationContext>("session.prepareContinuation", { sessionId, tabId });
+    if (!result.ok) throw new Error(result.refusal.message);
+    return result.value;
+  }
+
+  async continueInNewTab(sessionId: string, tabId: string, tab: NewTabSettings, prompt: string): Promise<ContinueResult> {
+    const result = await this.connection.request<{ tab?: { id?: unknown }; delivered?: unknown; inInput?: unknown; error?: unknown }>("session.continue", { sessionId, tabId, tab, prompt });
+    if (!result.ok) return { started: false, message: result.refusal.message };
+    const id = result.value?.tab?.id;
+    if (typeof id !== "string") return { started: false, message: "The host did not open the new conversation." };
+    return { started: true, tabId: id, delivered: result.value.delivered === true, inInput: result.value.inInput === true, ...(typeof result.value.error === "string" ? { message: result.value.error } : {}) };
+  }
+
+  private async control(method: string, params: Record<string, unknown>): Promise<ControlResult> {
+    const result = await this.connection.request<unknown>(method, params);
+    return result.ok ? { done: true } : { done: false, message: result.refusal.message };
   }
 
   async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {

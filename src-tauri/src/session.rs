@@ -614,7 +614,14 @@ pub struct TabRuntime {
     compaction: compaction::Admission,
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
-    stdio_writer: Option<std::sync::mpsc::SyncSender<codex::stdio::Outbound>>,
+    /// Each frame with the phone or share a prompt came from, if any.
+    stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
+    /// The phone or share the prompt just sent came from, until its frame is
+    /// queued with it: it is held to its permits when that frame is written.
+    stdio_authority: Option<codex_stdio::Authority>,
+    /// A continuation sent to experimental Codex, answered once Codex takes
+    /// its turn or the connection ends before it does.
+    stdio_receipt: Option<(u64, DeliveryReceipt)>,
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
@@ -1335,7 +1342,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None,
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None,
                 turn_started_at: None,
                 turn_by_command: false,
                 signed_out_in_turn: false,
@@ -1555,9 +1562,14 @@ impl SessionManager {
         self.reconcile_compactions(&mut rt, &mut events)?;
         for event in &mut events { recovery::sanitize(&mut event.payload); }
         // A tab that is a terminal has no agent to recover.
-        let terminal = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).map(TabEntry::is_terminal)).unwrap_or(false);
+        let tab = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).cloned());
+        let terminal = tab.as_ref().is_some_and(TabEntry::is_terminal);
         if rt.status == TabStatus::Idle && !rt.turn_open && !rt.stopping && !terminal {
             if let Some(kind) = recovery::from_history(&events) {
+                let kind = match &tab {
+                    Some(tab) if codex_stdio::selected(tab) => codex_stdio::recovery_on_open(tab, &path, kind),
+                    _ => kind,
+                };
                 self.needs_recovery(&mut rt, kind);
             }
         }
@@ -1920,9 +1932,32 @@ impl SessionManager {
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
         let outcome = self.send_impl(session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        self.confirm_continuation(session_id, tab_id, outcome, &rx)
+    }
+
+    /// A phone's Continue in New Session: the handoff goes as any phone
+    /// message does, in `send_mobile`'s order (the permit before the tab), so
+    /// it is held to the permit again at its write and names its sender, and
+    /// is confirmed as the desktop's handoff is. A permit gone by the write
+    /// delivers nothing: the receipt says so, and the tab keeps no brief to
+    /// send again under the host's authority.
+    pub(crate) fn send_mobile_confirmed(&self, session_id: &str, tab_id: &str, agent: String, display: String,
+        permit: crate::local_runtime::mobile::WritePermit) -> Result<SendOutcome> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let outcome = {
+            let admission = crate::issue_pipeline::admission::lock();
+            let _sharing = self.sharing.lock().unwrap();
+            let _admitted = permit.enter()?;
+            permit.check_mode(session_id, tab_id)?;
+            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx))?
+        };
+        self.confirm_continuation(session_id, tab_id, outcome, &rx)
+    }
+
+    fn confirm_continuation(&self, session_id: &str, tab_id: &str, outcome: SendOutcome, rx: &std::sync::mpsc::Receiver<std::result::Result<(), String>>) -> Result<SendOutcome> {
         let seq = outcome.events.first().map(|event| event.seq).context("the continuation was not published")?;
         let rt_arc = self.runtime(session_id, tab_id)?;
-        match self.await_receipt(&rt_arc, seq, &rx, ReceiptWait::DEFAULT) {
+        match self.await_receipt(&rt_arc, seq, rx, ReceiptWait::DEFAULT) {
             Receipt::Delivered => Ok(outcome),
             Receipt::Failed(message) => Err(anyhow!(message)),
             Receipt::Unconfirmed => {
@@ -2018,7 +2053,9 @@ impl SessionManager {
         let agent = agent_name(&rt.harness);
         let pane = match &rt.engine {
             Engine::Cli(p) if p.awaiting_delivery == Some(seq) => p.pane_id.clone(),
-            Engine::Cli(_) => return Ok(false),
+            // Experimental Codex has no input to leave a prompt in: Codex
+            // took it or it failed, and the receipt already said which.
+            Engine::Cli(_) | Engine::CodexStdio(_) => return Ok(false),
             _ => bail!("{agent} is not running in this tab."),
         };
         match self.enter_again(&mut rt, &pane, seq, Instant::now(), "reader") {
@@ -2133,8 +2170,7 @@ impl SessionManager {
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
         if codex_stdio::selected(&tab) {
-            anyhow::ensure!(receipt.is_none(), "Experimental Codex does not support continuation delivery");
-            return self.send_codex_stdio(&mut rt, &rt_arc, &entry, prompt, refs, wire_images);
+            return self.send_codex_stdio(&mut rt, &rt_arc, &entry, prompt, refs, wire_images, receipt);
         }
 
         if receipt.is_some() && (pty_first(&tab.harness).is_none() || rt.turn_open || !rt.pending.is_empty()) {
@@ -4254,6 +4290,7 @@ impl SessionManager {
                 if readiness == Readiness::Cancelled {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
                 if !manager.prepare_prompt(&mut rt, readiness, receipt.as_ref().map(|(_, receipt)| receipt)) {
@@ -4318,9 +4355,11 @@ impl SessionManager {
             if let Err(e) = result {
                 log::warn!("[{pane}] write: {e:#}");
                 let mut rt = rt_arc.lock().unwrap();
-                if !admitted_to_writer {
-                    if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); return; }
-                    if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); return; }
+                if !admitted_to_writer && (shared.is_some() || mobile.is_some()) {
+                    if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    manager.refuse_continuation(&mut rt, receipt);
+                    return;
                 }
                 if ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready))) {
                     return;
@@ -4385,6 +4424,22 @@ impl SessionManager {
             self.end_open_turn(rt, TurnStatus::Aborted, None);
             self.set_status(rt, TabStatus::Idle);
         }
+    }
+
+    /// A phone's or share's handoff refused before a byte of it was typed:
+    /// the dialog that sent it is told it was not delivered, and the tab
+    /// keeps no brief a later launch would send again under the host's
+    /// authority. No banner: nothing failed that the reader could recover.
+    fn refuse_continuation(&self, rt: &mut TabRuntime, receipt: Option<(u64, DeliveryReceipt)>) {
+        let Some((seq, receipt)) = receipt else { return };
+        // Forgotten before the sender is told, so no answer outruns it.
+        if let Err(error) = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+            if t.continuation == Some(seq) { t.continuation = None; }
+            Ok(())
+        }) {
+            log::warn!("forget the refused continuation of {}: {error:#}", rt.key());
+        }
+        let _ = receipt.send(Err("The sender's access changed before the handoff was delivered, so nothing was sent.".into()));
     }
 
     /// Decide whether to type after readiness has settled. A quiet-screen
@@ -5225,6 +5280,10 @@ mod watch_tests;
 #[cfg(test)]
 #[path = "session_mobile_admission_tests.rs"]
 mod mobile_admission_tests;
+
+#[cfg(test)]
+#[path = "session_mobile_controls_tests.rs"]
+mod mobile_controls_tests;
 
 #[cfg(test)]
 #[path = "session_follow_tests.rs"]

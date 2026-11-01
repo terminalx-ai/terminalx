@@ -48,6 +48,13 @@
   goes under one id, and a Mac that already has it answers as it did the first
   time, so the phone reports it sent and clears the box. Older Macs behave as
   before. (#675)
+- Control a session from the phone as from the desktop: Stop and Interrupt a
+  working agent; Retry safely, Resend last prompt, Continue here and Stop from
+  the recovery banner; change the model, effort and permission mode with the
+  desktop's choices, pending states and Bypass confirmation; and Continue in
+  new session with a chosen agent, settings and context. A read-only phone sees
+  the settings but cannot change them, and each control is checked against the
+  phone's access on the Mac. Shown only for a Mac that offers them.
 - Report each connection path's failure as it happens. A Relay refusal shows on
   the Sessions card while LAN addresses are still pending, and LAN addresses that
   have not answered get 3 more seconds once Relay has failed, not 15. Log
@@ -108,6 +115,15 @@
   own terminal interface on the same thread, instead of an empty terminal. The
   chat keeps its history without repeating it; the move is one-way and waits for
   a running turn to finish. (#644)
+- Message an experimental Codex session from a paired phone or as a guest or host
+  of a shared session, including `/compact` from the phone, instead of being
+  refused as local-only. Each message is checked against its sender's access when
+  it is delivered, as for other agents; one whose access ended is not sent. (#644)
+- Continue in New Session can hand off to an experimental Codex session. Delivery
+  is confirmed once Codex starts the handoff's turn. A handoff, or any prompt,
+  that Codex never took because it failed or was stopped first is offered back
+  with **Resend last prompt**, after a restart too, and is never sent again on
+  its own. (#644)
 
 ### Status bar
 

@@ -97,6 +97,8 @@ beforeEach(() => {
     connection: { onEvent: () => () => {}, reportError: vi.fn(), retryNow: vi.fn() },
     api: {
       features: async () => ({}),
+      // An older Mac: no session controls; `session-controls.test.tsx` covers them.
+      sessionControls: async () => false,
       transport: () => "relay",
       reassemblesFragments: async () => false,
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),

@@ -31,6 +31,37 @@ fn item(method: &str, thread: &str) -> String {
 }
 
 #[test]
+fn a_prompt_is_accepted_once_by_whichever_of_its_result_or_start_comes_first() {
+    let accepted = |actions: &[Action]| actions.iter().filter(|action| matches!(action, Action::Accepted)).count();
+    let (mut client, actions) = ready("hello");
+    assert!(client.unaccepted());
+    let result = json!({"id": wire(&actions)[0]["id"], "result": {"turn": {"id": "turn"}}}).to_string();
+    assert_eq!(accepted(&client.handle(&result).unwrap()), 1);
+    assert!(!client.unaccepted());
+    assert_eq!(accepted(&turn(&mut client)), 0);
+
+    let (mut client, actions) = ready("hello");
+    let result = json!({"id": wire(&actions)[0]["id"], "result": {"turn": {"id": "turn"}}}).to_string();
+    let started = turn(&mut client);
+    assert!(matches!(started.first(), Some(Action::Accepted)), "taken before its turn is drawn");
+    assert_eq!(accepted(&client.handle(&result).unwrap()), 0);
+}
+
+#[test]
+fn a_refused_or_unanswered_prompt_stays_unaccepted_and_compaction_never_waits() {
+    let mut client = client();
+    client.start("hello".into(), vec![]).unwrap();
+    assert!(client.unaccepted(), "a prompt behind the handshake is not taken");
+    let (mut client, actions) = ready("hello");
+    let refused = json!({"id": wire(&actions)[0]["id"], "error": {"code": -32600, "message": "model not found"}}).to_string();
+    assert!(client.handle(&refused).is_err());
+    client.fail();
+    assert!(client.unaccepted() && client.failed(), "a refused prompt was never received");
+    let (client, _) = ready("/compact");
+    assert!(!client.unaccepted());
+}
+
+#[test]
 fn the_real_thread_is_bound_before_the_first_prompt_write() {
     let (client, actions) = ready("hello");
     assert_eq!(client.thread.as_deref(), Some("thread"));
