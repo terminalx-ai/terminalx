@@ -288,6 +288,21 @@ pub fn list() -> Result<(Vec<Project>, Option<String>)> {
     Ok((f.projects, f.last_selected))
 }
 
+/// What a paired phone calls a project: stable for its path, without saying
+/// the path, which never leaves this Mac.
+pub fn public_id(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("terminalx-project:{path}").as_bytes());
+    digest.iter().take(12).map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The project a paired phone named by its [`public_id`]. Archived projects
+/// are not offered, so they cannot be named.
+pub fn by_public_id(id: &str) -> Result<Project> {
+    list()?.0.into_iter().find(|project| !project.archived && public_id(&project.path) == id)
+        .context("That project is no longer on this Mac.")
+}
+
 /// A local mirror of a cloud workspace holds files a remote machine chose
 /// (PRO-25). It is for reading: as a project or an agent's working directory
 /// it would have agents and tools act on that content, here. `path` is

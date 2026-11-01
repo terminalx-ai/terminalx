@@ -32,6 +32,15 @@
 
 ### Mobile
 
+- Start sessions from the phone as the Mac's new-session view does: a project's
+  session in a new worktree (named for the work) or on its checkout, or a quick
+  chat, with the agent, model, effort, permission mode, title and first
+  message. Codex sessions follow Settings → Experimental → Native Codex. A
+  retry after a lost reply opens the first session instead of a second one.
+  Projects reach the phone by an id, never their path. Read-only and revoked
+  phones cannot start sessions.
+- Settings → This Mac on the phone turns Native Codex on or off for the Mac's
+  next Codex sessions; the Mac's own Settings follows it while open.
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
 - Sending a message or worktree note again after the connection dropped no

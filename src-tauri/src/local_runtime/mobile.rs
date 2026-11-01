@@ -684,6 +684,20 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     let _admitted = grant.enter()?;
     match method {
         "check" => Ok(Value::Null),
+        // What the desktop starts from its new-session view, and the settings
+        // a phone may change on this Mac. The grant stays held while they act,
+        // so a phone revoked meanwhile neither starts a session nor changes one.
+        "create" => { grant.driver()?; create_session(manager, &params) }
+        "settings" => Ok(phone_settings(&crate::store::settings::load())),
+        "setSettings" => {
+            grant.driver()?;
+            let native_codex = params["nativeCodex"].as_bool().context("nativeCodex must be true or false")?;
+            let mut settings = crate::store::settings::load();
+            settings.experimental.native_codex = native_codex;
+            crate::store::settings::save(&settings)?;
+            manager.sink().emit("experimental_settings_changed", &settings.experimental);
+            Ok(phone_settings(&settings))
+        }
         "observe" => {
             if string("attachMode")? != "observe" || params["client"]["type"] != "mobile" || !params["capabilities"].is_object() {
                 bail!("Terminal observation capabilities are invalid.");
@@ -719,6 +733,77 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     }
 }
 
+
+/// The settings of this Mac a phone shows and may change. Paths, credentials
+/// and what only this Mac's screen and hardware use stay on the desktop.
+fn phone_settings(settings: &crate::store::settings::Settings) -> Value {
+    serde_json::json!({"nativeCodex": settings.experimental.native_codex})
+}
+
+/// A session a paired phone starts: a project's (in a new worktree or on its
+/// checkout) or a quick chat, with the agent, model, effort and mode the
+/// phone chose. Made as the desktop's new-session view makes one, Settings →
+/// Experimental → Native Codex included; its first message goes through the
+/// phone's send, which checks the phone again as it writes.
+fn create_session(manager: &crate::session::SessionManager, params: &Value) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Create {
+        #[serde(default)]
+        quick: bool,
+        #[serde(default)]
+        project_id: Option<String>,
+        #[serde(default)]
+        use_worktree: bool,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        prompt: String,
+    }
+    use crate::session_ops::{NewQuickChat, NewSession, NewTab};
+    let p: Create = serde_json::from_value(params.clone()).context("Invalid new session request.")?;
+    let agent = crate::harness::offered().into_iter().find(|harness| harness.id == p.agent)
+        .with_context(|| format!("{} is not an agent this Mac offers.", p.agent))?;
+    if !agent.available { bail!("{} is not installed on this Mac.", agent.name); }
+    let mode = crate::store::index::requested_mode(p.mode);
+    if let Some(mode) = mode.as_deref() {
+        if !matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions") { bail!("Unknown permission mode {mode}."); }
+    }
+    let mut tab = NewTab { harness: agent.id, transport: Default::default(), model: p.model, effort: p.effort.filter(|effort| !effort.trim().is_empty()), permission_mode: mode };
+    crate::session_ops::prefer_native_codex(&mut tab, false);
+    // The title a session started from the window gets: the prompt's first line.
+    let title = p.title.filter(|title| !title.trim().is_empty())
+        .or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
+    let entry = match (p.quick, p.project_id) {
+        (true, None) => crate::session_ops::create_quick_chat_blocking(&**manager.sink(), NewQuickChat { title, cwd: None, tab: Some(tab) })
+            .map_err(|error| anyhow::anyhow!(error))?,
+        (false, Some(id)) => {
+            let project = crate::store::projects::by_public_id(&id)?;
+            if p.use_worktree && project.kind != crate::store::projects::ProjectKind::Git {
+                bail!("{} is not a Git repository, so it has no worktrees. Start the session on its folder.", project.name);
+            }
+            let named = crate::names::from_prompt(&p.prompt);
+            let req = NewSession {
+                project_path: project.path, title, use_worktree: p.use_worktree, on_main: !p.use_worktree,
+                base_ref: None, worktree_name: (p.use_worktree && !named.is_empty()).then_some(named),
+                checkout_branch: None, issue: None, automation: None, cwd: None, tab: Some(tab),
+            };
+            crate::session_ops::validate_session_target(&req).map_err(|error| anyhow::anyhow!(error))?;
+            crate::session_ops::create_session_blocking(&**manager.sink(), req).map_err(|error| anyhow::anyhow!(error))?
+        }
+        _ => bail!("Choose a project or a quick chat for the new session."),
+    };
+    let tab = entry.tabs.first().context("The new session has no tab.")?;
+    Ok(serde_json::json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title,
+        "native": tab.transport == crate::store::index::AgentTransport::ExperimentalCodexStdio}))
+}
 
 #[derive(Debug)]
 pub struct Busy;
@@ -938,3 +1023,7 @@ mod input_tests {
 #[cfg(test)]
 #[path = "mobile_lock_tests.rs"]
 mod lock_tests;
+
+#[cfg(test)]
+#[path = "mobile_create_tests.rs"]
+mod create_tests;
