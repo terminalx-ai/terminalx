@@ -291,14 +291,26 @@ account/read failed during TUI bootstrap: account/read failed: workspace routing
   { "v": 1, "provider": "codex", "credentialId": "…", "grantId": "…", "version": 3, "epoch": 7, "reason": "provider-refused" }
   ```
 
-  The server forces a refresh and either issues a grant of a new version or
-  epoch, or marks the credential `sign-in-required` and stops issuing grants
-  for it. A transient failure is sent again on a later turn; a 404 (a server
-  from before) is not. While the login stands refused, by the runtime's mark
-  or the server's `sign-in-required`, the loop fetches at least every 30 s,
-  and a launch for that agent first asks the loop for a sync and waits up to
-  5 s for it, so a login signed in again reaches the same tab without a new
-  session or a workspace restart.
+  The report is a hint read from the agent's own output, never proof. The
+  server checks it with the provider by forcing a refresh, and answers in
+  the grant list, not in its reply: a grant of a new version or epoch for a
+  login that works, or the credential marked `sign-in-required`, with no
+  grant, for one that does not. Either ends the runtime's mark, as does a
+  turn that works on that grant. A 2xx only says the server has the report:
+  the same grant, still connected, means the check has not settled (it is
+  queued, or the refresh failed transiently, which keeps the stored login),
+  and the mark stays. The runtime does not report that grant again, so the
+  mark then lasts until the server's own next refresh, a sign-in again or a
+  turn that works. A server that cannot take the report now (rate-limited,
+  or down) answers 429 or 5xx instead, and the report goes again on a later
+  turn, as any transient failure to send does; a 404 (a server from before)
+  is not sent again. The reply is a JSON object (`{}` will do): an empty 2xx
+  reads as a transient failure, and the report is sent again. While the
+  login stands refused, by the runtime's mark or the server's
+  `sign-in-required`, the loop fetches at least every 30 s, and a launch for
+  that agent first asks the loop for a sync and waits up to 5 s for it, so a
+  login signed in again reaches the same tab without a new session or a
+  workspace restart.
 
 A grant or configuration sync that changes this answer for any provider (the
 first sync after a start or resume, a login removed or connected again, a key
