@@ -38,6 +38,24 @@ const TAIL_EVENT_LIMIT: usize = 5_000;
 // entire serialized RPC response, including its envelope. No transcript reply
 // is larger on any transport; on Relay a page is held to one Relay frame.
 const TAIL_RESPONSE_BYTES_LIMIT: usize = Transport::Direct.text_plaintext_limit();
+/// How long a connection waits for the runtime to register or check it.
+const RUNTIME_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Runtime calls block on a local socket for up to two minutes. They run on
+/// the blocking pool, so a stalled runtime cannot hold the async workers that
+/// Relay's control channel also runs on (#666, #661).
+pub(super) async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(work).await.context("a paired-device runtime call stopped")?
+}
+
+/// `off_runtime` for a call that may be abandoned: one that changes nothing,
+/// or whose result undoes itself when dropped, as a `MobileConnection` does.
+async fn off_runtime_within<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::time::timeout(RUNTIME_CALL_TIMEOUT, off_runtime(work)).await.map_err(|_| {
+        anyhow!(super::diagnostics::Category::LocalRuntime)
+            .context(format!("The local runtime did not answer within {} s.", RUNTIME_CALL_TIMEOUT.as_secs()))
+    })?
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,7 +191,13 @@ pub(super) struct MobileConnection {
 }
 
 impl MobileConnection {
-    pub(super) fn new(manager: &PairingManager, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
+    /// `new`, with the runtime's `register` round trip off the async workers.
+    pub(super) async fn open(manager: &Arc<PairingManager>, device: &DeviceEntry, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
+        let (manager, device) = (manager.clone(), device.clone());
+        off_runtime_within(move || Self::new(&manager, &device, manager.mobile.clone(), outbound, transport)).await
+    }
+
+    fn new(manager: &PairingManager, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
         let id = Uuid::new_v4().to_string();
         let owner = manager.runtime.lock().unwrap().clone().context("The local runtime is unavailable.")?;
         let attachment = owner.attachment()?;
@@ -209,11 +233,23 @@ impl MobileConnection {
     }
 
     pub(super) fn check(&self, manager: &PairingManager) -> Result<()> {
+        self.check_current(manager)?;
+        self.call("check", json!({}))?;
+        Ok(())
+    }
+
+    /// `check`, with the runtime round trip off the async workers.
+    pub(super) async fn check_off_runtime(self: &Arc<Self>, manager: &PairingManager) -> Result<()> {
+        self.check_current(manager)?;
+        let connection = self.clone();
+        off_runtime_within(move || connection.call("check", json!({})).map(drop)).await
+    }
+
+    fn check_current(&self, manager: &PairingManager) -> Result<()> {
         self.check_buffer()?;
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.actor.generation != manager.account.current_generation() {
             bail!("The paired-device connection or account changed.");
         }
-        self.call("check", json!({}))?;
         Ok(())
     }
 
@@ -237,7 +273,15 @@ impl MobileConnection {
             }
         }
         self.runtime.unregister_client(&self.id);
-        if self.call("close", json!({})).is_err() { self.owner.disconnect(); }
+        let (owner, actor, id) = (self.owner.clone(), self.actor.clone(), self.id.clone());
+        let close = move || {
+            if owner.mobile(&actor, "close", json!({"connection": id})).is_err() { owner.disconnect(); }
+        };
+        // Closing runs on async workers and in Drop: keep the round trip off them (#666).
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => { runtime.spawn_blocking(close); }
+            Err(_) => close(),
+        }
     }
 
     fn stream(&self, request_id: &str, result: Value) {
@@ -312,7 +356,8 @@ impl Drop for MobileConnection {
     fn drop(&mut self) { self.finish(); }
 }
 
-pub(super) async fn dispatch(
+/// Synchronous throughout: callers run it with `off_runtime`.
+pub(super) fn dispatch(
     manager: &PairingManager,
     connection: &Arc<MobileConnection>,
     request: &Value,

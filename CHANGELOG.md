@@ -22,6 +22,13 @@
   from the cell, so a phone stops offering Pair for a Mac it cannot reach.
   Accept a cell's `account-pairing-changed` hint, which polls at once and then
   every two seconds for a minute. (#671)
+- Notice a Relay control connection that died without a close, after a network
+  change, a new address, a VPN change or sleep. Reconnect within 2 seconds of an
+  address change or wake, or after 45 seconds of silence, instead of showing
+  Connected until TerminalX restarts. Record each phone's Relay connection, and
+  how far it got, in `relay-diagnostics.json`. Run paired-device calls to the
+  local runtime off the workers Relay runs on, so a stalled runtime cannot stop
+  Relay reconnecting. (#666)
 
 ### Mobile
 
@@ -32,6 +39,12 @@
   goes under one id, and a Mac that already has it answers as it did the first
   time, so the phone reports it sent and clears the box. Older Macs behave as
   before. (#675)
+- Report each connection path's failure as it happens. A Relay refusal shows on
+  the Sessions card while LAN addresses are still pending, and LAN addresses that
+  have not answered get 3 more seconds once Relay has failed, not 15. Log
+  cancelled attempts and Relay director errors, race the paths again when the
+  phone changes network, and wait 1 second, rising, before reconnecting a
+  connection that keeps dropping straight after connecting. (#666)
 
 ### Organizations
 
