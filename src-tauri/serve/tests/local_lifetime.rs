@@ -1120,10 +1120,18 @@ fn cli_workspace_deletion_confirms_owner_processes_and_keeps_the_project() {
     let shell = format!("{session}:cleanup-shell");
     serve.control("runtime.pty.spawn",json!({"id":shell,"cwd":cwd,"cols":80,"rows":24,"command":"sleep 60"}));
     let pid = serve.control("runtime.pty.output",json!({"id":shell}))["pid"].as_u64().unwrap();
-    assert_eq!(serve.try_control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true}))["ok"],false);
+    // Without --yes it says what would go, running agent and shell included (#719).
+    let refused = serve.try_control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true}));
+    assert_eq!((&refused["ok"],&refused["error"]["code"]),(&json!(false),&json!("confirmation_required")));
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains(session) && message.contains("still running, would be stopped: claude tab") && message.contains("1 shell"),"{message}");
+    let preview = serve.control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"dryRun":true}));
+    assert_eq!((&preview["sessions"][0]["id"],&preview["sessions"][0]["runningTabs"][0]["id"],&preview["sessions"][0]["runningShells"]),(&json!(session),&json!(tab),&json!(1)));
     assert!(std::path::Path::new(&cwd).is_dir(),"missing confirmation must leave the worktree alone");
-    let deleted = serve.control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true,"confirmed":true}));
+    assert_eq!(serve.control("runtime.pty.output",json!({"id":shell}))["running"],true,"a preview stops nothing");
+    let deleted = serve.control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true,"confirmed":true,"sessions":[session]}));
     assert_eq!(deleted["deleted"],cwd);
+    assert_eq!((&deleted["removedSessions"][0]["id"],&deleted["removedSessions"][0]["belongsTo"]),(&json!(session),&json!("thisProject")));
     assert!(!std::path::Path::new(&cwd).exists());
     assert!(!std::process::Command::new("/bin/kill").args(["-0",&pid.to_string()])
         .stderr(std::process::Stdio::null()).status().unwrap().success());
