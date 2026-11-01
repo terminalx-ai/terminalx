@@ -9,7 +9,7 @@ import { cn } from "@/lib/cn";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { openCloudSession } from "@/lib/cloudDashboard";
 import { lookAtCloudPipeline } from "@/lib/cloudPipelines";
-import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineHeadline, pipelineSettings, pipelineSteps, setPipelineAutoMerge, setPipelineResolveConflicts, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
+import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineHeadline, pipelineSettings, pipelineSteps, reviewChecksLine, setPipelineAutoMerge, setPipelineResolveConflicts, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { FindingSeverity, IssuePipeline, PipelineAction, PipelineFinding } from "@/types/issuePipeline";
@@ -127,6 +127,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const workspace = place ? findCloudWorkspace(catalog, place.orgId, place.workspaceId)?.workspace ?? null : null;
   const asleep = workspace != null && workspace.state !== "ready";
   const findings = [...(pipeline.verdict?.findings ?? [])].sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
+  const checksLine = reviewChecksLine(pipeline.verdict);
   const done = pipeline.state === "merged";
 
   const run = useCallback(
@@ -264,6 +265,12 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
       )}
 
       {error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+
+      {checksLine && (
+        <p data-testid="pipeline-review-checks" className={cn("text-[11px] leading-relaxed", pipeline.verdict?.checks === "failed" ? "text-foreground" : "text-muted-foreground")}>
+          {checksLine}
+        </p>
+      )}
 
       {pipeline.verdict && findings.length > 0 && (
         <div>

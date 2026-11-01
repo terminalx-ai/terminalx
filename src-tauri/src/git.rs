@@ -137,13 +137,31 @@ pub fn run_within_reporting(
 /// return what it printed. The deadline includes draining both output pipes;
 /// at expiry its whole process group is killed, even if the direct child has
 /// already exited. For a call whose complete answer is needed.
-pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+pub(crate) fn output_within(command: Command, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    let out = capture_within(command, timeout).map_err(|error| match error.kind() {
+        std::io::ErrorKind::TimedOut => RunError::TimedOut,
+        _ => RunError::Spawn(error),
+    })?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        Err(RunError::Failed(if err.trim().is_empty() { format!("exit {}", out.status) } else { err.trim().to_string() }))
+    }
+}
+
+/// `Command::output` with a deadline: the exit status and everything written
+/// to both pipes, whatever the status. Both pipes are drained while the child
+/// runs, so an answer larger than the pipe buffer never blocks it. A deadline
+/// that passes, draining included, is an `ErrorKind::TimedOut` error, and the
+/// whole process group has been killed.
+pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
     use std::io::Read;
     use std::process::Stdio;
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let mut child = command.spawn()?;
     // Read as it comes, so a full pipe never blocks the child.
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -151,7 +169,7 @@ pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) 
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut bytes);
             }
-            String::from_utf8_lossy(&bytes).into_owned()
+            bytes
         })
     };
     let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
@@ -172,18 +190,13 @@ pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) 
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(match ended {
-                    Err(error) => RunError::Spawn(error),
-                    _ => RunError::TimedOut,
+                    Err(error) => error,
+                    _ => std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer within {} ms", timeout.as_millis())),
                 });
             }
         }
     };
-    let (out, err) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
-    if status.success() {
-        Ok(out)
-    } else {
-        Err(RunError::Failed(if err.trim().is_empty() { format!("exit {status}") } else { err.trim().to_string() }))
-    }
+    Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
 }
 
 /// `run` with a deadline.

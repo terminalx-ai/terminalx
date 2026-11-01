@@ -12,6 +12,9 @@ use serde_json::Value;
 pub const STATUS_FENCE: &str = "terminalx-status";
 pub const REVIEW_FENCE: &str = "terminalx-review";
 
+/// The most of a reviewer's note on its checks that is repeated.
+const CHECKS_NOTE_LIMIT: usize = 200;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -84,6 +87,29 @@ pub enum SecurityPass {
     Flagged,
 }
 
+/// Whether the reviewer ran the project's checks on the commit it judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewChecks {
+    Passed,
+    Failed,
+    /// Judged by reading the code only: nothing ran, or nothing finished.
+    NotRun,
+}
+
+impl ReviewChecks {
+    /// Only an explicit pass is a pass, and only an explicit failure a
+    /// failure. Anything else, the field left out included, did not run as
+    /// far as anyone can tell.
+    fn parse(value: Option<&str>) -> Self {
+        match value.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+            "passed" | "pass" | "success" => Self::Passed,
+            "failed" | "fail" | "failure" | "error" => Self::Failed,
+            _ => Self::NotRun,
+        }
+    }
+}
+
 /// One review of one commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +122,13 @@ pub struct Verdict {
     /// Everything still open at this commit; a finding the author fixed is
     /// simply absent from the next review.
     pub findings: Vec<Finding>,
+    /// What the reviewer's own checks came to. `None` only for a verdict
+    /// stored before reviews said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<ReviewChecks>,
+    /// The reviewer's few words on what ran, or why nothing did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_note: Option<String>,
     pub round: u32,
     pub at: String,
 }
@@ -107,6 +140,25 @@ impl Verdict {
 
     pub fn security_flagged(&self) -> bool {
         self.security_pass == SecurityPass::Flagged || self.findings.iter().any(|finding| finding.security)
+    }
+
+    /// The reviewer's checks in a sentence, for the record and the pull
+    /// request. Nothing for a verdict stored before reviews said.
+    pub fn checks_line(&self) -> Option<String> {
+        // The reviewer's words, kept to one short line of the sentence they end.
+        let mut note = self.checks_note.as_deref().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+        if note.chars().count() > CHECKS_NOTE_LIMIT {
+            note = format!("{}…", note.chars().take(CHECKS_NOTE_LIMIT).collect::<String>().trim_end());
+        }
+        let with = |text: &str| match note.trim_end_matches('.') {
+            "" => format!("{text}."),
+            note => format!("{text}: {note}."),
+        };
+        Some(match self.checks? {
+            ReviewChecks::Passed => with("The reviewer's checks passed"),
+            ReviewChecks::Failed => with("The reviewer's checks failed"),
+            ReviewChecks::NotRun => with("Reviewed by reading only, tests not run"),
+        })
     }
 }
 
@@ -202,6 +254,9 @@ pub enum ReviewError {
     /// No review block in the reply.
     Missing,
     Unreadable(String),
+    /// Not a verdict yet: the reviewer says checks it started are still
+    /// running, and what they are when it said.
+    Pending(Option<String>),
 }
 
 /// Read the reviewer's verdict. `round` and `at` are the pipeline's own; the
@@ -209,8 +264,12 @@ pub enum ReviewError {
 pub fn review(message: &str, round: u32, at: &str) -> Result<Verdict, ReviewError> {
     let block = last_block(message, REVIEW_FENCE).ok_or(ReviewError::Missing)?;
     let value: Value = serde_json::from_str(&block).map_err(|error| ReviewError::Unreadable(format!("the review block is not JSON: {error}")))?;
+    let said = text_field(&value, &["verdict", "decision"]).unwrap_or_default().to_ascii_lowercase();
+    if said == "pending" {
+        return Err(ReviewError::Pending(text_field(&value, &["reason", "checksNote", "checks_note"])));
+    }
     let commit = text_field(&value, &["commit"]).ok_or_else(|| ReviewError::Unreadable("the review block names no commit".into()))?;
-    let decision = match text_field(&value, &["verdict", "decision"]).unwrap_or_default().to_ascii_lowercase().as_str() {
+    let decision = match said.as_str() {
         "merge" | "approve" | "approved" => Decision::Merge,
         "changes" | "changes_requested" | "request_changes" => Decision::Changes,
         other => return Err(ReviewError::Unreadable(format!("the verdict must be \"merge\" or \"changes\", not {other:?}"))),
@@ -227,7 +286,9 @@ pub fn review(message: &str, round: u32, at: &str) -> Result<Verdict, ReviewErro
     // A finding marked as a security finding means the pass flagged something,
     // whatever the summary field says.
     let security_pass = if findings.iter().any(|finding| finding.security) { SecurityPass::Flagged } else { security_pass };
-    Ok(Verdict { commit, decision, security_pass, findings, round, at: at.to_string() })
+    let checks = Some(ReviewChecks::parse(text_field(&value, &["checks"]).as_deref()));
+    let checks_note = text_field(&value, &["checksNote", "checks_note", "checksReason"]);
+    Ok(Verdict { commit, decision, security_pass, findings, checks, checks_note, round, at: at.to_string() })
 }
 
 fn location(finding: &Finding) -> String {
@@ -263,6 +324,10 @@ pub fn review_comment(verdict: &Verdict, max_rounds: u32, mergeable: bool) -> St
         SecurityPass::NotNeeded => {}
         SecurityPass::Clean => body.push_str(" Security pass: clean."),
         SecurityPass::Flagged => body.push_str(" Security pass: flagged."),
+    }
+    if let Some(checks) = verdict.checks_line() {
+        body.push(' ');
+        body.push_str(&checks);
     }
     if verdict.findings.is_empty() {
         body.push_str("\n\nNo findings.");
@@ -363,12 +428,52 @@ mod tests {
             findings_markdown(&findings),
             "- **[critical, security]** Deletes the wrong rows (`db.rs:9`)\n  No tenant filter.\n  See the query.\n- **[low]** Rename (`a.rs`)"
         );
-        let verdict = Verdict { commit: "abc1234def5678".into(), decision: Decision::Changes, security_pass: SecurityPass::Flagged, findings, round: 1, at: "now".into() };
+        let verdict = Verdict { commit: "abc1234def5678".into(), decision: Decision::Changes, security_pass: SecurityPass::Flagged, findings, checks: None, checks_note: None, round: 1, at: "now".into() };
         let comment = review_comment(&verdict, 3, false);
         assert!(comment.starts_with("### TerminalX review of `abc1234def` — changes requested"));
         assert!(comment.contains("Round 1 of 3"));
         assert!(comment.contains("Security pass: flagged."));
+        // A verdict stored before reviews said what their checks came to says nothing about them.
+        assert!(!comment.contains("checks") && !comment.contains("tests"));
         let clean = Verdict { findings: Vec::new(), decision: Decision::Merge, security_pass: SecurityPass::NotNeeded, ..verdict };
         assert!(review_comment(&clean, 3, true).ends_with("No findings."));
+    }
+
+    #[test]
+    fn a_review_says_whether_its_checks_ran_and_only_an_explicit_pass_is_one() {
+        let said = |checks: &str| review(&format!("```terminalx-review\n{{\"commit\":\"abc1234\",\"verdict\":\"merge\",{checks}\"findings\":[]}}\n```"), 1, "now").unwrap();
+        let passed = said(r#""checks":"passed","checksNote":"cargo test: 212 passed","#);
+        assert_eq!((passed.checks, passed.checks_note.as_deref()), (Some(ReviewChecks::Passed), Some("cargo test: 212 passed")));
+        assert_eq!(said(r#""checks":"failed","#).checks, Some(ReviewChecks::Failed));
+        for not_run in [r#""checks":"not_run","#, r#""checks":"mostly","#, r#""checks":"","#, ""] {
+            assert_eq!(said(not_run).checks, Some(ReviewChecks::NotRun), "{not_run}");
+        }
+        // Said in the record and on the pull request.
+        let reading = said(r#""checks":"not_run","checksNote":"the build waits on a file lock.","#);
+        assert_eq!(reading.checks_line().as_deref(), Some("Reviewed by reading only, tests not run: the build waits on a file lock."));
+        assert!(!review_comment(&reading, 3, true).contains("Security pass") && review_comment(&reading, 3, true).contains("Reviewed by reading only, tests not run: the build waits on a file lock."));
+        assert_eq!(said(r#""checks":"failed","#).checks_line().as_deref(), Some("The reviewer's checks failed."));
+        assert_eq!(passed.checks_line().as_deref(), Some("The reviewer's checks passed: cargo test: 212 passed."));
+        // Kept to one short line of its sentence.
+        let spread = Verdict { checks_note: Some("cargo test\n\n  ran   ok".into()), ..passed.clone() };
+        assert_eq!(spread.checks_line().as_deref(), Some("The reviewer's checks passed: cargo test ran ok."));
+        let long = Verdict { checks_note: Some("x".repeat(500)), ..passed.clone() };
+        assert_eq!(long.checks_line().unwrap().chars().count(), "The reviewer's checks passed: ".len() + CHECKS_NOTE_LIMIT + "….".chars().count());
+        // Stored, it reads back as written, and a verdict stored before it is still read.
+        let stored = serde_json::to_value(&reading).unwrap();
+        assert_eq!((stored["checks"].as_str(), stored["checksNote"].as_str()), (Some("notRun"), Some("the build waits on a file lock.")));
+        let legacy: Verdict = serde_json::from_value(serde_json::json!({"commit":"abc1234","decision":"merge","securityPass":"notNeeded","findings":[],"round":1,"at":"now"})).unwrap();
+        assert_eq!(legacy.checks, None);
+    }
+
+    #[test]
+    fn a_pending_review_is_not_a_verdict_and_says_what_is_still_running() {
+        let pending = "Tests are compiling.\n\n```terminalx-review\n{\"commit\":\"abc1234\",\"verdict\":\"pending\",\"reason\":\"cargo test is still compiling\"}\n```";
+        assert_eq!(review(pending, 1, "now"), Err(ReviewError::Pending(Some("cargo test is still compiling".into()))));
+        // The commit is not needed to say so, nor a reason.
+        assert_eq!(review("```terminalx-review\n{\"verdict\":\"Pending\"}\n```", 1, "now"), Err(ReviewError::Pending(None)));
+        // A verdict after it, in the same reply, is the one that counts.
+        let then = format!("{pending}\n\nDone now.\n\n```terminalx-review\n{{\"commit\":\"abc1234\",\"verdict\":\"merge\",\"checks\":\"passed\"}}\n```");
+        assert_eq!(review(&then, 1, "now").unwrap().checks, Some(ReviewChecks::Passed));
     }
 }

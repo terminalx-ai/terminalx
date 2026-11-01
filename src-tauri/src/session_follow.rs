@@ -400,7 +400,7 @@ impl SessionManager {
             Engine::Cli(p) if p.by_hand.is_none() && self.terminals.is_running(&p.pane_id) => return Ok(()),
             // A headless tab's hand-off terminal.
             Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) => return Ok(()),
-            Engine::Cli(_) => self.became_terminal(&mut rt, Gone::Replaced),
+            Engine::Cli(_) => self.became_terminal(&mut rt, Gone::Replaced, None),
             Engine::None => {}
         }
         let seen_at = SystemTime::now();
@@ -434,12 +434,14 @@ impl SessionManager {
             codex_interrupt_hooks_owed: 0,
             codex_prompt_starts_turn: false,
             generation,
+            launched_at: Instant::now(),
             restart_when_idle: false,
             settings_asked_at: None,
             launched_for: None,
             status_names_model: false,
             settings_command_is_ours: false,
             ready,
+            recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
             awaiting_delivery: None,
@@ -647,7 +649,7 @@ impl SessionManager {
     /// The tab's lock is taken a batch at a time, so a long conversation
     /// does not keep the tab from answering anything else until it is in.
     fn import(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &tui::Tail, records: Vec<tui::Record>, whole: bool, busy: bool) {
-        let ended = |status| Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false };
+        let ended = |status| Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
         let mut open = false;
         let mut records = records.into_iter().peekable();
         while records.peek().is_some() {
@@ -837,7 +839,7 @@ impl SessionManager {
             _ => return,
         };
         let turn_was_open = rt.turn_open;
-        self.became_terminal(&mut rt, if alive { Gone::Suspended } else { Gone::Exited });
+        self.became_terminal(&mut rt, if alive { Gone::Suspended } else { Gone::Exited }, None);
         drop(rt);
         if turn_was_open {
             self.observer.automation_failed(&entry.id, &tab.id, "The agent left the terminal before the automation turn completed.");
@@ -853,6 +855,12 @@ impl SessionManager {
     /// place in the same pane. A pane the app closed (Stop, a restart, the
     /// tab or the app going) is the app's own doing and changes nothing
     /// here, and neither does anything on a runtime that does not follow.
+    ///
+    /// The app's own CLI that exits before it ever got going (#667) did not
+    /// go by itself: it could not start. Followed or not, the turn it was
+    /// launched for fails with the last line it printed, the tab stays the
+    /// agent's and asks to be recovered, as a refused sign-in when that line
+    /// says so (which in a cloud workspace reports the grant it was given).
     pub(super) fn cli_gone(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, code: Option<i32>, legacy_turn_status: TurnStatus) {
         let tail = match &rt_arc.lock().unwrap().engine {
             Engine::Cli(p) => p.tail.clone(),
@@ -870,9 +878,26 @@ impl SessionManager {
             return;
         }
         let by_hand = p.by_hand.is_some();
+        // Gone before it ever got going: the last thing it printed is why,
+        // where the reader is told it went, and not only in its terminal.
+        // Redacted as the agent's own words always are (#667), whole and
+        // before it is cut to length: the chat is kept on disk, copied into
+        // forks and broadcast, as its screen is not.
+        let said = (!closing && p.never_got_going()).then(|| self.terminals.program_output(pane)).flatten().and_then(|output| tui::last_words(&output));
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         let turn_was_open = rt.turn_open;
-        if !follows {
+        let early = (!by_hand && !closing && !p.ready.marked() && !p.recorded)
+            .then(|| recovery::EarlyExit::read(&self.terminals.read_output(pane).unwrap_or_default()))
+            .filter(|exit| turn_was_open || exit.sign_in_refused);
+        let failed_to_start = early.is_some();
+        if let Some(exit) = early {
+            self.fail_open_turn(&mut rt, &exit);
+            if !turn_was_open {
+                self.sign_in_refused(&rt);
+            }
+            self.release_cli(&mut rt);
+            self.needs_recovery(&mut rt, exit.recovery());
+        } else if !follows {
             if by_hand {
                 // Followed, and closed by the app with its pane. If the tab
                 // outlives that (its session was moved, say), it is a
@@ -890,11 +915,15 @@ impl SessionManager {
                 self.close_open_turn(&mut rt, legacy_turn_status, None);
             }
             self.release_cli(&mut rt);
+            if let Some(said) = said {
+                let text = format!("{} exited: {said}", crate::harness::display_name(&rt.harness));
+                self.publish(&mut rt, Payload::Status { text }, None);
+            }
             if let Some(kind) = recovery {
                 self.needs_recovery(&mut rt, kind);
             }
         } else {
-            self.became_terminal(&mut rt, Gone::Exited);
+            self.became_terminal(&mut rt, Gone::Exited, said.as_deref());
         }
         drop(rt);
         if turn_was_open {
@@ -904,7 +933,7 @@ impl SessionManager {
         // The app's own CLI was the pane's process, so the pane went with it:
         // the tab needs a shell to be the terminal it now is. A CLI started
         // by hand leaves the shell it was started from.
-        if follows && !by_hand {
+        if follows && !by_hand && !failed_to_start {
             if let Err(error) = self.shell_for(&session, &tab) {
                 log::warn!("open a shell in {pane} after its agent exited: {error:#}");
             }
@@ -913,8 +942,9 @@ impl SessionManager {
 
     /// The tab's agent is no longer in front of its terminal. Not an error:
     /// the tab simply is a terminal now. A turn cut short is closed as
-    /// interrupted, and the log says what happened in one line.
-    fn became_terminal(&self, rt: &mut TabRuntime, gone: Gone) {
+    /// interrupted, and the log says what happened in one line, with what
+    /// the agent `said` as it went when that is why it went.
+    fn became_terminal(&self, rt: &mut TabRuntime, gone: Gone, said: Option<&str>) {
         if let Engine::Cli(p) = &rt.engine {
             rt.left_at = Some((p.tail.path(), p.tail.offset()));
         }
@@ -929,11 +959,15 @@ impl SessionManager {
         self.release_cli(rt);
         let text = match (gone, mid_turn) {
             (Gone::Replaced, _) => None,
-            (Gone::Exited, false) => Some(format!("{agent} exited.")),
-            (Gone::Exited, true) => Some(format!("{agent} exited before the turn finished.")),
-            (Gone::Suspended, false) => Some(format!("{agent} was suspended in the terminal.")),
-            (Gone::Suspended, true) => Some(format!("{agent} was suspended in the terminal before the turn finished.")),
-        };
+            (Gone::Exited, false) => Some(format!("{agent} exited")),
+            (Gone::Exited, true) => Some(format!("{agent} exited before the turn finished")),
+            (Gone::Suspended, false) => Some(format!("{agent} was suspended in the terminal")),
+            (Gone::Suspended, true) => Some(format!("{agent} was suspended in the terminal before the turn finished")),
+        }
+        .map(|text| match said {
+            Some(said) => format!("{text}: {said}"),
+            None => format!("{text}."),
+        });
         if let Some(text) = text {
             self.publish(rt, Payload::Status { text }, None);
         }
@@ -1050,7 +1084,7 @@ impl SessionManager {
         self.set_front(&rt, Front::Agent);
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
-        let started = self.start_cli(&mut rt, &rt_arc, &entry, &tab);
+        let started = self.start_cli(&mut rt, &rt_arc, &entry, &tab, false);
         if started.is_err() {
             self.set_front(&rt, Front::Terminal);
         }

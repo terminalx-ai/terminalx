@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredHost } from "../store/hosts";
+import { RelayOuterError } from "./relay-client";
 
 // `reachable` connect at once, `refused` are turned away with a relay close
 // code, `opening` open their socket and then wait in the handshake.
@@ -7,11 +8,11 @@ const mocks = vi.hoisted(() => ({ clients: [] as any[], reachable: new Set<strin
 vi.mock("../store/hosts", () => ({ updateStoredHost: mocks.writes, writeHostCredential: vi.fn() }));
 vi.mock("./e2ee-keypair", () => ({ loadOrCreateE2EESecretKey: async () => new Uint8Array(32) }));
 vi.mock("./credential-rotation", () => ({ rotateCredentialIfNeeded: async (args: unknown) => args }));
-vi.mock("./relay-client", () => {
-  class RelayOuterError extends Error { constructor(readonly code: number) { super(`relay_outer_${code}`); } }
-  return { RelayOuterError, RelayClient: class {
+vi.mock("./relay-client", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./relay-client")>();
+  return { ...original, RelayClient: class {
     state = "connecting";
-    listeners: ((state: string) => void)[] = [];
+    listeners: ((state: string, cause?: Error) => void)[] = [];
     reject?: (error: Error) => void;
     finish?: () => void;
     constructor(public options: any) { mocks.clients.push(this); }
@@ -19,19 +20,22 @@ vi.mock("./relay-client", () => {
       const path = this.options.endpoint ?? "relay";
       if (mocks.reachable.has(path)) { this.state = "connected"; return Promise.resolve(); }
       const refusal = mocks.refused.get(path);
-      if (refusal) { this.state = "disconnected"; return Promise.reject(new RelayOuterError(refusal)); }
+      if (refusal) { this.state = "disconnected"; return Promise.reject(new original.RelayOuterError(refusal)); }
       if (mocks.opening.has(path)) this.setState("handshaking");
       return new Promise<void>((resolve, reject) => { this.reject = reject; this.finish = () => { this.setState("connected"); resolve(); }; });
     }
     close() { this.setState("disconnected"); this.reject?.(new Error("Connection refused")); }
-    setState(state: string) { this.state = state; for (const listener of this.listeners) listener(state); }
+    /** The socket closed under a connected client, with what ended it. */
+    drop(cause: Error) { this.setState("disconnected", cause); }
+    setState(state: string, cause?: Error) { this.state = state; for (const listener of this.listeners) listener(state, cause); }
+    getTransport() { return this.options.transport === "direct" ? "direct" : "relay"; }
     subscribe() {}
-    subscribeState(listener: (state: string) => void) { this.listeners.push(listener); listener(this.state); return () => { this.listeners = this.listeners.filter((other) => other !== listener); }; }
+    subscribeState(listener: (state: string, cause?: Error) => void) { this.listeners.push(listener); listener(this.state); return () => { this.listeners = this.listeners.filter((other) => other !== listener); }; }
     getResumeConfirmation() { return null; }
     request() { return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
   } };
 });
-import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, HostConnection, RESUME_QUIET_MS } from "./connection";
+import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS } from "./connection";
 
 const lan = "ws://192.168.1.2:6768";
 const vpn = "ws://100.93.49.78:6768";
@@ -400,5 +404,60 @@ describe("path failures, cancellations and network changes", () => {
     connection.networkChanged(wifi); await flush();
     expect(mocks.clients.length).toBeGreaterThan(sockets);
     expect(live()).toHaveLength(1);
+  });
+});
+
+// #670: what ended a connection, and trying again without waiting out the delay.
+describe("a lost connection", () => {
+  const live = () => mocks.clients.filter((client) => client.state === "connected");
+  const failAttempt = async () => { for (const client of mocks.clients) if (client.state === "connecting") client.close(); await flush(); };
+
+  it("logs the path, close code and reason it was lost with", async () => {
+    const logs: any[] = []; connection.onLog((entry) => logs.push(entry));
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    expect(connection.transport()).toBe("direct");
+    mocks.reachable.clear();
+    // A connection that lasted (#666): one lost sooner also says when it reconnects.
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(1001, "Stream end encountered", false)); await flush();
+    expect(connection.transport()).toBeNull();
+    expect(logs.find((entry) => entry.message === "Connection lost")?.detail).toBe('Mac · direct · relay_outer_1001 (reason "Stream end encountered", not clean)');
+  });
+
+  it("starts the next attempt at once on retryNow, and leaves one under way alone", async () => {
+    const stages: string[] = []; connection.onStage((stage) => stages.push(stage));
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    mocks.reachable.clear();
+    // A connection that lasted, so attempt 0 starts at once instead of after the #666 flap delay.
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(4408, "", false)); await flush();
+    // Attempt 0 is under way: asking again changes nothing.
+    let sockets = mocks.clients.length;
+    connection.retryNow(); await flush();
+    expect(mocks.clients).toHaveLength(sockets);
+    await failAttempt();
+    expect(stages.at(-1)).toBe("reconnecting");
+    // Waiting out the delay before attempt 1: retryNow ends the wait, with no timer advanced.
+    sockets = mocks.clients.length;
+    connection.retryNow(); await flush();
+    expect(mocks.clients.length).toBeGreaterThan(sockets);
+    await failAttempt();
+    mocks.reachable.add(lan);
+    connection.retryNow(); await flush();
+    expect(live()).toHaveLength(1);
+    expect(stages.at(-1)).toBe("connected");
+    // Connected: nothing to do.
+    sockets = mocks.clients.length;
+    connection.retryNow(); await flush();
+    expect(mocks.clients).toHaveLength(sockets);
+  });
+
+  it("does not reconnect from the background on retryNow", async () => {
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    connection.background();
+    live()[0].close(); await flush();
+    const sockets = mocks.clients.length;
+    connection.retryNow(); await flush();
+    expect(mocks.clients).toHaveLength(sockets);
   });
 });

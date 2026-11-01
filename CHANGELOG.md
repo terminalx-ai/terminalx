@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Background sessions
+
+- Reconnect to the background runtime automatically, with backoff and no attempt
+  limit, instead of after three tries per window. Recovery no longer reloads
+  windows: terminals re-attach in place from their retained output, and sessions,
+  history and pipelines are read again without restarting agents or resending
+  prompts. A hung runtime is now noticed, a restarted one is found again, and a
+  window whose terminal output alone dropped recovers without affecting others.
+  The notice stays quiet for short gaps and asks for action only when retrying
+  cannot help or has not helped for minutes. (#643)
 ### Relay
 
 - Poll the account service for pairing grants and revocations once every 30
@@ -42,8 +52,31 @@
   organizations, with exact-name confirmation and guidance for remaining resources.
   Refresh membership and clear a deleted default selection without choosing a replacement.
 
+### Terminal
+
+- Release a tab's terminal view metadata when the tab is removed, and ignore
+  late start or adoption replies from its previous lifetime. Archived tabs,
+  retained conversation history and reattachment are unchanged. (#232)
+- Cancel xterm's pending buffer compaction when a terminal is disposed,
+  including buffers replaced by a reset, so a closed terminal's scrollback is
+  not kept alive by the timer. (#232)
+- Reuse one small canvas for terminal palette conversion instead of creating
+  two surfaces per palette. (#232)
+- Add an opt-in memory diagnostic to the terminal benchmark: weak inventories of
+  xterm buffers, parsers, renderers and canvases, Tauri callback counts, and
+  WebContent footprint in exact bytes. It reports typed-array spans without
+  materializing their backing buffers. (#232)
+
 ### Chat
 
+- Restart Claude Code tabs whose conversation the CLI never wrote (opened and
+  never prompted, or a first prompt that never reached it) under the same id
+  instead of resuming a conversation that does not exist, which exited at once.
+  Send a Continue in New Session handoff again, ahead of the next prompt, when
+  the CLI never took it. Offer any other prompt the agent never received with
+  **Resend last prompt**, images included. Say why a CLI that exits as it
+  starts went, from what it printed, with credentials and private paths cut
+  out. (#663)
 - Deliver Continue in New Session handoffs that the new agent left in its input.
   The Enter waits until the agent has shown the paste, and is written again up
   to twice. A handoff still in the input is offered as **Press Enter**, not
@@ -56,12 +89,27 @@
   compaction start/completion events and retained interruption status. Existing
   PTY sessions keep their current behavior. (#644)
 
+### Status bar
+
+- Claude usage keeps refreshing when Claude Code's keychain login is large.
+  The read no longer stalls until its deadline once the item outgrew the pipe
+  buffer, as it did as MCP sign-ins accumulated, and then reported "OAuth
+  credentials were not found". A failure now says whether the keychain read
+  timed out, failed (with its exit code), or found no login, and Refresh
+  retries a failed credential read at once instead of waiting out a backoff
+  of up to four hours. A provider's Retry-After still holds it. (#664)
+
 ### Issue work status
 
 - Refresh shared issue work when the account service changes its supported
   capabilities, and republish actual linked sessions after support returns.
   Explain when the account service has not reported support; shared activity
   still requires a supported backend. (#642)
+- Name each Mac by its computer name (System Settings → General → About), so
+  work on another of your Macs reads "You · on Studio" instead of
+  "You · on This Mac". Macs that saved "This Mac" get their real name without
+  renaming, and a name chosen earlier is kept. Settings → Account shows this
+  Mac's name with a Rename button, with or without Relay. (#686)
 
 ### Cloud workspaces
 
@@ -72,6 +120,27 @@
   checkout sessions visible. Require the runtime's `session-repository/1`
   capability; refuse unavailable or mismatched checkouts instead of using the
   blank workspace root. (#656)
+
+### Issue pipelines
+
+- When a pipeline's pull request is merged or closed, or the pipeline is
+  stopped, stop the idle agents of its reviewer and conflict resolver (and,
+  after a merge or close, its author), with the background commands and watches
+  they left running. A reviewer or resolver still in a turn is told the pipeline
+  ended and is stopped when that turn ends; an author in a turn is left alone.
+  Conversations can be resumed. A reply that arrives after the end is noted on
+  the issue page and ignored. (#689)
+- A reviewer can answer that its own checks are still running instead of giving
+  a verdict. TerminalX waits up to 20 minutes, then asks once for a verdict on
+  what it has. (#689)
+- Verdicts say whether the reviewer's checks passed, failed or did not run. The
+  issue page and the pull request comment say so. Failed checks stop the
+  pipeline for a person. A review by reading alone no longer merges a project
+  without CI by itself. (#689)
+- Removing a workspace stops leftover Rust builds and checks still working in
+  it, such as a `cargo check` that outlived rust-analyzer, and lists any other
+  process there by name. Programs detached on purpose (`screen`, `tmux`,
+  `nohup`, tunnels) are never stopped. (#689)
 
 ## 0.2.21
 

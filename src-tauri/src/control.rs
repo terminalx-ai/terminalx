@@ -1029,9 +1029,9 @@ impl ControlService {
         if let Some(desktop) = &self.desktop {
             desktop.browser.forget_workspace(&browser_key);
         }
-        let (entries, removal) = (removed.sessions, removed.removal);
+        let (entries, removal, strays) = (removed.sessions, removed.removal, removed.strays);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
-        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch}))
+        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch, "strayProcesses": strays}))
     }
 
     fn issues_list(&self, params: Value) -> Result<Value, ControlError> {

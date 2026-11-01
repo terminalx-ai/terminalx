@@ -47,7 +47,7 @@ use self::model::{
     HostBindingPayload, HostMetadata, PairingCode, PairingOffer, PairingTransport, RelayStatus,
     CAPABILITY, OFFER_TTL_MS,
 };
-pub use self::model::{PairingConnectionMode, PairingStatus, RelayPhase};
+pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
@@ -450,44 +450,47 @@ impl PairingManager {
         }
     }
 
-    pub async fn set_host_name(&self, display_name: &str) -> Result<PairingStatus> {
-        let display_name = display_name.trim();
-        if display_name.is_empty()
-            || display_name.chars().count() > 80
-            || display_name.chars().any(char::is_control)
-        {
-            bail!("machine name must contain 1 to 80 visible characters");
+    /// Name this Mac for the user's other devices, or with `None` let it follow
+    /// the computer's own name again. Relay need not be on (#686); when this
+    /// Mac is bound, the account directory takes the name first, so a phone
+    /// never lists one it refused.
+    pub async fn set_host_name(&self, display_name: Option<&str>) -> Result<MachineName> {
+        let chosen = display_name.map(chosen_host_name).transpose()?;
+        let computer_name = tokio::task::spawn_blocking(recent_computer_name).await?;
+        let named = resolve_machine_name(chosen.clone(), None, computer_name);
+        let bound = self.inner.lock().unwrap().host.is_some();
+        let context = self.account_context();
+        let mirror = registry::load_account_mirror()?;
+        let binding = context.zip(mirror.clone()).filter(|(context, mirror)| bound && context.user_id == mirror.user_id);
+        if let Some((context, mirror)) = binding {
+            let keypair = self.host_key(false)?;
+            let payload = HostBindingPayload {
+                host_id: keypair.host_id(),
+                host_public_key_b64: keypair.public_key_b64(),
+                binding_generation: mirror.binding_generation,
+                display_name: named.name.clone(),
+                platform: "darwin".into(),
+                environment_kind: "native".into(),
+                capabilities: vec![CAPABILITY.into()],
+            };
+            tokio::task::spawn_blocking(move || cloud::register_host(&context, &payload)).await??;
         }
-        let context = self
-            .account_context()
-            .ok_or_else(|| anyhow!("sign in before changing this Mac’s name"))?;
-        let mut mirror = registry::load_account_mirror()?
-            .filter(|mirror| mirror.user_id == context.user_id)
-            .ok_or_else(|| anyhow!("host binding is not ready"))?;
-        let keypair = self.host_key(false)?;
-        let payload = HostBindingPayload {
-            host_id: keypair.host_id(),
-            host_public_key_b64: keypair.public_key_b64(),
-            binding_generation: mirror.binding_generation,
-            display_name: display_name.into(),
-            platform: "darwin".into(),
-            environment_kind: "native".into(),
-            capabilities: vec![CAPABILITY.into()],
-        };
-        let context_for_bind = context.clone();
-        let payload_for_bind = payload.clone();
-        tokio::task::spawn_blocking(move || {
-            cloud::register_host(&context_for_bind, &payload_for_bind)
-        })
-        .await??;
-        mirror.host_display_name = Some(display_name.into());
-        registry::save_account_mirror(&mirror)?;
+        let mut settings = crate::store::settings::load();
+        settings.machine_name = chosen;
+        crate::store::settings::save(&settings)?;
+        // The name is the Mac's now, whoever signs in. One an earlier version
+        // kept for an account must not come back when this one is cleared.
+        // Read again: sign-out may have advanced the binding fence meanwhile.
+        if let Some(mut mirror) = registry::load_account_mirror()?.filter(|mirror| mirror.host_display_name.is_some()) {
+            mirror.host_display_name = None;
+            registry::save_account_mirror(&mirror)?;
+        }
         if let Some(host) = self.inner.lock().unwrap().host.as_mut() {
-            host.display_name = display_name.into();
+            host.display_name = named.name.clone();
             host.last_seen_at = Some(Utc::now().to_rfc3339());
         }
         self.emit();
-        Ok(self.snapshot())
+        Ok(named)
     }
 
     pub(super) fn is_stopped(&self) -> bool {
@@ -515,14 +518,20 @@ impl PairingManager {
         self.host_key(false).or_else(|_| self.host_key(true)).ok().map(|keypair| keypair.host_id())
     }
 
-    /// This Mac's name as Settings → Account shows it to `user_id`.
+    /// This Mac's name as Settings → Account shows it to `user_id`, and as
+    /// their other devices see it.
     pub(crate) fn host_name(user_id: &str) -> String {
-        registry::load_account_mirror()
-            .ok()
-            .flatten()
-            .filter(|mirror| mirror.user_id == user_id)
-            .and_then(|mirror| mirror.host_display_name)
-            .unwrap_or_else(host_display_name)
+        Self::machine_name_for(Some(user_id)).name
+    }
+
+    /// This Mac's name as Settings → Account shows it to whoever is signed in.
+    pub fn machine_name(&self) -> MachineName {
+        Self::machine_name_for(self.account_context().map(|context| context.user_id).as_deref())
+    }
+
+    fn machine_name_for(user_id: Option<&str>) -> MachineName {
+        let saved = user_id.and_then(|user_id| saved_host_name(registry::load_account_mirror().ok().flatten().as_ref(), user_id));
+        resolve_machine_name(crate::store::settings::load().machine_name, saved, recent_computer_name())
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
@@ -629,16 +638,15 @@ impl PairingManager {
                 }
             })
             .unwrap_or(1);
-        let display_name = previous
-            .as_ref()
-            .filter(|mirror| mirror.user_id == context.user_id)
-            .and_then(|mirror| mirror.host_display_name.clone())
-            .unwrap_or_else(host_display_name);
+        // Only a name someone chose is kept here; the computer's own is read
+        // again each time, so a rename in System Settings reaches the directory (#686).
+        let saved = saved_host_name(previous.as_ref(), &context.user_id);
+        let display_name = resolve_machine_name(crate::store::settings::load().machine_name, saved.clone(), recent_computer_name()).name;
         let mirror = AccountMirror {
             user_id: context.user_id.clone(),
             email: context.email.clone(),
             display_name: context.display_name.clone(),
-            host_display_name: Some(display_name.clone()),
+            host_display_name: saved,
             binding_generation: generation,
         };
         if let Err(error) = registry::save_account_mirror(&mirror) {
@@ -1468,14 +1476,87 @@ fn computer_name() -> Option<String> {
         .chain(std::fs::read_to_string("/etc/hostname").ok())
         .filter_map(|name| presentable_name(name.split('.').next().unwrap_or("")))
         .next()
+        .or_else(system_host_name)
 }
 
-fn host_display_name() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .and_then(|name| name.split('.').next().map(str::to_string))
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "This Mac".into())
+/// [`computer_name`], read again once it is a minute old: the work-status
+/// publisher asks for this Mac's name on each pass.
+fn recent_computer_name() -> Option<String> {
+    const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+    static RECENT: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
+    let mut recent = RECENT.lock().unwrap();
+    if let Some((at, name)) = recent.as_ref() {
+        if at.elapsed() < FRESH_FOR {
+            return name.clone();
+        }
+    }
+    let name = computer_name();
+    *recent = Some((std::time::Instant::now(), name.clone()));
+    name
+}
+
+/// The kernel's host name ("Studio.local" → "Studio"), for when nothing else
+/// names this computer. "localhost" names every computer, so it is no name.
+#[cfg(unix)]
+fn system_host_name() -> Option<String> {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the call writes at most `buffer.len()` bytes into a buffer that outlives it.
+    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
+    let name = String::from_utf8_lossy(&buffer[..end]);
+    presentable_name(name.split('.').next().unwrap_or("")).filter(|name| !name.eq_ignore_ascii_case("localhost"))
+}
+
+#[cfg(not(unix))]
+fn system_host_name() -> Option<String> {
+    None
+}
+
+/// The name every Mac saved as its own before #686 when it was opened from
+/// Finder or the Dock, which leaves no `HOSTNAME` to read. Nobody chose it,
+/// and on another computer it says the opposite of what is true.
+const PLACEHOLDER_HOST_NAME: &str = "This Mac";
+
+/// What others are shown when nothing names this computer.
+const UNNAMED_HOST: &str = "Unnamed Mac";
+
+/// The name an earlier version kept in `account.json` for `user_id`: one the
+/// user chose in Settings → Account, or the host name it found, but never the
+/// placeholder it saved when it found none.
+fn saved_host_name(mirror: Option<&AccountMirror>, user_id: &str) -> Option<String> {
+    mirror
+        .filter(|mirror| mirror.user_id == user_id)
+        .and_then(|mirror| mirror.host_display_name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != PLACEHOLDER_HOST_NAME)
+        .map(str::to_string)
+}
+
+/// This Mac's name: the one chosen in Settings → Account, else one an earlier
+/// version saved, else the computer's own. `chosen` when it does not follow
+/// the computer's name.
+fn resolve_machine_name(chosen: Option<String>, saved: Option<String>, computer_name: Option<String>) -> MachineName {
+    let chosen = chosen.map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
+    let (name, chosen) = match (chosen, saved) {
+        (Some(name), _) => (name, true),
+        (None, Some(name)) => {
+            let differs = computer_name.as_deref() != Some(name.as_str());
+            (name, differs)
+        }
+        (None, None) => (computer_name.clone().unwrap_or_else(|| UNNAMED_HOST.into()), false),
+    };
+    MachineName { name, chosen, computer_name }
+}
+
+/// A name the user typed for this Mac, as it may be sent: 1 to 80 visible characters.
+fn chosen_host_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        bail!("machine name must contain 1 to 80 visible characters");
+    }
+    Ok(name.into())
 }
 
 fn advertised_endpoints() -> Vec<String> {
@@ -1824,6 +1905,100 @@ mod tests {
         if let Some(name) = computer_name() {
             assert!(!name.is_empty() && name.chars().count() <= COMPUTER_NAME_MAX_CHARS && !name.chars().any(char::is_control));
         }
+    }
+
+    fn mirror(user_id: &str, host_display_name: Option<&str>) -> AccountMirror {
+        AccountMirror {
+            user_id: user_id.into(),
+            email: format!("{user_id}@example.invalid"),
+            display_name: user_id.into(),
+            host_display_name: host_display_name.map(str::to_string),
+            binding_generation: 7,
+        }
+    }
+
+    // #686: every Mac opened from Finder saved and published "This Mac", which
+    // another Mac then showed as "You · on This Mac".
+    #[test]
+    fn a_mac_is_named_by_its_choice_then_its_computer_name_and_never_this_mac() {
+        let studio = || Some("Studio".to_string());
+        let resolve = |chosen: Option<&str>, saved: Option<&str>, computer: Option<&str>| {
+            resolve_machine_name(chosen.map(str::to_string), saved.map(str::to_string), computer.map(str::to_string))
+        };
+        assert_eq!(resolve(None, None, Some("Studio")), MachineName { name: "Studio".into(), chosen: false, computer_name: studio() });
+        assert_eq!(resolve(Some(" Desk "), Some("Old"), Some("Studio")), MachineName { name: "Desk".into(), chosen: true, computer_name: studio() });
+        // A name saved by an earlier version stays, and is the user's while it differs from the computer's.
+        assert_eq!(resolve(None, Some("Old"), Some("Studio")), MachineName { name: "Old".into(), chosen: true, computer_name: studio() });
+        assert!(!resolve(None, Some("Studio"), Some("Studio")).chosen);
+        assert_eq!(resolve(Some("  "), None, Some("Studio")).name, "Studio");
+        // Nothing names this computer: a name that reads true on any computer.
+        assert_eq!(resolve(None, None, None), MachineName { name: UNNAMED_HOST.into(), chosen: false, computer_name: None });
+        assert_ne!(UNNAMED_HOST, PLACEHOLDER_HOST_NAME);
+
+        // The placeholder is no saved name; neither is another account's.
+        assert_eq!(saved_host_name(Some(&mirror("u1", Some("This Mac"))), "u1"), None);
+        assert_eq!(saved_host_name(Some(&mirror("u1", Some(" Studio "))), "u1").as_deref(), Some("Studio"));
+        assert_eq!(saved_host_name(Some(&mirror("u1", Some("Studio"))), "u2"), None);
+        assert_eq!(saved_host_name(Some(&mirror("u1", None)), "u1"), None);
+        assert_eq!(saved_host_name(None, "u1"), None);
+
+        assert!(chosen_host_name(" \t ").is_err());
+        assert!(chosen_host_name(&"n".repeat(81)).is_err());
+        assert!(chosen_host_name("Desk\u{0007}").is_err());
+        assert_eq!(chosen_host_name("  Desk Mac ").unwrap(), "Desk Mac");
+    }
+
+    #[tokio::test]
+    async fn a_mac_that_saved_this_mac_is_named_and_renamed_without_relay() {
+        let _home = crate::store::temp_home();
+        let account = Arc::new(crate::account::AccountManager::default());
+        account.set_context_for_test(Some(AccountContext {
+            access_token: "token".into(),
+            user_id: "u1".into(),
+            email: "u1@example.invalid".into(),
+            display_name: "U1".into(),
+            profile_id: "profile".into(),
+            organization_id: "org".into(),
+            relay_entitled: true,
+            generation: 1,
+        }));
+        let manager = PairingManager::new(account);
+        let computer = recent_computer_name();
+        let own_name = computer.clone().unwrap_or_else(|| UNNAMED_HOST.into());
+
+        // What 0.2.21 left behind when opened from Finder or the Dock.
+        registry::save_account_mirror(&mirror("u1", Some("This Mac"))).unwrap();
+        assert_eq!(PairingManager::host_name("u1"), own_name);
+        assert_eq!(manager.machine_name(), MachineName { name: own_name.clone(), chosen: false, computer_name: computer.clone() });
+
+        // Relay is off: no host is bound and nothing is sent anywhere.
+        assert!(manager.inner.lock().unwrap().host.is_none());
+        let named = manager.set_host_name(Some("  Desk Mac ")).await.unwrap();
+        assert_eq!(named, MachineName { name: "Desk Mac".into(), chosen: true, computer_name: computer.clone() });
+        assert_eq!(PairingManager::host_name("u1"), "Desk Mac");
+        // The name is the Mac's, whoever signs in next.
+        assert_eq!(PairingManager::host_name("someone-else"), "Desk Mac");
+        assert_eq!(crate::store::settings::load().machine_name.as_deref(), Some("Desk Mac"));
+        let kept = registry::load_account_mirror().unwrap().unwrap();
+        assert_eq!((kept.host_display_name, kept.binding_generation, kept.user_id.as_str()), (None, 7, "u1"));
+
+        assert!(manager.set_host_name(Some("   ")).await.is_err());
+        assert_eq!(PairingManager::host_name("u1"), "Desk Mac");
+
+        // Cleared, it follows the computer's own name again.
+        let named = manager.set_host_name(None).await.unwrap();
+        assert_eq!(named, MachineName { name: own_name.clone(), chosen: false, computer_name: computer });
+        assert_eq!(PairingManager::host_name("u1"), own_name);
+        assert_eq!(crate::store::settings::load().machine_name, None);
+    }
+
+    #[test]
+    fn a_name_chosen_in_an_earlier_version_is_kept() {
+        let _home = crate::store::temp_home();
+        registry::save_account_mirror(&mirror("u1", Some("Studio"))).unwrap();
+        assert_eq!(PairingManager::host_name("u1"), "Studio");
+        // Another account on this Mac never saw that name.
+        assert_ne!(PairingManager::host_name("u2"), "Studio");
     }
 
     #[test]

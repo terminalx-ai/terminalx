@@ -190,6 +190,7 @@ try {
           pr: { number: 7, url: "https://example.test/pull/7", base: "main" },
           verdict: {
             commit, decision: "changes", securityPass: "flagged", round: 3, at: "2026-10-01T00:10:00Z",
+            checks: "notRun", checksNote: "the build waited on a file lock held by a cargo check that outlived its editor, so no test ran",
             findings: [
               { severity: "high", title: "Focus is lost when the list re-renders after a selection", file: "src/components/demo/VeryLongDirectoryName/AnotherDirectory/DemoListWithKeyboardNavigation.tsx", line: 128, detail: "The selected row is re-created, so document.activeElement falls back to the body and the next arrow key does nothing.", security: false },
               { severity: "medium", title: "Token read from localStorage without a check", file: "src/lib/demoAuth.ts", line: 9, security: true },
@@ -240,12 +241,14 @@ try {
           stages: node.querySelectorAll('ol[aria-label="Stages"] > li').length,
           findings: [...node.querySelectorAll("ul > li")].map((item) => item.textContent.slice(0, 14)),
           switches: document.querySelectorAll('[role="switch"][aria-label="Merge when green"]').length,
+          checks: node.querySelector('[data-testid="pipeline-review-checks"]')?.textContent ?? null,
         };
       });
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "the pipeline panel fits the detail pane with its findings and record open": !pipelineLayout.scrolls && pipelineLayout.inside && !pipelineLayout.overlaps,
         "it shows the five stages and the open findings, worst first": pipelineLayout.stages === 5 && pipelineLayout.findings.join("|") === "highFocus is l|medium · secur|nitUnused impo",
         "the issue has one merge switch, the pipeline's": pipelineLayout.switches === 1,
+        "it says the review was by reading only": pipelineLayout.checks?.startsWith("Reviewed by reading only, tests not run: the build waited") === true,
         "it says Needs you, in the list and on the page": (await page.getByText("Needs you", { exact: true }).count()) === 2,
         "the way forward is offered and a merge is not": (await panel.getByRole("button", { name: "Review once more", exact: true }).count()) === 1 && (await panel.getByRole("button", { name: "Merge", exact: true }).count()) === 0,
       }, pipelineLayout);

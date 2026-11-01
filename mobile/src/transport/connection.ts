@@ -5,6 +5,7 @@ import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { hostDisplayName } from "../store/host-name";
 import { RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
+import { closeDetail } from "./connection-errors";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
 import { rotateCredentialIfNeeded } from "./credential-rotation";
@@ -70,6 +71,10 @@ export class HostConnection {
   private network: PhoneNetwork | undefined;
   /** Connections in a row that were lost within FLAP_WINDOW_MS of connecting. */
   private flaps = 0;
+  /** The generation whose connect attempt is under way, between reconnect delays. */
+  private attempting: number | null = null;
+  /** Ends the reconnect delay being waited out, for `retryNow`. */
+  private skipDelay: (() => void) | null = null;
   private pendingClients = new Set<RelayClient>();
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private active: { host: StoredHost; credential: HostCredential } | null = null;
@@ -93,6 +98,7 @@ export class HostConnection {
     this.lostWhileAway = false;
     this.resumeDeadline = 0;
     this.cancel(reason);
+    this.skipDelay?.();
     clearInterval(this.refreshTimer);
     for (const client of this.pendingClients) client.close();
     this.pendingClients.clear();
@@ -108,6 +114,7 @@ export class HostConnection {
     const active = this.active;
     if (!active) return;
     this.cancel(reason);
+    this.skipDelay?.();
     clearInterval(this.refreshTimer);
     for (const client of this.pendingClients) client.close();
     this.pendingClients.clear();
@@ -186,6 +193,28 @@ export class HostConnection {
   onConnected(listener: () => void): () => void {
     this.connectedListeners.add(listener);
     return () => this.connectedListeners.delete(listener);
+  }
+
+  /** The path the usable connection runs over; null while there is none. */
+  transport(): "direct" | "relay" | null {
+    return this.client?.getTransport() ?? null;
+  }
+
+  /** Whether the Mac on the usable connection reassembles fragments; false while there is none. */
+  reassemblesFragments(): Promise<boolean> {
+    return this.client?.reassemblesFragments() ?? Promise.resolve(false);
+  }
+
+  /**
+   * Someone asked to try again (#670): the next connect attempt starts now
+   * instead of after the reconnect delay. A usable connection, or an attempt
+   * already under way, is left alone; so is one lost in the background, which
+   * is taken up again on return.
+   */
+  retryNow(): void {
+    if (!this.active || this.client || this.backgrounded) return;
+    if (this.skipDelay) this.skipDelay();
+    else if (this.attempting !== this.generation) this.restart();
   }
 
   private reconnectNow(reason: string): void {
@@ -277,8 +306,9 @@ export class HostConnection {
     while (this.active && generation === this.generation) {
       this.emitStage(attempt === 0 ? "connecting" : attempt >= 12 ? "unreachable" : attempt >= 3 ? "cant-connect" : "reconnecting", attempt);
       const delay = attempt === 0 ? firstDelay : attempt > 12 ? RECONNECT_TRICKLE_MS : RECONNECT_DELAYS_MS[Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1)]!;
-      if (delay) await wait(delay);
+      if (delay) await this.delay(delay);
       if (!this.active || generation !== this.generation) return;
+      this.attempting = generation;
       try {
         await this.connectOnce(generation);
         return;
@@ -290,8 +320,23 @@ export class HostConnection {
         }
         this.log("warning", "Connection attempt failed", safeError(error));
         attempt++;
+      } finally {
+        if (this.attempting === generation) this.attempting = null;
       }
     }
+  }
+
+  /** A reconnect delay that `retryNow` can cut short. */
+  private delay(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        if (this.skipDelay === done) this.skipDelay = null;
+        resolve();
+      };
+      const timer = setTimeout(done, milliseconds);
+      this.skipDelay = done;
+    });
   }
 
   private async connectOnce(generation: number): Promise<void> {
@@ -380,7 +425,7 @@ export class HostConnection {
     client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
     let wasConnected = false;
     let connectedAt = 0;
-    client.subscribeState((state) => {
+    client.subscribeState((state, cause) => {
       if (generation !== this.generation) return;
       if (state === "connected") {
         wasConnected = true;
@@ -399,7 +444,9 @@ export class HostConnection {
           return;
         }
         const delay = this.flaps ? FLAP_DELAYS_MS[Math.min(this.flaps, FLAP_DELAYS_MS.length) - 1]! : 0;
-        this.log("warning", "Connection lost", delay ? `${hostDisplayName(host)} · reconnecting in ${delay / 1_000} s` : hostDisplayName(host));
+        // The close code and reason are what tell a relay rejection from the phone's own network (#670).
+        const lost = `${hostDisplayName(host)} · ${winner.path} · ${cause ? safeError(cause) : "no cause"}`;
+        this.log("warning", "Connection lost", delay ? `${lost} · reconnecting in ${delay / 1_000} s` : lost);
         void this.connectLoop(generation, delay);
       }
     });
@@ -516,7 +563,7 @@ const relayError = (error: unknown) => {
   return meaning ? `${safeError(error)} (${meaning})` : safeError(error);
 };
 const safeError = (value: unknown) => {
-  const message = value instanceof Error ? value.message : typeof value === "string" ? value : "Unknown connection error";
+  const message = value instanceof RelayOuterError ? closeDetail(value) : value instanceof Error ? value.message : typeof value === "string" ? value : "Unknown connection error";
   return message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]");
 };
 const redactEndpoint = (value: string) => { try { return new URL(value).origin; } catch { return "relay endpoint"; } };

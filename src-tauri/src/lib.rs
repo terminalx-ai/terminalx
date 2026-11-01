@@ -115,6 +115,7 @@ mod relay_e2ee;
 pub mod remote;
 mod session;
 mod session_ops;
+mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
@@ -165,6 +166,8 @@ pub struct AppState {
     manager: std::sync::Mutex<Option<session::SessionManager>>,
     runtime: std::sync::Mutex<Option<Arc<local_runtime::desktop::Desktop>>>,
     runtime_error: std::sync::Mutex<String>,
+    /// Re-establishes `runtime` after a loss, without reloading a window.
+    runtime_supervisor: local_runtime::supervisor::Supervisor,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
 }
 
@@ -235,6 +238,7 @@ pub fn run() {
         manager: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(None),
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
+        runtime_supervisor: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
 
@@ -334,9 +338,15 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
-            if let Err(error) = local_runtime::ui::connect(app.handle()) {
-                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
-                log::error!("attach background runtime: {error:#}");
+            let state = app.state::<AppState>();
+            state.runtime_supervisor.start(app.handle())?;
+            match local_runtime::supervisor::attach(app.handle()) {
+                Ok(generation) => state.runtime_supervisor.attached(generation),
+                Err(error) => {
+                    *state.runtime_error.lock().unwrap() = format!("{error:#}");
+                    log::error!("attach background runtime: {error:#}");
+                    state.runtime_supervisor.unattached(&error);
+                }
             }
             work_claims.start(app.handle().clone());
             Ok(())
@@ -477,7 +487,8 @@ pub fn run() {
             commands::session_guest_leave,
             commands::pairing_generate,
             commands::pairing_revoke,
-            commands::pairing_set_host_name,
+            commands::machine_name,
+            commands::set_machine_name,
             commands::add_project,
             commands::chats_dir,
             commands::remove_project,
@@ -543,6 +554,7 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::resend_unsent,
             commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
@@ -769,6 +781,8 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
+                        // The app goes with it: nothing may attach again.
+                        state.runtime_supervisor.halt();
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                         if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
@@ -805,6 +819,7 @@ pub fn run() {
                 // destroying the window first; the computer-use helper must
                 // not outlive the app on either path.
                 state.computer.shutdown();
+                state.runtime_supervisor.halt();
                 state.pairing.stop();
                 if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                 state.browser.shutdown();

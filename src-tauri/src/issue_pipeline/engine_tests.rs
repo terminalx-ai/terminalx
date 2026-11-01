@@ -2,7 +2,7 @@
 //! and the sessions would. Every way it can stop short of a merge is here,
 //! and the one way it merges.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -13,7 +13,7 @@ use crate::github::{PinnedMerge, PrCheck, PrSnapshot};
 use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
-use super::engine::{self, act, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, Diff, Host, Workspace};
+use super::engine::{self, act, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, AgentStop, Diff, Host, Workspace};
 use super::gate::StopReason;
 use super::verdict::Severity;
 use super::engine::set_resolve_conflicts;
@@ -70,6 +70,12 @@ struct World {
     cloud: bool,
     /// Each session's last finished turn, as its transcript has it.
     replies: BTreeMap<String, (DateTime<Utc>, String)>,
+    /// Conversations whose agent process is running, by [`key`].
+    running: BTreeSet<String>,
+    /// Of those, the ones in a turn or with a prompt waiting.
+    busy: BTreeSet<String>,
+    /// Agents TerminalX stopped, with the note left in each transcript.
+    stopped_agents: Vec<(String, String)>,
 }
 
 struct FakeHost(Mutex<World>);
@@ -135,6 +141,9 @@ impl FakeHost {
             merge_hold: None,
             cloud: false,
             replies: BTreeMap::new(),
+            running: BTreeSet::new(),
+            busy: BTreeSet::new(),
+            stopped_agents: Vec::new(),
         }))
     }
 
@@ -151,6 +160,21 @@ impl FakeHost {
         self.world().sent.iter().filter(|(to, _)| to == session_id).map(|(_, prompt)| prompt.clone()).collect()
     }
 
+    /// A conversation's agent is running; `busy` while it is in a turn.
+    fn agent(&self, who: &SessionRef, busy: bool) {
+        let mut world = self.world();
+        world.running.insert(key(who));
+        if busy {
+            world.busy.insert(key(who));
+        } else {
+            world.busy.remove(&key(who));
+        }
+    }
+
+    fn stopped_agents(&self) -> Vec<String> {
+        self.world().stopped_agents.iter().map(|(who, _)| who.clone()).collect()
+    }
+
 }
 
 impl Host for FakeHost {
@@ -164,6 +188,23 @@ impl Host for FakeHost {
 
     fn last_reply(&self, session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
         self.world().replies.get(&session.session_id).cloned()
+    }
+
+    fn agent_busy(&self, who: &SessionRef) -> bool {
+        self.world().busy.contains(&key(who))
+    }
+
+    fn stop_agent(&self, who: &SessionRef, note: &str) -> Result<AgentStop> {
+        let mut world = self.world();
+        if !world.running.contains(&key(who)) {
+            return Ok(AgentStop::NotRunning);
+        }
+        if world.busy.contains(&key(who)) {
+            return Ok(AgentStop::Busy);
+        }
+        world.running.remove(&key(who));
+        world.stopped_agents.push((key(who), note.to_string()));
+        Ok(AgentStop::Stopped)
     }
 
     fn session(&self, session_id: &str) -> Result<SessionEntry> {
@@ -387,7 +428,25 @@ fn reviewed(commit: &str, verdict: &str, findings: &str) -> String {
 }
 
 fn reviewed_with(commit: &str, verdict: &str, findings: &str, security: &str) -> String {
-    format!("Read it.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"{verdict}\", \"securityPass\": \"{security}\", \"findings\": {findings}}}\n```")
+    format!("Read it.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"{verdict}\", \"securityPass\": \"{security}\", \"checks\": \"passed\", \"findings\": {findings}}}\n```")
+}
+
+/// A verdict that says what the reviewer's own checks came to.
+fn reviewed_checks(commit: &str, verdict: &str, checks: &str, note: &str) -> String {
+    format!("Read it.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"{verdict}\", \"securityPass\": \"not_needed\", \"checks\": \"{checks}\", \"checksNote\": \"{note}\", \"findings\": []}}\n```")
+}
+
+/// The reviewer ends its turn to wait for checks it started.
+fn pending_review(commit: &str, reason: &str) -> String {
+    format!("The tests are still running.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"pending\", \"reason\": \"{reason}\"}}\n```")
+}
+
+fn key(who: &SessionRef) -> String {
+    format!("{}/{}", who.session_id, who.tab_id)
+}
+
+fn author_tab() -> SessionRef {
+    SessionRef { session_id: "author".into(), tab_id: "t1".into() }
 }
 
 const HIGH: &str = r#"[{"severity": "high", "title": "Off by one", "file": "src/lib/format.ts", "line": 3}]"#;
@@ -2397,4 +2456,282 @@ fn refused_continuation_still_revokes_explicit_off_permissions() {
         assert!(!run.pipeline().auto_merge && !run.pipeline().resolve_conflicts);
         assert!(run.merges().is_empty());
     }
+}
+
+// ---- the end of a pipeline, for the conversations in it (#689) ----------------------
+
+#[test]
+fn a_merge_made_elsewhere_stops_the_idle_reviewer_and_author_and_a_later_reply_changes_nothing() {
+    // The reviewer gave its verdict with its tests still running in the background, and went on waking up after the merge.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("desktop-platforms (ubuntu-latest)", "failure")];
+    let run = Run::start_in(host, true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    let stopped = run.reviewer(&reviewed_checks(C1, "merge", "not_run", "the tests are still compiling"));
+    assert_eq!(stopped.reason, Some(StopReason::ChecksFailed { names: vec!["desktop-platforms (ubuntu-latest)".into()] }));
+    // Both agents sit idle between turns, the reviewer with a watch that will wake it.
+    run.host.agent(&reviewer, false);
+    run.host.agent(&author_tab(), false);
+
+    // A person merges the pull request on GitHub.
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged);
+    assert_eq!(run.host.stopped_agents(), [key(&author_tab()), key(&reviewer)]);
+    assert!(run.host.world().stopped_agents[1].1.starts_with("Pull request #7 was merged at 1111111111, so this pipeline is finished. TerminalX stopped this tab's agent"));
+    let released = merged.events.last().unwrap();
+    assert_eq!(released.kind, "participantsReleased");
+    assert_eq!(released.message, "Pull request #7 was merged at 1111111111, so this pipeline is finished. Stopped the agents of the author and the reviewer, which sat idle; their conversations can be resumed.");
+    // Nothing was typed into them: an idle agent would only read it when it woke.
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    assert!(run.host.prompts_to("author").is_empty());
+    assert!(merged.releasing.is_empty());
+    // Looked at again, nothing is released twice.
+    assert_eq!(run.poll().events.len(), merged.events.len());
+
+    // Woken anyway, by a person typing into it, the reviewer revises its verdict: noted once, and nothing moves.
+    let late = run.reviewer(&reviewed(C1, "changes", HIGH));
+    assert_eq!(late.state, State::Merged);
+    assert_eq!(late.events.last().unwrap().message, "The reviewer replied after the merge; its reply was ignored.");
+    assert_eq!(late.events.last().unwrap().session_id.as_deref(), Some(reviewer.session_id.as_str()));
+    assert_eq!(run.reviewer("Still waiting on the tests.").events.len(), late.events.len());
+    assert_eq!(run.host.world().comments.len(), 1);
+    // The author's conversation is a person's own again: its turns are not the pipeline's to note.
+    assert_eq!(run.author("Thanks, all done.").events.len(), late.events.len());
+    assert!(run.host.prompts_to("author").is_empty());
+}
+
+#[test]
+fn a_conversation_still_in_a_turn_when_the_pipeline_ends_is_told_and_stopped_once_the_turn_ends() {
+    let run = Run::start(&github_issue(), false);
+    let reviewer = run.to_review().reviewer.unwrap();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    // The reviewer is in a turn when the merge lands.
+    run.host.agent(&reviewer, true);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert_eq!(merged.releasing, std::slice::from_ref(&reviewer));
+    assert!(run.host.stopped_agents().is_empty(), "a turn is never cut off");
+    let told = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(told.len(), 2);
+    assert!(told[1].starts_with("Pull request #7 was merged at 1111111111, so this pipeline is finished. TerminalX will not use another report or verdict"), "{}", told[1]);
+    assert!(told[1].contains("Stop any background commands and watches you started for this pipeline"));
+    assert!(merged.events.last().unwrap().message.ends_with("Told the reviewer, still in a turn, to stop what it started for the pipeline; its agent is stopped when that turn ends."));
+
+    // That turn ends with the notice still waiting for it: left for the turn that reads it.
+    let waiting = run.reviewer("Checking the tests once more.");
+    assert_eq!(waiting.releasing, std::slice::from_ref(&reviewer));
+    assert!(run.host.stopped_agents().is_empty());
+    // The next ends idle: its agent is stopped, and the reply noted.
+    run.host.agent(&reviewer, false);
+    let done = run.reviewer("Understood. Stopped the watch.");
+    assert!(done.releasing.is_empty());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+    assert_eq!(done.events.last().unwrap().message, "The reviewer replied after the merge; its reply was ignored. TerminalX stopped its agent.");
+    assert_eq!(done.state, State::Merged);
+}
+
+#[test]
+fn stopping_a_pipeline_releases_its_reviewer_and_leaves_the_authors_work_alone() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    run.host.agent(&author_tab(), true);
+    run.host.agent(&reviewer, true);
+    let stopped = act(&run.host, &run.id, Action::Stop).unwrap();
+    // The author's work goes on, only without the pipeline; the reviewer is told its review is off.
+    assert!(run.host.prompts_to("author").is_empty());
+    assert_eq!(stopped.releasing, std::slice::from_ref(&reviewer));
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].starts_with("This pipeline was stopped. TerminalX will not use another report or verdict"));
+    run.host.agent(&reviewer, false);
+    let ignored = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert!(ignored.verdict.is_none() && run.merges().is_empty() && run.host.world().comments.is_empty());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+    assert_eq!(ignored.events.last().unwrap().message, "The reviewer replied after the pipeline was stopped; its reply was ignored. TerminalX stopped its agent.");
+    // A turn of the author's while it is stopped is still nobody's business.
+    assert_eq!(run.author(&done("Done.")).events.len(), ignored.events.len());
+
+    // Resumed, the same reviewer is asked again: the prompt resumes its conversation.
+    let resumed = act(&run.host, &run.id, Action::Resume).unwrap();
+    assert_eq!((resumed.stage, resumed.state, resumed.round), (Stage::Review, State::Working, 2));
+    assert!(resumed.releasing.is_empty());
+    assert_eq!(run.host.world().reviewers, 1);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
+}
+
+#[test]
+fn a_pull_request_closed_without_merging_releases_its_conversations_once() {
+    let run = Run::start(&github_issue(), false);
+    let reviewer = run.to_review().reviewer.unwrap();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    run.host.agent(&author_tab(), false);
+    run.host.agent(&reviewer, false);
+    run.host.world().pr.as_mut().unwrap().state = "CLOSED".into();
+    let closed = run.poll();
+    assert_eq!(closed.reason, Some(StopReason::PullRequestClosed));
+    assert_eq!(run.host.stopped_agents(), [key(&author_tab()), key(&reviewer)]);
+    assert_eq!(closed.events.last().unwrap().message, "Pull request #7 was closed without merging, so this pipeline is finished. Stopped the agents of the author and the reviewer, which sat idle; their conversations can be resumed.");
+    assert_eq!(run.poll().events.len(), closed.events.len());
+    // Its turns after that are noted, not acted on.
+    assert_eq!(run.reviewer("One more thought.").events.last().unwrap().message, "The reviewer replied after the pull request was closed; its reply was ignored.");
+}
+
+// ---- a reviewer whose own checks are still running (#689) ---------------------------
+
+#[test]
+fn a_reviewer_still_running_its_checks_is_waited_for_and_then_asked_once_for_its_verdict() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    // It ends its turn to wait for the tests it started.
+    let pending = run.reviewer(&pending_review(C1, "cargo test is still compiling"));
+    assert_eq!((pending.stage, pending.state, pending.reminded), (Stage::Review, State::Working, false));
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1, "not reminded of a verdict it is working towards");
+    assert!(pending.verdict.is_none() && run.host.world().comments.is_empty());
+    assert_eq!(pending.note.as_deref(), Some("The reviewer is running its checks on 1111111111; its verdict is due within 20 minutes."));
+    let said = pending.events.last().unwrap();
+    assert_eq!((said.kind.as_str(), said.message.as_str()), ("reviewPending", "The reviewer is still running its checks on 1111111111: cargo test is still compiling. Its verdict is waited for up to 20 minutes."));
+    // A watch wakes it with the tests still running: the same wait, not a new one.
+    let still = run.reviewer(&pending_review(C1, "still compiling"));
+    assert_eq!((still.events.len(), still.review_pending_since.clone()), (pending.events.len(), pending.review_pending_since.clone()));
+    // Looked at within its time, nothing is sent.
+    run.poll();
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+
+    // Past it, the idle reviewer is asked once for its verdict on what it has.
+    run.host.world().now += TimeDelta::minutes(5);
+    let asked = run.poll();
+    assert!(asked.reminded);
+    let prompts = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("have been running for 20 minutes") && prompts[1].contains("do not reply pending again"), "{}", prompts[1]);
+    assert_eq!(asked.events.last().unwrap().kind, "reminder");
+    run.poll();
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 2, "asked once");
+
+    // It says its checks never finished: taken, and shown as a review by reading.
+    let merged = run.reviewer(&reviewed_checks(C1, "merge", "not_run", "the build waits on a file lock"));
+    assert_eq!(merged.state, State::Merged, "CI ran the tests: {:?}", merged.note);
+    assert!(merged.review_pending_since.is_none());
+    let verdict = merged.events.iter().find(|event| event.kind == "verdict").unwrap();
+    assert!(verdict.message.ends_with("Reviewed by reading only, tests not run: the build waits on a file lock."), "{}", verdict.message);
+    assert!(run.host.world().comments[0].contains("Reviewed by reading only, tests not run: the build waits on a file lock."));
+}
+
+#[test]
+fn a_reviewer_that_still_gives_no_verdict_once_its_time_ran_out_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    run.reviewer(&pending_review(C1, "tests running"));
+    // Back at work when its time runs out: not interrupted.
+    run.host.agent(&reviewer, true);
+    run.host.world().now += TimeDelta::minutes(30);
+    run.poll();
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    // That turn ends saying pending again: asked for its verdict now, once.
+    run.host.agent(&reviewer, false);
+    let asked = run.reviewer(&pending_review(C1, "tests running"));
+    assert!(asked.reminded);
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].contains("do not reply pending again"));
+    // Pending once more is a person's.
+    let stopped = run.reviewer(&pending_review(C1, "tests running"));
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert_eq!(stopped.reason, Some(StopReason::NoVerdict { detail: "Its checks were still running after 20 minutes, and it gave no verdict.".into() }));
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_reviewer_reminded_of_its_verdict_may_answer_that_its_checks_are_still_running() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    let asked = run.reviewer("The tests are still compiling. I'll give the verdict when the run reports back.");
+    assert!(asked.reminded);
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].contains("If checks you started are still running, say so with a pending block"));
+    let pending = run.reviewer(&pending_review(C1, "cargo test"));
+    assert_eq!((pending.state, pending.reminded), (State::Working, false));
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
+}
+
+#[test]
+fn a_reviewer_waiting_on_its_own_checks_holds_a_cloud_workspace_awake() {
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_review();
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+    run.reviewer(&pending_review(C1, "tests"));
+    assert_eq!(engine::holding_at(run.host.now()), 1);
+    run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+}
+
+// ---- what the reviewer's checks came to (#689) ---------------------------------------
+
+#[test]
+fn a_review_by_reading_alone_does_not_merge_a_project_without_ci_by_itself() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = Vec::new();
+    host.world().settings.allow_no_ci = true;
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().validation = Some(Vec::new());
+    let ready = run.reviewer(&reviewed_checks(C1, "merge", "not_run", "no time to build"));
+    assert_eq!((ready.state, ready.reason.clone()), (State::ReadyToMerge, Some(StopReason::ReviewChecksNotRun)));
+    assert!(run.merges().is_empty());
+    // The person it waits for presses Merge.
+    assert_eq!(act(&run.host, &run.id, Action::Merge).unwrap().state, State::Merged);
+    assert_eq!(run.merges(), [("merge".to_string(), C1.to_string())]);
+    // Reviewed with its checks run, the same project merges by itself.
+    drop(run);
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = Vec::new();
+    host.world().settings.allow_no_ci = true;
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().validation = Some(Vec::new());
+    assert_eq!(run.reviewer(&reviewed_checks(C1, "merge", "passed", "cargo test")).state, State::Merged);
+}
+
+#[test]
+fn checks_that_failed_for_the_reviewer_are_a_persons_to_judge_whatever_its_verdict() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    let stopped = run.reviewer(&reviewed_checks(C1, "merge", "failed", "status::usage tests fail"));
+    assert_eq!((stopped.stage, stopped.state), (Stage::Merge, State::NeedsYou));
+    assert_eq!(stopped.reason, Some(StopReason::ReviewChecksFailed { note: Some("status::usage tests fail".into()) }));
+    assert!(run.merges().is_empty());
+    assert!(run.host.world().comments[0].contains("The reviewer's checks failed: status::usage tests fail."));
+}
+
+#[test]
+fn an_author_in_a_turn_when_its_pull_request_merges_is_left_to_finish_and_never_told_to_stop() {
+    let run = Run::start(&github_issue(), false);
+    let reviewer = run.to_review().reviewer.unwrap();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    // A person is using the author's tab for a follow-up of their own when the merge lands.
+    run.host.agent(&author_tab(), true);
+    run.host.agent(&reviewer, false);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert!(run.host.prompts_to("author").is_empty(), "nothing is typed into a person's turn");
+    assert!(merged.releasing.is_empty());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+    assert_eq!(merged.events.last().unwrap().message, "Pull request #7 was merged at 1111111111, so this pipeline is finished. Stopped the reviewer's agent, which sat idle; its conversation can be resumed. Left the author's agent running: it is in a turn.");
+    // That turn ends: the conversation is the person's, and its agent is not stopped for it.
+    run.host.agent(&author_tab(), false);
+    let after = run.author("Changelog updated.");
+    assert_eq!(after.events.len(), merged.events.len());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+}
+
+#[test]
+fn an_overdue_verdict_that_cannot_be_asked_for_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    run.reviewer(&pending_review(C1, "tests running"));
+    // Its tab cannot take the request when the poller asks.
+    run.host.world().send_error = Some("the agent could not be started".into());
+    run.host.world().now += TimeDelta::minutes(30);
+    let stopped = run.poll();
+    assert_eq!((stopped.stage, stopped.state), (Stage::Review, State::NeedsYou));
+    assert_eq!(stopped.reason, Some(StopReason::Failed { step: "Asking the session again".into(), message: "the agent could not be started".into() }));
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    // From there a person asks for the review again.
+    assert_eq!(act(&run.host, &run.id, Action::Advance).unwrap().stage, Stage::Review);
 }

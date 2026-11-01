@@ -149,10 +149,27 @@ describe("where a pipeline stands", () => {
     expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "checksFailed" } }))).toEqual({ action: "advance", label: "Check again" });
     // A head nobody reviewed is fixed by a review, not by looking again.
     expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "headMoved" } }))).toEqual({ action: "review", label: "Review the new commit" });
+    // Nor are checks the reviewer saw fail on the commit it passed.
+    expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "reviewChecksFailed", note: null } }))).toEqual({ action: "review", label: "Review again" });
+    // Read and not run, in a project with no CI: the person it waits for merges it.
+    expect(forward(pipeline({ stage: "merge", state: "readyToMerge", reason: { kind: "reviewChecksNotRun" } }))).toEqual({ action: "merge", label: "Merge" });
     // A session that is done and has not said so can be taken at its word by the reader.
     expect(pipelineActions(pipeline()).secondary[0]).toEqual({ action: "advance", label: "Open pull request now" });
     expect(pipelineActions(pipeline({ stage: "address" })).secondary[0]).toEqual({ action: "advance", label: "Review the changes now" });
     expect(pipelineActions(pipeline({ stage: "review" })).secondary.map((button) => button.action)).toEqual(["stop"]);
+  });
+
+  it("says what the reviewer's own checks came to, as the pull request does", async () => {
+    const { reviewChecksLine } = await load();
+    const verdict = { commit: C1, decision: "merge" as const, securityPass: "notNeeded" as const, findings: [], round: 1, at: "2026-10-12T10:05:00.000Z" };
+    expect(reviewChecksLine({ ...verdict, checks: "notRun", checksNote: "the build waits on a file lock." })).toBe("Reviewed by reading only, tests not run: the build waits on a file lock.");
+    expect(reviewChecksLine({ ...verdict, checks: "failed", checksNote: "  " })).toBe("The reviewer's checks failed.");
+    expect(reviewChecksLine({ ...verdict, checks: "passed", checksNote: "cargo test" })).toBe("The reviewer's checks passed: cargo test.");
+    expect(reviewChecksLine({ ...verdict, checks: "passed", checksNote: "cargo test\n\n  ran   ok" })).toBe("The reviewer's checks passed: cargo test ran ok.");
+    expect([...reviewChecksLine({ ...verdict, checks: "passed", checksNote: "x".repeat(500) })!].length).toBe("The reviewer's checks passed: ".length + 200 + "….".length);
+    // A verdict stored before reviews said, or none at all, says nothing.
+    expect(reviewChecksLine(verdict)).toBeNull();
+    expect(reviewChecksLine(null)).toBeNull();
   });
 
   it("finds an issue's newest pipeline and a session's part in one", async () => {
@@ -201,8 +218,9 @@ describe("a pipeline as the app stores it", () => {
   const fixture = JSON.parse(stored) as IssuePipeline;
 
   it("is read by the page without translation", async () => {
-    const { pipelineHeadline, pipelineSteps, pipelineActions, pipelineForIssue, pipelineForSession } = await load();
+    const { pipelineHeadline, pipelineSteps, pipelineActions, pipelineForIssue, pipelineForSession, reviewChecksLine } = await load();
     expect(pipelineHeadline(fixture)).toEqual({ label: "Needs you", tone: "warning" });
+    expect(reviewChecksLine(fixture.verdict)).toBe("The reviewer's checks passed.");
     expect(pipelineSteps(fixture).map((step) => [step.stage, step.status, step.detail])).toEqual([
       ["work", "done", null],
       ["pullRequest", "done", "#7"],
@@ -235,11 +253,11 @@ describe("a pipeline as the app stores it", () => {
     const declared: (keyof IssuePipeline)[] = [
       "id", "projectPath", "issue", "branch", "author", "reviewer", "autoMerge", "stopped", "stage", "state", "reason", "note", "pr",
       "round", "maxRounds", "reviewCommit", "verdict", "securityAreas", "merged", "events", "created", "modified",
-      "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks",
+      "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks", "reviewPendingSince", "releasing",
     ];
     const engineOnly = ["summary", "reminded", "reviewRequestedAt", "findingsSentRound", "waitingSince", "mergeRequested", "mergeRefused"];
     expect(Object.keys(fixture).filter((key) => !(declared as string[]).includes(key) && !engineOnly.includes(key))).toEqual([]);
-    expect(Object.keys(fixture.verdict!).sort()).toEqual(["at", "commit", "decision", "findings", "round", "securityPass"]);
+    expect(Object.keys(fixture.verdict!).sort()).toEqual(["at", "checks", "commit", "decision", "findings", "round", "securityPass"]);
     expect(Object.keys(fixture.pr!).sort()).toEqual(["base", "number", "url"]);
     expect(Object.keys(fixture.author).sort()).toEqual(["sessionId", "tabId"]);
   });
@@ -293,5 +311,29 @@ describe("what the window knows of the pipelines", () => {
     expect(act).toHaveBeenCalledWith("p1", "stop");
     expect(getIssuePipelines()).toHaveLength(1);
     expect(getIssuePipelines()[0].state).toBe("stopped");
+  });
+});
+
+describe("after a gap in the live connection", () => {
+  it("takes the listed state over what it knew, keeps what was announced meanwhile, and tells of a pipeline that came to rest", async () => {
+    const store = await load();
+    list.mockResolvedValueOnce([pipeline(), pipeline({ id: "p2" }), pipeline({ id: "gone" })]);
+    await store.bootIssuePipelines();
+    expect(store.getIssuePipelines().map((value) => value.id)).toEqual(["p1", "p2", "gone"]);
+    let listed!: (pipelines: IssuePipeline[]) => void;
+    list.mockReturnValueOnce(new Promise((resolve) => (listed = resolve)));
+    listeners.get("local_runtime_reattached")!({ payload: { generation: 2 } });
+    // Announced while the list is on its way: newer than the list.
+    listeners.get("issue_pipeline")!({ payload: pipeline({ id: "p2", state: "waiting", note: "announced" }) });
+    listeners.get("issue_pipeline")!({ payload: pipeline({ id: "p3", note: "started meanwhile" }) });
+    notePipelineState.mockClear();
+    listed([pipeline({ state: "readyToMerge", note: "finished during the gap" }), pipeline({ id: "p2", note: "listed before the announcement" })]);
+    await vi.waitFor(() => expect(store.getIssuePipelines().map((value) => value.id)).toEqual(["p1", "p2", "p3"]));
+    const [p1, p2, p3] = store.getIssuePipelines();
+    expect(p1).toMatchObject({ state: "readyToMerge", note: "finished during the gap" });
+    expect(p2.note).toBe("announced");
+    expect(p3.note).toBe("started meanwhile");
+    expect(notePipelineState).toHaveBeenCalledOnce();
+    expect(notePipelineState).toHaveBeenCalledWith(expect.objectContaining({ id: "p1", state: "readyToMerge" }));
   });
 });
