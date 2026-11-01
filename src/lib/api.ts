@@ -1669,7 +1669,7 @@ export interface UsageWindow {
 }
 
 /** Why a received window did not replace the one shown under its key. */
-export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline";
+export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline" | "endedWindow";
 
 /** A manual refresh that did not reach the provider, and when the button will. */
 export interface UsageRefreshSkip {
@@ -1681,7 +1681,7 @@ export interface UsageRefreshSkip {
 /** Live usage from a Claude turn that was not used, newer than any that was. */
 export interface LiveUsageRefused {
   at: number;
-  reason: "unidentified" | "launchMismatch" | "statuslineMismatch";
+  reason: "unidentified" | "launchUnknown" | "launchMismatch" | "statuslineMismatch";
 }
 
 // The fields marked optional below are absent from a background runtime older than #729.

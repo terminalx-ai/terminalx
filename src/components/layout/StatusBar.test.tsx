@@ -506,6 +506,40 @@ describe("status bar usage", () => {
       expect(notice()).toBeNull();
     });
 
+    // #738: the reply came 30 s past the 5h deadline and still had that window.
+    it("says a check that saw the window that just expired changed nothing, not that it refreshed just now", () => {
+      const now = Date.now();
+      for (const window of statusState.usage.windows) if (window.agent === "claude") window.updatedAt = now - 10 * 60_000;
+      Object.assign(claudeWindow("five_hour"), { resetsAt: now - 30_000, stale: true, source: "oauth" });
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: now + 30_000, error: null,
+        lastSuccessAt: now - 1_000,
+        lastUpdatedAt: now - 10 * 60_000,
+        refused: [{ key: "five_hour", label: "5h", reason: "endedWindow" }],
+      };
+      render(<StatusBar />);
+      const detail = openDetail("Claude");
+      const session = within(detail).getByText("Session").parentElement as HTMLElement;
+      expect(session.textContent).toContain("Window expired — awaiting update");
+      expect((detail.querySelector("[data-usage-freshness]") as HTMLElement).textContent).toBe(
+        "Last refreshed 10m ago"
+        + "Checked just now · no newer usage"
+        + "5h kept: the reply still had the window that just expired",
+      );
+    });
+
+    it("says a tab whose Claude account wasn't known at launch was refused for that, not for another account", () => {
+      const now = Date.now();
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now, lastUpdatedAt: now,
+        liveRefused: { at: now - 60_000, reason: "launchUnknown" },
+      };
+      render(<StatusBar />);
+      const notice = openDetail("Claude").querySelector("[data-usage-live-refused]") as HTMLElement;
+      expect(notice.textContent).toBe("Live usage from a turn was refused 1m ago: the tab's Claude account wasn't known when it started.");
+      expect(notice.textContent).not.toContain("different Claude account");
+    });
+
     it("says when Codex was last refreshed when its button is inside the debounce, until it can fetch again", async () => {
       const now = Date.now();
       for (const window of statusState.usage.windows) if (window.agent === "codex") window.updatedAt = now - 2 * 60_000;
