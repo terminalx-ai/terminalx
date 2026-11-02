@@ -100,6 +100,13 @@
   secret-looking value, including one that runs on over lines. Errors such as
   `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
   readable. (#717)
+- Show a native Codex reply as one message while it streams. Each piece Codex
+  sent was recorded as a message of its own, so a real reply showed as dozens
+  of fragments, each with its own time, and was saved that way. The reply now
+  grows in place and is saved once, whole, with the time its first piece came;
+  Codex's reasoning summary does the same. What streamed of a reply that never
+  finished, because the turn was interrupted, failed or stopped, or the
+  connection was lost, is kept as it was shown. (#644)
 
 ### Background sessions
 

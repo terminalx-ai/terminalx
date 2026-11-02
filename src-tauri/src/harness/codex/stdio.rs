@@ -52,6 +52,12 @@ enum Request { Initialize, Thread, Turn, Compact, Interrupt }
 
 struct Ask { id: Value, turn: String, method: String }
 
+/// What one reply or reasoning item has streamed so far. A reasoning
+/// summary's next part starts a new paragraph, as in its completed summary.
+struct Stream { item: String, reasoning: bool, part: i64, text: String }
+
+const SUMMARY_BREAK: &str = "\n\n";
+
 pub struct Stdio {
     pub launch: Arc<()>,
     pub thread: Option<String>,
@@ -66,7 +72,13 @@ pub struct Stdio {
     turn_epoch: u64,
     answers: HashMap<String, Ask>,
     asks: HashMap<String, Ask>,
-    seen_text: HashSet<String>,
+    /// The turn's streamed items not yet committed, in the order they began.
+    /// Each piece is only a preview; an item is committed once, whole, when
+    /// it completes or, failing that, when its turn ends.
+    streams: Vec<Stream>,
+    /// Items of this turn already committed: a late piece or a repeated
+    /// completion adds nothing.
+    committed: HashSet<String>,
     cwd: String,
     model: String,
     effort: Option<String>,
@@ -106,7 +118,7 @@ impl Stdio {
     pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
         Self { launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
-            seen_text: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }
+            streams: Vec::new(), committed: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }
     }
 
     /// Start on, and keep, the model a cloud route names (PRO-18): the route's
@@ -311,7 +323,8 @@ impl Stdio {
             "turn/started" => {
                 self.turn_epoch = self.turn_epoch.checked_add(1).ok_or_else(|| anyhow::anyhow!("turn epochs exhausted"))?;
                 self.turn = Some(required(&p["turn"], "id")?);
-                self.seen_text.clear();
+                self.streams.clear();
+                self.committed.clear();
                 if !self.manual_compact {
                     out.extend(self.accepted());
                     out.push(Action::Emit(Payload::TurnStarted { model: None, provider_session_id: self.thread.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }));
@@ -320,6 +333,8 @@ impl Stdio {
             "turn/completed" => {
                 let id = required(&p["turn"], "id")?;
                 if self.turn.as_deref() != Some(&id) { return Ok(out); }
+                // What the reader saw stream in stays, ahead of the turn's end.
+                out.extend(self.unfinished().into_iter().map(Action::Emit));
                 self.turn = None;
                 self.turn_epoch = self.turn_epoch.checked_add(1).ok_or_else(|| anyhow::anyhow!("turn epochs exhausted"))?;
                 self.answers.clear();
@@ -350,12 +365,8 @@ impl Stdio {
                     out.push(Action::Emit(Payload::TurnCompleted { status, final_text: error["message"].as_str().map(str::to_owned), usage: None, duration_ms: None, head: None, auth_failed, detail: None }));
                 }
             }
-            "item/agentMessage/delta" => {
-                let id = required(p, "itemId")?;
-                self.seen_text.insert(id.clone());
-                out.push(Action::Emit(Payload::AssistantText { block: Some(block(&id)), text: required(p, "delta")? }));
-            }
-            "item/reasoning/summaryTextDelta" => out.push(Action::Emit(Payload::Reasoning { block: Some(block(&required(p, "itemId")?)), text: required(p, "delta")? })),
+            "item/agentMessage/delta" => out.extend(self.stream(required(p, "itemId")?, false, 0, p["delta"].as_str().unwrap_or_default())),
+            "item/reasoning/summaryTextDelta" => out.extend(self.stream(required(p, "itemId")?, true, p["summaryIndex"].as_i64().unwrap_or(0), p["delta"].as_str().unwrap_or_default())),
             "item/started" | "item/completed" => {
                 let item = &p["item"];
                 let id = required(item, "id")?;
@@ -363,7 +374,11 @@ impl Stdio {
                 match item["type"].as_str() {
                     // The lifecycle channel above is the sole compaction source.
                     Some("contextCompaction" | "userMessage") => {},
-                    Some("agentMessage") if completed && !self.seen_text.contains(&id) => out.push(Action::Emit(Payload::AssistantText { block: Some(block(&id)), text: required(item, "text")? })),
+                    Some("agentMessage") if completed => out.extend(self.commit(&id, false, item["text"].as_str().unwrap_or_default())),
+                    Some("reasoning") if completed => {
+                        let summary: Vec<&str> = item["summary"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|part| !part.is_empty()).collect();
+                        out.extend(self.commit(&id, true, &summary.join(SUMMARY_BREAK)));
+                    }
                     Some(kind @ ("commandExecution" | "fileChange" | "mcpToolCall" | "webSearch")) => {
                         if completed {
                             out.push(Action::Emit(Payload::ToolCallCompleted { call_id: id, result: ToolResult { text: item["aggregatedOutput"].as_str().unwrap_or("").to_owned(), is_error: matches!(item["status"].as_str(), Some("failed" | "declined")), exit_code: item["exitCode"].as_i64().and_then(|n| i32::try_from(n).ok()), structured: Some(item.clone()), ..Default::default() } }));
@@ -388,6 +403,48 @@ impl Stdio {
             _ => {},
         }
         Ok(out)
+    }
+
+    /// A streamed piece of an item, shown as a live preview of its block.
+    fn stream(&mut self, item: String, reasoning: bool, part: i64, delta: &str) -> Option<Action> {
+        if delta.is_empty() || self.committed.contains(&item) { return None; }
+        let at = match self.streams.iter().position(|stream| stream.item == item) {
+            Some(at) => at,
+            None => {
+                self.streams.push(Stream { item, reasoning, part, text: String::new() });
+                self.streams.len() - 1
+            }
+        };
+        let stream = &mut self.streams[at];
+        let mut text = String::new();
+        if part != stream.part {
+            stream.part = part;
+            if !stream.text.is_empty() { text.push_str(SUMMARY_BREAK); }
+        }
+        text.push_str(delta);
+        stream.text.push_str(&text);
+        let block = block(&stream.item);
+        Some(Action::Emit(Payload::Delta(if reasoning { Delta::ThinkingDelta { block, text } } else { Delta::TextDelta { block, text } })))
+    }
+
+    /// An item is committed once: with the text it completed with, or else
+    /// what it streamed.
+    fn commit(&mut self, item: &str, reasoning: bool, text: &str) -> Option<Action> {
+        if !self.committed.insert(item.to_owned()) { return None; }
+        let streamed = self.streams.iter().position(|stream| stream.item == item).map(|at| self.streams.remove(at).text);
+        let text = if text.is_empty() { streamed.unwrap_or_default() } else { text.to_owned() };
+        (!text.is_empty()).then(|| Action::Emit(committed(item, reasoning, text)))
+    }
+
+    /// What the turn streamed of items that never completed, committed as it
+    /// ends without them: by its end, a lost connection or Stop.
+    pub(crate) fn unfinished(&mut self) -> Vec<Payload> {
+        let mut out = Vec::new();
+        for stream in std::mem::take(&mut self.streams) {
+            self.committed.insert(stream.item.clone());
+            out.push(committed(&stream.item, stream.reasoning, stream.text));
+        }
+        out
     }
 
     fn server_request(&mut self, v: &Value, id: &Value) -> Result<Vec<Action>> {
@@ -417,6 +474,10 @@ fn required(value: &Value, key: &str) -> Result<String> {
     value[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned).ok_or_else(|| anyhow::anyhow!("Codex frame missing {key}"))
 }
 fn block(id: &str) -> BlockRef { BlockRef { message_id: id.into(), index: 0 } }
+fn committed(item: &str, reasoning: bool, text: String) -> Payload {
+    let block = Some(block(item));
+    if reasoning { Payload::Reasoning { block, text } } else { Payload::AssistantText { block, text } }
+}
 
 #[cfg(test)]
 #[path = "stdio_tests.rs"]

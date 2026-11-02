@@ -307,3 +307,100 @@ fn a_turn_refused_for_its_sign_in_ends_with_auth_failed() {
     let actions = client.handle(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed","error":{"codexErrorInfo":"unauthorized"}}}}"#).unwrap();
     assert!(actions.iter().any(|action| matches!(action, Action::Emit(Payload::TurnCompleted { auth_failed: false, .. }))));
 }
+
+fn emitted(actions: Vec<Action>) -> Vec<Payload> {
+    actions.into_iter().filter_map(|action| match action { Action::Emit(payload) => Some(payload), _ => None }).collect()
+}
+
+fn piece(method: &str, item: &str, delta: &str, part: i64) -> String {
+    json!({"method":method,"params":{"threadId":"thread","turnId":"turn","itemId":item,"delta":delta,"summaryIndex":part}}).to_string()
+}
+
+fn completed(item: Value) -> String {
+    json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","completedAtMs":0,"item":item}}).to_string()
+}
+
+fn ended(status: &str) -> String {
+    json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":status}}}).to_string()
+}
+
+/// #644: a reply arrives in many pieces. Each is a live preview of its block;
+/// the reply is committed once, whole, when its item completes.
+#[test]
+fn a_streamed_reply_is_previewed_piece_by_piece_and_committed_once() {
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    for text in ["One ", "reply, ", "streamed."] {
+        let shown = emitted(client.handle(&piece("item/agentMessage/delta", "msg_2", text, 0)).unwrap());
+        assert!(matches!(&shown[..], [Payload::Delta(Delta::TextDelta { block, text: preview })] if *block == super::block("msg_2") && preview == text), "{shown:?}");
+    }
+    assert!(emitted(client.handle(&piece("item/agentMessage/delta", "msg_2", "", 0)).unwrap()).is_empty(), "an empty piece shows nothing");
+    let commit = completed(json!({"type":"agentMessage","id":"msg_2","text":"One reply, streamed."}));
+    let told = emitted(client.handle(&commit).unwrap());
+    assert!(matches!(&told[..], [Payload::AssistantText { block: Some(block), text }] if *block == super::block("msg_2") && text == "One reply, streamed."), "{told:?}");
+    assert!(emitted(client.handle(&commit).unwrap()).is_empty(), "a repeated completion adds nothing");
+    assert!(emitted(client.handle(&piece("item/agentMessage/delta", "msg_2", "late", 0)).unwrap()).is_empty(), "nor does a late piece");
+    // A reply Codex did not stream is committed when it completes.
+    let told = emitted(client.handle(&completed(json!({"type":"agentMessage","id":"msg_3","text":"Whole."}))).unwrap());
+    assert!(matches!(&told[..], [Payload::AssistantText { text, .. }] if text == "Whole."), "{told:?}");
+    let end = emitted(client.handle(&ended("completed")).unwrap());
+    assert!(matches!(&end[..], [Payload::TurnCompleted { status: TurnStatus::Ok, .. }]), "nothing is committed twice: {end:?}");
+}
+
+/// A reasoning summary streams as thinking and is committed as one block, its
+/// parts a paragraph apart in the preview as in the completed summary.
+#[test]
+fn a_reasoning_summary_streams_as_thinking_and_is_committed_once() {
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    let mut preview = String::new();
+    for (text, part) in [("Reading ", 0), ("the brief.", 0), ("Writing ", 1), ("the reply.", 1)] {
+        let shown = emitted(client.handle(&piece("item/reasoning/summaryTextDelta", "rs_1", text, part)).unwrap());
+        let [Payload::Delta(Delta::ThinkingDelta { block, text })] = &shown[..] else { panic!("no thinking preview: {shown:?}") };
+        assert_eq!(*block, super::block("rs_1"));
+        preview.push_str(text);
+    }
+    assert_eq!(preview, "Reading the brief.\n\nWriting the reply.");
+    let told = emitted(client.handle(&completed(json!({"type":"reasoning","id":"rs_1","summary":["Reading the brief.","Writing the reply."],"content":[]}))).unwrap());
+    assert!(matches!(&told[..], [Payload::Reasoning { block: Some(block), text }] if *block == super::block("rs_1") && *text == preview), "{told:?}");
+    // Reasoning without a summary shows nothing.
+    assert!(emitted(client.handle(&completed(json!({"type":"reasoning","id":"rs_2","summary":[],"content":["hidden"]}))).unwrap()).is_empty());
+    assert!(matches!(&emitted(client.handle(&ended("completed")).unwrap())[..], [Payload::TurnCompleted { .. }]));
+}
+
+/// A turn that ends while a reply is still streaming, however it ends, keeps
+/// what the reader saw: committed once, before the turn's end.
+#[test]
+fn a_turn_that_ends_mid_reply_commits_what_it_streamed_once() {
+    for status in ["completed", "interrupted", "failed"] {
+        let (mut client, _) = ready("hello");
+        turn(&mut client);
+        client.handle(&piece("item/reasoning/summaryTextDelta", "rs_1", "Thinking", 0)).unwrap();
+        for text in ["Half ", "a reply"] {
+            client.handle(&piece("item/agentMessage/delta", "msg_2", text, 0)).unwrap();
+        }
+        let end = emitted(client.handle(&ended(status)).unwrap());
+        assert!(matches!(&end[..], [
+            Payload::Reasoning { block: Some(thought), text: thinking },
+            Payload::AssistantText { block: Some(reply), text },
+            Payload::TurnCompleted { .. },
+        ] if *thought == super::block("rs_1") && thinking == "Thinking" && *reply == super::block("msg_2") && text == "Half a reply"), "{status}: {end:?}");
+        assert!(emitted(client.handle(&completed(json!({"type":"agentMessage","id":"msg_2","text":"Half a reply, finished"}))).unwrap()).is_empty(), "{status}: a late completion adds nothing");
+        assert!(client.unfinished().is_empty());
+    }
+}
+
+/// A connection that ends mid-reply (Stop, a crash) leaves the session to
+/// commit what streamed: once, however often it asks.
+#[test]
+fn a_reply_cut_off_by_the_connection_is_handed_over_once() {
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    client.handle(&piece("item/agentMessage/delta", "msg_2", "Cut ", 0)).unwrap();
+    client.handle(&piece("item/agentMessage/delta", "msg_2", "off", 0)).unwrap();
+    client.exited = true;
+    assert!(client.handle(&piece("item/agentMessage/delta", "msg_2", " after exit", 0)).unwrap().is_empty());
+    let left = client.unfinished();
+    assert!(matches!(&left[..], [Payload::AssistantText { block: Some(block), text }] if *block == super::block("msg_2") && text == "Cut off"), "{left:?}");
+    assert!(client.unfinished().is_empty());
+}

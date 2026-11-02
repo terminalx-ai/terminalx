@@ -19,7 +19,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
-        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch"] {
+        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -671,6 +671,118 @@ fn first_launch_fixture(case: &str) {
     manager.stop("stdio-owner", "tab").unwrap();
 }
 
+/// Stands in for Codex replying in pieces: answers the handshake, then for a
+/// `turn/start` plays the frames written to `streamed` and, if there is one,
+/// those in `finished`.
+const STREAMING_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+while read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      cat "$here/streamed"
+      if [ -f "$here/finished" ]; then cat "$here/finished"; fi ;;
+  esac
+done
+"#;
+
+/// #644: Codex streams a reply in many pieces, each shown live as a preview.
+/// The chat records the reply once, whole, at the time its first piece came:
+/// when its item completes, or when its turn ends without that (here, Stop).
+fn streamed_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    const PIECES: [&str; 6] = ["One ", "reply, ", "streamed ", "in ", "many ", "pieces."];
+    const THOUGHT: &str = "Reading the brief.\n\nWriting the reply.";
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), STREAMING_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Shaped as Codex 0.166.0's app-server schema has them.
+    let frame = |method: &str, mut params: serde_json::Value| {
+        params["threadId"] = json!("thread-1");
+        params["turnId"] = json!("turn-1");
+        format!("{}\n", json!({"method": method, "params": params}))
+    };
+    let mut streamed = format!("{}\n", json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}));
+    for (part, delta) in [(0, "Reading "), (0, "the brief."), (1, "Writing "), (1, "the reply.")] {
+        streamed += &frame("item/reasoning/summaryTextDelta", json!({"itemId":"rs_1","summaryIndex":part,"delta":delta}));
+    }
+    streamed += &frame("item/completed", json!({"completedAtMs":0,"item":{"type":"reasoning","id":"rs_1","summary":["Reading the brief.","Writing the reply."],"content":[]}}));
+    streamed += &frame("item/started", json!({"startedAtMs":0,"item":{"type":"agentMessage","id":"msg_2","text":""}}));
+    for delta in PIECES {
+        streamed += &frame("item/agentMessage/delta", json!({"itemId":"msg_2","delta":delta}));
+    }
+    std::fs::write(bin.join("streamed"), streamed).unwrap();
+    if case == "streamed-reply" {
+        let finished = frame("item/completed", json!({"completedAtMs":0,"item":{"type":"agentMessage","id":"msg_2","text":PIECES.concat()}}))
+            + &format!("{}\n", json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}));
+        std::fs::write(bin.join("finished"), finished).unwrap();
+    }
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(1024));
+    let mut heard = sink.subscribe();
+    let manager = SessionManager::new(sink.clone(),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    manager.send("stdio-owner", "tab", "hello".into(), Vec::new()).unwrap();
+
+    // Shown live: every piece, as a preview of its block.
+    let mut live: Vec<AgentEvent> = Vec::new();
+    let pieces = |live: &[AgentEvent], thinking: bool| live.iter().filter_map(|event| match &event.payload {
+        Payload::Delta(Delta::TextDelta { block, text }) if !thinking => Some((block.message_id.clone(), text.clone())),
+        Payload::Delta(Delta::ThinkingDelta { block, text }) if thinking => Some((block.message_id.clone(), text.clone())),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let until = Instant::now() + WAIT;
+    while pieces(&live, false).len() < PIECES.len() {
+        assert!(Instant::now() < until, "{case}: not every piece was shown: {:?}", live.iter().map(|event| &event.payload).collect::<Vec<_>>());
+        match heard.try_recv() {
+            Ok(published) if &*published.event == "agent_event" => live.push(serde_json::from_str(&published.payload).unwrap()),
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert_eq!(pieces(&live, false), PIECES.map(|piece| ("msg_2".to_owned(), piece.to_owned())));
+    assert_eq!(pieces(&live, true).iter().map(|(block, text)| { assert_eq!(block, "rs_1"); text.as_str() }).collect::<String>(), THOUGHT);
+    if case == "streamed-stopped" { manager.stop("stdio-owner", "tab").unwrap(); }
+
+    // Recorded: each item once, whole, ahead of the turn's end.
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    let until = Instant::now() + WAIT;
+    while !events().iter().any(|event| matches!(event.payload, Payload::TurnCompleted { .. })) {
+        assert!(Instant::now() < until, "{case}: the turn never ended: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let events = events();
+    assert!(!events.iter().any(|event| matches!(event.payload, Payload::Delta(_))), "{case}: previews are never written to the log");
+    let chat: Vec<_> = events.iter().filter_map(|event| match &event.payload {
+        Payload::UserMessage { text, .. } => Some(format!("user: {text}")),
+        Payload::Reasoning { block: Some(block), text } => Some(format!("thinking {}: {text}", block.message_id)),
+        Payload::AssistantText { block: Some(block), text } => Some(format!("reply {}: {text}", block.message_id)),
+        Payload::TurnCompleted { status, .. } => Some(format!("end: {status:?}")),
+        _ => None,
+    }).collect();
+    let end = if case == "streamed-reply" { TurnStatus::Ok } else { TurnStatus::Aborted };
+    assert_eq!(chat, ["user: hello".to_owned(), format!("thinking rs_1: {THOUGHT}"), format!("reply msg_2: {}", PIECES.concat()), format!("end: {end:?}")], "{case}");
+    let first_piece = live.iter().find(|event| matches!(event.payload, Payload::Delta(Delta::TextDelta { .. }))).unwrap();
+    let reply = events.iter().find(|event| matches!(event.payload, Payload::AssistantText { .. })).unwrap();
+    assert!(reply.message_ts.is_some());
+    assert_eq!(reply.message_ts, first_piece.message_ts, "{case}: the reply is dated by its first piece");
+    if case == "streamed-reply" { manager.stop("stdio-owner", "tab").unwrap(); }
+}
+
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
@@ -679,6 +791,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
+    if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({
