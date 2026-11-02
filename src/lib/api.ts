@@ -615,6 +615,16 @@ export const api = {
   projectOverview: (projectPath: string) => invoke<ProjectOverview>("project_overview", { projectPath }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     invoke<void>("set_session_archived", { sessionId, archived }),
+  /** Archive or bring back several sessions at once: all of them, or none when one is not a session (#718). */
+  setSessionsArchived: (sessionIds: string[], archived: boolean) =>
+    invoke<SessionEntry[]>("set_sessions_archived", { sessionIds, archived }),
+  /** This window shows `sessionId` now (or none): the idle sweep leaves it in the list. */
+  setShownSession: (sessionId: string | null) => invoke<void>("set_shown_session", { sessionId }),
+  /**
+   * Archive the sessions nobody has written in for the limit in Settings, in the runtime that knows what each is
+   * doing (#718). `keep`: what this window shows. Resolves to the ids archived; the windows hear of each as usual.
+   */
+  archiveIdleSessions: (keep: string[]) => invoke<string[]>("archive_idle_sessions", { keep }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   /** Delete one session; its workspace and every other session stay. */
@@ -1434,6 +1444,8 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+  /** Settings → Experimental → Native Codex for a Codex launch (#745): the runtime starts the first tab on Codex's app server where it can. */
+  nativeCodex?: boolean;
 }
 
 /** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
@@ -1670,7 +1682,7 @@ export interface UsageWindow {
 }
 
 /** Why a received window did not replace the one shown under its key. */
-export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline";
+export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline" | "notYetStarted" | "endedWindow";
 
 /** A manual refresh that did not reach the provider, and when the button will. */
 export interface UsageRefreshSkip {
@@ -1682,7 +1694,7 @@ export interface UsageRefreshSkip {
 /** Live usage from a Claude turn that was not used, newer than any that was. */
 export interface LiveUsageRefused {
   at: number;
-  reason: "unidentified" | "launchMismatch" | "statuslineMismatch";
+  reason: "unidentified" | "launchUnknown" | "launchMismatch" | "statuslineMismatch";
 }
 
 // The fields marked optional below are absent from a background runtime older than #729.
@@ -2375,6 +2387,20 @@ export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
 export const agentSettings = {
   get: () => invoke<AgentSettings>("agent_settings"),
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
+};
+
+/** When a finished conversation is archived (#718). */
+export interface ConversationSettings {
+  /** Days a conversation may go without a message before it is archived; 0 is never. */
+  archiveIdleDays: number;
+}
+
+/** The idle limits Settings offers for archiving, as the Rust side accepts them; 0 is never. */
+export const ARCHIVE_IDLE_DAYS = [0, 1, 3, 7, 14, 30] as const;
+
+export const conversationSettings = {
+  get: () => invoke<ConversationSettings>("conversation_settings"),
+  setArchiveIdleDays: (days: number) => invoke<ConversationSettings>("set_archive_idle_days", { days }),
 };
 
 export interface WorkStatusSettings {

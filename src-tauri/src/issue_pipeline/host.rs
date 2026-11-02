@@ -203,7 +203,7 @@ fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool) -> Re
         _ => bail!("Could not compare the branch with its base: {}", String::from_utf8_lossy(&output.stderr)),
     };
     if !conflicting && !required { return Ok(None); }
-    Ok(Some(super::Resolution { head, remote_head: remote_head(cwd, branch)?, base: base.to_string(), base_commit, return_stage: super::Stage::Work }))
+    Ok(Some(super::Resolution { head, remote_head: remote_head(cwd, branch)?, base: base.to_string(), base_commit, return_stage: super::Stage::Work, waiting_since: None }))
 }
 
 impl Host for LocalHost {
@@ -239,6 +239,10 @@ impl Host for LocalHost {
     fn agent_busy(&self, who: &SessionRef) -> bool {
         let status = index::get(&who.session_id).ok().and_then(|session| session.tab(&who.tab_id).map(|tab| tab.status));
         matches!(status, Some(index::TabStatus::InProgress | index::TabStatus::Waiting)) || !self.manager.pipeline_idle(&who.session_id, &who.tab_id)
+    }
+
+    fn background_work(&self, who: &SessionRef) -> Option<String> {
+        self.manager.background_work(&who.session_id, &who.tab_id)
     }
 
     /// A terminal, or an agent a person started in one by hand, is theirs and

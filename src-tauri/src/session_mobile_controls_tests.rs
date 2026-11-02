@@ -17,15 +17,25 @@ struct Phone {
 impl Phone {
     /// A Claude tab in `auto`, and two paired phones: one that drives, one that only reads.
     fn paired() -> Self {
+        Self::paired_on(json!({"harness":"claude","model":"opus"}))
+    }
+
+    /// The same, on a tab of its own: `tab` is what it has beyond its id,
+    /// mode and creation.
+    fn paired_on(mut tab: Value) -> Self {
         let home = store::temp_home();
         let root = store::root().unwrap();
+        let harness = tab["harness"].clone();
+        tab["id"] = json!("tab");
+        tab["permissionMode"] = json!("auto");
+        tab["created"] = json!(index::now());
         let session: index::SessionEntry = serde_json::from_value(json!({
             "id":"phone-controls", "projectPath":root, "cwd":root, "title":"fixture", "created":index::now(), "modified":index::now(),
-            "tabs":[{"id":"tab","harness":"claude","model":"opus","permissionMode":"auto","created":index::now()}]
+            "tabs":[tab]
         })).unwrap();
         index::save(&[session]).unwrap();
         // An answered exchange: context to continue from, and nothing unsent.
-        let said = |seq: u64, payload: Value| json!({"id":format!("e{seq}"),"sessionId":"phone-controls","tabId":"tab","harness":"claude","seq":seq,"ts":index::now(),"payload":payload}).to_string();
+        let said = |seq: u64, payload: Value| json!({"id":format!("e{seq}"),"sessionId":"phone-controls","tabId":"tab","harness":harness,"seq":seq,"ts":index::now(),"payload":payload}).to_string();
         std::fs::write(store::log_path("phone-controls", "tab").unwrap(), format!("{}\n{}\n",
             said(1, json!({"type":"user_message","text":"fix the build","queued":false})),
             said(2, json!({"type":"assistant_text","text":"The build passes now."})))).unwrap();
@@ -261,4 +271,152 @@ fn a_resend_to_a_busy_tab_waits_for_its_turn() {
     let outcome = phone.call("driving", "resendUnsent", json!({})).unwrap();
     assert_eq!(outcome["queued"], true);
     assert!(phone.manager.mobile.has_pending(), "held for the end of the turn");
+}
+
+/// Codex's stand-in (#746): it answers `--help` as a Codex with
+/// `--no-daemon` does and refuses to be an app server. Started in a pane, it
+/// notes how it was launched and then every byte typed at it, as a TUI reads
+/// them. It never goes quiet, so it is never ready unless the test says so:
+/// a Codex a settings restart has just started, still drawing.
+const CODEX: &str = r#"#!/bin/sh
+case "$1" in
+  --help) printf '  --no-daemon  Run without the daemon\n'; exit 0;;
+  app-server) exit 1;;
+esac
+printf 'LAUNCH %s\n' "$*" >> "$0.typed"
+(while :; do printf '.'; sleep 0.2; done) &
+stty raw -echo
+exec cat >> "$0.typed"
+"#;
+
+const CONVERSATION: &str = "019a3d1e-6b1c-7d52-9b4e-0c7a1f2e3d4c";
+
+/// A terminal Codex tab on a conversation it resumes, with a paired phone.
+struct Codex {
+    phone: Phone,
+    typed: PathBuf,
+    _program: codex::pty::TestProgram,
+    _dir: tempfile::TempDir,
+}
+
+impl Drop for Codex {
+    fn drop(&mut self) {
+        self.phone.manager.closing();
+        self.phone.manager.terminals.kill_all();
+    }
+}
+
+impl Codex {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let phone = Phone::paired_on(json!({"harness":"codex","model":"","providerSessionId":CONVERSATION}));
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("codex");
+        std::fs::write(&program, CODEX).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = codex::pty::codex_program_for_tests(program.clone());
+        // Its rollout, in the home the app runs Codex in: what each launch resumes.
+        let day = codex::home::managed_root().unwrap().join("sessions/2026/11/02");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join(format!("rollout-2026-11-02T10-00-00-{CONVERSATION}.jsonl")), "").unwrap();
+        phone.manager.follow_pane_exits();
+        Codex { typed: dir.path().join("codex.typed"), phone, _program: program, _dir: dir }
+    }
+
+    fn manager(&self) -> &SessionManager {
+        &self.phone.manager
+    }
+
+    fn rt(&self) -> Arc<Mutex<TabRuntime>> {
+        self.manager().runtime("phone-controls", "tab").unwrap()
+    }
+
+    /// Each launch's arguments, and what was typed at it.
+    fn launches(&self) -> Vec<(String, Vec<u8>)> {
+        let typed = std::fs::read(&self.typed).unwrap_or_default();
+        let mut launches = Vec::new();
+        let mut rest = typed.as_slice();
+        while let Some(at) = rest.windows(7).position(|bytes| bytes == b"LAUNCH ") {
+            if let Some((_, typed)) = launches.last_mut() {
+                *typed = rest[..at].to_vec();
+            }
+            let line = &rest[at + 7..];
+            let end = line.iter().position(|byte| *byte == b'\n').unwrap_or(line.len());
+            launches.push((String::from_utf8_lossy(&line[..end]).into_owned(), Vec::new()));
+            rest = line.get(end + 1..).unwrap_or_default();
+        }
+        if let Some((_, typed)) = launches.last_mut() {
+            *typed = rest.to_vec();
+        }
+        launches
+    }
+
+    fn launched(&self, nth: usize, with: &str) {
+        self.phone.wait_for(&format!("launch {nth} with {with}"), || self.launches().get(nth - 1).is_some_and(|(args, _)| args.contains(with)));
+        assert_eq!(self.launches().len(), nth, "{:?}", self.launches());
+    }
+
+    fn send(&self, text: &str) -> u64 {
+        self.manager().send("phone-controls", "tab", text.into(), vec![]).unwrap().events[0].seq
+    }
+
+    /// The turn `seq` opened ended as stopped, its prompt withdrawn.
+    fn stopped(&self, seq: u64) {
+        self.phone.wait_for("the turn to end", || !self.rt().lock().unwrap().turn_open);
+        assert_eq!(self.rt().lock().unwrap().status, TabStatus::Idle);
+        let events = store::read_lines::<AgentEvent>(&store::log_path("phone-controls", "tab").unwrap()).unwrap();
+        let after: Vec<_> = events.iter().skip_while(|event| event.seq != seq).map(|event| &event.payload).collect();
+        assert!(after.iter().any(|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })), "{after:?}");
+        assert!(after.iter().any(|payload| matches!(payload, Payload::PromptWithdrawn { prompt_seq } if *prompt_seq == seq)), "{after:?}");
+    }
+}
+
+impl Phone {
+    fn wait_for(&self, what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !done() {
+            assert!(Instant::now() < deadline, "never happened: {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// #746: a new effort or mode restarts a terminal Codex tab's Codex, and a
+/// prompt sent then waits for the new one to be ready. An interrupt while it
+/// waited, from the desktop or from a phone, was an Escape typed into a
+/// Codex with no turn running; the prompt was typed once Codex was up, and
+/// its turn ran to the end. Now the interrupt ends that turn at once: the
+/// prompt is withdrawn, nothing at all is typed into the new Codex, and the
+/// next prompt is the first thing it reads.
+#[test]
+fn an_interrupt_right_after_a_settings_restart_ends_the_turn() {
+    let codex = Codex::new();
+    codex.manager().ensure_started("phone-controls", "tab").unwrap();
+    codex.launched(1, &format!("resume {CONVERSATION}"));
+
+    // The desktop: a new effort, a prompt, and Interrupt.
+    codex.manager().set_effort("phone-controls", "tab", Some("high")).unwrap();
+    codex.launched(2, "model_reasoning_effort=high");
+    let seq = codex.send("count to a thousand slowly");
+    assert!(codex.manager().interrupt("phone-controls", "tab").unwrap(), "the interrupt took");
+    codex.stopped(seq);
+
+    // A phone: a new mode, a prompt, and its Interrupt.
+    codex.phone.call("driving", "setMode", json!({"mode":"plan"})).unwrap();
+    codex.launched(3, "-a on-request -s read-only");
+    let seq = codex.send("and again");
+    assert_eq!(codex.phone.call("driving", "interrupt", json!({})).unwrap(), json!({"interrupted": true}));
+    codex.stopped(seq);
+
+    // Neither prompt, nor an Escape, reached either Codex: the next prompt,
+    // once Codex is up, is the first thing it reads.
+    codex.send("next");
+    if let Engine::Cli(p) = &codex.rt().lock().unwrap().engine {
+        p.ready.mark();
+    }
+    codex.phone.wait_for("the next prompt to be entered", || codex.launches().get(2).is_some_and(|(_, typed)| typed.contains(&b'\r')));
+    let launches = codex.launches();
+    assert_eq!(launches.len(), 3, "{launches:?}");
+    assert_eq!(String::from_utf8_lossy(&launches[1].1), "", "typed into the Codex restarted for the effort");
+    assert!(launches[2].1.starts_with(b"\x1b[200~next\x1b[201~\r"), "typed into the Codex restarted for the mode: {:?}", String::from_utf8_lossy(&launches[2].1));
 }

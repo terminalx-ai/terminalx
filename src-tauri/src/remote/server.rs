@@ -2404,6 +2404,15 @@ impl WorkspaceRpc {
         }
         let project = super::session_target::resolve(&self.root, p.repository.as_ref())?;
         let root = project.to_string_lossy().into_owned();
+        // A checkout of the workspace's repository is a project of its own:
+        // its issue pipeline's settings are stored and read under its path,
+        // so it is registered like the root, which is at start. Unregistered,
+        // an issue session there started with no pipeline (#461).
+        if p.repository.is_some() {
+            if let Err(error) = crate::store::projects::add(&root) {
+                log::warn!("register the repository checkout {root}: {error:#}");
+            }
+        }
         if let Some(settings) = p.pipeline_settings.take() {
             let patch = crate::store::projects::ProjectPatch { issue_pipeline: Some(settings), ..Default::default() };
             if let Err(error) = crate::store::projects::update(&root, patch) {

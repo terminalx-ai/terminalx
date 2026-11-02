@@ -175,8 +175,9 @@ struct InputBox {
     /// The tab was set waiting on the reader for them.
     made_waiting: bool,
     /// How many times the reader has stopped the turn from the chat. A
-    /// message sent before the latest stop is withdrawn rather than typed
-    /// once the box empties.
+    /// message sent before the latest stop and not yet entered is withdrawn
+    /// rather than typed: once the box empties, once the CLI is ready (#746),
+    /// or in place of its Enter.
     stops: u64,
 }
 
@@ -184,6 +185,9 @@ struct InputBox {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Readiness {
     Cancelled,
+    /// The reader stopped the turn before the CLI was ready for the prompt
+    /// (#746): a CLI restarted for its settings, still starting.
+    Stopped,
     /// It said so, or went quiet on something that is not a known dialog.
     Ready,
     /// Neither signal came in time, or the CLI exited.
@@ -197,6 +201,7 @@ impl Readiness {
     fn as_str(self) -> &'static str {
         match self {
             Self::Cancelled => "cancelled",
+            Self::Stopped => "stopped",
             Self::Ready => "ready",
             Self::TimedOut => "timed_out",
             Self::Blocked(_) => "blocked",
@@ -216,6 +221,9 @@ struct ComposerEcho {
     image_count: usize,
     sent_at: Instant,
     receipt: Option<DeliveryReceipt>,
+    /// Its typing has begun: some of it may be in the CLI's input box. Until
+    /// then a stop has nothing in the CLI to interrupt for it (#746).
+    typing: bool,
     /// Enter was written. Confirmation is armed only from then, not while
     /// the prompt is waiting for the CLI to become ready — and a prompt that
     /// was never typed is not one the CLI can be said to have left unsent.
@@ -410,7 +418,7 @@ fn agent_name(harness: &str) -> &'static str {
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0, overtaken: false, continuation: false }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, typing: false, submitted: false, queued: false, command: false, seq: 0, overtaken: false, continuation: false }
     }
 
     fn echoed(&self) -> Echoed {
@@ -1159,6 +1167,10 @@ struct PromptDelivery {
     queued: bool,
     receipt: Option<(u64, DeliveryReceipt)>,
     shared: Option<(crate::local_sharing::WritePermit, String, String, u64)>,
+    /// How many stops the reader had made when this was sent
+    /// ([`InputBox::stops`]): taken by the sender, which holds the tab, so a
+    /// stop made before the typing starts is never mistaken for an earlier one.
+    stops: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1716,6 +1728,13 @@ impl SessionManager {
             }
         }
         match store::message_activity::record(&ev) {
+            // A message to an archived session brings it back to the list
+            // (#718), whoever sent it: the window, the CLI, a phone, a guest,
+            // an automation or a pipeline. Only a new one does: a message
+            // read again from a transcript does not move its time on.
+            Ok(Some(session)) if session.archived && ev.subagent.is_none() && matches!(&ev.payload, Payload::UserMessage { .. }) => {
+                self.sink.emit("session_updated", &crate::session_archive::bring_back(session));
+            }
             Ok(Some(session)) => self.sink.emit("session_updated", &session),
             Ok(None) => {}
             Err(error) => log::warn!("record message activity: {error:#}"),
@@ -2839,11 +2858,17 @@ impl SessionManager {
             // One the reader started by hand that has left its terminal is
             // not there to read it, and its shell is not sent it.
             Engine::Cli(p) => {
-                // A message still waiting on the input box is not typed
-                // after the stop, whenever the box empties (#722).
+                // A message sent and not yet entered is not typed after the
+                // stop: not when the box empties (#722), nor when a CLI
+                // restarted for its settings is ready (#746).
                 p.input.stops += 1;
+                // The turn's own prompt has not begun to be typed: the CLI
+                // has no turn to stop, and may still be on its first screen,
+                // where a key is not "stop". Withdrawing the prompt is the
+                // stop, and its delivery does that (`type_prompt`).
+                let untyped = p.awaiting_delivery.is_some_and(|seq| p.echoed.iter().any(|echo| echo.seq == seq && !echo.typing));
                 let pane = p.pane_id.clone();
-                self.left_the_terminal(&rt).is_none() && self.terminals.write(&pane, tui::ESCAPE).is_ok()
+                untyped || (self.left_the_terminal(&rt).is_none() && self.terminals.write(&pane, tui::ESCAPE).is_ok())
             }
             Engine::Acp(a) => {
                 let actions = a.interrupt();
@@ -4858,8 +4883,8 @@ impl SessionManager {
     ) -> Result<SendOutcome> {
         let tab = entry.tab(&rt.tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         self.start_cli(rt, rt_arc, entry, tab, true)?;
-        let (pane, ready) = match &rt.engine {
-            Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone()),
+        let (pane, ready, stops) = match &rt.engine {
+            Engine::Cli(p) => (p.pane_id.clone(), p.ready.clone(), p.input.stops),
             _ => bail!("the agent is not running"),
         };
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
@@ -4879,6 +4904,7 @@ impl SessionManager {
             ready: Some(ready),
             seq: Some(ev.seq),
             queued,
+            stops,
             receipt: receipt.map(|receipt| (ev.seq, receipt)),
             mobile: prompt.mobile.map(|permit| (permit, entry.id.clone(), tab.id.clone(), ev.seq)),
             shared: prompt.shared_connection.map(|connection| (connection, entry.id.clone(), tab.id.clone(), ev.seq)),
@@ -4950,7 +4976,7 @@ impl SessionManager {
     /// the CLI has not acknowledged it (`nudge_by`); the watcher tells the
     /// reader when it never does (`accept_by`).
     fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, delivery: PromptDelivery) {
-        let PromptDelivery { ready, seq, queued, receipt, shared, mobile } = delivery;
+        let PromptDelivery { ready, seq, queued, receipt, shared, mobile, stops } = delivery;
         let sent_at = Instant::now();
         // A slash command opens a palette or runs in the CLI itself: it is
         // held to acknowledging nothing. A continuation is held to it like any
@@ -4981,12 +5007,10 @@ impl SessionManager {
                     }
                 }
             };
-            // How many stops the reader had made when this was sent: one made
-            // since withdraws it if it is still waiting on the input box.
-            let stops = match &rt_arc.lock().unwrap().engine {
-                Engine::Cli(p) => p.input.stops,
-                _ => 0,
-            };
+            // The reader has stopped the turn since this message was sent. A
+            // command the app types for itself is not part of a turn, and is
+            // only held to a stop while it waits on the input box (#722).
+            let stopped = |rt: &TabRuntime| seq.is_some() && matches!(&rt.engine, Engine::Cli(p) if p.input.stops != stops);
             // Let go of only while waiting on the input box, so an earlier
             // prompt's Enter can still be written again (`enter_again`).
             let mut held = Some(ticket.take());
@@ -5001,11 +5025,15 @@ impl SessionManager {
                 None => Ok(()),
             };
             if let Some(ready) = &ready {
-                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref());
+                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || stopped(&rt_arc.lock().unwrap()));
                 stage("ready", serde_json::json!({ "readiness": readiness.as_str() }));
                 let mut rt = rt_arc.lock().unwrap();
                 // Stop or a restart may have replaced the CLI while waiting.
                 if !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready)) {
+                    return;
+                }
+                if let (Readiness::Stopped, Some(seq)) = (readiness, seq) {
+                    manager.prompt_withdrawn(&mut rt, seq, receipt.map(|(_, receipt)| receipt));
                     return;
                 }
                 if readiness == Readiness::Cancelled {
@@ -5044,8 +5072,24 @@ impl SessionManager {
                     return;
                 }
             };
+            // The last look before anything is typed: a stop since this was
+            // sent withdraws it, whatever it waited on (#746). From here on
+            // the stop is an Escape for the CLI, and holds back the Enter.
+            if let Some(seq) = seq {
+                let mut rt = rt_arc.lock().unwrap();
+                if stopped(&rt) {
+                    manager.prompt_withdrawn(&mut rt, seq, receipt.map(|(_, receipt)| receipt));
+                    return;
+                }
+                if let Engine::Cli(p) = &mut rt.engine {
+                    if let Some(echo) = p.echoed.iter_mut().find(|echo| echo.seq == seq) {
+                        echo.typing = true;
+                    }
+                }
+            }
             let mut admitted_to_writer = false;
-            let result = (|| -> Result<()> {
+            // Whether the Enter was written: not after a stop (#746).
+            let result = (|| -> Result<bool> {
                 let mut sharing = (shared.is_some() || mobile.is_some()).then(|| manager.sharing.lock().unwrap());
                 let mut owner_attachment = None;
                 if let (Some((connection, session_id, tab_id, _)), Some(sharing)) = (&shared, &mut sharing) {
@@ -5094,10 +5138,19 @@ impl SessionManager {
                 }
                 std::thread::sleep(tui::submit_delay(body.len()).saturating_sub(read_after.elapsed()));
                 still_there()?;
-                Self::submit_composer_prompt(&rt_arc, seq, receipt.as_ref().map(|(seq, _)| *seq), watched, || terminals.write(&pane, tui::SUBMIT))?;
+                if !Self::submit_composer_prompt(&rt_arc, seq, receipt.as_ref().map(|(seq, _)| *seq), watched, stopped, || terminals.write(&pane, tui::SUBMIT))? {
+                    return Ok(false);
+                }
                 stage("submit_written", serde_json::json!({ "paste": read.as_str(), "drawn": drawn }));
-                Ok(())
+                Ok(true)
             })();
+            if let (Ok(false), Some(seq)) = (&result, seq) {
+                // Stopped while it was being typed: what reached the input box
+                // stays there for the reader, and is not sent (#746).
+                log::info!("[{pane}] the turn was stopped before its prompt was entered");
+                manager.prompt_withdrawn(&mut rt_arc.lock().unwrap(), seq, receipt.map(|(_, receipt)| receipt));
+                return;
+            }
             if let Err(e) = result {
                 log::warn!("[{pane}] write: {e:#}");
                 let mut rt = rt_arc.lock().unwrap();
@@ -5135,8 +5188,16 @@ impl SessionManager {
     ///
     /// `watched`: the CLI is held to acknowledging the prompt, and given the
     /// Enter again until it does.
-    fn submit_composer_prompt(rt_arc: &Arc<Mutex<TabRuntime>>, seq: Option<u64>, receipt_seq: Option<u64>, watched: bool, write: impl FnOnce() -> Result<()>) -> Result<()> {
+    ///
+    /// `stopped`: the reader has stopped the turn since the prompt was sent,
+    /// and its Enter is not written (#746). Asked under the same lock as an
+    /// interrupt's, so a stop is either before the Enter or its Escape after.
+    /// `false` when the Enter was held back.
+    fn submit_composer_prompt(rt_arc: &Arc<Mutex<TabRuntime>>, seq: Option<u64>, receipt_seq: Option<u64>, watched: bool, stopped: impl FnOnce(&TabRuntime) -> bool, write: impl FnOnce() -> Result<()>) -> Result<bool> {
         let mut rt = rt_arc.lock().unwrap();
+        if stopped(&rt) {
+            return Ok(false);
+        }
         write()?;
         if let Engine::Cli(p) = &mut rt.engine {
             for seq in receipt_seq.into_iter().chain(seq) {
@@ -5158,7 +5219,7 @@ impl SessionManager {
                 }
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn cancel_shared_prompt(&self, rt: &mut TabRuntime, seq: u64) {
@@ -5237,7 +5298,7 @@ impl SessionManager {
     /// A quiet Claude pane that never said it was up is read before it is
     /// trusted: the CLI's first-run screens (onboarding, trust, a custom API
     /// key, the bypass disclaimer) are quiet too, and are `Blocked`.
-    fn wait_ready(&self, pane: &str, ready: &tui::Ready, shared: Option<&(crate::local_sharing::WritePermit, String, String, u64)>, mobile: Option<&(crate::local_runtime::mobile::WritePermit, String, String, u64)>) -> Readiness {
+    fn wait_ready(&self, pane: &str, ready: &tui::Ready, shared: Option<&(crate::local_sharing::WritePermit, String, String, u64)>, mobile: Option<&(crate::local_runtime::mobile::WritePermit, String, String, u64)>, stopped: impl Fn() -> bool) -> Readiness {
         let deadline = Instant::now() + tui::READY_TIMEOUT;
         let blocked = || {
             self.terminals.read_output(pane).and_then(|out| if ready.announces_start() {
@@ -5249,6 +5310,12 @@ impl SessionManager {
         loop {
             if self.delivery_revoked(shared, mobile) {
                 return Readiness::Cancelled;
+            }
+            // Stopped while the CLI starts, as one restarted for a new
+            // effort or mode does (#746): the turn ends now, not once the
+            // CLI is up and has been given the prompt after all.
+            if stopped() {
+                return Readiness::Stopped;
             }
             if ready.settled() {
                 return Readiness::Ready;
@@ -5426,10 +5493,11 @@ impl SessionManager {
         }
     }
 
-    /// A message the reader stopped the turn on while it waited on the input
-    /// box: never typed, and never will be. The chat says so and offers to
-    /// send it again; a turn it was to start ends here, as stopped. A
-    /// handoff's sender is told it did not go.
+    /// A message the reader stopped the turn on before it was entered: while
+    /// it waited on the input box (#722), on a CLI still starting, or while
+    /// it was being typed (#746). It is not sent, and never will be. The chat
+    /// says so and offers to send it again; a turn it was to start ends here,
+    /// as stopped. A handoff's sender is told it did not go.
     fn prompt_withdrawn(&self, rt: &mut TabRuntime, seq: u64, receipt: Option<DeliveryReceipt>) {
         self.cancel_shared_prompt(rt, seq);
         if let Engine::Cli(p) = &mut rt.engine {
@@ -5437,7 +5505,7 @@ impl SessionManager {
         }
         self.publish(rt, Payload::PromptWithdrawn { prompt_seq: seq }, None);
         if let Some(receipt) = receipt {
-            let _ = receipt.send(Err("The new session opened, but its agent's input box had text in it, and the handoff was stopped before it was typed. The prepared prompt is retained.".into()));
+            let _ = receipt.send(Err("The new session opened, but the handoff was stopped before its agent took it. The prepared prompt is retained.".into()));
         }
     }
 
@@ -5475,7 +5543,7 @@ impl SessionManager {
     /// message nobody sent.
     fn type_command(&self, p: &mut CliTab, rt_arc: &Arc<Mutex<TabRuntime>>, command: String) {
         p.echoed.push_back(ComposerEcho { command: true, ..ComposerEcho::new(command.clone(), 0) });
-        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), PromptDelivery::default());
+        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), PromptDelivery { stops: p.input.stops, ..Default::default() });
     }
 
     // ---- inbound from the CLI's hooks

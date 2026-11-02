@@ -50,7 +50,7 @@ When automation passes ids between commands, copy the full ids from JSON output.
 ```text
 terminalx status --json
 terminalx projects list --json
-terminalx sessions list [--project <project> | --quick] --json
+terminalx sessions list [--project <project> | --quick] [--archived] --json
 terminalx sessions list --worktree <path-or-name> [--project <project>] --json
 terminalx sessions show <session> --json
 terminalx tabs list <session> --json
@@ -58,6 +58,33 @@ terminalx tabs list <session> --json
 
 `status` reports the app version, process id, socket path, attached projects, and tabs whose
 agent process is running.
+
+`sessions list` lists what the sidebar lists: sessions that are not archived. `--archived` lists
+only the archived ones, as the sidebar's Show archived does; it combines with `--project` and
+`--quick`. Each entry carries `archived`, and `autoArchived` when the app archived it for
+sitting idle. `sessions show` and every other session command take an archived session's id
+as they take any other.
+
+### Archive sessions
+
+```text
+terminalx sessions archive <session>... --json
+terminalx sessions unarchive <session>... --json
+```
+
+Archiving takes a session out of the sidebar's list and nothing more: its transcript, its
+worktree and its agent's conversation stay, and it is listed under Show archived and found by
+the command palette. These run the app's own archive, so the sidebar updates at once. Name
+one or more sessions; each selector is resolved first, and one that matches no session, or
+more than one, changes none of them. The result lists the `sessions` as they are now.
+
+The app also archives a conversation nobody has written in for a while (a week unless the
+person chose otherwise in Settings → Agents), never while it is pinned or open, while a tab
+is working, waiting on a decision or holding a queued message, while its last reply is
+unread, while its worktree has uncommitted or unpushed work, or while its issue pipeline's
+pull request is open. A new message to an archived session brings it back; so does
+`unarchive`. Archive only what the person asked to tidy; do not archive a session you are
+working in, or another agent's.
 
 ### Start a session
 
@@ -177,7 +204,7 @@ instead; that directory is used as it is and is not added as a project.
 `--project`, `--name`, `--worktree` and `--on-main` do not apply to `--quick` and are refused.
 Without `--title`, the first line of the prompt is the title. The returned `kind` is `quick`.
 
-`sessions list` includes quick chats, each with `"kind": "quick"`; a session of a project has
+`sessions list` includes quick chats (the archived ones with `--archived`), each with `"kind": "quick"`; a session of a project has
 no `kind`. `--quick` lists only them. `--project` never matches one, even when its `--cwd` is
 inside that project. It does match a session that names the project's folder another way, such
 as through a symlink. `sessions show`, `sessions rename`, `tabs list`, `send`, `read` and
@@ -185,7 +212,8 @@ as through a symlink. `sessions show`, `sessions rename`, `tabs list`, `send`, `
 
 `--worktree` lists every session that runs in that worktree, by the same rule `worktrees
 delete` uses to choose what it deletes: sessions of other projects and quick chats whose
-folder is in it are included. There `--project` only says whose worktree it is.
+folder is in it are included, and archived sessions too, so it does not take `--archived`.
+There `--project` only says whose worktree it is.
 
 Deleting a quick chat in the app deletes its scratch directory and what is in it. Anything a
 reader should keep belongs somewhere else.

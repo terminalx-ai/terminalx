@@ -267,7 +267,7 @@ mod tests {
         let mut pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
         pipeline.author = SessionRef { session_id: "author".into(), tab_id: "t1".into() };
         pipeline.resolver = Some(SessionRef { session_id: "author".into(), tab_id: "resolver".into() });
-        pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work });
+        pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work, waiting_since: None });
         super::super::store::insert(&pipeline).unwrap();
         assert!(check("author", "t1").is_err());
         assert!(check("other", "t1").is_err());
