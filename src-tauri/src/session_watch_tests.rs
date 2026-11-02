@@ -31,11 +31,15 @@ struct Observer {
     rt: Mutex<std::sync::Weak<Mutex<TabRuntime>>>,
     completed: Mutex<Vec<(String, String, Option<String>)>>,
     interrupts: std::sync::atomic::AtomicUsize,
+    answered: Mutex<Vec<(String, String)>>,
 }
 
 impl SessionObserver for Observer {
     fn interrupted(&self, _key: &str) {
         self.interrupts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn answered(&self, session: &str, tab: &str) {
+        self.answered.lock().unwrap().push((session.into(), tab.into()));
     }
     fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
@@ -108,7 +112,7 @@ fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
         "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
     })).unwrap();
     index::save(&[entry]).unwrap();
-    let tab = |mode: &str| crate::session_ops::NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
+    let tab = |mode: &str| crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
     rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
         crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
     assert!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).is_err());
@@ -126,14 +130,40 @@ impl Rig {
     }
 
     fn with_live_pane() -> Self {
+        Self::running("sh -c 'read line'")
+    }
+
+    /// A tab whose pane runs `command`, in place of the CLI.
+    fn running(command: &str) -> Self {
         let rig = Self::new();
         let sink = Arc::new(crate::sink::BroadcastSink::new(256));
         let spec = pty::PaneSpec {
             cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
-            command: Some("sh -c 'read line'"), env: &[],
+            command: Some(command), env: &[],
         };
         rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
         rig
+    }
+
+    /// Wait until the pane's program has read everything written into it.
+    fn pane_has_read_it_all(&self) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while self.manager.terminals.unread_input(&self.pane) != Some(0) {
+            assert!(Instant::now() < deadline, "the pane never read its input");
+            std::thread::sleep(MOMENT);
+        }
+    }
+
+    /// From now on, each stage the tab tells a continuation's dialog.
+    fn hear_deliveries(&self) -> Arc<Mutex<Vec<String>>> {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let into = heard.clone();
+        self.manager.sink.listen("prompt_delivery", Box::new(move |payload| {
+            let told: serde_json::Value = serde_json::from_str(payload).unwrap();
+            assert_eq!((told["sessionId"].as_str(), told["tabId"].as_str()), (Some(SESSION), Some(TAB)));
+            into.lock().unwrap().push(format!("{}:{}", told["seq"], told["stage"].as_str().unwrap()));
+        }));
+        heard
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -178,6 +208,7 @@ impl Rig {
             seq: 0,
             source_timestamp: None,
             message_times: HashMap::new(),
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_retiring: None,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
@@ -187,19 +218,25 @@ impl Rig {
                 mode: "default".into(),
                 pane_id: pane.clone(),
                 generation: 0,
+                launched_at: now,
                 restart_when_idle: false,
                 settings_asked_at: None,
                 launched_for: None,
                 status_names_model: false,
                 settings_command_is_ours: false,
                 ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
+                recorded: false,
                 tail: tail.clone(),
                 echoed: Default::default(),
                 awaiting_delivery: None,
                 delivery_sent_at: None,
                 accept_by: None,
                 nudge_by: None,
+                nudges_left: 0,
+                entered_at: None,
                 held: Vec::new(),
+                prompts: RecordedPrompts::default(),
+                input: InputBox::default(),
                 resend_after_abort: None,
                 codex_interrupt_hooks_owed: 0,
                 codex_prompt_starts_turn: false,
@@ -220,6 +257,7 @@ impl Rig {
             compact_boundary_at: None,
             turn_started_at: None,
             turn_by_command: false,
+            signed_out_in_turn: false,
             last_activity: now,
             recovery: None,
             stalled_at: None,
@@ -229,7 +267,9 @@ impl Rig {
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
+            background: None,
             left_at: None,
+            prepared_baseline: None,
             log_path: dir.path().join("tab.jsonl"),
             me: std::sync::Weak::new(),
         }));
@@ -331,6 +371,69 @@ impl Rig {
     fn hook(&self, event: &str, payload: serde_json::Value) {
         self.manager.on_hook(HookFrame { tab: TAB.into(), session: SESSION.into(), token: self.token.clone(), event: event.into(), payload });
         self.stamp();
+    }
+}
+
+#[test]
+fn codex_pretool_reports_acknowledge_without_overriding_the_provider_policy() {
+    for mode in ["bypassPermissions", "auto", "plan"] {
+        let rig = Rig::in_mode(CliKind::Codex, mode);
+        let reply = rig.manager.on_hook(HookFrame {
+            session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(),
+            event: "PreToolUse".into(),
+            payload: json!({"tool_name":"shell", "tool_input":{"command":"pwd"}}),
+        });
+        assert_eq!(reply.output, Some(json!({})), "{mode}: the local-owner bridge needs an explicit acknowledgement, not a missing reply");
+        assert!(reply.refused.is_none());
+        assert!(rig.rt.lock().unwrap().pending.is_empty());
+        assert_eq!(rig.launch_mode().as_deref(), Some(mode));
+    }
+}
+
+#[test]
+fn a_pretool_report_from_a_replaced_launch_is_not_acknowledged() {
+    let rig = Rig::in_mode(CliKind::Codex, "bypassPermissions");
+    let reply = rig.manager.on_hook_pumping(HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(),
+        event: "PreToolUse".into(), payload: json!({"tool_name":"shell", "tool_input":{"command":"pwd"}}),
+    }, |rt, _| {
+        let mut rt = rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.origin.token = crate::hooks::mint_token();
+    });
+    assert!(reply.output.is_none(), "a stale launch must still fail closed at the owner bridge");
+}
+
+#[test]
+fn permission_context_survives_the_hook_without_changing_tool_input() {
+    for (gate, input, reason) in [
+        ("PreToolUse", json!({"command":"git status --short --branch"}), "Approval is required because this session is set to Ask every time."),
+        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), "Inspect the selected checkout"),
+    ] {
+        let rig = Rig::in_mode(CliKind::Codex, "manual");
+        let manager = rig.manager.clone();
+        let frame = HookFrame {
+            session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
+            payload: json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}),
+        };
+        let worker = std::thread::spawn(move || manager.on_hook(frame));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let request = loop {
+            if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+            assert!(Instant::now() < deadline, "the hook must publish a permission request");
+            std::thread::sleep(MOMENT);
+        };
+        let event = rig.events().into_iter().find(|e| matches!(e.payload, Payload::PermissionRequested { .. })).unwrap();
+        {
+            let rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { unreachable!() };
+            p.decisions[&request].sender.send(Decision::Deny).unwrap();
+        }
+        worker.join().unwrap();
+        let payload = serde_json::to_value(event.payload).unwrap();
+        assert_eq!(payload["cwd"], "/workspace/app", "the hook's directory must reach the recorded permission event");
+        assert_eq!(payload["description"], reason);
+        assert_eq!(payload["input"], input, "display context must not rewrite the provider's tool arguments");
     }
 }
 
@@ -869,6 +972,7 @@ fn a_silent_turn_waiting_for_approval_is_counted_separately() {
     {
         let mut rt = rig.rt.lock().unwrap();
         rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            cwd: None,
             request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(),
             input: json!({ "command": "ls" }), title: None, description: None, options: vec![],
         }, None);
@@ -1009,7 +1113,7 @@ fn terminal_output_does_not_clear_a_timeout_the_provider_reported() {
     rig.pane_draws();
     {
         let mut rt = rig.rt.lock().unwrap();
-        rig.manager.apply(&mut rt, Payload::Error { message: "request timed out".into(), fatal: false }, None);
+        rig.manager.apply(&mut rt, Payload::Error { message: "request timed out".into(), fatal: false, detail: None }, None);
     }
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
     for _ in 0..3 {
@@ -1597,7 +1701,7 @@ fn a_turn_that_ends_in_an_error_asks_for_attention() {
         rig.append(&failed_command(kind, "call-1"));
         {
             let mut rt = rig.rt.lock().unwrap();
-            rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Error, final_text: Some("the agent crashed".into()), usage: None, duration_ms: None, head: None, auth_failed: false }, None);
+            rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Error, final_text: Some("the agent crashed".into()), usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
         }
         assert!(!rig.turn_open());
         assert_eq!(rig.status(), TabStatus::Waiting, "{kind:?}");
@@ -1613,7 +1717,7 @@ fn a_pending_permission_still_waits_for_input_after_a_failed_command() {
     rig.append(&failed_command(CliKind::Claude, "call-1"));
     {
         let mut rt = rig.rt.lock().unwrap();
-        rig.manager.apply(&mut rt, Payload::PermissionRequested { request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(), input: json!({ "command": "rm file" }), title: None, description: None, options: vec![] }, None);
+        rig.manager.apply(&mut rt, Payload::PermissionRequested { cwd: None, request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(), input: json!({ "command": "rm file" }), title: None, description: None, options: vec![] }, None);
     }
     assert_eq!(rig.status(), TabStatus::Waiting);
     assert_eq!(rig.recovery(), None);
@@ -1881,7 +1985,8 @@ fn a_shared_session_is_restarted_out_of_a_mode_it_may_not_be_in() {
 }
 
 /// The composer's prompt went into the pane and its Enter was written; the
-/// CLI has not acknowledged it.
+/// CLI has not acknowledged it. What `submit_composer_prompt` arms, by the
+/// rig's clock.
 fn enter_written_unacknowledged(rig: &Rig, seq: u64) {
     let mut rt = rig.rt.lock().unwrap();
     if let Engine::Cli(p) = &mut rt.engine {
@@ -1889,17 +1994,34 @@ fn enter_written_unacknowledged(rig: &Rig, seq: u64) {
         p.delivery_sent_at = Some(rig.now.get());
         p.accept_by = Some(rig.now.get() + tui::ACCEPT_TIMEOUT);
         p.nudge_by = Some(rig.now.get() + tui::NUDGE_AFTER);
+        p.nudges_left = tui::NUDGES;
+        p.entered_at = Some(rig.now.get());
     }
 }
 
+/// The same for a continuation: its echo carries a receipt, and the tab
+/// sets it no deadline of its own.
+fn continuation_entered_unacknowledged(rig: &Rig, seq: u64) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
+    enter_written_unacknowledged(rig, seq);
+    let (receipt, heard) = std::sync::mpsc::channel();
+    let mut rt = rig.rt.lock().unwrap();
+    if let Engine::Cli(p) = &mut rt.engine {
+        p.accept_by = None;
+        p.echoed.push_back(ComposerEcho { seq, submitted: true, continuation: true, receipt: Some(receipt), ..ComposerEcho::new("continue the work".into(), 0) });
+    }
+    heard
+}
+
+/// The `prompt_delivery` stages in the tab's diagnostics; a send's own timings (`send_timing`, #727) are beside them.
 fn delivery_stages(rig: &Rig) -> Vec<String> {
     let path = rig.rt.lock().unwrap().diagnostics_path();
-    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()).filter_map(|v| v["stage"].as_str().map(String::from)).collect()
+    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| v["type"] == "prompt_delivery").filter_map(|v| v["stage"].as_str().map(String::from)).collect()
 }
 
 #[test]
-fn an_enter_the_cli_let_go_by_is_written_once_more_before_the_reader_is_told() {
-    let rig = Rig::with_live_pane();
+fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
+    let rig = Rig::running("cat >/dev/null");
     enter_written_unacknowledged(&rig, 7);
     rig.tick();
     assert!(delivery_stages(&rig).is_empty(), "not at once: the CLI gets its moment");
@@ -1907,14 +2029,100 @@ fn an_enter_the_cli_let_go_by_is_written_once_more_before_the_reader_is_told() {
     rig.tick();
     assert_eq!(delivery_stages(&rig), ["nudged"]);
     assert_eq!(rig.recovery(), None, "a nudge is not a warning");
+    rig.pane_has_read_it_all();
     rig.advance(Duration::from_secs(1));
     rig.tick();
-    assert_eq!(delivery_stages(&rig), ["nudged"], "once only");
+    assert_eq!(delivery_stages(&rig), ["nudged"], "not again until it has had as long again");
+    // A CLI that only just started can let the second go by too (#662).
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"]);
+    rig.pane_has_read_it_all();
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"], "twice only");
     // Still nothing: now the reader is told, as before.
     rig.advance(tui::ACCEPT_TIMEOUT);
     rig.tick();
     assert_eq!(rig.recovery(), Some(RecoveryKind::DeliveryUnconfirmed));
-    assert_eq!(delivery_stages(&rig), ["nudged", "unconfirmed"]);
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged", "unconfirmed"]);
+}
+
+/// The handoff whose Enter was lost: nothing ever wrote it again, because a
+/// continuation was kept out of the nudge along with the banner (#662). It
+/// is nudged like any prompt, and the dialog that sent it hears each one;
+/// the tab still raises no warning of its own, the dialog being the one to
+/// say what became of it.
+#[test]
+fn a_continuation_left_in_the_input_is_nudged_without_raising_the_banner() {
+    let rig = Rig::running("cat >/dev/null");
+    let heard = rig.hear_deliveries();
+    let receipt = continuation_entered_unacknowledged(&rig, 4);
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    rig.pane_has_read_it_all();
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"]);
+    assert_eq!(*heard.lock().unwrap(), ["4:nudged", "4:nudged"]);
+    rig.advance(tui::ACCEPT_TIMEOUT);
+    rig.tick();
+    assert_eq!(rig.recovery(), None);
+    assert_eq!(delivery_stages(&rig), ["nudged", "nudged"], "no deadline of the tab's own");
+    // The CLI takes it at last: its record is the dialog's word, whether or
+    // not anyone is still waiting on the receipt.
+    drop(receipt);
+    rig.append(&format!("{}\n", serde_json::json!({
+        "parentUuid": null, "isSidechain": false, "type": "user", "uuid": "u-handoff", "userType": "external",
+        "cwd": "/w", "sessionId": "s", "message": { "role": "user", "content": "continue the work" },
+    })));
+    assert_eq!(*heard.lock().unwrap(), ["4:nudged", "4:nudged", "4:delivered"]);
+    assert!(delivery_stages(&rig).ends_with(&["accepted".to_string()]));
+}
+
+/// A CLI that has not read what it was given is not taking input at all. An
+/// Enter written after it says nothing new, and once its input queue is full
+/// the write never returns, holding the tab (#661). The nudge stands back
+/// and says why.
+#[test]
+fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
+    let rig = Rig::running("sleep 600");
+    let heard = rig.hear_deliveries();
+    let _receipt = continuation_entered_unacknowledged(&rig, 5);
+    // The handoff's Enter, still in the queue: the CLI has stopped reading.
+    rig.manager.terminals.write(&rig.pane, tui::SUBMIT).unwrap();
+    let unread = rig.manager.terminals.unread_input(&rig.pane);
+    assert!(unread.is_some_and(|n| n > 0), "the platform reports unread input");
+    for _ in 0..tui::NUDGES {
+        rig.advance(tui::NUDGE_AFTER);
+        rig.tick();
+    }
+    assert_eq!(delivery_stages(&rig), ["stalled", "stalled"]);
+    assert_eq!(*heard.lock().unwrap(), ["5:stalled", "5:stalled"]);
+    assert_eq!(rig.manager.terminals.unread_input(&rig.pane), unread, "nothing was added to it");
+}
+
+/// The reader's own Enter, from the dialog: held to what a nudge is held to,
+/// and only for the prompt still awaited.
+#[test]
+fn the_readers_enter_goes_only_where_a_nudge_would() {
+    let rig = Rig::running("cat >/dev/null");
+    let _receipt = continuation_entered_unacknowledged(&rig, 6);
+    assert!(!rig.manager.submit_waiting(SESSION, TAB, 5).unwrap(), "not the prompt awaited");
+    assert!(rig.manager.submit_waiting(SESSION, TAB, 6).unwrap());
+    assert_eq!(delivery_stages(&rig), ["nudged"]);
+    rig.pane_has_read_it_all();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            cwd: None,
+            request_id: "r1".into(), tool_use_id: "call-9".into(), tool_name: "Bash".into(),
+            input: json!({ "command": "rm -rf build" }), title: None, description: None, options: vec![],
+        }, None);
+    }
+    let asking = rig.manager.submit_waiting(SESSION, TAB, 6).unwrap_err().to_string();
+    assert!(asking.contains("asking something"), "{asking}");
+    assert_eq!(delivery_stages(&rig), ["nudged"]);
 }
 
 #[test]
@@ -1924,6 +2132,7 @@ fn no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer()
     {
         let mut rt = rig.rt.lock().unwrap();
         rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            cwd: None,
             request_id: "r1".into(), tool_use_id: "call-9".into(), tool_name: "Bash".into(),
             input: json!({ "command": "rm -rf build" }), title: None, description: None, options: vec![],
         }, None);
@@ -1955,7 +2164,7 @@ fn send_now_keeps_pending_identities_and_echo_order_after_interrupt() {
     // The Escape went in; the CLI ends the turn as interrupted.
     {
         let mut rt = rig.rt.lock().unwrap();
-        rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }, None);
+        rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
     }
     let rt = rig.rt.lock().unwrap();
     assert!(!rt.turn_open, "an interrupt acknowledgement does not prove delivery");
@@ -2006,4 +2215,204 @@ fn transcript_message_timestamps_survive_tailing() {
     assert_eq!(messages[1].ts, "");
     assert_eq!(messages[0].message_ts.as_deref(), Some("2026-10-22T23:59:00Z"));
     assert!(messages[1].message_ts.is_none());
+}
+
+// #644 source-derived admission controls. Rig::new has no provider/pane process.
+fn compaction_rig_scope(rig: &Rig) -> CompactionScope {
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "compaction", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "providerSessionId": "thread", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    CompactionScope { session_id: SESSION.into(), tab_id: TAB.into(), conversation_id: None,
+        provider: "claude".into(), thread_id: "thread".into(), subagent_id: None }
+}
+
+#[test]
+fn compaction_admission_fences_replacement_and_reconciles_lost_owner() {
+    let rig = Rig::new();
+    let scope = compaction_rig_scope(&rig);
+    let token = rig.manager.bind_compaction(scope.clone(), rig.tail.clone(), 0).unwrap();
+    let generation = rig.rt.lock().unwrap().seq;
+    let start = || CompactionObservation::ItemStarted { generation, turn_id: "turn".into(), item_id: "item".into() };
+    assert!(rig.manager.publish_compaction(&token, start(), false).is_err());
+    assert!(matches!(rig.manager.publish_compaction(&token, start(), true).unwrap(), compaction::Publication::Committed(_)));
+    let _replacement = rig.manager.bind_compaction(scope, rig.tail.clone(), 0).unwrap();
+    assert!(rig.manager.publish_compaction(&token, start(), true).is_err());
+    let mut rt = rig.rt.lock().unwrap();
+    if let Engine::Cli(cli) = &mut rt.engine { cli.generation += 1; }
+    let mut history = store::read_lines(&rt.log_path).unwrap();
+    rig.manager.reconcile_compactions(&mut rt, &mut history).unwrap();
+    assert!(matches!(history.last().unwrap().payload, Payload::ContextCompactionLifecycle {
+        evidence: CompactionEvidence { observation: CompactionObservation::ContinuityLost { reason: CompactionLoss::Restarted, .. }, .. }, persisted: true, ..
+    }));
+    let seq = rt.seq;
+    rig.manager.reconcile_compactions(&mut rt, &mut history).unwrap();
+    assert_eq!(rt.seq, seq, "replay must not append duplicate loss");
+}
+
+#[test]
+fn compaction_append_failure_emits_uncertainty_and_latches_admission() {
+    let rig = Rig::new();
+    let scope = compaction_rig_scope(&rig);
+    let token = rig.manager.bind_compaction(scope, rig.tail.clone(), 0).unwrap();
+    let rt = rig.rt.lock().unwrap();
+    let generation = rt.seq;
+    // An incomplete prior record is a deterministic append failure, not a
+    // platform-dependent permission failure or a provider request.
+    use std::io::Write;
+    std::fs::OpenOptions::new().append(true).open(&rt.log_path).unwrap().write_all(b"{").unwrap();
+    let before = std::fs::read(&rt.log_path).unwrap();
+    drop(rt);
+    let completion = || CompactionObservation::ItemCompleted { generation, turn_id: "turn".into(), item_id: "item".into() };
+    match rig.manager.publish_compaction(&token, completion(), false).unwrap() {
+        compaction::Publication::Uncertain(event) => {
+            assert!(!event.payload.is_persisted());
+            assert!(matches!(event.payload, Payload::ContextCompactionLifecycle {
+                evidence: CompactionEvidence { observation: CompactionObservation::ContinuityLost { .. }, .. }, persisted: false, ..
+            }));
+        }
+        _ => panic!("append failure must not advertise completion"),
+    }
+    assert!(rig.manager.publish_compaction(&token, completion(), false).is_err());
+    assert_eq!(std::fs::read(&rig.rt.lock().unwrap().log_path).unwrap(), before);
+}
+
+#[test]
+fn compaction_reconciliation_preserves_old_provider_after_conversation_switch() {
+    let rig = Rig::new();
+    let scope = compaction_rig_scope(&rig);
+    // Use the real load_events path as well as the rig's publication API.
+    let path = store::log_path(SESSION, TAB).unwrap();
+    rig.rt.lock().unwrap().log_path = path.clone();
+    let token = rig.manager.bind_compaction(scope.clone(), rig.tail.clone(), 0).unwrap();
+    let start = || CompactionObservation::ItemStarted {
+        generation: token.generation(), turn_id: "turn".into(), item_id: "item".into(),
+    };
+    assert!(matches!(rig.manager.publish_compaction(&token, start(), true).unwrap(), compaction::Publication::Committed(_)));
+    index::update_tab(SESSION, TAB, |tab| {
+        tab.harness = "codex".into();
+        tab.provider_session_id = Some("thread-B".into());
+        tab.follow.conversation = Some("B".into());
+        Ok(())
+    }).unwrap();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.harness = "codex".into();
+        if let Engine::Cli(cli) = &mut rt.engine {
+            cli.harness = CliKind::Codex;
+            cli.generation += 1;
+        }
+        rig.manager.publish(&mut rt, Payload::Conversation { id: Some("B".into()), harness: "codex".into(), resumed: false }, None);
+    }
+    // Provider preservation for historical loss must not admit old positive work.
+    assert!(rig.manager.publish_compaction(&token, start(), true).is_err());
+    let returned = rig.manager.load_events(SESSION, TAB).unwrap();
+    let loss = returned.last().unwrap();
+    assert_eq!((&*loss.session_id, &*loss.tab_id, &*loss.harness), (SESSION, TAB, "claude"));
+    assert!(matches!(&loss.payload, Payload::ContextCompactionLifecycle {
+        evidence: CompactionEvidence { scope: retained, observation: CompactionObservation::ContinuityLost { generation, reason: CompactionLoss::Restarted } },
+        persisted: true, ..
+    } if retained == &scope && *generation == token.generation()));
+    let saved: Vec<AgentEvent> = store::read_lines(&path).unwrap();
+    assert_eq!(saved, returned);
+    let seq = rig.rt.lock().unwrap().seq;
+    assert_eq!(rig.manager.load_events(SESSION, TAB).unwrap(), returned);
+    assert_eq!(rig.rt.lock().unwrap().seq, seq, "repeat read must retain the saved loss without another append");
+    assert_eq!(store::read_lines::<AgentEvent>(&path).unwrap(), saved);
+
+    // Shared source-derived wire shape consumed by the real frontend filter/fold.
+    // Only nondeterministic event ids and timestamps are normalized, never
+    // provider/scope/sequence/payload. This is not a captured provider fixture.
+    let mut normalized = returned;
+    for event in &mut normalized {
+        event.id = format!("fixture-{}", event.seq);
+        event.ts.clear();
+    }
+    let expected: serde_json::Value = serde_json::from_str(include_str!("../../src/lib/fixtures/compaction-provider-switch.json")).unwrap();
+    assert_eq!(serde_json::to_value(normalized).unwrap(), expected);
+}
+
+/// What `terminalx wait` reads of a tab (#668). A request raised by the CLI's
+/// hook is one `permissions list` shows. The CLI asking in its own screen, and
+/// an error the agent stopped on, leave the tab waiting too, with nothing in
+/// that list: the first with no error to name, the second with one.
+#[test]
+fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let manager = rig.manager.clone();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: json!({"cwd": "/workspace/app", "tool_name": "Bash", "tool_input": {"cmd": "rm -rf build"}}),
+    };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    let asked = rig.manager.wait_view(SESSION, TAB);
+    assert_eq!((asked.status, asked.asks, asked.recovery), (TabStatus::Waiting, true, None));
+    assert_eq!(rig.manager.pending_permissions().iter().map(|p| p.request_id.as_str()).collect::<Vec<_>>(), [request.as_str()]);
+    // Answered as `permissions allow` answers it.
+    rig.manager.respond_permission(SESSION, TAB, &request, "allow").unwrap();
+    worker.join().unwrap();
+    assert!(!rig.manager.wait_view(SESSION, TAB).asks);
+
+    // The CLI asks in its own screen: the tab waits, on nothing this app holds.
+    rig.hook("Notification", json!({"notification_type": "permission_prompt", "message": "Codex needs your permission"}));
+    let terminal = rig.manager.wait_view(SESSION, TAB);
+    assert_eq!((terminal.status, terminal.asks, terminal.recovery), (TabStatus::Waiting, false, None));
+
+    // The agent stops on an error: the tab waits, with nothing to answer.
+    rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::Error { message: "unexpected failure".into(), fatal: true, detail: None }, None);
+    let failed = rig.manager.wait_view(SESSION, TAB);
+    assert_eq!((failed.status, failed.asks, failed.recovery), (TabStatus::Waiting, false, Some(RecoveryKind::Failed)));
+    assert!(rig.manager.pending_permissions().is_empty());
+}
+
+/// What an issue pipeline stopped on its author's answer hears (#725): a
+/// prompt the reader typed into the CLI's own terminal, and a permission the
+/// reader answered. A turn the CLI starts itself, and an event it has only
+/// been offered, are nobody's answer.
+#[test]
+fn the_observer_hears_the_readers_prompts_and_answers_and_not_the_clis_own_turns() {
+    let rig = Rig::new();
+    let heard = || rig.observer.answered.lock().unwrap().clone();
+    let tab = (SESSION.to_string(), TAB.to_string());
+    rig.hook("UserPromptSubmit", json!({ "prompt": "Use the billing_plans table.", "source": "user" }));
+    assert_eq!(heard(), std::slice::from_ref(&tab));
+    rig.hook("Stop", json!({ "last_assistant_message": "Done." }));
+    // Before Claude Code named its source, every prompt was the reader's.
+    rig.hook("UserPromptSubmit", json!({ "prompt": "And the owner column." }));
+    rig.hook("Stop", json!({}));
+    assert_eq!(heard(), [tab.clone(), tab.clone()]);
+    for source in ["loop_wakeup", "schedule_wakeup", "system", "poll_event"] {
+        rig.hook("UserPromptSubmit", json!({ "prompt": "<task-notification>", "source": source }));
+        assert_eq!(heard().len(), 2, "{source}");
+    }
+    drop(rig);
+
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let manager = rig.manager.clone();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: json!({"cwd": "/workspace/app", "tool_name": "Bash", "tool_input": {"cmd": "git commit -am notes"}}),
+    };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    assert!(rig.observer.answered.lock().unwrap().is_empty(), "being asked is not being answered");
+    rig.manager.respond_permission(SESSION, TAB, &request, "allow").unwrap();
+    worker.join().unwrap();
+    assert_eq!(*rig.observer.answered.lock().unwrap(), [(SESSION.to_string(), TAB.to_string())]);
+    // A request no longer open is refused, and answers nothing.
+    assert!(rig.manager.respond_permission(SESSION, TAB, &request, "allow").is_err());
+    assert_eq!(rig.observer.answered.lock().unwrap().len(), 1);
 }

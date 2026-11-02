@@ -1,0 +1,27 @@
+[
+  {
+    "id": "fixture-1", "sessionId": "watched-session", "tabId": "watched-tab", "harness": "claude", "seq": 1, "ts": "",
+    "payload": {
+      "type": "context_compaction_lifecycle", "confirmedStart": false, "persisted": true,
+      "evidence": { "scope": { "sessionId": "watched-session", "tabId": "watched-tab", "conversationId": null, "provider": "claude", "threadId": "thread", "subagentId": null }, "type": "connection_opened", "generation": 1 }
+    }
+  },
+  {
+    "id": "fixture-2", "sessionId": "watched-session", "tabId": "watched-tab", "harness": "claude", "seq": 2, "ts": "",
+    "payload": {
+      "type": "context_compaction_lifecycle", "confirmedStart": true, "persisted": true,
+      "evidence": { "scope": { "sessionId": "watched-session", "tabId": "watched-tab", "conversationId": null, "provider": "claude", "threadId": "thread", "subagentId": null }, "type": "item_started", "generation": 1, "turnId": "turn", "itemId": "item" }
+    }
+  },
+  {
+    "id": "fixture-3", "sessionId": "watched-session", "tabId": "watched-tab", "harness": "codex", "seq": 3, "ts": "",
+    "payload": { "type": "conversation", "id": "B", "harness": "codex", "resumed": false }
+  },
+  {
+    "id": "fixture-4", "sessionId": "watched-session", "tabId": "watched-tab", "harness": "claude", "seq": 4, "ts": "",
+    "payload": {
+      "type": "context_compaction_lifecycle", "confirmedStart": false, "persisted": true,
+      "evidence": { "scope": { "sessionId": "watched-session", "tabId": "watched-tab", "conversationId": null, "provider": "claude", "threadId": "thread", "subagentId": null }, "type": "continuity_lost", "generation": 1, "reason": "restarted" }
+    }
+  }
+]

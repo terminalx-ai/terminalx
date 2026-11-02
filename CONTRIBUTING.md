@@ -22,6 +22,10 @@ run what you change.
   helper as missing. See [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md).
 - The **`claude`** and **`codex`** CLIs, logged in, if you want to run agents.
   TerminalX spawns them; it does not bundle or proxy them.
+  Codex must support `--no-daemon` (verified with 0.164.0). TerminalX checks
+  the resolved CLI's help before fresh or resumed launches. Older CLIs such
+  as 0.152.0 and 0.153.4 need upgrading; TerminalX reports this before starting
+  an agent instead of falling back to a shared daemon with another tab's identity.
 - macOS on Apple silicon is the only platform currently built and tested.
 
 ## Setup

@@ -24,12 +24,21 @@ pub const COMPUTER_SKILL_STUB: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../skills/computer-use/SKILL.md"
 ));
+pub const VM_GUIDE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skill-guides/local-vm.md"
+));
+pub const VM_SKILL_STUB: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skills/local-vm/SKILL.md"
+));
 
 /// Every guide this binary can serve through `terminalx skills get <name>`,
 /// with the discovery stub "Install skills" writes for it.
-pub const SKILLS: [(&str, &str, &str); 2] = [
+pub const SKILLS: [(&str, &str, &str); 3] = [
     ("terminalx-cli", GUIDE, SKILL_STUB),
     ("computer-use", COMPUTER_GUIDE, COMPUTER_SKILL_STUB),
+    ("local-vm", VM_GUIDE, VM_SKILL_STUB),
 ];
 
 const HELP: &str = r#"terminalx — control a running TerminalX app
@@ -38,14 +47,15 @@ Usage:
   terminalx status [--json]
   terminalx projects list [--json]
   terminalx sessions list [--project PROJECT|--quick] [--json]
+  terminalx sessions list --worktree WORKTREE [--project PROJECT] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
-      [--title TEXT] [--name NAME]
+      [--title TEXT] [--name NAME] [--experimental-codex-stdio]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
       [--provider github|linear] [--auto-merge|--no-auto-merge] [--no-pipeline]
       [--title TEXT] [--name NAME] [--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
-      [--title TEXT] [--cwd DIRECTORY] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
   terminalx share create SESSION [--read-only] [--people EMAIL,EMAIL]
@@ -79,7 +89,8 @@ Usage:
   terminalx cloud resume CLOUD_WORKSPACE [--json]
   terminalx worktrees list [--project PROJECT] [--json]
   terminalx worktrees rename WORKTREE --name NAME [--project PROJECT] [--json]
-  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--force] [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --dry-run [--sessions ID,ID] [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--sessions ID,ID] [--force] [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
   terminalx issues view ISSUE [--project PROJECT] [--provider github|linear] [--comments] [--json]
@@ -94,14 +105,19 @@ Usage:
   terminalx pipelines show PIPELINE [--project PROJECT] [--json]
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines stop|resume|advance|review|merge|refresh PIPELINE [--project PROJECT] [--json]
-  terminalx skills get terminalx-cli|computer-use [--full] [--json]
+  terminalx vm status|start|stop [--json]
+  terminalx vm tools [TOOL] [--json]
+  terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
+  terminalx vm screenshot [--out PATH] [--json]
+  terminalx skills get terminalx-cli|computer-use|local-vm [--full] [--json]
 
 Computer use (desktop apps on macOS, Linux and Windows):
 COMPUTER_HELP
 BROWSER_HELP
 
 Use `terminalx skills get terminalx-cli` for the complete guide and
-`terminalx skills get computer-use` for desktop automation."#;
+`terminalx skills get computer-use` for desktop automation, and
+`terminalx skills get local-vm` for the Linux desktop VM."#;
 
 /// The help text with the computer and browser verbs spliced in from their
 /// own modules.
@@ -443,6 +459,24 @@ fn parse_with_stdin(
         "issues" => parse_issues(&mut tokens, stdin),
         "pipelines" => parse_pipelines(&mut tokens),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
+        "vm" => {
+            let action = tokens.required_front("vm action (status, start, stop, tools, call or screenshot)")?;
+            let params = match action.as_str() {
+                "status" | "start" | "stop" => json!({}),
+                "call" => {
+                    let tool = tokens.required_front("tool name")?;
+                    let arguments = tokens.take_front().unwrap_or_else(|| "{}".into());
+                    json!({"tool": tool, "arguments": arguments})
+                }
+                "tools" => json!({"tool": tokens.take_front()}),
+                "screenshot" => json!({"out": tokens.option("--out")?}),
+                other => return Err(invalid(format!("Unknown vm action {other}."))),
+            };
+            tokens.finish()?;
+            // The first start downloads the desktop image.
+            let timeout = Duration::from_secs(if action == "start" { 25 * 60 } else { 150 });
+            Ok(Action::Rpc { command: format!("vm.{action}"), params, timeout })
+        }
         "skills" => {
             expect_word(&mut tokens, "get", "skills")?;
             let name = tokens.required_front("skill name")?;
@@ -450,7 +484,7 @@ fn parse_with_stdin(
                 return Err(ControlError::new(
                     "not_found",
                     format!("This binary does not embed a guide named {name}."),
-                    Some("Use terminalx-cli or computer-use exactly.".into()),
+                    Some("Use terminalx-cli, computer-use or local-vm exactly.".into()),
                 ));
             };
             let _full = tokens.flag("--full")?;
@@ -502,14 +536,18 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let org = tokens.option("--org")?;
             let cloud = tokens.flag("--cloud")?;
             let quick = tokens.flag("--quick")?;
+            let worktree = tokens.option("--worktree")?;
             let in_cloud = cloud || org.is_some() || project.as_deref().is_some_and(is_cloud_key);
             if quick && (in_cloud || project.is_some()) {
                 return Err(invalid("--quick lists the chats that have no project; it cannot be combined with --project, --cloud or --org."));
             }
+            if worktree.is_some() && (in_cloud || quick) {
+                return Err(invalid("--worktree lists the sessions in a local worktree, quick chats included; it cannot be combined with --quick, --cloud or --org."));
+            }
             if in_cloud {
                 cloud_rpc("sessions.list", json!({"project": project, "org": org}), tokens)
             } else {
-                rpc("sessions.list", json!({"project": project, "quick": quick}), tokens)
+                rpc("sessions.list", json!({"project": project, "quick": quick, "worktree": worktree}), tokens)
             }
         }
         "show" => {
@@ -532,6 +570,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
+            let experimental_codex_stdio = tokens.flag("--experimental-codex-stdio")?;
             for refused in ["--project", "--name"] {
                 if tokens.option(refused)?.is_some() {
                     return Err(invalid(format!("{refused} does not apply to --quick: a quick chat has no project and no worktree.")));
@@ -542,9 +581,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     return Err(invalid(format!("{refused} does not apply to --quick: a quick chat has no project and no worktree.")));
                 }
             }
-            rpc(
-                "sessions.create",
-                json!({
+            let mut params = json!({
                     "quick": true,
                     "agent": agent,
                     "prompt": prompt,
@@ -553,9 +590,9 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "model": model.unwrap_or_default(),
                     "effort": effort,
                     "mode": mode,
-                }),
-                tokens,
-            )
+                });
+            if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            rpc("sessions.create", params, tokens)
         }
         "create" => {
             let project = tokens.required_option("--project")?;
@@ -579,6 +616,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
+            let experimental_codex_stdio = tokens.flag("--experimental-codex-stdio")?;
             let worktree = tokens.flag("--worktree")?;
             let on_main = tokens.flag("--on-main")?;
             if worktree && on_main {
@@ -599,6 +637,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "effort": effort,
                 "mode": mode,
             });
+            if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
             // Only an issue start carries these, so every other request is
             // word for word what it was.
             if let Some(issue) = issue {
@@ -751,10 +790,18 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let project = tokens.option("--project")?;
             let confirmed = tokens.flag("--yes")?;
             let force = tokens.flag("--force")?;
+            let dry_run = tokens.flag("--dry-run")?;
+            if confirmed && dry_run {
+                return Err(invalid("--dry-run removes nothing; it cannot be combined with --yes."));
+            }
+            // `--sessions ""` names no sessions: the worktree must hold none.
+            let sessions = tokens.option("--sessions")?.map(|list| {
+                list.split(',').map(str::trim).filter(|id| !id.is_empty()).map(String::from).collect::<Vec<_>>()
+            });
             let worktree = tokens.required_front("worktree")?;
             rpc(
                 "worktrees.delete",
-                json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force}),
+                json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force, "dryRun": dry_run, "sessions": sessions}),
                 tokens,
             )
         }
@@ -1096,6 +1143,32 @@ mod tests {
     }
 
     #[test]
+    fn experimental_codex_transport_requires_an_explicit_creation_flag() {
+        for destination in [vec!["--quick"], vec!["--project", "project"]] {
+            let mut command = vec!["sessions", "create"];
+            command.extend(destination);
+            command.extend(["--agent", "codex", "--prompt", "hello"]);
+            let (_, ordinary, _) = rpc_of(&command);
+            assert!(ordinary.get("experimentalCodexStdio").is_none());
+            command.push("--experimental-codex-stdio");
+            let (_, experimental, _) = rpc_of(&command);
+            assert_eq!(experimental["experimentalCodexStdio"], json!(true));
+        }
+    }
+
+    #[test]
+    fn vm_commands_reach_the_app_and_the_first_start_may_download() {
+        let (command, _, timeout) = rpc_of(&["vm", "start"]);
+        assert_eq!(command, "vm.start");
+        assert!(timeout >= Duration::from_secs(20 * 60));
+        assert_eq!(rpc_of(&["vm", "call", "launch_app", r#"{"name":"firefox"}"#]).1, json!({"tool": "launch_app", "arguments": r#"{"name":"firefox"}"#}));
+        assert_eq!(rpc_of(&["vm", "call", "list_windows"]).1, json!({"tool": "list_windows", "arguments": "{}"}));
+        assert_eq!(rpc_of(&["vm", "screenshot", "--out", "/tmp/s.png"]).1, json!({"out": "/tmp/s.png"}));
+        assert_eq!(rpc_of(&["vm", "tools"]).1, json!({"tool": null}));
+        assert!(parse(&args(&["vm", "install"])).is_err());
+    }
+
+    #[test]
     fn a_quick_chat_is_created_and_listed_without_a_project() {
         let (command, params, _) = rpc_of(&["sessions", "create", "--quick", "--agent", "claude", "--prompt", "What is a monad?", "--cwd", "/tmp/notes", "--mode", "plan"]);
         assert_eq!(command, "sessions.create");
@@ -1110,8 +1183,8 @@ mod tests {
         assert!(parse(&args(&["sessions", "create", "--agent", "claude", "--prompt", "hi"])).is_err());
 
         let (command, params, _) = rpc_of(&["sessions", "list", "--quick"]);
-        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": null, "quick": true})));
-        assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false}));
+        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": null, "quick": true, "worktree": null})));
+        assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false, "worktree": null}));
         assert!(parse(&args(&["sessions", "list", "--quick", "--project", "api"])).is_err());
         assert!(parse(&args(&["sessions", "list", "--quick", "--cloud"])).is_err());
     }
@@ -1553,6 +1626,36 @@ mod tests {
         assert_eq!(command, "worktrees.delete");
         assert_eq!(params["confirmed"], true);
         assert_eq!(params["worktree"], "feature");
+        assert_eq!((&params["dryRun"], &params["sessions"]), (&json!(false), &json!(null)), "naming no sessions is not naming none");
+    }
+
+    /// #719: the delete can be previewed, and told which sessions the caller
+    /// saw; the listing can ask for exactly what the delete would take.
+    #[test]
+    fn a_worktree_delete_can_be_previewed_and_name_the_sessions_it_expects() {
+        let (command, params, _) = rpc_of(&["worktrees", "delete", "zero-comparison", "--dry-run", "--project", "raccoon"]);
+        assert_eq!(command, "worktrees.delete");
+        assert_eq!(params, json!({"project": "raccoon", "worktree": "zero-comparison", "confirmed": false, "force": false, "dryRun": true, "sessions": null}));
+
+        let (_, params, _) = rpc_of(&["worktrees", "delete", "zero-comparison", "--yes", "--sessions", "01a1787e, 01a174ef-2919,"]);
+        assert_eq!((&params["confirmed"], &params["sessions"]), (&json!(true), &json!(["01a1787e", "01a174ef-2919"])));
+        // An empty list says the worktree should hold no sessions at all.
+        assert_eq!(rpc_of(&["worktrees", "delete", "w", "--yes", "--sessions", ""]).1["sessions"], json!([]));
+        assert!(parse(&args(&["worktrees", "delete", "w", "--yes", "--dry-run"])).is_err());
+        assert!(parse(&args(&["worktrees", "delete", "w", "--yes", "--sessions"])).is_err(), "--sessions needs a value");
+
+        let (command, params, _) = rpc_of(&["sessions", "list", "--worktree", "zero-comparison", "--project", "raccoon"]);
+        assert_eq!((command.as_str(), params), ("sessions.list", json!({"project": "raccoon", "quick": false, "worktree": "zero-comparison"})));
+        for refused in [&["--quick"][..], &["--cloud"], &["--org", "Acme"]] {
+            let mut values = vec!["sessions", "list", "--worktree", "w"];
+            values.extend_from_slice(refused);
+            assert!(parse(&args(&values)).is_err(), "{refused:?}");
+        }
+        for text in [help_text(), GUIDE.to_string()] {
+            for usage in ["sessions list --worktree", "--dry-run", "--sessions"] {
+                assert!(text.contains(usage), "missing {usage}");
+            }
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { onOpenOrganizationSettings, takeAgentLoginsRequest } from "@/lib/settingsLinks";
+import { onOpenOrganizationSettings, takeAgentLoginsRequest, takeAgentLoginsSignIn } from "@/lib/settingsLinks";
 import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, type AgentLoginSource, type ClaudeLoginOutcome, type CodexLoginStatus } from "@/lib/api";
 
 /**
@@ -236,6 +236,9 @@ function remaining(ms: number): string {
   return `${Math.round(minutes / 60)} h`;
 }
 
+/** The service's state for a login its provider no longer accepts (terminalx-saas #241). */
+const SIGN_IN_REQUIRED = "sign-in-required";
+
 /** What the row says about a login, and whether it needs attention. */
 export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()): { text: string; warn: boolean } {
   if (!login || login.state === "disconnected") return { text: "Not connected", warn: false };
@@ -243,6 +246,11 @@ export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()
   const how = login.authKind === "api-key" ? "API key" : lent ? "sign-in lent from a Mac" : "subscription login";
   const who = lent ? ` · ${lent.who}` : login.displayIdentity ? ` · ${login.displayIdentity}` : "";
   if (login.state === "revoked") return { text: `Revoked (${how}${who}): workspaces no longer receive it. Replace it to use this agent again.`, warn: true };
+  // The provider stopped accepting it (a sign-in revoked on its side, terminalx-saas #241): stored, and of no use until signed in again.
+  if (login.state === SIGN_IN_REQUIRED) {
+    const fix = login.authKind === "api-key" ? "Replace it with a working key to use this agent again." : "Sign in again to use this agent again.";
+    return { text: `Sign-in required (${how}${who}): the provider no longer accepts it, so agents in workspaces can't sign in with it. ${fix}`, warn: true };
+  }
   // The service still calls an expired lend connected; the time in its name says otherwise.
   if (lent && lent.at <= now) {
     return { text: `Expired ${new Date(lent.at).toLocaleString()} (${how}${who}): agents can no longer sign in with it. Connect a login again.`, warn: true };
@@ -253,9 +261,9 @@ export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()
   return { text: `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`, warn: false };
 }
 
-/** Whether a workspace's agent can sign in with this login now: stored, not revoked, and not a lent sign-in past its expiry. */
+/** Whether a workspace's agent can sign in with this login now: stored, accepted by its provider, and not a lent sign-in past its expiry. */
 export function agentLoginUsable(login: AgentLogin | undefined, now = Date.now()): boolean {
-  if (!login || login.state === "disconnected" || login.state === "revoked") return false;
+  if (!login || login.state === "disconnected" || login.state === "revoked" || login.state === SIGN_IN_REQUIRED) return false;
   const lent = lentUntil(login);
   return !lent || lent.at > now;
 }
@@ -429,6 +437,8 @@ export function OrganizationAgentLogins({
   const [replace, setReplace] = useState(false);
   const [signIn, setSignIn] = useState<SignIn | null>(null);
   const [codex, setCodex] = useState<CodexSignIn | null>(null);
+  // An agent a message elsewhere asked to sign in again (#667): its sign-in opens once the rows are in.
+  const wantedSignIn = useRef<AgentLoginProvider | null>(null);
   // An expiry shown as "in 3 h" is re-read every minute, so it turns to Expired without a refresh.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -442,7 +452,10 @@ export function OrganizationAgentLogins({
   useEffect(() => {
     if (!revealOnRequest) return;
     const reveal = () => {
-      if (takeAgentLoginsRequest(organizationId)) revealing.current = true;
+      if (takeAgentLoginsRequest(organizationId)) {
+        revealing.current = true;
+        wantedSignIn.current = takeAgentLoginsSignIn(organizationId);
+      }
       if (!revealing.current) return;
       section.current?.scrollIntoView?.({ block: "start" });
       if (!loading) revealing.current = false;
@@ -505,6 +518,17 @@ export function OrganizationAgentLogins({
     setError(null);
     setNotice(null);
   };
+
+  // Asked from a tab whose agent's login was refused: that agent's sign-in, at its consent, as if its button were pressed.
+  // Only for someone the list was given to (an owner or admin); a member's page shows no controls to open.
+  useEffect(() => {
+    const agent = wantedSignIn.current;
+    if (!agent || loading) return;
+    wantedSignIn.current = null;
+    if (logins && !adminOnly && !signIn && !codex && AGENTS.some((candidate) => candidate.id === agent && candidate.signIn)) {
+      choose({ agent, source: "sign-in" });
+    }
+  }, [loading, logins, adminOnly, signIn, codex]);
 
   /** Begin "Log in with Claude": the app opens the provider's page; the panel then asks for the code it shows. */
   const startSignIn = async (stored: boolean) => {
@@ -755,7 +779,7 @@ export function OrganizationAgentLogins({
                     <div className="flex flex-wrap gap-1.5">
                       {agent.signIn && (
                         <Button size="xs" disabled={busy || !!signIn || !!codex} onClick={() => choose({ agent: agent.id, source: "sign-in" })}>
-                          {stored ? `Replace by logging in with ${agent.signIn}` : `Log in with ${agent.signIn}`}
+                          {login?.state === SIGN_IN_REQUIRED ? `Sign in again with ${agent.signIn}` : stored ? `Replace by logging in with ${agent.signIn}` : `Log in with ${agent.signIn}`}
                         </Button>
                       )}
                       <Button size="xs" variant="outline" disabled={busy || !!signIn || !!codex} onClick={() => choose({ agent: agent.id, source: "api-key" })}>

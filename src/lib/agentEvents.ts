@@ -27,6 +27,12 @@ export interface StreamBlock {
 
 export interface TabLog {
   loaded: boolean;
+  /**
+   * True only after a manager history read reconciled current ownership, or,
+   * for a cloud tab, while a live feed that caught up from its runtime's own
+   * history holds (`setFeedContinuity`).
+   */
+  compactionContinuityKnown?: boolean;
   events: AgentEvent[];
   stream: StreamBlock[];
   status: TabStatus;
@@ -34,7 +40,14 @@ export interface TabLog {
 }
 
 const EMPTY: TabLog = { loaded: false, events: [], stream: [], status: "idle", version: 0 };
-const logs = new Map<string, TabLog>();
+// Kept across flush's shallow object replacement, retired on drop/recreation.
+// A read must match both the cache incarnation and its invalidation generation.
+interface StoredLog extends TabLog {
+  readonly admission: { generation: number };
+  /** A cloud tab's live feed, not a history read, says whether continuity is known. */
+  fed?: boolean;
+}
+const logs = new Map<string, StoredLog>();
 const listeners = new Map<string, Set<() => void>>();
 const dirty = new Set<string>();
 let frame: number | null = null;
@@ -64,17 +77,37 @@ function touch(k: string, immediate = false) {
   if (frame == null) frame = requestAnimationFrame(flush);
 }
 
-function getLog(k: string): TabLog {
+function getLog(k: string): StoredLog {
   let l = logs.get(k);
   if (!l) {
-    l = { ...EMPTY, events: [], stream: [] };
+    l = { ...EMPTY, events: [], stream: [], admission: { generation: 0 } };
     logs.set(k, l);
   }
   return l;
 }
 
+function historyReadToken(log: StoredLog) {
+  return { incarnation: log.admission, generation: log.admission.generation };
+}
+
+function admitHistoryRead(sessionId: string, tabId: string, token: ReturnType<typeof historyReadToken>, events: AgentEvent[]) {
+  const current = logs.get(key(sessionId, tabId));
+  if (!current || current.admission !== token.incarnation || current.admission.generation !== token.generation) return;
+  current.compactionContinuityKnown = true;
+  mergeTabEvents(sessionId, tabId, events);
+}
+
 function sameBlock(a: BlockRef, b: BlockRef) {
   return a.messageId === b.messageId && a.index === b.index;
+}
+
+/**
+ * A preview changes by replacement, never in place: a new stream with a new
+ * block, so the memoised turn drawing it (and anything memoised under it)
+ * sees new props and draws the new text at the next frame.
+ */
+function setStreamBlock(log: TabLog, old: StreamBlock | undefined, next: StreamBlock) {
+  log.stream = old ? log.stream.map((s) => (s === old ? next : s)) : [...log.stream, next];
 }
 
 export function applyEvent(ev: AgentEvent) {
@@ -89,29 +122,31 @@ export function applyEvent(ev: AgentEvent) {
   }
   if (p.type === "delta") {
     if (ev.subagent) return; // one preview per tab; subagent output is drawn from committed events
-    let b = log.stream.find((s) => sameBlock(s.ref, p.block));
+    const b = log.stream.find((s) => sameBlock(s.ref, p.block));
+    const fresh = (kind: StreamBlock["kind"]): StreamBlock => b ?? { ref: p.block, kind, text: "", partialJson: "", done: false };
     switch (p.delta) {
       case "block_start": {
         const kind = p.blockType === "text" ? "text" : p.blockType === "thinking" ? "thinking" : p.blockType === "tool_use" ? "tool_use" : "other";
-        if (!b) log.stream.push({ ref: p.block, kind, text: "", partialJson: "", done: false });
-        else b.kind = kind;
+        setStreamBlock(log, b, { ...fresh(kind), kind });
         break;
       }
-      case "text_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "text", text: "", partialJson: "", done: false }));
-        b.ts ??= ev.messageTs;
-        b.text += p.text;
+      case "text_delta": {
+        const s = fresh("text");
+        setStreamBlock(log, b, { ...s, ts: s.ts ?? ev.messageTs, text: s.text + p.text });
         break;
-      case "thinking_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "thinking", text: "", partialJson: "", done: false }));
-        b.text += p.text;
+      }
+      case "thinking_delta": {
+        const s = fresh("thinking");
+        setStreamBlock(log, b, { ...s, text: s.text + p.text });
         break;
-      case "input_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "tool_use", text: "", partialJson: "", done: false }));
-        b.partialJson += p.partialJson;
+      }
+      case "input_delta": {
+        const s = fresh("tool_use");
+        setStreamBlock(log, b, { ...s, partialJson: s.partialJson + p.partialJson });
         break;
+      }
       case "block_stop":
-        if (b) b.done = true;
+        if (b) setStreamBlock(log, b, { ...b, done: true });
         break;
     }
     touch(k);
@@ -120,10 +155,7 @@ export function applyEvent(ev: AgentEvent) {
   if (p.type === "status" && p.text.startsWith("tool_pending:")) {
     const [, id, name] = p.text.split(":");
     const b = log.stream.find((s) => s.kind === "tool_use" && !s.toolId);
-    if (b) {
-      b.toolId = id;
-      b.toolName = name;
-    }
+    if (b) setStreamBlock(log, b, { ...b, toolId: id, toolName: name });
     touch(k);
     return;
   }
@@ -144,23 +176,32 @@ export function applyEvent(ev: AgentEvent) {
   }
   log.events.push(ev);
   if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
-  const urgent = p.type === "recovery" || p.type === "permission_requested" || p.type === "questions_asked" || p.type === "turn_completed";
+  // A reader's message is drawn in the frame it arrives in: the composer's own
+  // stops being drawn as sending as soon as the runtime answers (#727).
+  const urgent = p.type === "recovery" || p.type === "permission_requested" || p.type === "questions_asked" || p.type === "turn_completed" || p.type === "user_message";
   touch(k, urgent);
 }
 
 export async function loadTab(sessionId: string, tabId: string) {
   const k = key(sessionId, tabId);
   const log = getLog(k);
-  if (log.loaded) return;
-  const events = await agent.loadEvents(sessionId, tabId);
-  const fresh = logs.get(k);
-  // The tab may have closed while its persisted history was being read.
-  if (!fresh) return;
-  // Events that streamed in while loading are newer than the file; keep them.
-  const seen = new Set(events.map((e) => e.id));
-  fresh.events = [...events, ...fresh.events.filter((e) => !seen.has(e.id))];
-  fresh.loaded = true;
-  touch(k, true);
+  if (log.loaded && log.compactionContinuityKnown) return;
+  const token = historyReadToken(log);
+  let events: AgentEvent[];
+  try {
+    events = await agent.loadEvents(sessionId, tabId);
+  } catch (error) {
+    // Unreadable history is shown as none, not as a load that never ends.
+    const fresh = logs.get(k);
+    if (fresh && fresh.admission === token.incarnation && fresh.admission.generation === token.generation) {
+      fresh.loaded = true;
+      touch(k, true);
+    }
+    throw error;
+  }
+  // A pre-gap response is history, not a current ownership attestation. Drop
+  // it rather than re-admitting it into an invalidated/recreated reader.
+  admitHistoryRead(sessionId, tabId, token, events);
 }
 
 /** The tab's log as it stands, outside React. */
@@ -168,9 +209,27 @@ export function getTabLog(sessionId: string, tabId: string): TabLog {
   return logs.get(key(sessionId, tabId)) ?? EMPTY;
 }
 
+/**
+ * Whether a cloud tab's log is continuous with its runtime's own history
+ * (#644): true while a live feed that caught up from that history over a
+ * connected attachment holds, false from when it drops or attaches again.
+ * `cloudAgents` keeps it; a local resume's history read neither sets nor
+ * clears it.
+ */
+export function setFeedContinuity(sessionId: string, tabId: string, known: boolean) {
+  const k = key(sessionId, tabId);
+  const log = known ? getLog(k) : logs.get(k);
+  if (!log) return;
+  log.fed = true;
+  if ((log.compactionContinuityKnown ?? false) === known) return;
+  log.compactionContinuityKnown = known;
+  touch(k, true);
+}
+
 /** Indicators the runtime never saves; their seq may be reused after it restarts. */
 function transient(ev: AgentEvent) {
-  return ev.payload.type === "usage_update" || ev.payload.type === "model_request_started";
+  return ev.payload.type === "usage_update" || ev.payload.type === "model_request_started"
+    || (ev.payload.type === "context_compaction_lifecycle" && !ev.payload.persisted);
 }
 
 /**
@@ -251,10 +310,17 @@ export function useTabLog(sessionId: string, tabId: string): TabLog {
 let subscribed = false;
 let reconciling = false;
 
-/** Read saved history again after suspension; never send input or restart work. */
+/** Read saved history again after suspension or a new live connection; never
+ * send input or restart work. */
 export async function reconcileAgentEvents() {
   if (reconciling) return;
   reconciling = true;
+  for (const [k, log] of logs) {
+    log.admission.generation++;
+    // A cloud tab's feed follows its own connection, which this read cannot restore.
+    if (!log.fed) log.compactionContinuityKnown = false;
+    dirty.add(k);
+  }
   // A frame requested before suspension need not be delivered on resume.
   if (frame !== null) cancelAnimationFrame(frame);
   flush();
@@ -275,11 +341,12 @@ export async function reconcileAgentEvents() {
     for (const session of getSessions().sessions) {
       for (const tab of session.tabs) {
         const k = key(session.id, tab.id);
-        if (!logs.get(k)?.loaded || !listeners.get(k)?.size) continue;
+        const log = logs.get(k);
+        if (!log?.loaded || !listeners.get(k)?.size) continue;
+        const token = historyReadToken(log);
         try {
           const events = await agent.loadEvents(session.id, tab.id);
-          // Navigation/closure while the read was pending must not resurrect a log.
-          if (logs.has(k)) mergeTabEvents(session.id, tab.id, events);
+          admitHistoryRead(session.id, tab.id, token, events);
         } catch {
           // Keep the existing conversation; a later resume retries the read.
         }
@@ -295,6 +362,8 @@ export async function subscribeAgentEvents() {
   subscribed = true;
   onAppResume(() => void reconcileAgentEvents());
   try {
+    // Events published while the live connection was down never arrived.
+    await listen("local_runtime_reattached", () => void reconcileAgentEvents());
     const liveTab = (sessionId: string, tabId: string) => getSessions().sessions.some((session) => session.id === sessionId && session.tabs.some((tab) => tab.id === tabId));
     await listen<AgentEvent>("agent_event", ({ payload }) => {
       if (liveTab(payload.sessionId, payload.tabId)) applyEvent(payload);

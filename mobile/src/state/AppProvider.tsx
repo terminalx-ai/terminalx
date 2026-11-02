@@ -1,6 +1,7 @@
 import { forgetConversationState } from "./conversation-state";
 import { clearTranscriptCaches } from "../data/transcript-cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import NetInfo from "@react-native-community/netinfo";
 import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
 import { beginSignIn, finishSignIn, readSession, refreshStoredSession, signOut as revokeCloudSession } from "../auth/native";
@@ -15,6 +16,7 @@ import { extractPairingNameFromUrl, parsePairingCodeOrThrow } from "../pairing/p
 import { readHostCredential, readHosts, removeHost, setHostNames, type StoredHost } from "../store/hosts";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
+import { phoneNetwork } from "../transport/network";
 
 interface AppContextValue {
   ready: boolean;
@@ -40,7 +42,8 @@ interface AppContextValue {
   pairAvailable(host: AccountHost): Promise<void>;
   pairCode(code: string): Promise<void>;
   retryPairing(): Promise<void>;
-  connectHost(host: StoredHost): Promise<void>;
+  /** Select a computer without restarting a usable connection; false if selection failed or was superseded. */
+  connectHost(host: StoredHost): Promise<boolean>;
   disconnectHost(): void;
   /** Unpair a computer: it is asked to drop this phone too when it is the one connected, then forgotten here either way. */
   forgetHost(hostId: string): Promise<void>;
@@ -65,6 +68,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [installationState, setInstallationState] = useState<InstallationState>("ready");
   const [activeHost, setActiveHost] = useState<StoredHost | null>(null);
   const activeHostRef = useRef<StoredHost | null>(null);
+  const selectionGeneration = useRef(0);
   const [connectionStage, setConnectionStage] = useState<ConnectionStage>("idle");
   const connectionStageRef = useRef<ConnectionStage>("idle");
   const [connectionAttempt, setConnectionAttempt] = useState(0);
@@ -113,6 +117,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const refreshCloudSession = useCallback(async (stored: CloudSession): Promise<CloudSession | null> => {
     const outcome = await refreshStoredSession(stored);
     if (outcome.status === "rejected") {
+      selectionGeneration.current++;
       connection.stop();
       activeHostRef.current = null;
       setActiveHost(null);
@@ -160,11 +165,15 @@ export function AppProvider({ children }: PropsWithChildren) {
       while (summariesDirty.current && activeHostRef.current) {
         summariesDirty.current = false;
         const host: string = activeHostRef.current.id;
-        const values = await api.summaries();
-        if (values && activeHostRef.current?.id === host) setSessions(values);
+        const generation = selectionGeneration.current;
+        try {
+          const values = await api.summaries();
+          if (values && selectionGeneration.current === generation && activeHostRef.current?.id === host) setSessions(values);
+        } catch (cause) {
+          // A reconnect may have queued another read while this one was failing.
+          if (!summariesDirty.current && selectionGeneration.current === generation && activeHostRef.current?.id === host) setError(readableError(cause));
+        }
       }
-    } catch (cause) {
-      setError(readableError(cause));
     } finally {
       summariesRunning.current = false;
       setLoadingSessions(false);
@@ -172,19 +181,32 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [api]);
 
   const connectHost = useCallback(async (host: StoredHost, signal?: AbortSignal) => {
+    if (signal?.aborted) return false;
+    const generation = ++selectionGeneration.current;
     setError(null);
-    const credential = await readHostCredential(host.id);
-    if (signal?.aborted) return;
-    if (!credential) {
-      setError("The device credential is unavailable. Pair this computer again.");
-      return;
+    if (activeHostRef.current?.id === host.id) {
+      if (connectionStageRef.current === "connected") void refreshSessions();
+      else if (!["connecting", "reconnecting"].includes(connectionStageRef.current)) connection.restart("the computer was chosen again");
+      return true;
     }
-    api.resetConnection(true);
-    activeHostRef.current = host;
-    setActiveHost(host);
-    setSessions([]);
-    connection.start(host, credential);
-  }, [api, connection]);
+    try {
+      const credential = await readHostCredential(host.id);
+      if (signal?.aborted || generation !== selectionGeneration.current) return false;
+      if (!credential) {
+        setError("The device credential is unavailable. Pair this computer again.");
+        return false;
+      }
+      api.resetConnection(true);
+      activeHostRef.current = host;
+      setActiveHost(host);
+      setSessions([]);
+      connection.start(host, credential);
+      return true;
+    } catch (cause) {
+      if (!signal?.aborted && generation === selectionGeneration.current) setError(readableError(cause));
+      return false;
+    }
+  }, [api, connection, refreshSessions]);
 
   useEffect(() => {
     const startup = new AbortController();
@@ -233,7 +255,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     const linking = Linking.addEventListener("url", ({ url }) => {
       if (isAuthCallbackUrl(url)) void finishSignIn(url).then(setSession).catch((cause: unknown) => setError(readableError(cause)));
     });
-    return () => { startup.abort(); linking.remove(); };
+    return () => { startup.abort(); selectionGeneration.current++; linking.remove(); };
   }, [api, connectHost, loadHosts]);
 
   useEffect(() => {
@@ -279,10 +301,16 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
       if (!activeHostRef.current) return;
       // Not a return from the background it knew of (the first activation): as before, connect if not connected.
-      if (!connection.foreground() && connectionStage !== "connected") connection.restart();
+      if (!connection.foreground() && connectionStage !== "connected") connection.restart("the app became active");
     });
     return () => subscription.remove();
   }, [connection, connectionStage, refreshCloudSession, session]);
+
+  // Changing networks races the paths again, rather than waiting for a dead one to time out (#666).
+  useEffect(() => NetInfo.addEventListener((state) => {
+    const network = phoneNetwork(state);
+    if (network) connection.networkChanged(network);
+  }), [connection]);
 
   const signIn = useCallback(async () => {
     setError(null);
@@ -296,6 +324,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const signOut = useCallback(async () => {
     if (!session) return;
+    selectionGeneration.current++;
     connection.stop();
     activeHostRef.current = null;
     setActiveHost(null);
@@ -359,6 +388,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [loadHosts]);
 
   const disconnectHost = useCallback(() => {
+    selectionGeneration.current++;
     connection.stop();
     activeHostRef.current = null;
     setActiveHost(null);
@@ -384,7 +414,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const reconnectHost = useCallback(async (hostId: string) => {
     setError(null);
     if (activeHostRef.current?.id === hostId) {
-      connection.restart();
+      connection.restart("reconnect was chosen");
       return;
     }
     const host = (await readHosts()).find((item) => item.id === hostId);

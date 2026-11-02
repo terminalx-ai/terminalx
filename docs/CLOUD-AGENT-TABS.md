@@ -173,8 +173,40 @@ In a cloud tab's terminal view Escape is typed into the agent's screen with
 | `session.configure` | manage, idempotent | `{ sessionId, tabId, model?, effort?, mode? }` → `{ tab: AgentTabInfo }` |
 | `session.markRead` | participate | `{ sessionId, tabId }` → `{}` |
 | `session.nudge` | participate | `{}` → `{}` (poll the mailbox now) |
-| `session.create` | manage, idempotent | unchanged (+ `tab: AgentTabInfo` in the result); one session with one agent tab per call |
+| `session.create` | manage, idempotent | one session with one agent tab per call (`tab: AgentTabInfo` in the result); optional selected checkout through `session-repository/1` |
 | `session.close` | manage, idempotent | `{ sessionId, tabId?, remove? }`. `remove` also drops the tab from the list and its checkpoints |
+
+`session-repository/1` adds `repository: { identity, directory }` to
+`session.create`. The desktop carries the selected `github.com/owner/name`
+identity and its advertised `targetDirectory` (relative for ordinary clones,
+potentially absolute for Environment images); it refuses
+missing metadata or an older runtime instead of silently starting at the root.
+The runtime verifies confinement, a committed checkout and matching origin
+before writing settings or creating a session/worktree. A missing or mismatched
+checkout returns `repository_checkout_unavailable`; it does not clone, fetch,
+reset or initialize a blank repository. The existing manager authority and
+idempotency checks still apply.
+
+Absolute checkout paths are canonicalized against the runtime's configured
+workspace root; the same origin, top-level and Git common-directory checks apply.
+The caller's absolute path is never a scope grant. The desktop permits the SaaS
+standard `/var/lib/terminalx/workspace` layout and the older
+`/srv/terminalx/state/workspace` layout only as a pre-wake compatibility filter;
+the runtime still enforces its actual configured root.
+The current catalog has no authoritative external checkout-scope grant.
+Environment layouts such as `/home/repos/Acme/App` are therefore explicitly
+unsupported by this session route: the desktop refuses before connection/wake
+with `cloud_repository_checkout_scope_unsupported`, not a claim that setup is
+missing. Runtime canonical escape returns `repository_checkout_scope_unsupported`.
+Supporting external Environment roots requires authoritative configured scope
+and matching visibility rules; it cannot be enabled by trusting a caller path.
+
+Repository sessions use that checkout as their project, including worktrees and
+pipelines. Workspace-wide session/agent/pipeline visibility includes confined
+nested checkout projects; existing root sessions remain intact. Git discovery
+also includes nested checkouts beside an older blank root. Genuine blank projects
+omit `repository` and retain the existing root initialization behavior. No
+automatic migration of old sessions or change to the older root is performed.
 
 `AgentTabInfo`:
 
@@ -202,6 +234,83 @@ count as an active turn in the activity report, so it does not hold off the
 idle suspend, and the desktop shows it as "Needs sign-in", not "Working". A
 first prompt for such an agent fails with the launch category
 `agent-sign-in-required` instead of being typed into a sign-in screen.
+
+`state` is also `sign-in-required` (#667) when the provider refused the
+login: the server's state for a login it found revoked (terminalx-saas
+#241), or, until the server has its say, the runtime's own for a grant an
+agent here was refused with (`reason: provider-refused`). That one is known
+for certain and is said whether or not the last sync went well; it goes when
+a grant of another version or epoch arrives, when the server stops calling the
+credential connected, or when the provider answers an agent started on that
+grant after all (a turn that works, or Codex past its account check). The desktop then shows "<Agent> sign-in for <organization>
+was revoked or expired" over the tab, with **Sign in again** for an owner or
+admin (see "When the provider refuses a login" below).
+
+### When the provider refuses a login (#667)
+
+A login revoked at the provider (an owner deleting its sessions in their
+ChatGPT account, say) keeps answering 401 long before its access token
+expires. Codex then exits about two seconds into every start, with its
+reason only in the terminal:
+
+```
+account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)
+```
+
+- **Recognised.** A CLI the app launched that exits before it ever got
+  going (no `SessionStart` hook, no transcript record of this launch) is a
+  failure to start, followed or not: the tab stays the agent's and is not
+  turned into a terminal. Its last lines (`recovery::EarlyExit`) say whether
+  the provider refused its sign-in: a 401 status, "unauthorized", "sign in
+  again", a token that could not be refreshed, or Claude Code's own words
+  ("Please run /login", "OAuth token has expired"). A refresh that failed for
+  want of a network, a 429 or a 5xx is not a refusal. Experimental Codex
+  stdio reads the same from a handshake error or its startup stderr, and a
+  failed turn from `codexErrorInfo: "unauthorized"` or a 401 status. The
+  turn then ends `error` with `authFailed: true` and the tab's recovery is
+  `signed_out`. Claude Code's refusal mid-turn (a record classified signed
+  out, then its `Stop` hook) also ends the turn with `authFailed: true`.
+- **Said.** The turn's end (and a launch error, such as a Codex too old for
+  `--no-daemon`) carries `detail`: the last line, plain text, with tokens,
+  secrets said as `key=value`, `--key value`, `key: value` or JSON's
+  `"key": "value"` (escaped JSON too), cookies, an `Authorization` value
+  with its scheme, addresses, URL paths and queries and home folders cut
+  out, at most 240 characters (`recovery::detail`, applied again by
+  `sanitize`). A bare `key:` label counts only where a phrase starts and
+  when it ends in a credential word, so `Unauthorized:`, `auth.json:` and
+  Codex's own `Failed to refresh token:` stay readable; a quoted key counts
+  wherever its credential word is. The chat shows it under the allowlisted
+  message. Mid-turn provider text never becomes a `detail`.
+- **Reported.** A turn that ends with `authFailed` on a session launched with
+  an organization grant calls `cloud_grants::reject_launch`, which marks the
+  grant refused and wakes the grant loop. The loop sends, before its next
+  fetch, `POST /v1/cloud-workspace-bootstrap/agent-grant-rejected` with the
+  runtime credential:
+
+  ```json
+  { "v": 1, "provider": "codex", "credentialId": "…", "grantId": "…", "version": 3, "epoch": 7, "reason": "provider-refused" }
+  ```
+
+  The report is a hint read from the agent's own output, never proof. The
+  server checks it with the provider by forcing a refresh, and answers in
+  the grant list, not in its reply: a grant of a new version or epoch for a
+  login that works, or the credential marked `sign-in-required`, with no
+  grant, for one that does not. Either ends the runtime's mark, as does a
+  turn that works on that grant. A 2xx only says the server has the report:
+  the same grant, still connected, means the check has not settled (it is
+  queued, or the refresh failed transiently, which keeps the stored login),
+  and the mark stays. The runtime does not report that grant again, so the
+  mark then lasts until the server's own next refresh, a sign-in again or a
+  turn that works. A server that cannot take the report now (rate-limited,
+  or down) answers 429 or 5xx instead, and the report goes again on a later
+  turn, as any transient failure to send does; a 404 (a server from before)
+  is not sent again. The reply is a JSON object (`{}` will do): an empty 2xx
+  reads as a transient failure, and the report is sent again. While the
+  login stands refused, by the runtime's mark or the server's
+  `sign-in-required`, the loop fetches at least every 30 s, and a launch for
+  that agent first asks the loop for a sync and waits up to 5 s for it, so a
+  login signed in again reaches the same tab without a new session or a
+  workspace restart.
 
 A grant or configuration sync that changes this answer for any provider (the
 first sync after a start or resume, a login removed or connected again, a key

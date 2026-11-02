@@ -51,6 +51,7 @@ When automation passes ids between commands, copy the full ids from JSON output.
 terminalx status --json
 terminalx projects list --json
 terminalx sessions list [--project <project> | --quick] --json
+terminalx sessions list --worktree <path-or-name> [--project <project>] --json
 terminalx sessions show <session> --json
 terminalx tabs list <session> --json
 ```
@@ -59,6 +60,16 @@ terminalx tabs list <session> --json
 agent process is running.
 
 ### Start a session
+
+Keep work in the current conversation by default. Create another session only when the
+person requests a new conversation, delegates work to another agent, or authorizes a workflow
+that needs a separate session (such as a handoff or issue pipeline). Existing authorization
+is sufficient; do not ask again for each session in that workflow.
+
+Filing an issue, reading context, checking repository metadata, and other lightweight subtasks
+do not by themselves authorize another session. Do that work directly in the current
+conversation. If essential information is missing, ask there instead of starting a helper.
+This applies to project sessions, quick chats, and cloud sessions alike.
 
 ```text
 terminalx sessions create \
@@ -99,6 +110,50 @@ Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`
 `path`, alongside the full `session` and prompt delivery `outcome`. Renaming a session changes
 its title without changing its worktree name.
 
+### Experimental Codex connection (new local sessions only)
+
+Local project and quick-chat creation accept `--experimental-codex-stdio` with
+`--agent codex`. This opt-in requires Codex CLI 0.164.0 or newer and selects its
+experimental app-server stdio API. This is an experimental integration, not a
+production-supported replacement.
+
+Without the flag, creation follows the app's Settings → Experimental → **Native
+Codex** switch (off by default): when it is on, a new Codex session or tab started
+from the app or with `terminalx sessions create --agent codex` uses this connection,
+except sessions started from an issue, automations, and the Ask every time mode,
+which keep the PTY engine. Otherwise ordinary creation uses the PTY engine.
+The app also applies the setting to sessions and tabs it starts in an existing
+cloud workspace, under the same rules: there Codex signs in with the workspace's
+credential and takes its route and configuration, and opening the terminal view
+moves the tab as on a Mac. A new workspace's first session keeps the PTY engine.
+
+The transport choice is persisted. Opening the view never starts or resumes it;
+existing PTY sessions cannot be migrated into this mode. After the app restarts,
+after Stop, or after a lost connection, the next message sent resumes the same
+Codex thread in a new connection; nothing earlier is replayed. The owner handles
+send, command/file approvals, interrupt, Stop and `/compact`, from the desktop, a
+paired phone (a phone's `/compact` compacts too) or a shared session's guests and
+host. A phone's or guest's message is held to its permit when it is written, as
+for a PTY tab: one revoked or no longer allowed is not sent, and its turn ends as
+stopped. Manual compaction adds system status, not a user message. Unsupported
+modes or protocol requests fail explicitly. Issue pipelines are not supported.
+Continue in New Session can hand off to an experimental tab: delivery is confirmed
+once Codex starts the turn for the handoff. If Codex fails or is stopped before
+then, the handoff, like any prompt Codex never took, is reported as not delivered
+and offered back with "Resend last prompt"; nothing is sent again by itself.
+Opening the tab's terminal view in the app moves it to Codex's own terminal
+interface on the same thread, for good: the chat keeps its history,
+and from then on the tab is an ordinary PTY Codex tab. A new model or effort
+applies from the next turn. A new permission mode (other than Ask every time) is taken between turns:
+the connection stops and the next message resumes the thread under that mode.
+
+Confirmed compaction events update the existing chat indicator. If the connection
+ends, retained status records loss of continuity; it does not invent completion
+or replay a prompt. Stop confirms reader and process cleanup, retaining ownership
+on a timeout so it can be retried. If the installed Codex is older than 0.164.0
+(or missing) when a tab first starts, before it has a thread, the tab switches to
+the PTY engine and continues there; the message is sent as usual, with no error.
+
 ### Start a quick chat (no project)
 
 ```text
@@ -110,8 +165,11 @@ terminalx sessions create --quick \
   --json
 ```
 
-A quick chat is a session with no project. Use it for a question or a one-off task that
-belongs to no attached project; do not attach a folder as a project just to ask something.
+A quick chat is a visible, persistent session with no project. When a separate conversation
+is authorized as described above, use it for a question or a one-off task that belongs to no
+attached project; do not attach a folder as a project just to ask something. A quick chat is
+not a private scratch helper: even a read-only prompt creates a sidebar entry and can leave
+that session needing attention if prompt delivery cannot be confirmed.
 It runs in a scratch directory of its own under the TerminalX home, with no worktree and no
 branch, and the returned `path` is that directory. `--cwd` runs it in an existing directory
 instead; that directory is used as it is and is not added as a project.
@@ -121,8 +179,13 @@ Without `--title`, the first line of the prompt is the title. The returned `kind
 
 `sessions list` includes quick chats, each with `"kind": "quick"`; a session of a project has
 no `kind`. `--quick` lists only them. `--project` never matches one, even when its `--cwd` is
-inside that project. `sessions show`, `sessions rename`, `tabs list`, `send`, `read` and
+inside that project. It does match a session that names the project's folder another way, such
+as through a symlink. `sessions show`, `sessions rename`, `tabs list`, `send`, `read` and
 `wait` take a quick chat's id like any other session's.
+
+`--worktree` lists every session that runs in that worktree, by the same rule `worktrees
+delete` uses to choose what it deletes: sessions of other projects and quick chats whose
+folder is in it are included. There `--project` only says whose worktree it is.
 
 Deleting a quick chat in the app deletes its scratch directory and what is in it. Anything a
 reader should keep belongs somewhere else.
@@ -150,8 +213,26 @@ terminalx wait <session-or-tab> [--timeout <seconds>] --json
 
 `send` types into the live agent TUI through the composer path. `read` returns normalized,
 persisted transcript events; `--since` is exclusive and `--tail` is applied after it. `wait`
-returns when the turn completes, the agent asks for permission, the tab stops, or the timeout
-expires. Its result names the reason and includes the current tab status.
+returns when the turn completes, the agent asks for a decision, the agent stops on an error, the
+agent asks something in its own terminal, the tab stops, or the timeout expires. Its result names
+the `reason` and includes the current tab `status`:
+
+- `permission`: the agent asks for a decision someone can give. `permissions list` shows it.
+- `recovery`: the agent stopped on an error and waits for someone to deal with it. Nothing is
+  in `permissions list`. `recovery` names the error: `failed`, `signed_out`, `usage_limit`,
+  `capacity`, `timeout`, `disconnected`, `delivery_unconfirmed` or `permission_expired`.
+  Read the transcript before sending again, and tell the person when only they can fix it
+  (for example, signing the agent in again).
+- `terminal`: the agent asks something in its own terminal, such as its own permission prompt in
+  a CLI started by hand. Nothing is in `permissions list`, and it cannot be answered from this
+  CLI: tell the person to answer it in the tab.
+- `stop`: the turn ended.
+- `stopped`: nothing is running.
+- `timeout`: none of these before the timeout.
+
+A `wait` right after a `send` waits for the agent to take that message, so a turn that ended or
+failed before it is not reported. A message the agent holds behind an error it has stopped on
+still reports that `recovery`.
 
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
@@ -174,7 +255,8 @@ already raised.
 ```text
 terminalx worktrees list [--project <project>] --json
 terminalx worktrees rename <path-or-name> --name <name> [--project <project>] --json
-terminalx worktrees delete <path-or-name> [--project <project>] --yes [--force] --json
+terminalx worktrees delete <path-or-name> [--project <project>] --dry-run [--sessions <id>,<id>] --json
+terminalx worktrees delete <path-or-name> [--project <project>] --yes [--sessions <id>,<id>] [--force] --json
 ```
 
 Renaming moves a TerminalX-managed worktree and renames its matching branch, using the same
@@ -182,12 +264,38 @@ slug rules as creation. It rejects taken or unusable names and updates every ses
 to that workspace. The response includes `name`, `path`, `branch`, and the updated `sessions`.
 The project's main checkout and externally managed worktrees cannot be renamed here.
 
-Deletion always requires `--yes` and refuses a project's main checkout. It stops every tab
-running in the worktree and removes the sessions that ran there, transcripts included; the
-response lists their ids under `removedSessions`. The branch is retained. Inspect the
-worktree's uncommitted and unpushed counts from `worktrees list` before deleting it.
+`worktrees list` gives each worktree's `sessionCount` and, except for the main checkout, its
+`sessions`: the ones deleting it would delete. Each has `id`, `title`, `project` (null for a
+quick chat) and `belongsTo`: `thisProject`, `anotherProject` or `quickChat`.
+
+Deletion refuses a project's main checkout. It stops every tab running in the worktree and
+deletes every session whose folder is in it, whatever project it belongs to and archived or
+not, transcripts included. The branch is retained.
+
+Without `--yes`, nothing is removed: the refusal lists the sessions that would go, the tabs
+and shells still running in them, and the git state, and its recovery gives the `--sessions`
+value that names those sessions. `--dry-run` returns the same as JSON (`sessions`, `landed`,
+`needsForce`) and succeeds. `--sessions` names the sessions you were shown, by id or the start
+of one. With it, nothing is removed unless the worktree holds exactly those sessions;
+otherwise the error (`sessions_changed`) names the ones not named and lists what it holds.
+`--sessions ""` says it should hold none. Pass it on every delete:
+
+```text
+terminalx worktrees delete <worktree> --dry-run --json
+terminalx worktrees delete <worktree> --yes --sessions <ids from the dry run> --json
+```
+
+A worktree that is not clean and merged also needs `--force`. Pass it only when losing the
+work the preview lists is intended. The response lists each deleted session under
+`removedSessions` with its `id`, `title`, `project` and `belongsTo`.
 
 ### Issues
+
+For a request to file an issue, gather any needed context directly in the current conversation
+and use `terminalx issues create`. Filing an issue does not require `sessions create --quick`
+or `sessions create --issue`; the latter starts a separate agent working on an existing issue.
+Do not start a context-check helper or an implementation session unless the person also
+authorized that work.
 
 ```text
 terminalx issues list --project <project> [--provider github|linear] \
@@ -228,8 +336,12 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
 Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
-other people see it and may notify them, so TerminalX asks the person in a native dialog that
-names the issue, the action and the whole text, whoever runs the command. A refusal answers
+other people see it and may notify them, so TerminalX shows a pending request in the main
+window, whoever runs the command. The person chooses Review to see the reported session,
+project, target, action and complete text in a bounded, scrollable dialog. Background requests
+do not open the dialog or switch conversations. Only the explicit action button approves;
+Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
+40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
 `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
 what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
 lines is refused before anyone is asked; link to the details instead. A project can let comments and
@@ -260,7 +372,9 @@ work done and its checks passing, TerminalX pushes the branch, opens a pull requ
 the issue, has a separate reviewer session review it, takes the findings back to the author
 session, and reviews the new commit, up to the project's limit (three by default). It stops at
 `readyToMerge` unless automatic merging is on for the issue. `--auto-merge` and
-`--no-auto-merge` set that switch; without either the project's default applies.
+`--no-auto-merge` set that switch; without either the project's default applies, which for
+an issue is on (and conflict resolution with it) unless the project turned it off or has a
+person do the merge.
 `--no-pipeline` starts from the issue and stops at the code. `--on-main` implies no pipeline:
 there is no branch to open a pull request from.
 
@@ -337,9 +451,12 @@ command; an app that does not know one answers `unsupported`.
 **The person decides whether the command line may touch the cloud.** These commands run with the
 signed-in person's account, and any agent in a local session can run them. They are all refused
 with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
-cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
-command that starts billed compute or stops a workspace is still confirmed by the person in a
-native dialog first. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
+cloud workspaces" in Settings (`cloud status` then says `enabled: false`). Turning it on
+authorizes routine compute within the person's existing organization and workspace permissions:
+session launches, resume, send-wake and new workspace creation can incur billing without another
+native confirmation. The switch does not grant a new role or repository access.
+Stopping a workspace still requires `--yes` and the person's native confirmation. Enabling the
+switch also requires native confirmation. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
 seconds all answer `declined`, and answering an expired dialog later does nothing. One question
 is shown at a time. After a refusal or an unanswered question the app does not ask again for a
 while (a minute, growing to fifteen): the command answers `declined` at once. While a dialog is
@@ -358,9 +475,9 @@ scripting; or any program when TerminalX itself has been granted Accessibility. 
 prevent the last two from inside. The person's switch and their
 answer are the control, not a security boundary against software already running as them.
 
-`send` to a workspace the app is not connected to reads the workspace list again first. If the
-workspace has stopped, is stopping, or the list cannot be read, the person is asked, because the
-message would start it.
+`send` can resume a stopped workspace under the enabled switch. When supported, the server first
+receives the message with wake disabled; a stopped response is followed by the same message with
+wake allowed. Older servers use a fresh workspace list. Neither path adds a routine compute dialog.
 
 The switch is kept in a file in the app's home (`cloud-control.json`), not in the window. That
 protects it from an agent that uses the app; it does not protect it from a process that already
@@ -400,7 +517,9 @@ session has no tab there, or its first prompt failed to start one (the message s
   it answers `spend_confirmation_required` unless `--confirm-spend` is passed, which creates a
   new machine and returns its `workspace` key and `operationId`; the first session appears in
   `sessions list` once the machine has started it. Pass the same `--idempotency-key` when
-  retrying a create.
+  retrying a create. `--wake` and `--confirm-spend` remain explicit command scope for compatibility:
+  they allow waking an existing workspace or allocating a new one, respectively. They do not
+  request another native dialog when cloud control is enabled.
 - `sessions create --issue` starts a session from one of the cloud project's GitHub or Linear
   issues, read first with the person's own `gh` or Linear key, in a worktree of the project's
   workspace (with `--wake` for a stopped one; never a new machine: it answers
@@ -409,8 +528,10 @@ session has no tab there, or its first prompt failed to start one (the message s
   itself, so `--auto-merge` is refused, and the merge is the person's, from the issue page.
   The response carries `pipeline`, or `null` with the reason in `pipelineNote`.
 
-`wait` returns `reason`: `permission` (the agent asks for a decision), `stop` (the turn ended),
-`stopped` (nothing is running) or `timeout`. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
+`wait` returns `reason`: `permission` (the agent asks for a decision), `recovery` (the agent
+stopped on an error; `recovery` names it, as for a local tab), `terminal` (the agent asks in its
+own terminal), `stop` (the turn ended), `stopped` (nothing is running) or `timeout`. As for a local tab, a `wait` right after a `send` does not
+report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
 ### This guide

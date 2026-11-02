@@ -11,8 +11,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-#[path = "transaction.rs"]
-mod transaction;
+use super::transaction;
 
 const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -157,12 +156,27 @@ pub struct Follow {
     pub history: Vec<PastConversation>,
 }
 
+/// Persisted at creation. Missing metadata always means the existing PTY path.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentTransport {
+    #[default]
+    Pty,
+    ExperimentalCodexStdio,
+}
+
+impl AgentTransport {
+    pub fn is_default(&self) -> bool { *self == Self::Pty }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TabEntry {
     pub id: String,
     /// Harness name, kept verbatim so an entry written by a newer build survives.
     pub harness: String,
+    #[serde(default, skip_serializing_if = "AgentTransport::is_default")]
+    pub transport: AgentTransport,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -195,12 +209,23 @@ pub struct TabEntry {
     pub context_used: Option<u64>,
     #[serde(default)]
     pub context_max: Option<u64>,
-    /// Provider conversation this tab was forked from. It drives the first
-    /// start only (a tab with an id of its own resumes that), and stays set
-    /// afterwards so the parent's transcript is not deleted before the fork
-    /// has one of its own.
+    /// Provider conversation this tab was forked from. It drives every start
+    /// until the fork has a transcript of its own (a tab whose own exists
+    /// resumes that), and stays set afterwards so the parent's transcript is
+    /// not deleted before the fork has one of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from: Option<String>,
+    /// The `seq` of the prompt that carried another conversation's context
+    /// into this tab (Continue in New Session). Should the CLI never have
+    /// taken it, it is the tab's whole brief, and the next launch sends it
+    /// again rather than leave the agent without it (#663).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<u64>,
+    /// Its agent was stopped because nothing was using it (#696): showing
+    /// the tab does not start it again, its next prompt does. Kept here so
+    /// a runtime that starts again knows it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parked: bool,
     #[serde(flatten, default)]
     pub follow: Follow,
     #[serde(flatten, default)]
@@ -763,6 +788,18 @@ pub fn update_session<R>(session_id: &str, f: impl FnOnce(&mut SessionEntry) -> 
     })
 }
 
+/// Mark a tab's agent as stopped for sitting idle, or as in use again
+/// ([`TabEntry::parked`]). Neither is something done in the session, so
+/// neither changes when it was last modified.
+pub fn set_parked(session_id: &str, tab_id: &str, parked: bool) -> Result<()> {
+    update(|sessions| {
+        if let Some(tab) = sessions.iter_mut().find(|session| session.id == session_id).and_then(|session| session.tab_mut(tab_id)) {
+            tab.parked = parked;
+        }
+        Ok(())
+    })
+}
+
 pub fn update_tab<R>(session_id: &str, tab_id: &str, f: impl FnOnce(&mut TabEntry) -> Result<R>) -> Result<R> {
     update_session(session_id, |s| {
         let t = s.tab_mut(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -1087,6 +1124,27 @@ mod tests {
     }
 
     #[test]
+    fn transport_is_opt_in_and_survives_persistence_without_migrating_legacy_tabs() {
+        let _home = crate::store::temp_home();
+        let session: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id":"transport", "projectPath":"/p", "cwd":"/p", "title":"transport", "created":"x", "modified":"x",
+            "tabs":[
+                {"id":"legacy", "harness":"codex", "created":"x", "providerSessionId":"existing-thread"},
+                {"id":"experimental", "harness":"codex", "created":"x", "transport":"experimentalCodexStdio"}
+            ]
+        })).unwrap();
+        save(&[session]).unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded[0].tabs[0].transport, AgentTransport::Pty);
+        assert_eq!(loaded[0].tabs[0].provider_session_id.as_deref(), Some("existing-thread"));
+        assert_eq!(loaded[0].tabs[1].transport, AgentTransport::ExperimentalCodexStdio);
+        let legacy = serde_json::to_value(&loaded[0].tabs[0]).unwrap();
+        assert!(legacy.get("transport").is_none());
+        let experimental = serde_json::to_value(&loaded[0].tabs[1]).unwrap();
+        assert_eq!(experimental["transport"], "experimentalCodexStdio");
+    }
+
+    #[test]
     fn tabs_without_a_permission_mode_use_the_product_default() {
         let tab: TabEntry = serde_json::from_value(serde_json::json!({
             "id": "t1",
@@ -1238,7 +1296,7 @@ mod tests {
         session.worktree_name = Some("feature-one".into());
         session.branch = Some("raccoon/feature-one".into());
         session.base_ref = Some("base-sha".into());
-        session.tabs.push(TabEntry {
+        session.tabs.push(TabEntry { transport: Default::default(),
             id: "tab-one".into(),
             harness: "codex".into(),
             title: None,
@@ -1251,7 +1309,7 @@ mod tests {
             modified: "now".into(),
             context_used: None,
             context_max: None,
-            fork_from: None,
+            fork_from: None, continuation: None, parked: false,
             follow: Follow::default(),
             unknown: BTreeMap::new(),
         });

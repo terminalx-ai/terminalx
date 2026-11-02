@@ -668,6 +668,56 @@ WebKit allocation retention from JavaScript allocations not covered by the
 terminal finalization counters; a heap/native allocation profile is still
 needed before declaring the memory target fixed.
 
+### Matched ownership diagnostics
+
+The [24 October isolated guest investigation](perf/terminal-memory-2026-10-24/README.md)
+preserves failing controls, allocation profiles and reference traces. It corrects
+a typed-array measurement effect but does not resolve native memory acceptance.
+
+For an isolated Dev build, `terminal-bench.mjs --scenarios soak --pid PID
+--home PRIVATE_HOME --out diagnostic.json --memory-diagnostics` enables a
+separate diagnostic run. It preserves the normal 4-session, 50-terminal,
+20-agent and 200-switch workload, but adds profiling between steps. **Do not
+use this run for acceptance**: dereferencing weak references and inspecting
+native heaps can change collection timing. Normal workload and endpoint timing
+are unchanged when the flag is absent. All runs now request integer bytes
+from `footprint`, avoiding its default MB rounding before computing growth;
+historical results are preserved as recorded. Diagnostic mode requires the stand-in agent CLI in
+the private home rather than silently skipping agent churn.
+
+Each checkpoint writes an inventory and raw `footprint -f bytes` (including
+JSON), `vmmap -summary` and `heap --noContent --showSizes -z` output under
+`diagnostic.json.profiles/`. Only WebContent processes responsible to the
+verified app PID are profiled. Capture failures and timestamps are preserved;
+there is no collection request, endpoint replacement or retry-until-pass.
+
+The opt-in inventory uses weak references to terminal buffers, parser and
+write queues, renderer geometry, shared atlases and canvases. It deduplicates
+typed-array view objects, counts retired objects separately, and reports
+the Tauri callback map size when available. These private xterm 6/addon-webgl
+0.19 fields are read only; the inventory is not a JS heap size. Byte totals
+sum view spans: distinct views can overlap and can retain larger backing
+stores. The probe deliberately avoids `.buffer`, which materializes additional
+objects and changes JavaScriptCore's typed-array allocation mode. A standalone
+guest probe with 40,000 arrays measured a 16,203,840-byte footprint increase
+when reading `.buffer`, versus 4,308,992 bytes when reading view lengths.
+The original instrumented VM soak is preserved with this observer-effect
+limitation; do not treat its native allocation delta as application-only growth.
+Canvas pixels describe capacity, not resident native bytes. In particular,
+shared atlas canvases must not be attributed once per renderer.
+
+Two source-level observations motivate this experiment. A real xterm with
+177 columns and 10,046 populated lines still owns **21,337,704 bytes** of cell
+arrays after `dispose()` while the terminal itself remains reachable. Also,
+the addon's three-second context-recovery timeout survives disposal; the
+real-addon test verifies its eventual expiry. These are transient-retention
+hypotheses, not diagnoses of the failed memory endpoint. Matched inventories
+can establish whether these objects still exist at that endpoint. Native
+profiles then distinguish live allocations, allocator fragmentation and
+graphics storage after application ownership disappears. Do not clear live
+scrollback, zero canvases or replace the terminal engine based only on these
+observations.
+
 Validation of the retained changes:
 
 - The complete frontend suite passed 1,842 tests across 181 files on the

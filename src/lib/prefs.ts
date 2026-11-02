@@ -27,6 +27,9 @@ export interface Prefs {
    */
   branchSessions: "tabs" | "sidebar";
   panelWidth: number;
+  /** The right panel's terminal dock: shown below the panel's tabs, and its height. */
+  panelTerminalOpen: boolean;
+  panelTerminalHeight: number;
   editorPaneWidth: number;
   updateChannel: "stable" | "beta";
   sounds: boolean;
@@ -34,6 +37,8 @@ export interface Prefs {
   fontScale: "sm" | "md" | "lg";
   transcriptLayout: "wide" | "chat";
   foldToolCalls: boolean;
+  /** Under each finished turn, a chip per file it changed with the lines added and removed. */
+  turnChanges: boolean;
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -50,6 +55,8 @@ export interface Prefs {
   issueCloudProject: string | null;
   /** Issue pipeline settings of cloud projects, by project key. Kept here; each issue session started from here takes them to its workspace. */
   cloudIssuePipelines: Record<string, IssuePipelineSettings>;
+  /** 1: `cloudIssuePipelines` stores a launch switch only once it is chosen (#700). */
+  cloudIssuePipelinesVersion: number;
   /** The Issues list's filter and sort, by project and tracker (`issueFilterKey`). */
   issueFilters: Record<string, Partial<IssueListFilter>>;
   useWorktree: boolean;
@@ -111,6 +118,8 @@ export interface Prefs {
   projectsDir: string | null;
 }
 
+const CLOUD_ISSUE_PIPELINES_VERSION = 1;
+
 const DEFAULTS: Prefs = {
   linkBrowser: "ask",
   linkBrowserChosen: false,
@@ -121,6 +130,8 @@ const DEFAULTS: Prefs = {
   tabStrip: true,
   branchSessions: "tabs",
   panelWidth: 400,
+  panelTerminalOpen: false,
+  panelTerminalHeight: 260,
   editorPaneWidth: 520,
   updateChannel: "stable",
   sounds: true,
@@ -128,6 +139,7 @@ const DEFAULTS: Prefs = {
   fontScale: "md",
   transcriptLayout: "wide",
   foldToolCalls: true,
+  turnChanges: true,
   autocorrect: false,
   lastProject: null,
   lastAgent: "claude",
@@ -137,6 +149,7 @@ const DEFAULTS: Prefs = {
   issueProvider: "github",
   issueCloudProject: null,
   cloudIssuePipelines: {},
+  cloudIssuePipelinesVersion: CLOUD_ISSUE_PIPELINES_VERSION,
   issueFilters: {},
   useWorktree: true,
   bypassConfirmed: false,
@@ -208,6 +221,23 @@ function load(): Prefs {
       prefs.linkBrowser = "system";
       migrated = true;
     }
+    // Before #700 every save of a cloud project's pipeline wrote both launch
+    // switches, `false` unless turned on: that `false` was no choice, so it is
+    // forgotten once and the switch follows where each session starts.
+    // An older build keeps the version it does not know (it spreads what it
+    // read), so a switch it saves as off afterwards reads as Off, never as no choice.
+    const pipelinesVersion = Number(parsed.cloudIssuePipelinesVersion) || 0;
+    if (pipelinesVersion < CLOUD_ISSUE_PIPELINES_VERSION) {
+      for (const settings of Object.values(prefs.cloudIssuePipelines as Record<string, IssuePipelineSettings>)) {
+        for (const key of ["autoMerge", "resolveConflicts"] as const) {
+          if (settings[key] !== false) continue;
+          delete settings[key];
+          migrated = true;
+        }
+      }
+    }
+    // Never lowered: a newer build's migrations are not run again after a downgrade.
+    prefs.cloudIssuePipelinesVersion = Math.max(pipelinesVersion, CLOUD_ISSUE_PIPELINES_VERSION);
     // Shortcuts saved under an older version's action ids, once. A newer version's are left as they are.
     const version = shortcutsVersionOf(parsed.shortcutsVersion);
     if (version < SHORTCUTS_VERSION) {

@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   },
   workspaceConnection: vi.fn(),
   ask: vi.fn(),
+  setting: vi.fn<() => Promise<boolean>>(),
   /** The runtime a lease connects to: who it says this person is, and its own tab list. */
   runtime: { you: undefined as unknown, listAgentTabs: vi.fn() },
 }));
@@ -34,7 +35,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, open: vi.fn() }));
 // The native question, answered by `mocks.ask` with the text the person would read (commands.rs builds the same).
 vi.mock("@/lib/cloudControlNative", () => ({
   cloudControlNative: {
-    setting: vi.fn(async () => false),
+    setting: mocks.setting,
     setSetting: vi.fn(async (enabled: boolean) => ({ enabled, refused: null })),
     confirm: async (what: string, okLabel: string) =>
       (await mocks.ask(`A terminalx command (run by you or by an agent in a local session) asks to ${what}`, { title: "Cloud workspace request", kind: "warning", okLabel, cancelLabel: "Refuse" })) ? "accepted" : "declined",
@@ -58,14 +59,17 @@ vi.mock("@/lib/cloudConnections", async (importOriginal) => {
   return {
     ...original,
     wakeCloudConnection: vi.fn(async () => ({ release: vi.fn() })),
-    retainCloudConnection: vi.fn(async () => {
+    retainCloudConnection: vi.fn(async (at?: { orgId: string; workspaceId: string }) => {
       const client = {
         get connection() {
           return { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage", you: mocks.runtime.you };
         },
         listAgentTabs: mocks.runtime.listAgentTabs,
       };
-      return { release: vi.fn(), client, current: () => ({ client }), state: () => client.connection, ended: () => false };
+      // The connection closes with its lease: what it listed is last known from then on, as `cloudSessions` marks it.
+      const { markCloudAgentsOffline } = await import("@/lib/cloudAgents");
+      const release = vi.fn(() => at && markCloudAgentsOffline({ organizationId: at.orgId, workspaceId: at.workspaceId }));
+      return { release, client, current: () => ({ client }), state: () => client.connection, ended: () => false };
     }),
     connectedCloudClient: vi.fn(() => null),
   };
@@ -89,6 +93,7 @@ const {
   LOOKUP_WITHIN_MS,
   SEND_LOOKUP_WITHIN_MS,
   WAIT_CHUNK_SECONDS,
+  settledReason,
 } = await import("./cloudControl");
 // The lifecycle refusal is the app's own sentence, whatever it currently says (PRO-73 rewords it).
 const { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON } = await import("@/lib/cloudCollab");
@@ -96,7 +101,8 @@ const catalog = await import("@/lib/cloudCatalog");
 const connections = await import("@/lib/cloudConnections");
 const newSession = await import("@/lib/cloudNewSession");
 const sessions = await import("@/lib/sessions");
-const { resetCloudAgents } = await import("@/lib/cloudAgents");
+const { applyLiveTabs, resetCloudAgents } = await import("@/lib/cloudAgents");
+const { mergeTabEvents } = await import("@/lib/agentEvents");
 const { resetCloudSessions } = await import("@/lib/cloudSessions");
 const { resetCloudDashboard } = await import("@/lib/cloudDashboard");
 const { resetCollab } = await import("@/lib/cloudCollab");
@@ -189,6 +195,7 @@ beforeEach(async () => {
   // The person turned the setting on; "off" and the other option have their own tests below.
   setCloudControlPolicy("setting");
   setCloudControlEnabled(true);
+  mocks.setting.mockReset().mockResolvedValue(true);
   mocks.ask.mockReset().mockResolvedValue(true);
   cached = { "ws-1": { "s1-tab": { tab: tabInfo("s1"), events, cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 } }, "ws-stopped": { "s2-tab": { tab: tabInfo("s2"), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 } } };
   enqueued = [];
@@ -460,16 +467,176 @@ describe("wait", () => {
     expect(reads).toBeGreaterThanOrEqual(6);
   });
 
-  it("says a tab waits for a permission", async () => {
-    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: tabInfo("s1", "waiting") };
+  /** An event of the s1 tab's transcript. */
+  const said = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "s1-tab", seq, ts: seq, payload });
+  const ask = { requestId: "r1", toolName: "Bash", input: { command: "rm -rf build" }, options: ["allow", "deny"] };
+
+  it("says a tab waits for a permission only when there is one to answer", async () => {
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), pendingPermissions: [ask] } };
     resetCloudAgents();
     expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toMatchObject({ reason: "permission", status: "waiting" });
+
+    // Waiting with nothing to answer and no error behind it (#668): the agent asks in its own terminal.
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: tabInfo("s1", "waiting") };
+    resetCloudAgents();
+    expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toEqual({ session: `cloud:${ORG}:ws-1:s1`, tabId: "s1-tab", reason: "terminal", status: "waiting" });
+  });
+
+  it("waits for a transcript behind a waiting tab's status before saying why it waits", async () => {
+    // The status is from after the failure this desktop holds: the agent tried again and stopped once more.
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), lastSeq: 5 }, events: [...events, said(3, { type: "recovery", kind: "failed" })] };
+    resetCloudAgents();
+    let checkpoints = 0;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_checkpoint") return base(command, args);
+      // Its upload is behind at first, then catches up.
+      if (++checkpoints < 3) return null;
+      const projection = { v: 1, sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status: "waiting", process: "exited", truncated: false, followUps: [], updatedAt: 5 };
+      const later = [said(4, { type: "user_message", text: "try again" }), said(5, { type: "recovery", kind: "signed_out" })];
+      return { epoch: 1, version: 1, projection: { ...projection, events: [...events, said(3, { type: "recovery", kind: "failed" }), ...later] } };
+    });
+    const { now, sleep } = fakeSleep();
+    expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 30 }, sleep, now)).toMatchObject({ reason: "recovery", recovery: "signed_out" });
+    expect(checkpoints).toBe(3);
+  });
+
+  it("says a tab whose agent failed to start stopped on an error, and which one", async () => {
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", "waiting"), lastSeq: 3 }, events: [...events, said(3, { type: "recovery", kind: "failed" })] };
+    resetCloudAgents();
+    expect(await handleCloudControl("wait", { target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 1 })).toEqual({
+      session: `cloud:${ORG}:ws-1:s1`,
+      tabId: "s1-tab",
+      reason: "recovery",
+      recovery: "failed",
+      status: "waiting",
+    });
+  });
+
+  it("reads why a connected tab waits from its checkpoint when its transcript is behind its status", async () => {
+    // Connected: the runtime's list says waiting, at an event this desktop has not been streamed.
+    vi.mocked(connections.connectedCloudClient).mockReturnValue({ connection: { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: [], authority: "manage" } } as never);
+    const scope = { organizationId: ORG, workspaceId: "ws-1" };
+    await handleCloudControl("read", { target: `cloud:${ORG}:ws-1:s1` });
+    applyLiveTabs(scope, [{ ...tabInfo("s1", "waiting"), lastSeq: 3 } as never]);
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_checkpoint") return base(command, args);
+      const projection = { v: 1, sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status: "waiting", process: "exited", truncated: false, followUps: [], updatedAt: 5 };
+      return { epoch: 1, version: 1, projection: { ...projection, events: [...events, said(3, { type: "recovery", kind: "usage_limit" })] } };
+    });
+    try {
+      const { now, sleep } = fakeSleep();
+      expect(await waitForCloudTab({ target: `cloud:${ORG}:ws-1:s1`, timeoutSeconds: 30 }, sleep, now)).toMatchObject({ reason: "recovery", recovery: "usage_limit", status: "waiting" });
+    } finally {
+      vi.mocked(connections.connectedCloudClient).mockReturnValue(null);
+    }
+  });
+
+  it.each([
+    ["whose agent failed to start", "waiting", said(3, { type: "recovery", kind: "failed" })],
+    ["whose last turn has ended", "completed", said(3, { type: "turn_completed", status: "ok" })],
+  ])("waits right after a send to a tab %s for the new turn, and says when that ends", async (_, before, last) => {
+    const target = `cloud:${ORG}:ws-1:s1`;
+    const scope = { organizationId: ORG, workspaceId: "ws-1" };
+    cached["ws-1"]["s1-tab"] = { ...(cached["ws-1"]["s1-tab"] as object), tab: { ...tabInfo("s1", before), lastSeq: 3 }, events: [...events, last] };
+    resetCloudAgents();
+    // The mailbox's receipts: none until the runtime has taken the message.
+    let taken = false;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command !== "cloud_agent_outbox_sync") return base(command, args);
+      return taken ? enqueued.map((_, index) => ({ clientCommandId: `cmd-${index + 1}`, tabId: "s1-tab", kind: "send", state: "applied", receipt: { queued: false }, createdAt: 1, updatedAt: 2 })) : [];
+    });
+    vi.useFakeTimers();
+    try {
+      await handleCloudControl("send", { target, text: "try again" });
+      // What the runtime does while the wait pauses, a step per pause.
+      const steps = [
+        // It takes the message. The receipt comes in; nothing newer of the tab has yet.
+        () => void (taken = true),
+        // Its new turn, and the status it reports with it.
+        () => {
+          mergeTabEvents("s1", "s1-tab", [said(4, { type: "user_message", text: "try again" }), said(5, { type: "recovery", kind: null })] as never);
+          applyLiveTabs(scope, [{ ...tabInfo("s1", "in_progress"), lastSeq: 5 } as never]);
+        },
+        () => {
+          mergeTabEvents("s1", "s1-tab", [said(6, { type: "assistant_message", text: "it starts now" }), said(7, { type: "turn_completed", status: "ok" })] as never);
+          applyLiveTabs(scope, [{ ...tabInfo("s1", "completed"), lastSeq: 7 } as never]);
+        },
+      ];
+      const sleep = async (ms: number) => {
+        steps.shift()?.();
+        await vi.advanceTimersByTimeAsync(ms);
+      };
+      expect(await waitForCloudTab({ target, timeoutSeconds: 30 }, sleep, () => Date.now())).toMatchObject({ reason: "stop", status: "completed" });
+      expect(steps).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("is refused to someone the workspace is not shared with", async () => {
     await list(OTHER, [item("ws-b", OTHER, { authority: "participate", you: { role: "none", canApprove: false, canManageShares: false } })]);
     expect(await refusal("wait", { target: `cloud:${OTHER}:ws-b:sb`, timeoutSeconds: 1 })).toMatchObject({ code: "forbidden" });
     expect(connections.retainCloudConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("why a wait ends (#668)", () => {
+  /** The runtime's word on the tab, reported when its transcript reached `lastSeq`. */
+  const info = (status: string, lastSeq: number, fields: Record<string, unknown> = {}) => ({ status, lastSeq, pendingPermissions: [], followUps: [], ...fields }) as never;
+  const said = (seq: number, payload: Record<string, unknown>) => ({ id: `e${seq}`, sessionId: "s1", tabId: "s1-tab", seq, ts: seq, payload }) as never;
+  const ask = { requestId: "r1", toolName: "Bash", input: {}, options: ["allow", "deny"] };
+  const followUp = { clientCommandId: "cmd-9", text: "then the docs" };
+  const prompt = said(1, { type: "user_message", text: "fix the login" });
+  const replied = [prompt, said(2, { type: "assistant_message", text: "Looking at it." })];
+  const failed = [prompt, said(2, { type: "recovery", kind: "failed" })];
+  const retried = [...failed, said(3, { type: "user_message", text: "try again" }), said(4, { type: "recovery", kind: null })];
+
+  it("says permission only for a request the runtime holds", () => {
+    expect(settledReason(info("waiting", 2, { pendingPermissions: [ask] }), replied, false)).toEqual({ reason: "permission" });
+    // A message on its way waits behind the request; the request is still someone's to answer.
+    expect(settledReason(info("waiting", 2, { pendingPermissions: [ask] }), failed, true)).toEqual({ reason: "permission" });
+    // A question this desktop's copy shows open, answered elsewhere since: the runtime holds no request.
+    const asked = [...replied, said(3, { type: "questions_asked", requestId: "q1", toolUseId: "", questions: [] })];
+    expect(settledReason(info("in_progress", 5), asked, false)).toBeNull();
+    expect(settledReason(info("completed", 5), asked, false)).toEqual({ reason: "stop" });
+  });
+
+  it("names the error a waiting tab stopped on, from a transcript that has reached its status", () => {
+    expect(settledReason(info("waiting", 2), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting", 2), [prompt, said(2, { type: "recovery", kind: "signed_out" })], false)).toEqual({ reason: "recovery", recovery: "signed_out" });
+    // A follow-up held by the runtime goes nowhere until the error is dealt with.
+    expect(settledReason(info("waiting", 2, { followUps: [followUp] }), failed, false)).toEqual({ reason: "recovery", recovery: "failed" });
+    expect(settledReason(info("waiting", 2), failed, true)).toBeNull();
+    // The status is from later than the transcript held here: what stopped the agent then is not known yet.
+    expect(settledReason(info("waiting", 6), retried, false)).toBeNull();
+    expect(settledReason(info("waiting", 6), failed, false)).toBeNull();
+  });
+
+  it("says the agent asks in its own terminal when it waits with nothing to answer and no error", () => {
+    expect(settledReason(info("waiting", 2), replied, false)).toEqual({ reason: "terminal" });
+    // Before anything was said: a CLI asking on its first screen.
+    expect(settledReason(info("waiting", 0), [], false)).toEqual({ reason: "terminal" });
+    // Not on a transcript behind the status, nor ahead of it.
+    expect(settledReason(info("waiting", 3), replied, false)).toBeNull();
+    expect(settledReason(info("waiting", 2), retried, false)).toBeNull();
+    // A tab that streams here hears of the event before the status that follows it: a prompt taken,
+    // an error taken back or a request decided leaves a status that still says waiting from before.
+    expect(settledReason(info("waiting", 4), retried, false)).toBeNull();
+    expect(settledReason(info("waiting", 3), [...replied, said(3, { type: "permission_decided", requestId: "r1", allowed: true, label: "Allow" })], false)).toBeNull();
+  });
+
+  it("ends on a finished turn or a stopped tab only when nothing is queued or started behind it", () => {
+    expect(settledReason(info("completed", 2), replied, false)).toEqual({ reason: "stop" });
+    expect(settledReason(info("idle", 2), replied, false)).toEqual({ reason: "stopped" });
+    expect(settledReason(info("in_progress", 2), replied, false)).toBeNull();
+    expect(settledReason(info("completed", 2), replied, true)).toBeNull();
+    expect(settledReason(info("completed", 2, { followUps: [followUp] }), replied, false)).toBeNull();
+    expect(settledReason(info("idle", 2, { followUps: [followUp] }), replied, false)).toBeNull();
+    // The transcript's newest event is a prompt the status has not caught up with.
+    expect(settledReason(info("completed", 3), [...replied, said(3, { type: "user_message", text: "and the docs" })], false)).toBeNull();
   });
 });
 
@@ -548,6 +715,8 @@ describe("creating a session", () => {
       title: "#433 Carry issue sessions on",
       useWorktree: true,
       issue: { ref: issue, body: "Sessions stop at code.", worktreeName: "433-carry-issue-sessions-on", pipeline: true, settings: { autoMerge: false, requirePerson: false } },
+      // With no flag, an issue resolves its conflicts as the issue page starts it (#700); a cloud workspace never merges.
+      pipeline: { autoMerge: false, resolveConflicts: true },
     });
     // --no-pipeline starts it plain; a runtime from before pipelines is said to be one.
     vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {
@@ -557,6 +726,7 @@ describe("creating a session", () => {
     const older = await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue, noPipeline: true });
     expect(older).toMatchObject({ pipeline: null, pipelineNote: expect.stringContaining("older TerminalX") });
     expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].issue).toMatchObject({ pipeline: false });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].pipeline).toBeUndefined();
     // An issue is never started in a new machine: that one would start without its pipeline.
     await list(ORG, []);
     const { setPrefs, getPrefs } = await import("@/lib/prefs");
@@ -572,7 +742,10 @@ describe("creating a session", () => {
   });
 
   it("does not wake a workspace the list calls running but which has stopped, unless --wake was given", async () => {
-    // The window's start flow asks before waking; the list still says ready.
+    setCloudControlPolicy("both");
+    setCloudControlEnabled(true);
+    mocks.ask.mockResolvedValue(false);
+    // A stopped runtime requires the caller's wake flag, not another dialog.
     vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {
       const wake = options?.wakeIfStopped;
       if (!(typeof wake === "function" ? await wake() : wake)) throw new Error("cloud_workspace_stopped");
@@ -583,6 +756,7 @@ describe("creating a session", () => {
     expect(refused.message).toContain("has stopped");
     expect(refused.recovery).toContain("--wake");
     expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", wake: true })).toMatchObject({ created: "session", resumed: true });
+    expect(mocks.ask).not.toHaveBeenCalled();
   });
 
   it("treats a workspace that is on its way down as stopped: no session, and nothing woken, without --wake", async () => {
@@ -596,13 +770,14 @@ describe("creating a session", () => {
     expectNoWake();
     // Asked for: it goes ahead, and says it resumed.
     expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", wake: true })).toMatchObject({ created: "session", resumed: true });
-    // And where the window confirms, that too is asked before anything is woken.
+    // The shipped Settings grant covers this wake without another dialog.
     setCloudControlPolicy("both");
     setCloudControlEnabled(true);
     mocks.ask.mockResolvedValue(false);
     vi.mocked(newSession.startInWorkspace).mockClear();
-    expect((await refusal("sessions.create", { project: PROJECT, prompt: "go", wake: true })).code).toBe("declined");
-    expect(newSession.startInWorkspace).not.toHaveBeenCalled();
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", wake: true })).toMatchObject({ created: "session", resumed: true });
+    expect(newSession.startInWorkspace).toHaveBeenCalledOnce();
+    expect(mocks.ask).not.toHaveBeenCalled();
   });
 
   it("resumes a stopped workspace only when asked to with --wake", async () => {
@@ -617,6 +792,9 @@ describe("creating a session", () => {
   });
 
   it("creates a new machine only with --confirm-spend, and reuses the given idempotency key", async () => {
+    setCloudControlPolicy("both");
+    setCloudControlEnabled(true);
+    mocks.ask.mockResolvedValue(false);
     await list(ORG, []);
     catalog.setCloudRepositories(ORG, [{ fullName: "acme/api", cloneUrl: acmeApi.cloneUrl, defaultBranch: "main", private: true, state: "accessible", reason: null } as never]);
     const { setPrefs, getPrefs } = await import("@/lib/prefs");
@@ -634,12 +812,14 @@ describe("creating a session", () => {
       expect(created).toEqual({ created: "workspace", workspace: `cloud:${ORG}:ws-new`, operationId: "op-1", state: "provisioning", quote: { provider: "Boat", currency: "USD", activeHourlyMicros: 120_000 } });
       expect(vi.mocked(newSession.confirmCloudCreate).mock.calls[0][1]).toEqual({ follow: false });
       expect(pending).toMatchObject({ idempotencyKey: "retry-1", request: { idempotencyKey: "retry-1" } });
+      expect(mocks.ask).not.toHaveBeenCalled();
     } finally {
       setPrefs({ cloudProjects: {} });
     }
   });
 
   it("is refused to a plain member, as the project's + is, before anything is asked of the server", async () => {
+    setCloudControlPolicy("both");
     signIn({ [ORG]: "member", [OTHER]: "member" });
     const refused = await refusal("sessions.create", { project: PROJECT, prompt: "go", wake: true, confirmSpend: true });
     expect(refused).toEqual({ code: "forbidden", message: NEW_SESSION_ADMIN_REASON, recovery: null });
@@ -649,6 +829,7 @@ describe("creating a session", () => {
   });
 
   it("does not know a project in an organization the person is not in", async () => {
+    setCloudControlPolicy("both");
     expect(await refusal("sessions.create", { project: "cloud:org-nope:github.com/acme/api", prompt: "go" })).toMatchObject({ code: "not_found" });
     expect(await refusal("sessions.create", { project: "/Users/me/code/api", prompt: "go" })).toMatchObject({ code: "invalid_arguments" });
   });
@@ -995,7 +1176,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     ["resume", { workspace: `cloud:${ORG}:ws-stopped` }],
   ];
 
-  it("ships with both: the setting, which is off by default, and the question in the window", () => {
+  it("ships with the setting, off by default, and confirmation for stopping", () => {
     expect(CLOUD_CONTROL_POLICY).toBe("both");
     setCloudControlEnabled(false);
     expect(cloudControlEnabled()).toBe(false);
@@ -1030,7 +1211,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
   });
 
-  describe("both together (what ships): the setting lets agents ask, the person still decides", () => {
+  describe("both together (what ships): the setting authorizes routine compute, stop still asks", () => {
     beforeEach(() => setCloudControlPolicy("both"));
 
     it("refuses everything while the setting is off, and asks nothing", async () => {
@@ -1052,28 +1233,108 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       expect(enqueued).toHaveLength(1);
     });
 
-    it("with the setting on, spend, wake and stop still ask in the window, and a refusal there does nothing", async () => {
+    it("with the setting on, routine sends, resumes and session launches do not ask again", async () => {
       setCloudControlEnabled(true);
       mocks.ask.mockResolvedValue(false);
       for (const [action, params] of [
         ["send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "continue" }],
         ["resume", { workspace: `cloud:${ORG}:ws-stopped` }],
-        ["stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true }],
+        ["sessions.create", { project: PROJECT, prompt: "go" }],
         ["sessions.create", { project: `cloud:${ORG}:github.com/acme/web`, prompt: "go", wake: true }],
       ] as [string, Record<string, unknown>][]) {
-        expect((await refusal(action, params)).code).toBe("declined");
+        await handleCloudControl(action, params);
       }
-      expect(mocks.ask).toHaveBeenCalledTimes(4);
-      expect(enqueued).toEqual([]);
-      expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
-      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
-      expect(newSession.startInWorkspace).not.toHaveBeenCalled();
-      expectNoWake();
-
-      // Agreed to: the stopped workspace is sent to.
-      mocks.ask.mockResolvedValue(true);
-      await handleCloudControl("send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "continue" });
+      expect(mocks.ask).not.toHaveBeenCalled();
       expect(enqueued).toHaveLength(1);
+      expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledOnce();
+      expect(newSession.startInWorkspace).toHaveBeenCalledTimes(2);
+      expect((await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true })).code).toBe("declined");
+      expect(mocks.ask).toHaveBeenCalledOnce();
+      expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
+    });
+
+    it("keeps role checks on every routine compute route", async () => {
+      setCloudControlEnabled(true);
+      signIn({ [ORG]: "member", [OTHER]: "member" });
+      await list(ORG, [item("ws-1", ORG, { you: { role: "viewer", canApprove: false, canManageShares: false } }), item("ws-stopped", ORG, { state: "suspended", you: { role: "viewer", canApprove: false, canManageShares: false } })]);
+      for (const [action, params] of [
+        ["resume", { workspace: `cloud:${ORG}:ws-stopped` }],
+        ["send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "hi" }],
+        ["sessions.create", { project: PROJECT, prompt: "go", wake: true, confirmSpend: true }],
+      ] as [string, Record<string, unknown>][]) expect(await refusal(action, params)).toMatchObject({ code: "forbidden" });
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(enqueued).toEqual([]);
+      expect(newSession.startInWorkspace).not.toHaveBeenCalled();
+      expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+      expectNoWake();
+    });
+
+    it("starts an issue in a stopped workspace with --wake and no repeated dialog", async () => {
+      setCloudControlEnabled(true);
+      mocks.ask.mockResolvedValue(false);
+      const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/web/issues/433" };
+      vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {
+        options?.onIssue?.({ supported: true, pipeline: { id: "p1", cloud: true }, note: null });
+        return `${plan.node.key}:new-session`;
+      });
+      const created = await handleCloudControl("sessions.create", { project: `cloud:${ORG}:github.com/acme/web`, prompt: "Fix issue #433", issue, wake: true });
+      expect(created).toMatchObject({ created: "session", resumed: true, pipeline: { id: "p1" } });
+      expect(vi.mocked(newSession.startInWorkspace).mock.calls[0][1].issue).toMatchObject({ ref: issue, pipeline: true });
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+    });
+
+    it.each(["false", "error", "true"] as const)("rechecks native %s after the awaited resume catalog read", async (nativeAnswer) => {
+      setCloudControlEnabled(true);
+      mocks.ask.mockResolvedValue(false);
+      let releaseList!: (value: { workspaces: CloudWorkspaceListItem[] }) => void;
+      let enteredList!: () => void;
+      const entered = new Promise<void>((resolve) => { enteredList = resolve; });
+      const pendingList = new Promise<{ workspaces: CloudWorkspaceListItem[] }>((resolve) => { releaseList = resolve; });
+      mocks.api.cloudWorkspaces.mockImplementationOnce(() => {
+        enteredList();
+        return pendingList;
+      });
+      mocks.api.cloudWorkspaceResume.mockResolvedValue({ workspace: item("ws-stopped", ORG, { state: "provisioning" }).workspace, operation: { id: "op-resume" } });
+      const pending = answerCloudControl("resume", { workspace: `cloud:${ORG}:ws-stopped` });
+      await entered;
+      // Native was disabled elsewhere while this window still caches true.
+      expect(cloudControlEnabled()).toBe(true);
+      expect(mocks.setting).not.toHaveBeenCalled();
+      if (nativeAnswer === "error") mocks.setting.mockRejectedValueOnce(new Error("unreadable"));
+      else mocks.setting.mockResolvedValueOnce(nativeAnswer === "true");
+      releaseList({ workspaces: [item("ws-stopped", ORG, { state: "suspended", repositories: [acmeWeb] })] });
+      const result = await pending;
+      expect(mocks.setting).toHaveBeenCalledOnce();
+      expect(mocks.ask).not.toHaveBeenCalled();
+      if (nativeAnswer === "true") {
+        expect(result).toMatchObject({ ok: true, result: { changed: true } });
+        expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledOnce();
+      } else {
+        expect(result).toMatchObject({ ok: false, error: { code: "cloud_control_disabled" } });
+        expect(cloudControlEnabled()).toBe(false);
+        expectNoWake();
+      }
+      expect(newSession.startInWorkspace).not.toHaveBeenCalled();
+      expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+      expect(enqueued).toEqual([]);
+    });
+
+    it("does not authorize from an older native true read after a local disable", async () => {
+      setCloudControlEnabled(true);
+      let resolveNative!: (enabled: boolean) => void;
+      let enteredNative!: () => void;
+      const entered = new Promise<void>((resolve) => { enteredNative = resolve; });
+      const read = new Promise<boolean>((resolve) => { resolveNative = resolve; });
+      mocks.setting.mockImplementationOnce(() => { enteredNative(); return read; });
+      const pending = answerCloudControl("resume", { workspace: `cloud:${ORG}:ws-stopped` });
+      await entered;
+      setCloudControlEnabled(false);
+      resolveNative(true);
+      expect(await pending).toMatchObject({ ok: false, error: { code: "cloud_control_disabled" } });
+      expect(cloudControlEnabled()).toBe(false);
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expectNoWake();
     });
   });
 
@@ -1084,33 +1345,31 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       setCloudControlEnabled(true);
     });
 
-    it("reads the list again when not connected, and asks when the workspace has stopped since", async () => {
+    it("reads the list again and uses the Settings grant when the workspace has stopped since", async () => {
       // The catalog still says ready; the server now says it idle-stopped.
       mocks.api.cloudWorkspaces.mockImplementation(async () => ({ workspaces: [item("ws-1", ORG, { state: "suspended" })] }));
       mocks.ask.mockResolvedValue(false);
-      const refused = await refusal("send", { target: TARGET, text: "still there?" });
-      expect(refused.code).toBe("declined");
+      await handleCloudControl("send", { target: TARGET, text: "still there?" });
       expect(mocks.api.cloudWorkspaces).toHaveBeenCalled();
-      expect(mocks.ask.mock.calls[0][0]).toContain("send a message to the stopped cloud workspace ws-1");
-      expect(enqueued).toEqual([]);
-      expectNoWake();
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(enqueued).toHaveLength(1);
     });
 
-    it("asks for a workspace that is on its way down, though it is still listed as ready", async () => {
+    it("uses the Settings grant for a workspace on its way down", async () => {
       const midStop = { ...item("ws-1", ORG), latestOperation: { id: "op-stop", action: "suspend", state: "running" } } as CloudWorkspaceListItem;
       mocks.api.cloudWorkspaces.mockImplementation(async () => ({ workspaces: [midStop] }));
       mocks.ask.mockResolvedValue(false);
-      expect((await refusal("send", { target: TARGET, text: "one more thing" })).code).toBe("declined");
-      expect(mocks.ask).toHaveBeenCalledTimes(1);
-      expect(enqueued).toEqual([]);
+      await handleCloudControl("send", { target: TARGET, text: "one more thing" });
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(enqueued).toHaveLength(1);
     });
 
-    it("asks when the list cannot be read: not knowing is not the same as running", async () => {
+    it("uses the Settings grant when a send may wake and the list cannot be read", async () => {
       mocks.api.cloudWorkspaces.mockRejectedValue({ code: "cloud_workspace_unavailable" });
       mocks.ask.mockResolvedValue(false);
-      expect((await refusal("send", { target: TARGET, text: "hello" })).code).toBe("declined");
-      expect(mocks.ask).toHaveBeenCalledTimes(1);
-      expect(enqueued).toEqual([]);
+      await handleCloudControl("send", { target: TARGET, text: "hello" });
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(enqueued).toHaveLength(1);
     });
 
     it("asks nothing when the list, read just now, says running, or when connected to it", async () => {
@@ -1158,23 +1417,23 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       expectNoWake();
     });
 
-    it("asks when the workspace stopped after the list was read, and sends nothing if the person refuses", async () => {
+    it("uses the Settings grant when the server reports a stopped workspace", async () => {
       // The catalog, and a list read just now, still say ready: only the server knows.
       running = false;
       mocks.ask.mockResolvedValue(false);
-      const refused = await refusal("send", { target: TARGET, text: "still there?" });
-      expect(refused.code).toBe("declined");
-      expect(mocks.ask.mock.calls[0][0]).toContain("send a message to the stopped cloud workspace ws-1");
-      // The one attempt could start nothing, and nothing followed it.
-      expect(enqueued).toEqual([expect.objectContaining({ wake: false })]);
+      await handleCloudControl("send", { target: TARGET, text: "still there?" });
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(enqueued).toHaveLength(2);
+      expect(enqueued[0]).toMatchObject({ wake: false });
+      expect("wake" in enqueued[1]).toBe(false);
       expect(connections.wakeCloudConnection).not.toHaveBeenCalled();
       expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
     });
 
-    it("sends again with wake allowed once the person agrees", async () => {
+    it("sends again with wake allowed by the Settings grant", async () => {
       running = false;
       const sent = (await handleCloudControl("send", { target: TARGET, text: "still there?" })) as Record<string, unknown>;
-      expect(mocks.ask).toHaveBeenCalledTimes(1);
+      expect(mocks.ask).not.toHaveBeenCalled();
       expect(enqueued).toHaveLength(2);
       expect(enqueued[0]).toMatchObject({ wake: false });
       expect("wake" in enqueued[1]).toBe(false);
@@ -1199,6 +1458,31 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
   });
 
   describe("the switch is native code's to keep", () => {
+    it("does not let a delayed boot/settings refresh undo a newer disable", async () => {
+      const { loadCloudControlSetting } = await import("./cloudControl");
+      let resolveNative!: (enabled: boolean) => void;
+      mocks.setting.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveNative = resolve; }));
+      const refresh = loadCloudControlSetting();
+      setCloudControlEnabled(false);
+      // A repeated known disable also invalidates an outstanding read.
+      setCloudControlEnabled(false);
+      resolveNative(true);
+      expect(await refresh).toBe(false);
+      expect(cloudControlEnabled()).toBe(false);
+    });
+
+    it("does not let an older refresh overwrite a newer native false result", async () => {
+      const { loadCloudControlSetting } = await import("./cloudControl");
+      let resolveOlder!: (enabled: boolean) => void;
+      mocks.setting.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveOlder = resolve; }));
+      const older = loadCloudControlSetting();
+      mocks.setting.mockResolvedValueOnce(false);
+      expect(await loadCloudControlSetting()).toBe(false);
+      resolveOlder(true);
+      expect(await older).toBe(false);
+      expect(cloudControlEnabled()).toBe(false);
+    });
+
     it("shows what native code says after asking it to change, and says why it did not turn on", async () => {
       const { requestCloudControlSetting, loadCloudControlSetting } = await import("./cloudControl");
       const native = await import("@/lib/cloudControlNative");
@@ -1234,7 +1518,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       setCloudControlEnabled(true);
       const native = await import("@/lib/cloudControlNative");
       const confirm = vi.spyOn(native.cloudControlNative, "confirm").mockResolvedValue("backoff:95");
-      const refused = await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` });
+      const refused = await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true });
       expect(refused.code).toBe("declined");
       expect(refused.message).toContain("refused or left unanswered in the TerminalX window a moment ago");
       expect(refused.recovery).toContain("2 minutes");
@@ -1255,7 +1539,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
         ["yes", "was refused in the TerminalX window"],
       ] as const) {
         confirm.mockResolvedValueOnce(answer as never);
-        const refused = await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` });
+        const refused = await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true });
         expect(refused.code).toBe("declined");
         expect(refused.message).toContain(words);
       }
@@ -1273,6 +1557,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       setCloudControlPolicy("confirm");
       // The setting plays no part under this option.
       setCloudControlEnabled(false);
+      mocks.setting.mockResolvedValue(false);
     });
 
     it("looking asks nothing: lists, read, wait and a send to a running workspace", async () => {
@@ -1293,6 +1578,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       await handleCloudControl("resume", { workspace: `cloud:${ORG}:ws-stopped` });
       await handleCloudControl("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true });
       expect(mocks.ask).toHaveBeenCalledTimes(4);
+      expect(mocks.setting).not.toHaveBeenCalled();
       for (const [message, options] of mocks.ask.mock.calls) {
         expect(message).toMatch(/^A terminalx command \(run by you or by an agent in a local session\) asks to /);
         expect(options).toMatchObject({ title: "Cloud workspace request", cancelLabel: "Refuse" });

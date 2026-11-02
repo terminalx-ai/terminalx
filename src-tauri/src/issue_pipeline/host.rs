@@ -17,7 +17,7 @@ use crate::sink::EventSink;
 use crate::store::index::{self, IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
-use super::engine::{Diff, Host, Workspace};
+use super::engine::{AgentStop, Diff, Host, Workspace};
 use super::{Pipeline, SessionRef};
 
 /// The event a written pipeline is announced with: to the window on the
@@ -118,6 +118,7 @@ fn workspace(cwd: &Path) -> Result<Workspace> {
         // `XY path`: two status letters, a space, the path.
         dirty: porcelain.lines().filter_map(|line| line.get(3..)).map(String::from).collect(),
         ahead_of_base: status.ahead_of_base.unwrap_or(0),
+        merging: crate::unfinished_merge::merge_heads(cwd)?,
     })
 }
 
@@ -232,12 +233,24 @@ impl Host for LocalHost {
         last_reply(&self.manager.load_events(&session.session_id, &session.tab_id).ok()?)
     }
 
+    fn agent_busy(&self, who: &SessionRef) -> bool {
+        let status = index::get(&who.session_id).ok().and_then(|session| session.tab(&who.tab_id).map(|tab| tab.status));
+        matches!(status, Some(index::TabStatus::InProgress | index::TabStatus::Waiting)) || !self.manager.pipeline_idle(&who.session_id, &who.tab_id)
+    }
+
+    /// A terminal, or an agent a person started in one by hand, is theirs and
+    /// never stopped; an idle one is stopped at once, however briefly it has
+    /// been idle, and opening its tab later does not start it again.
+    fn stop_agent(&self, who: &SessionRef, note: &str) -> Result<AgentStop> {
+        self.manager.stop_if_idle(&who.session_id, &who.tab_id, note, std::time::Duration::ZERO)
+    }
+
     /// An independent conversation in the owning session, with no fork or
     /// transcript copied from the author. Existing reviewer references are
     /// reused by the engine, including legacy separate sessions.
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
-        let reviewer = self.manager.add_tab(&author.id, &NewTab {
+        let reviewer = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(),
             harness: tab.harness.clone(), model: tab.model.clone(), effort: tab.effort.clone(), permission_mode: Some(tab.permission_mode.clone()),
         })?;
         crate::session_ops::rename_tab_entry(&author.id, &reviewer.id, Some("Reviewer".into())).map_err(anyhow::Error::msg)?;
@@ -273,6 +286,10 @@ impl Host for LocalHost {
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
         verify_resolution(cwd, resolution, head, branch)
+    }
+
+    fn abort_merge(&self, cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
+        crate::unfinished_merge::abort(cwd, head, merge_head)
     }
 
     fn defer_local_check(&self, pipeline_id: &str) -> bool {
@@ -473,8 +490,16 @@ mod tests {
         assert_eq!(workspace(root).unwrap().head, original.head);
         assert!(workspace(root).unwrap().dirty.is_empty());
         assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "branch intent\n");
-        let merge = std::process::Command::new("git").current_dir(root).args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-commit", &resolution.base_commit]).output().unwrap();
-        assert!(!merge.status.success());
+        let merge = || std::process::Command::new("git").current_dir(root).args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-edit", &resolution.base_commit]).output().unwrap();
+        assert!(!merge().status.success());
+        // Stopped here, the checkout holds exactly the merge the pipeline asked for, and it can be undone.
+        let half = workspace(root).unwrap();
+        assert_eq!((half.head.as_str(), half.merging.as_slice()), (resolution.head.as_str(), std::slice::from_ref(&resolution.base_commit)));
+        assert_eq!(half.dirty, ["README.md"]);
+        crate::unfinished_merge::abort(root, &resolution.head, &resolution.base_commit).unwrap();
+        let undone = workspace(root).unwrap();
+        assert!(undone.merging.is_empty() && undone.dirty.is_empty() && undone.head == original.head);
+        assert!(!merge().status.success());
         std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
         git(root, &["add", "README.md"]);
         git(root, &["commit", "-qm", "preserve both intents"]);

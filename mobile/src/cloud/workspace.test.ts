@@ -555,6 +555,73 @@ describe("a cloud workspace on the phone", () => {
     h.session.close();
   });
 
+  describe("whether a tab's conversation is continuous with the runtime's (#644)", () => {
+    it("is so once the live replay is in, not while the connection is down, and again once a resume's replay is in", async () => {
+      const h = harness();
+      await h.session.start();
+      await connected(h);
+      // Listed live but not looked at: nothing follows it.
+      expect(tab(h).continuous).toBe(false);
+      const stop = h.session.view("t1");
+      await vi.waitFor(() => expect(tab(h).continuous).toBe(true));
+      h.runtimes[0].drop(1006);
+      expect(tab(h).continuous).toBe(false);
+      // Back: the subscription resumes, and it is caught up again once its replay is in.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await connected(h);
+      await vi.waitFor(() => expect(tab(h).continuous).toBe(true));
+      // No longer looked at: nothing follows it from here on.
+      stop();
+      expect(tab(h).continuous).toBe(false);
+      h.session.close();
+    });
+
+    it("is not so through a trip to the home screen, though the screen still says connected, until the return's replay is in", async () => {
+      const h = harness();
+      await h.session.start();
+      await connected(h);
+      const stop = h.session.view("t1");
+      await vi.waitFor(() => expect(tab(h).continuous).toBe(true));
+      h.session.pause();
+      expect(h.session.getSnapshot().connection.state).toBe("connected");
+      expect(tab(h).continuous).toBe(false);
+      let answer!: () => void;
+      h.each((runtime) => (runtime.methods["session.subscribe"] = () => {
+        answer?.();
+        return { subscriptionId: "sub-2", events: [{ cursor: "c3", event: event(3) }], cursor: "c3" };
+      }));
+      const replayed = new Promise<void>((resolve) => { answer = resolve; });
+      h.session.resume();
+      await replayed;
+      await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([2, 3]));
+      expect(tab(h).continuous).toBe(true);
+      stop();
+      h.session.close();
+    });
+
+    it("is never so from a checkpoint alone, nor when the live feed is refused", async () => {
+      const earlier = await keyed();
+      const asleep = harness({ state: "suspended", secrets: earlier.secrets, checkpoints: [checkpoint(2, [event(1), event(2)])] });
+      await asleep.session.start();
+      const stopAsleep = asleep.session.view("t1");
+      await vi.waitFor(() => expect(tab(asleep)?.events).toHaveLength(2));
+      expect(tab(asleep).continuous).toBe(false);
+      stopAsleep();
+      asleep.session.close();
+
+      const refused = harness();
+      refused.each((runtime) => delete runtime.methods["session.subscribe"]);
+      await refused.session.start();
+      await connected(refused);
+      const stop = refused.session.view("t1");
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(tab(refused).continuous).toBe(false);
+      stop();
+      refused.session.close();
+    });
+  });
+
   it("follows a sent command until it settles, then stops asking", async () => {
     const h = harness();
     await h.session.start();

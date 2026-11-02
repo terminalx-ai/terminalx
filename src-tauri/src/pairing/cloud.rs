@@ -17,7 +17,6 @@ const RELAY_DIRECTOR_URL: &str = "https://relay.terminalx.ai";
 /// one terminalx-saas starts beside its API. The director runs on its own
 /// origin, so it cannot be derived from the dev API base URL.
 pub const DEV_RELAY_DIRECTOR_URL_ENV: &str = "TERMINALX_DEV_RELAY_DIRECTOR_URL";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct CloudHttpError(pub u16);
@@ -29,6 +28,19 @@ impl std::fmt::Display for CloudHttpError {
 }
 
 impl std::error::Error for CloudHttpError {}
+
+/// A refused request's `Retry-After`, in the whole seconds the account
+/// service sends with a 429. It sits beneath the [`CloudHttpError`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryAfter(pub Duration);
+
+impl std::fmt::Display for RetryAfter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "retry after {} s", self.0.as_secs())
+    }
+}
+
+impl std::error::Error for RetryAfter {}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -122,19 +134,18 @@ fn verify_guest_at(base: &str, token: &str) -> Result<crate::local_sharing::Pers
     })
 }
 
-pub fn heartbeat(
-    context: &AccountContext,
-    host_id: &str,
-    generation: u64,
-    reachability: &str,
-) -> Result<()> {
+/// Tell the account service this Mac is reachable over Relay. The service
+/// accepts only "live" or "exited" and treats a "live" as current for 90 s,
+/// so the caller sends one only while the control channel is answering;
+/// otherwise the binding lapses to "unverifiable" on its own.
+pub fn heartbeat(base: &str, context: &AccountContext, host_id: &str, generation: u64) -> Result<()> {
     request_unit(
-        &crate::account::api_base_url(),
+        base,
         &format!("/v1/desktop/host-account-bindings/{host_id}/heartbeat"),
         "POST",
         Some(json!({
             "bindingGeneration": generation,
-            "reachability": reachability,
+            "reachability": "live",
             "capabilities": [CAPABILITY]
         })),
         &context.access_token,
@@ -152,12 +163,13 @@ pub fn unbind(context: &AccountContext, host_id: &str, generation: u64) -> Resul
 }
 
 pub fn pending_grants(
+    base: &str,
     context: &AccountContext,
     host_id: &str,
     generation: u64,
 ) -> Result<Vec<AccountPairingGrant>> {
     request_json::<GrantList>(
-        &crate::account::api_base_url(),
+        base,
         &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests?bindingGeneration={generation}"),
         "GET",
         None,
@@ -197,12 +209,13 @@ pub fn reject_grant(
 }
 
 pub fn pending_revocations(
+    base: &str,
     context: &AccountContext,
     host_id: &str,
     generation: u64,
 ) -> Result<Vec<AccountPairingRevocation>> {
     request_json::<RevocationList>(
-        &crate::account::api_base_url(),
+        base,
         &format!("/v1/desktop/host-account-bindings/{host_id}/revocations?bindingGeneration={generation}"),
         "GET",
         None,
@@ -212,13 +225,14 @@ pub fn pending_revocations(
 }
 
 pub fn acknowledge_revocation(
+    base: &str,
     context: &AccountContext,
     host_id: &str,
     revocation_id: &str,
     generation: u64,
 ) -> Result<()> {
     request_unit(
-        &crate::account::api_base_url(),
+        base,
         &format!(
             "/v1/desktop/host-account-bindings/{host_id}/revocations/{revocation_id}/acknowledge"
         ),
@@ -319,7 +333,7 @@ fn request_unit(
     body: Option<serde_json::Value>,
     token: &str,
 ) -> Result<()> {
-    send(base, path, method, body, token).map(|_| ())
+    send(base, path, method, body, token).map(crate::account::discard_body)
 }
 
 fn request_json<T: DeserializeOwned>(
@@ -343,11 +357,7 @@ fn send(
     if token.is_empty() {
         return Err(anyhow!(Category::Authentication));
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout(REQUEST_TIMEOUT)
-        .redirects(0)
-        .build();
-    let request = agent
+    let request = crate::account::cloud_agent()
         .request(method, &format!("{base}{path}"))
         .set("authorization", &format!("Bearer {token}"))
         .set("content-type", "application/json");
@@ -357,9 +367,23 @@ fn send(
     };
     match response {
         Ok(response) => Ok(response),
-        Err(ureq::Error::Status(status, _)) => Err(CloudHttpError(status).into()),
+        Err(ureq::Error::Status(status, response)) => {
+            let retry_after = retry_after(&response);
+            crate::account::discard_body(response);
+            Err(match retry_after {
+                Some(after) => anyhow::Error::new(after).context(CloudHttpError(status)),
+                None => CloudHttpError(status).into(),
+            })
+        }
         Err(ureq::Error::Transport(error)) => Err(anyhow!(error).context("cloud request failed")),
     }
+}
+
+/// `Retry-After` as delta seconds, the only form the account service sends.
+/// An HTTP date is ignored, and the caller's own backoff applies.
+fn retry_after(response: &ureq::Response) -> Option<RetryAfter> {
+    let seconds = response.header("retry-after")?.trim().parse::<u64>().ok()?;
+    Some(RetryAfter(Duration::from_secs(seconds)))
 }
 
 pub(super) fn allowed_https_origin(value: &str) -> bool {
@@ -368,9 +392,196 @@ pub(super) fn allowed_https_origin(value: &str) -> bool {
         .is_some_and(|url| url.scheme() == "https" && url.origin().ascii_serialization() == value)
 }
 
+/// A loopback HTTP/1.1 server that keeps connections alive, as the account
+/// service does, and counts them.
+#[cfg(test)]
+pub(super) mod fixture {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[derive(Clone, Debug)]
+    pub struct Recorded {
+        pub method: String,
+        pub path: String,
+        pub authorization: String,
+        pub body: Option<serde_json::Value>,
+        pub at: Instant,
+    }
+
+    pub struct Reply {
+        pub status: u16,
+        pub retry_after: Option<u64>,
+        pub body: String,
+    }
+
+    impl Reply {
+        pub fn ok(body: &str) -> Self {
+            Self { status: 200, retry_after: None, body: body.into() }
+        }
+    }
+
+    type Responder = dyn Fn(&Recorded) -> Reply + Send + Sync;
+
+    pub struct KeepAliveServer {
+        pub base: String,
+        requests: Arc<Mutex<Vec<Recorded>>>,
+        connections: Arc<AtomicUsize>,
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl KeepAliveServer {
+        pub fn start(respond: impl Fn(&Recorded) -> Reply + Send + Sync + 'static) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let connections = Arc::new(AtomicUsize::new(0));
+            let stopped = Arc::new(AtomicBool::new(false));
+            let respond: Arc<Responder> = Arc::new(respond);
+            {
+                let (requests, connections, stopped) = (requests.clone(), connections.clone(), stopped.clone());
+                std::thread::spawn(move || {
+                    for stream in listener.incoming() {
+                        if stopped.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let Ok(stream) = stream else { continue };
+                        connections.fetch_add(1, Ordering::SeqCst);
+                        let (requests, respond) = (requests.clone(), respond.clone());
+                        std::thread::spawn(move || serve(stream, &requests, &*respond));
+                    }
+                });
+            }
+            Self { base, requests, connections, stopped }
+        }
+
+        pub fn requests(&self) -> Vec<Recorded> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        pub fn connections(&self) -> usize {
+            self.connections.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for KeepAliveServer {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::SeqCst);
+            // Wake the accept loop so it sees the flag.
+            let _ = TcpStream::connect(self.base.trim_start_matches("http://"));
+        }
+    }
+
+    fn serve(stream: TcpStream, requests: &Mutex<Vec<Recorded>>, respond: &Responder) {
+        // The client's pool holds connections open; let the thread end anyway.
+        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap_or_default().to_string();
+            let path = parts.next().unwrap_or_default().to_string();
+            let (mut length, mut authorization) = (0, String::new());
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                    return;
+                }
+                if header == "\r\n" {
+                    break;
+                }
+                let lower = header.to_lowercase();
+                if let Some(value) = lower.strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+                if lower.starts_with("authorization:") {
+                    authorization = header["authorization:".len()..].trim().to_string();
+                }
+            }
+            let mut payload = vec![0; length];
+            reader.read_exact(&mut payload).unwrap();
+            let request = Recorded {
+                method,
+                path,
+                authorization,
+                body: (length > 0).then(|| serde_json::from_slice(&payload).unwrap()),
+                at: Instant::now(),
+            };
+            let reply = respond(&request);
+            requests.lock().unwrap().push(request);
+            let retry_after = reply
+                .retry_after
+                .map(|seconds| format!("Retry-After: {seconds}\r\n"))
+                .unwrap_or_default();
+            let written = write!(
+                writer,
+                "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{retry_after}Connection: keep-alive\r\n\r\n{}",
+                reply.status,
+                reply.body.len(),
+                reply.body
+            );
+            if written.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_share_one_kept_alive_connection_and_keep_retry_after() {
+        use super::fixture::{KeepAliveServer, Reply};
+        let server = KeepAliveServer::start(|request| match request.path.as_str() {
+            path if path.ends_with("/pairing-grant-requests?bindingGeneration=3") => Reply::ok(r#"{"requests":[]}"#),
+            path if path.ends_with("/heartbeat") => Reply::ok(r#"{"binding":{"reachability":"live"}}"#),
+            _ => Reply {
+                status: 429,
+                retry_after: Some(7),
+                body: r#"{"error":"account_pairing_rate_limited","retryAfter":7}"#.into(),
+            },
+        });
+        let context = AccountContext {
+            access_token: "synthetic-access-token".into(),
+            user_id: "synthetic-user".into(),
+            email: "fixture@example.invalid".into(),
+            display_name: "Fixture".into(),
+            profile_id: "synthetic-profile".into(),
+            organization_id: "synthetic-org".into(),
+            relay_entitled: true,
+            generation: 1,
+        };
+        assert!(pending_grants(&server.base, &context, "synthetic-host", 3).unwrap().is_empty());
+        heartbeat(&server.base, &context, "synthetic-host", 3).unwrap();
+        let error = pending_revocations(&server.base, &context, "synthetic-host", 3).unwrap_err();
+        assert_eq!(error.downcast_ref::<CloudHttpError>().map(|error| error.0), Some(429));
+        assert_eq!(error.downcast_ref::<RetryAfter>(), Some(&RetryAfter(Duration::from_secs(7))));
+        assert_eq!(
+            super::super::diagnostics::Failure::from_error(&error).category,
+            Category::RateLimited
+        );
+        assert!(pending_grants(&server.base, &context, "synthetic-host", 3).unwrap().is_empty());
+
+        let requests = server.requests();
+        assert_eq!(
+            requests.iter().map(|request| request.method.as_str()).collect::<Vec<_>>(),
+            ["GET", "POST", "GET", "GET"]
+        );
+        assert_eq!(server.connections(), 1, "every request, the refused one too, reuses one connection");
+        assert!(requests.iter().all(|request| request.authorization == "Bearer synthetic-access-token"));
+        assert_eq!(
+            requests[1].body,
+            Some(json!({ "bindingGeneration": 3, "reachability": "live", "capabilities": [CAPABILITY] }))
+        );
+    }
 
     #[test]
     fn release_builds_use_the_production_relay_director() {

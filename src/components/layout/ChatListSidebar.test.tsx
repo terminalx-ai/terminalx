@@ -170,10 +170,47 @@ it("offers conversation-preserving cleanup in the list view and marks kept histo
     session("kept", "/repos/web", at(1), { worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } }),
   ]);
   mount();
+  // Set apart from the live chats under its fold (#696).
+  expect(screen.queryByRole("button", { name: "Talk kept" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const kept = screen.getByRole("button", { name: "Talk kept" });
   expect(within(kept).getByText("removed")).toBeTruthy();
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
   fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
   expect(await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
   expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
+});
+
+describe("renaming a chat in the list", () => {
+  it("opens Rename from a double-click, a right-click or the row's menu, with the developer's few actions beside it", async () => {
+    await boot([session("a", "/repos/web", at(1), { branch: "dc/payments" })]);
+    const { useDialogs, closeRenameSession } = await import("@/lib/dialogs");
+    let opened: string | null = null;
+    const Probe = () => {
+      opened = useDialogs().renameSession;
+      return null;
+    };
+    render(<Probe />);
+    mount();
+    const row = screen.getByRole("button", { name: "Talk a" });
+    fireEvent.doubleClick(row);
+    expect(opened).toBe("a");
+    act(() => closeRenameSession());
+
+    fireEvent.contextMenu(row);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Archive", "Delete…"]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
+    expect(opened).toBe("a");
+  });
+
+  it("shows a branch by the label it was given", async () => {
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: { sessionIds?: string[] }) =>
+      command === "list_projects" ? { projects: [{ ...projects[0], branchLabels: { "dc/payments": "Payments" } }], lastSelected: null } : base(command, args),
+    );
+    await boot([session("a", "/repos/web", at(1), { branch: "dc/payments" })]);
+    mount();
+    expect(screen.getByTestId("chat-preview").textContent).toBe("web · Payments");
+  });
 });

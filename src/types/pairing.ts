@@ -249,6 +249,15 @@ export interface PairingHostMetadata {
   lastSeenAt: string | null;
 }
 
+/** This Mac's name as the user's other devices show it (#686), from Settings → Account. */
+export interface MachineName {
+  name: string;
+  /** Named in Settings → Account; otherwise `name` follows the computer's own. */
+  chosen: boolean;
+  /** System Settings → General → About → Name, when it can be read. */
+  computerName: string | null;
+}
+
 export interface PairingStatus {
   relay: {
     phase: "off" | "connecting" | "connected" | "offline";

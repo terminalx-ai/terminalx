@@ -43,6 +43,7 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
 | `--runtime-kind <kind>` | `local` (default) or `cloud-workspace`, which requires `--project-root`. Reported as `runtimeKind` by the control `status` command |
 | `--self-test` | Start, run the login shell in a PTY, type a command, wait for its answer and exit, then stop |
 | `--idle-grace-seconds <1–3600>` | Local runtime's unattached idle grace; defaults to 60 seconds |
+| `--log-file <file>` | Keep the log in `<file>`, with stdout and stderr, moving it to `<file>.1` at 8 MB; the desktop passes `~/Library/Logs/<identifier>/runtime.log` |
 
 - **Stdout:** one JSON line when the runtime is ready (version, runtime kind, project root,
   data dir, socket path) and one when it stops. Logs go to stderr.

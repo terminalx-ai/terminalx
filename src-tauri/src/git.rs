@@ -134,15 +134,34 @@ pub fn run_within_reporting(
 }
 
 /// Run `command` to its end or to the deadline, whichever comes first, and
-/// return what it printed. At the deadline its whole process group is killed.
-/// For a call that goes to a remote and whose answer is needed.
-pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+/// return what it printed. The deadline includes draining both output pipes;
+/// at expiry its whole process group is killed, even if the direct child has
+/// already exited. For a call whose complete answer is needed.
+pub(crate) fn output_within(command: Command, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    let out = capture_within(command, timeout).map_err(|error| match error.kind() {
+        std::io::ErrorKind::TimedOut => RunError::TimedOut,
+        _ => RunError::Spawn(error),
+    })?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        Err(RunError::Failed(if err.trim().is_empty() { format!("exit {}", out.status) } else { err.trim().to_string() }))
+    }
+}
+
+/// `Command::output` with a deadline: the exit status and everything written
+/// to both pipes, whatever the status. Both pipes are drained while the child
+/// runs, so an answer larger than the pipe buffer never blocks it. A deadline
+/// that passes, draining included, is an `ErrorKind::TimedOut` error, and the
+/// whole process group has been killed.
+pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
     use std::io::Read;
     use std::process::Stdio;
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let mut child = command.spawn()?;
     // Read as it comes, so a full pipe never blocks the child.
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -150,7 +169,7 @@ pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) 
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut bytes);
             }
-            String::from_utf8_lossy(&bytes).into_owned()
+            bytes
         })
     };
     let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
@@ -158,8 +177,10 @@ pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) 
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            // A wrapper can exit while a background child retains its pipes.
+            // Do not join a reader until EOF, or accept output after expiry.
+            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() && std::time::Instant::now() < deadline => break status,
+            Ok(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
             ended => {
                 #[cfg(unix)]
                 // SAFETY: signals the process group this function just created.
@@ -169,18 +190,13 @@ pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) 
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(match ended {
-                    Err(error) => RunError::Spawn(error),
-                    _ => RunError::TimedOut,
+                    Err(error) => error,
+                    _ => std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer within {} ms", timeout.as_millis())),
                 });
             }
         }
     };
-    let (out, err) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
-    if status.success() {
-        Ok(out)
-    } else {
-        Err(RunError::Failed(if err.trim().is_empty() { format!("exit {status}") } else { err.trim().to_string() }))
-    }
+    Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
 }
 
 /// `run` with a deadline.
@@ -232,6 +248,56 @@ pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String
 
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// What Git makes by itself of merging `theirs` into `ours`
+/// (`merge-tree --write-tree`): the tree, and whether it holds conflicts.
+/// No checkout or index is touched; the objects it writes are unreferenced.
+pub fn merge_tree(cwd: &Path, ours: &str, theirs: &str) -> Result<(String, bool)> {
+    let out = git().current_dir(cwd).args(["merge-tree", "--write-tree", ours, theirs]).output().context("git merge-tree")?;
+    // Exit 1 is "merged, with conflicts": the tree is still printed first.
+    let conflicted = match out.status.code() {
+        Some(0) => false,
+        Some(1) => true,
+        _ => bail!("git merge-tree: {}", String::from_utf8_lossy(&out.stderr).trim()),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let tree = stdout.lines().next().map(str::trim).filter(|tree| is_tree_id(tree)).context("git merge-tree printed no tree")?;
+    Ok((tree.to_string(), conflicted))
+}
+
+/// The Git operation under way in the checkout, if one is: a merge, a
+/// rebase, a cherry-pick, a revert or a bisect left part way.
+pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
+    let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
+    let dir = Path::new(dir.trim());
+    let marks = [
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("BISECT_LOG", "bisect"),
+        ("sequencer", "cherry-pick or revert"),
+    ];
+    Ok(marks.into_iter().find(|(mark, _)| std::fs::symlink_metadata(dir.join(mark)).is_ok()).map(|(_, what)| what))
+}
+
+/// The paths `git status --porcelain -z` lists as unmerged.
+fn unmerged_in(porcelain: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut entries = porcelain.split('\0').filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        let (Some(flags), Some(path)) = (entry.get(..2), entry.get(3..)) else { continue };
+        // A rename or copy is followed by the path it came from.
+        if flags.starts_with(['R', 'C']) {
+            entries.next();
+        }
+        if matches!(flags, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU") {
+            out.push(path.to_string());
+        }
+    }
+    out
 }
 
 pub fn is_repo(cwd: &Path) -> bool {
@@ -494,6 +560,12 @@ pub struct WorkStatus {
     /// Commits on this branch that `origin/<default>` doesn't have.
     pub ahead_of_base: Option<u32>,
     pub head: Option<String>,
+    /// A merge, rebase, cherry-pick, revert or bisect left in progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Paths with unresolved conflicts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicted: Vec<String>,
 }
 
 pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
@@ -517,7 +589,9 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
         return WorkStatus::default();
     }
     let branch = current_branch(cwd);
-    let dirty = run(cwd, &["status", "--porcelain", "--untracked-files=normal", "--"]).map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let porcelain = run(cwd, &["status", "--porcelain", "-z", "--untracked-files=normal", "--"]).ok();
+    let dirty = porcelain.as_deref().is_some_and(|s| !s.is_empty());
+    let conflicted = porcelain.as_deref().map(unmerged_in).unwrap_or_default();
     let upstream = run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).ok().map(|s| s.trim().to_string());
     let (ahead, behind) = upstream_counts(cwd);
     let default = default_branch(cwd);
@@ -529,7 +603,8 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
         };
         run(cwd, &["rev-list", "--count", &format!("{base}..HEAD")]).ok().and_then(|s| s.trim().parse().ok())
     });
-    WorkStatus { is_repo: true, dirty, branch, upstream, ahead, behind, default_branch: default, ahead_of_base, head: head_commit(cwd) }
+    let operation = operation_in_progress(cwd).ok().flatten().map(String::from);
+    WorkStatus { is_repo: true, dirty, branch, upstream, ahead, behind, default_branch: default, ahead_of_base, head: head_commit(cwd), operation, conflicted }
 }
 
 // ---------------------------------------------------------------- worktrees
@@ -679,6 +754,61 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     })
 }
 
+/// A worktree on a branch that already exists, rather than a new one: the
+/// branch is checked out as it is, its commits and upstream kept. A remote
+/// branch (`origin/fix-x`) gets a local branch of its name tracking it.
+pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<CreatedWorktree> {
+    if name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
+        bail!("bad worktree name");
+    }
+    if branch.starts_with('-') || branch.contains("..") || branch.trim().is_empty() {
+        bail!("bad branch name");
+    }
+    let path = worktree_path(project, name);
+    std::fs::create_dir_all(worktree_root(project))?;
+    let local = if branch_exists(project, branch) {
+        add_checkout(project, &path, &[branch], branch)?;
+        branch.to_string()
+    } else {
+        let remote = format!("refs/remotes/{branch}");
+        if run(project, &["rev-parse", "--verify", "--quiet", &remote]).is_err() {
+            bail!("no branch named {branch}");
+        }
+        let local = branch.split_once('/').map(|(_, rest)| rest).unwrap_or(branch).to_string();
+        if branch_exists(project, &local) {
+            add_checkout(project, &path, &[&local], &local)?;
+        } else {
+            run(project, &["worktree", "add", "--track", "-b", &local, arg(&path)?, branch])?;
+        }
+        local
+    };
+    ensure_worktree_dir_ignored(project);
+    let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+    let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+    Ok(CreatedWorktree {
+        name: name.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        branch: local,
+        base: commit.clone(),
+        base_tree,
+        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None }),
+    })
+}
+
+/// `git worktree add <path> <branch>`, saying plainly when the branch is already checked out somewhere.
+fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str) -> Result<()> {
+    let mut args = vec!["worktree", "add", arg(path)?];
+    args.extend_from_slice(rest);
+    run(project, &args).map(|_| ()).map_err(|e| {
+        let text = e.to_string();
+        if text.contains("already checked out") || text.contains("already used by worktree") {
+            anyhow::anyhow!("{branch} is already checked out in another folder. Open that workspace instead, or pick New branch.")
+        } else {
+            e
+        }
+    })
+}
+
 /// Move a TerminalX-managed worktree and rename its matching branch. The
 /// checkout may be dirty; `git worktree move` preserves its contents.
 pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<CreatedWorktree> {
@@ -795,7 +925,7 @@ pub fn is_worktree_of(project: &Path, path: &Path) -> bool {
     is_own_worktree(path) && common_dir(path).is_some_and(|theirs| Some(theirs) == common_dir(project))
 }
 
-fn branch_exists(project: &Path, branch: &str) -> bool {
+pub fn branch_exists(project: &Path, branch: &str) -> bool {
     run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
 }
 
@@ -1221,6 +1351,30 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn captured_output_keeps_structured_status_on_nonzero_exit() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf '{\"loggedIn\":false}'; exit 1"]);
+        let output = capture_within(command, std::time::Duration::from_secs(1)).unwrap();
+        assert!(!output.status.success());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["loggedIn"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_deadline_includes_inherited_stdout_and_stderr() {
+        for redirect in ["2>/dev/null", ">/dev/null"] {
+            let mut command = Command::new("/bin/sh");
+            // The direct child exits, but its background child keeps one
+            // output pipe open. Successful early output must not defeat the
+            // deadline while waiting for the remaining EOF.
+            command.args(["-c", &format!("sleep 2 {redirect} & printf '  --no-daemon\\n'; exit 0")]);
+            let result = output_within(command, std::time::Duration::from_millis(50));
+            assert!(matches!(result, Err(RunError::TimedOut)), "{redirect}: {result:?}");
+        }
+    }
+
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -1231,6 +1385,26 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn checks_out_an_existing_branch_in_a_worktree_as_it_is() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        run(p, &["checkout", "-q", "-b", "feat/old-work"]).unwrap();
+        std::fs::write(p.join("b.txt"), "kept\n").unwrap();
+        run(p, &["add", "."]).unwrap();
+        run(p, &["commit", "-q", "-m", "old work"]).unwrap();
+        run(p, &["checkout", "-q", "main"]).unwrap();
+        let wt = checkout_worktree(p, "old-work", "feat/old-work").unwrap();
+        assert_eq!(wt.branch, "feat/old-work");
+        assert_eq!(current_branch(Path::new(&wt.path)).as_deref(), Some("feat/old-work"));
+        assert_eq!(std::fs::read_to_string(Path::new(&wt.path).join("b.txt")).unwrap(), "kept\n");
+        assert!(checkout_worktree(p, "nothing", "no-such-branch").is_err());
+        assert!(checkout_worktree(p, "bad", "--force").is_err());
+        let again = checkout_worktree(p, "old-work-2", "feat/old-work").unwrap_err().to_string();
+        assert!(again.contains("already checked out in another folder"), "{again}");
     }
 
     #[test]

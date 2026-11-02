@@ -171,6 +171,16 @@ export function remoteWorkers(answer: WorkClaimsAnswer | null, receivedAt: numbe
   return out;
 }
 
+/**
+ * Another of the reader's machines, by the name it sent. Before #686 a Mac
+ * opened from Finder or the Dock sent "This Mac", which says the opposite
+ * here, so that is no name; a Mac on an older version still sends it.
+ */
+function machineLabel(label: string | null | undefined): string {
+  const name = label?.trim();
+  return name && name.toLowerCase() !== "this mac" ? name : "another machine";
+}
+
 function remoteWorker(claim: WorkClaim, offset: number, now: number): IssueWorker | null {
   const state = workState(claim.state);
   const lastActive = claim.lastActiveAt + offset;
@@ -191,7 +201,7 @@ function remoteWorker(claim: WorkClaim, offset: number, now: number): IssueWorke
     place,
     you,
     person: you ? "You" : claim.person.name,
-    machine: place === "machine" ? (claim.device?.label ?? "another machine") : null,
+    machine: place === "machine" ? machineLabel(claim.device?.label) : null,
     cloud: claim.cloud,
     title: claim.title,
     branch: claim.branch ?? null,
@@ -459,6 +469,8 @@ export function unavailableText(answer: WorkClaimsAnswer | null, hasCloud = fals
       return `Sign in to see work on your other machines and your team’s. ${showing}`;
     case "offline":
       return `Shared work status is unavailable offline. ${showing}`;
+    case "unsupported":
+      return `Shared work status is unavailable: your account service has not reported support for it. ${showing}`;
     default:
       return `Shared work status is unavailable. ${showing}`;
   }
@@ -473,7 +485,10 @@ export function useWorkClaims(projectPath: string | null | undefined, provider: 
   const [read, setRead] = useState<{ answer: WorkClaimsAnswer | null; receivedAt: number; of: string }>({ answer: null, receivedAt: 0, of: "" });
   const urls = useMemo(() => [...new Set(issueUrls)].sort(), [issueUrls]);
   const urlsKey = urls.join("\n");
-  const of = `${accountScope}\n${projectPath}\n${provider}\n${urlsKey}`;
+  const { status } = useAccount();
+  // Also fences title-bar readers and capability-only account announcements.
+  const accountKey = JSON.stringify([accountScope, status.state, status.context?.account, status.workClaims]);
+  const of = `${accountKey}\n${projectPath}\n${provider}\n${urlsKey}`;
   const asking = useRef(0);
   useEffect(() => {
     if (!projectPath || urls.length === 0) return;
@@ -497,7 +512,7 @@ export function useWorkClaims(projectPath: string | null | undefined, provider: 
       document.removeEventListener("visibilitychange", visible);
     };
     // `urls` is named by `urlsKey`.
-  }, [projectPath, provider, urlsKey, refreshKey, every, accountScope]);
+  }, [projectPath, provider, urlsKey, refreshKey, every, accountKey]);
   return read.of === of ? read : { answer: null, receivedAt: 0 };
 }
 

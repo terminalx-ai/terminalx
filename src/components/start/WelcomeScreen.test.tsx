@@ -6,10 +6,10 @@ import { WelcomeScreen } from "./WelcomeScreen";
 import { EmptyView } from "./EmptyView";
 
 const mocks = vi.hoisted(() => ({
-  selectSession: vi.fn(), openLocalProject: vi.fn(), name: "TerminalX Dev", sessions: [] as { id: string }[],
+  openNewSession: vi.fn(), openLocalProject: vi.fn(), name: "TerminalX Dev", sessions: [] as { id: string }[],
 }));
 vi.mock("@tauri-apps/api/app", () => ({ getName: async () => mocks.name }));
-vi.mock("@/lib/sessions", () => ({ selectSession: mocks.selectSession, useSessionStore: () => ({ sessions: mocks.sessions }) }));
+vi.mock("@/lib/sessions", () => ({ openNewSession: mocks.openNewSession, useSessionStore: () => ({ sessions: mocks.sessions }) }));
 vi.mock("@/lib/projectStart", () => ({ openLocalProject: mocks.openLocalProject }));
 
 beforeEach(() => { mocks.sessions = []; mocks.openLocalProject.mockResolvedValue(null); setPrefs({ shortcuts: {} }); });
@@ -29,7 +29,7 @@ it("opens the existing project and new-session flows in keyboard order", async (
   await act(async () => fireEvent.click(buttons[0]));
   expect(mocks.openLocalProject).toHaveBeenCalled();
   fireEvent.click(buttons[1]);
-  expect(mocks.selectSession).toHaveBeenCalledWith(null);
+  expect(mocks.openNewSession).toHaveBeenCalled();
 });
 
 it("reacts to remapped and unbound shortcuts, including floating chat", async () => {

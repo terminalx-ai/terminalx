@@ -242,8 +242,10 @@ Releases serves one document to everyone and ignores the header; a feed
 hosted somewhere that reads headers could serve a different document per
 channel.
 
-The check only ever happens when the reader presses "Check for updates" in
-Settings → About. Nothing runs on launch or on a timer.
+Release builds check shortly after launch and every four hours. Readers can
+also check manually in Settings → About. An available update appears in the
+sidebar and a dismissible notice; installation requires Update and relaunch.
+Development builds skip the background checks.
 
 ## The cloud runtime (`terminalx-serve`)
 

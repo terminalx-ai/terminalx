@@ -1,11 +1,12 @@
 import "@testing-library/dom";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { TabEntry } from "@/types/session";
 import { accessibilityPress, mouseClick } from "@/test/press";
+import { useComposerSend } from "@/lib/composerSends";
 import { openPermissionModes, permissionEntry } from "@/test/permissionMenu";
 
 const { dragDropListener, invoke, openDialog } = vi.hoisted(() => ({ dragDropListener: vi.fn(), invoke: vi.fn(), openDialog: vi.fn() }));
@@ -20,7 +21,7 @@ vi.mock("@/components/chat/Dictation", () => ({
   DictationStatus: () => null,
   // Only what the composer hands it: whether dictating into this composer is off.
   MicButton: ({ disabled }: { disabled?: boolean }) => (disabled === undefined ? null : <button aria-label="Dictate" disabled={disabled} />),
-  useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationInto: () => ({ dictating: false, toggle: vi.fn(), prepareSend: vi.fn(() => vi.fn()) }),
   useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
@@ -1087,4 +1088,100 @@ describe("autocorrect in the composer (#525)", () => {
     act(() => setPrefs({ autocorrect: false }));
     expect(correctionsOf(box)).toEqual({ spellcheck: "false", autocorrect: "off", autocapitalize: "off" });
   });
+});
+
+// #637: hold the delivery promise independently of any agent response.
+// #727: the message leaves the composer as Send is pressed; the chat draws it as sending.
+describe("pending send acknowledgment", () => {
+  it.each(["click", "keyboard"])("hands the message on at once from a %s, and submits once until acceptance", async (action) => {
+    let accept!: () => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));
+    render(<TestComposer onSend={onSend} />);
+    const pending = renderHook(() => useComposerSend(tab.id));
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "hello" } });
+    if (action === "click") fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    else fireEvent.keyDown(field, { key: "Enter" });
+    expect(field.value).toBe("");
+    expect(pending.result.current.pending?.message).toEqual({ text: "hello", images: [], pressedAt: expect.any(Number), afterSeq: 0 });
+    expect(screen.getByRole("button", { name: "Sending" }).hasAttribute("disabled")).toBe(true);
+    // The next one can be written meanwhile, and goes once this one is in.
+    fireEvent.change(field, { target: { value: "next" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledExactlyOnceWith("hello", []);
+    expect(field.value).toBe("next");
+    await act(async () => accept());
+    expect(pending.result.current.pending).toBeNull();
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
+    expect(field.value).toBe("next");
+  });
+
+  it.each(["next draft", "", "hello"])("preserves edits ending in %j after acceptance", async (next) => {
+    let accept!: () => void;
+    render(<TestComposer onSend={() => new Promise<void>((resolve) => { accept = resolve; })} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.change(field, { target: { value: "intermediate edit" } });
+    fireEvent.change(field, { target: { value: next } });
+    await act(async () => accept());
+    expect((field as HTMLTextAreaElement).value).toBe(next);
+  });
+
+  it.each([
+    ["", "hello"],
+    ["next", "hello\n\nnext"],
+    ["hello, again", "hello, again"],
+  ])("puts a refused message back without resending it, typed meanwhile %j", async (typed, back) => {
+    let refuse!: (error: Error) => void;
+    const onSend = vi.fn(() => new Promise<void>((_, reject) => { refuse = reject; }));
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    if (typed) fireEvent.change(field, { target: { value: typed } });
+    await act(async () => refuse(new Error("delivery uncertain")));
+    expect(field.value).toBe(back);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
+  });
+});
+
+it("sets an image aside while it is sent, and puts the very same image back when the send is refused", async () => {
+  let refuse!: (error: Error) => void;
+  openDialog.mockResolvedValueOnce(["/tmp/first.png"]);
+  invoke.mockImplementation(async () => ({ name: "first.png", mediaType: "image/png", data: "AQID" }));
+  const onSend = vi.fn()
+    .mockImplementationOnce(() => new Promise<void>((_, reject) => { refuse = reject; }))
+    .mockImplementationOnce(async () => {});
+  render(<TestComposer onSend={onSend} />);
+  fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+  await screen.findByAltText("first.png");
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(screen.queryByAltText("first.png")).toBeNull();
+  await act(async () => refuse(new Error("delivery uncertain")));
+  expect(screen.getByAltText("first.png")).toBeTruthy();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
+  const [first, again] = (onSend.mock.calls as unknown as [string, object[]][]).map(([, images]) => images);
+  expect(again[0]).toBe(first[0]);
+  expect(screen.queryByAltText("first.png")).toBeNull();
+});
+
+it("retains an image added while an earlier image is being sent", async () => {
+  let accept!: () => void;
+  let imageId = 0;
+  vi.mocked(crypto.randomUUID).mockImplementation(() => `image-${++imageId}` as ReturnType<typeof crypto.randomUUID>);
+  openDialog.mockResolvedValueOnce(["/tmp/first.png"]).mockResolvedValueOnce(["/tmp/next.png"]);
+  invoke.mockImplementation(async (_command, { path }) => ({ name: path.endsWith("first.png") ? "first.png" : "next.png", mediaType: "image/png", data: "AQID" }));
+  const onSend = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));
+  render(<TestComposer onSend={onSend} />);
+  fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+  await screen.findByAltText("first.png");
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+  await screen.findByAltText("next.png");
+  await act(async () => accept());
+  expect(screen.queryByAltText("first.png")).toBeNull();
+  expect(screen.getByAltText("next.png")).toBeTruthy();
+  expect(onSend).toHaveBeenCalledExactlyOnceWith("", [{ name: "first.png", mediaType: "image/png", data: "AQID" }]);
 });

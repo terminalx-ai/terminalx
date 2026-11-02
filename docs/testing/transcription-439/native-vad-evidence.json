@@ -1,0 +1,373 @@
+[
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-results-v2.jsonl",
+    "sizeBytes": 1922453,
+    "sha256": "43f2428d119169da96d39694b9d8835c30c5822fe899e25a56143de46575cba1"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-onnx-results.jsonl",
+    "sizeBytes": 2016149,
+    "sha256": "96b70711f067a1e482cb1bb72d9e8e94c066358f02969a21e6d18c60e6530ec2"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-parity.json",
+    "sizeBytes": 91998,
+    "sha256": "fa6a7bbcf4424694a7911fccf26bfec75ed57c38eacef772ea0a9390247eea84"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-build.log",
+    "sizeBytes": 1918,
+    "sha256": "40da97c3f400feec32b6d7dfa5cea38cef9dd5e796256ec31a7384b3c1e21782"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-build-v2.log",
+    "sizeBytes": 255,
+    "sha256": "d7f0d3a191e2166605ba51158386c182df3cf1d2873e720bccb4c7f069cd4eeb"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-fetch.log",
+    "sizeBytes": 35,
+    "sha256": "2f30d20445458abdfcaa5f84dce46cff7111cb7c8fc70fcf8df561207ec1d7b6"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-prepare.log",
+    "sizeBytes": 552,
+    "sha256": "de776c58843516b9ce96f7c0707dfa90cd541f542ec36718697967770f76f19c"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-prepare-v2.log",
+    "sizeBytes": 40,
+    "sha256": "edca57ebb46a9d47c55e75a7a34ddcbe6d4c1fdf9a3e5b80dd3db191648857f5"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-run.log",
+    "sizeBytes": 153,
+    "sha256": "4c7e6f4b5312ea2ebdc97bc0c6e6ca90fb09d3fbdaf1f73543bfb925cb25842e"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-run-v2.log",
+    "sizeBytes": 13984,
+    "sha256": "4056396b40d5502d896193c821cd8b9be4b3fc0065e701bbdf122c90c093b363"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-onnx.log",
+    "sizeBytes": 984,
+    "sha256": "7d343b0c906067f97f3a7d4e5ff4014f7421c4c00aaa3def2fbf97883618c73c"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-onnx-v2.log",
+    "sizeBytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-inputs-v2/manifest.json",
+    "sizeBytes": 42394,
+    "sha256": "195968451448158073db355e2284c07d8f5f72af4b645b480ce4648287820a39"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-inputs-v2/labels.json",
+    "sizeBytes": 99141,
+    "sha256": "700a6fedc43568a34e63b5e349ff819c412e49ecf28dbbce96aec4d94a046eeb"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/native-vad-target/release/tx439-native-vad-probe",
+    "sizeBytes": 3614416,
+    "sha256": "bcaee55b1b41ff6de7bad5091311415b05b40b33182f65248b142136d5f749d9",
+    "preservedPath": "/tmp/tx439-kmesvcjt/native-vad-probe-portable"
+  },
+  {
+    "path": "/Users/pareshdudhat/code/ai/terminalx/terminalx/.raccoon/worktrees/gh-439-offline-dictation-context/src-tauri/target/debug/tx439-detector-adapter",
+    "sizeBytes": 3181928,
+    "sha256": "432dad05058d12060621b34980378582f53e1e3a06ac36cf1845be9d49829493"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-boundary-build.log",
+    "sizeBytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-boundary-run.log",
+    "sizeBytes": 446,
+    "sha256": "19b3b98a2e28cf5fa5fc3da8014fa3c06eda2fcefcd238427e47b14a15eef5f9"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-boundary-test",
+    "sizeBytes": 1637992,
+    "sha256": "3111b56d77aa5a11cec0c4011fe56b1b13d331690b33e7a0352f00b4fd5acef2"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-build-v2.log",
+    "sizeBytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-build.log",
+    "sizeBytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-parity-v2.json",
+    "sizeBytes": 91994,
+    "sha256": "e2e87475b4f492f585182e4723693e282b6e53b629b4d604843df0474f66ca5c"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-prototype-v2.dylib",
+    "sizeBytes": 1498072,
+    "sha256": "22f74ccde06df5ba73627dcdb82d0a9512f765ac37d49d50d88700ad48e3a3af"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-prototype.dylib",
+    "sizeBytes": 1498072,
+    "sha256": "5ba4fcc5f4b1ae85f4f4d56f599cf8707975782a7227885c39225fff732da516"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-results-v2.jsonl",
+    "sizeBytes": 2016196,
+    "sha256": "c15c58571dcfe27a82d526f354dad0cc02c43cf3cabc3fb5b525e99ddbb495e8"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-results.jsonl",
+    "sizeBytes": 474340,
+    "sha256": "1fdc3e355cbe905c26f5203e5356b5d1a781007e32534cc22bc6ea3077e650bf"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-run-v2.log",
+    "sizeBytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-run.log",
+    "sizeBytes": 2474,
+    "sha256": "e774556289cc1da03c960c9a9cecc8982cc1789344fa57652432737ba217f1a3"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-clippy.log",
+    "sizeBytes": 736,
+    "sha256": "faa6aa8042d06d475d69d6f8e7c6113cc8279ebc74880d9671d4ad1e78ee6534"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-parity.json",
+    "sizeBytes": 91976,
+    "sha256": "c7197275c363cad29891523703debfe1a0a3515018eab3428167b1688aac8f78"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-results.jsonl",
+    "sizeBytes": 1922389,
+    "sha256": "3924a8b28492092f7dc03db00fa5fb72fd92f3461a669eca0e04bc225d1e6b7c"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-run.log",
+    "sizeBytes": 431,
+    "sha256": "9efc38dc589370d716b84bf12c1e7aa4d42152812f76a628dfc74d125e8d91ee"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-test-v2.log",
+    "sizeBytes": 1262,
+    "sha256": "a14c0995af9b3fe508e3b6e322ce682525a150f208676c947d0e19d0f4eebac8"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-test.log",
+    "sizeBytes": 1786,
+    "sha256": "5796694729db172eb4ac64958ec1eb6bef648aa5437ed0cdfe8a69a884832a36"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/canary-180m-flash-0.2.3.err",
+    "sizeBytes": 2987,
+    "sha256": "d5e083d7a3156ccf28918ebf814788d6f21ac9ba675e4ea5233a6ee905b99304"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/canary-180m-flash-0.2.3.out",
+    "sizeBytes": 2419,
+    "sha256": "ce275388396dae9bd3eef321d742d60ba77265b2a8d4903d3ba2efa08cb4c9ba"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/canary-180m-flash-0.4.1.err",
+    "sizeBytes": 2863,
+    "sha256": "698ba6692d3f979f6815e6f647c33e0ef6a920e1733fac285118ea50c7425fb6"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/canary-180m-flash-0.4.1.out",
+    "sizeBytes": 2421,
+    "sha256": "1aaec44dbee30ea0e26a8031c6a62ebb46351611e604495a5699de63705c4833"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/manifest.json",
+    "sizeBytes": 12696,
+    "sha256": "862b8846cac2fff08af23eb2c92e015eed7a2fbcf4884bcb52c8d923294153f3"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/nemotron-3.5-asr-streaming-0.6b-0.2.3.err",
+    "sizeBytes": 3308,
+    "sha256": "490329ca3d53cf6a0c8e48852e2304a3ed82586cd2f9853c84a2c7731439af70"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/nemotron-3.5-asr-streaming-0.6b-0.2.3.out",
+    "sizeBytes": 2389,
+    "sha256": "c52d8d79c54a87893974e5af5a937d89e705ec2f70800e1287ceeda21be63d02"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/nemotron-3.5-asr-streaming-0.6b-0.4.1.err",
+    "sizeBytes": 3472,
+    "sha256": "7ea06dee768363717279505e21e33908a45bf4e138fc9a67cec8b321fd7301af"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/nemotron-3.5-asr-streaming-0.6b-0.4.1.out",
+    "sizeBytes": 2393,
+    "sha256": "ff3fcdf737a178e0946c0ce1f48a87d1d8d957a0b1060c77929e8bb9cd2f9118"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/parakeet-unified-en-0.6b-0.2.3.err",
+    "sizeBytes": 3292,
+    "sha256": "65e28919ed4ee6c2c13469945b33c0854221449e59bddf33d6455a2b471ceb37"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/parakeet-unified-en-0.6b-0.2.3.out",
+    "sizeBytes": 2375,
+    "sha256": "1ec476a90934f5cf512b87d157bf36233487fd9ffa7e655b63e51462f34e063c"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/parakeet-unified-en-0.6b-0.4.1.err",
+    "sizeBytes": 3454,
+    "sha256": "0e323dc8e4d4d21cae755a64b740eb20d28437c2c19c1aaaf8f23b6c8adaa245"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/parakeet-unified-en-0.6b-0.4.1.out",
+    "sizeBytes": 2375,
+    "sha256": "d63cb79449d905ba9ecc2da55b13c835db4cf1eb4a3c7820321d467d74128b20"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/runs.json",
+    "sizeBytes": 1269,
+    "sha256": "99091e3f326fd07711e88052634ff9a53445194ccadf0ae2fdd1388828c8ca13"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-large-v3-turbo-0.2.3.err",
+    "sizeBytes": 993,
+    "sha256": "c5a3b1719eebca2495cdced1d0737494c29be0045ad64ed7c87e25f80672fd35"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-large-v3-turbo-0.2.3.out",
+    "sizeBytes": 3126,
+    "sha256": "8c76f66f78b0d226fd3c00481aa9e97173f8f5fcfa9227b2a8ca2409aad83784"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-large-v3-turbo-0.4.1.err",
+    "sizeBytes": 889,
+    "sha256": "4dd3c4cfa848f6cf4ccef1e85c4a4184142ac2ecc709d3dd16361fdb1ad08097"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-large-v3-turbo-0.4.1.out",
+    "sizeBytes": 3126,
+    "sha256": "f2c17e0cf5651bf96c19d36337b56a546d18d2fe969fb23d51ed74c8fdc0e007"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-small-0.2.3.err",
+    "sizeBytes": 993,
+    "sha256": "c5a3b1719eebca2495cdced1d0737494c29be0045ad64ed7c87e25f80672fd35"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-small-0.2.3.out",
+    "sizeBytes": 3075,
+    "sha256": "7fede554a412a4c92ce34a4b816b69536a669c041cfc85c3c0cc6cf13c20bda9"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-small-0.4.1.err",
+    "sizeBytes": 889,
+    "sha256": "a7879bf0edca9ead169a59996f8df81410939a0d686455c7047386e1a68ba023"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility/whisper-small-0.4.1.out",
+    "sizeBytes": 3083,
+    "sha256": "95b2341ab6d17b03354127a19aafe1845d2835dde38fc8771cb6ccba162ecaff"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/canary-180m-flash-0.4.1.err",
+    "sizeBytes": 2863,
+    "sha256": "698ba6692d3f979f6815e6f647c33e0ef6a920e1733fac285118ea50c7425fb6"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/canary-180m-flash-0.4.1.out",
+    "sizeBytes": 2419,
+    "sha256": "ce275388396dae9bd3eef321d742d60ba77265b2a8d4903d3ba2efa08cb4c9ba"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/manifest.json",
+    "sizeBytes": 12703,
+    "sha256": "8959ecacafe52f9c37a3d4924e93a453138f09a234c133b66e461369f3924b15"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/nemotron-3.5-asr-streaming-0.6b-0.4.1.err",
+    "sizeBytes": 3473,
+    "sha256": "bbd1eb7b2b5298f0cc716b72287f3f1de9c80e0d483c0be04ec655efddbf103e"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/nemotron-3.5-asr-streaming-0.6b-0.4.1.out",
+    "sizeBytes": 2389,
+    "sha256": "c52d8d79c54a87893974e5af5a937d89e705ec2f70800e1287ceeda21be63d02"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/parakeet-unified-en-0.6b-0.4.1.err",
+    "sizeBytes": 3454,
+    "sha256": "21eed91022017b815e073be182baebc1bb93f6623c0a75d1c873468c3709b261"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/parakeet-unified-en-0.6b-0.4.1.out",
+    "sizeBytes": 2375,
+    "sha256": "d63cb79449d905ba9ecc2da55b13c835db4cf1eb4a3c7820321d467d74128b20"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/runs.json",
+    "sizeBytes": 644,
+    "sha256": "8d59a406fbca534868a62583e7f633fb22c477e7890d6c6f275048d8bf5336b6"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/whisper-large-v3-turbo-0.4.1.err",
+    "sizeBytes": 889,
+    "sha256": "4dd3c4cfa848f6cf4ccef1e85c4a4184142ac2ecc709d3dd16361fdb1ad08097"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/whisper-large-v3-turbo-0.4.1.out",
+    "sizeBytes": 3126,
+    "sha256": "8c76f66f78b0d226fd3c00481aa9e97173f8f5fcfa9227b2a8ca2409aad83784"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/whisper-small-0.4.1.err",
+    "sizeBytes": 889,
+    "sha256": "a7879bf0edca9ead169a59996f8df81410939a0d686455c7047386e1a68ba023"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native/whisper-small-0.4.1.out",
+    "sizeBytes": 3073,
+    "sha256": "fca3f64c63a546dc0907a3ed1eddd61a81317721a54d8c7f52c297f22a1ce536"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native.csv",
+    "sizeBytes": 11170,
+    "sha256": "1343c0a5428e82b3587c1e5373f552e5a17949abd5c958761c4826f8fa56597d"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility-native.log",
+    "sizeBytes": 526,
+    "sha256": "54fa3d083b9c0eacb903d6ea05cb6f66e41b8f7e3de56b384fe0e541b70423a8"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility.csv",
+    "sizeBytes": 11182,
+    "sha256": "83cf0bda48278b2e09deeffd488f53654756af7d1e9fc405c2777fe0f99979fa"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/runtime-compatibility.log",
+    "sizeBytes": 1036,
+    "sha256": "50a9117bc719ed15ed447d1c33a6cfb3663fc6422046c362712c716d6d3bdf82"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-clippy-v2.log",
+    "sizeBytes": 267,
+    "sha256": "98faf2a0997a48e1a5b92e4bfd40c6afbc279663bc5870e24ea1d23833df14a6"
+  },
+  {
+    "path": "/tmp/tx439-kmesvcjt/ggml-vad-rust-test-v3.log",
+    "sizeBytes": 979,
+    "sha256": "98ce9779d1ac76f50fd52630468f5202f85ccbb3f3c0e0acf12a9b0c9a68ff7c"
+  }
+]

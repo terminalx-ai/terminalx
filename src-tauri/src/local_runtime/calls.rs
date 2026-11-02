@@ -46,6 +46,8 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 if !crate::pty::is_shell_id(id) { bail!("shell pane id must name its session"); }
                 let session = crate::pty::shell_session(id).context("session is required")?;
                 crate::store::index::get(session)?;
+                // No shell opens in a session or workspace on its way out.
+                crate::issue_pipeline::admission::open(session, None)?;
                 let (cols, rows) = size()?;
                 let cwd = string(&params, "cwd")?;
                 terminals.spawn(sink.clone(), id, crate::pty::PaneSpec { cwd, cols, rows, command: params["command"].as_str(), env: &[] })?;
@@ -57,7 +59,9 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 let data = string(&params, "data")?;
                 if data.len() > 1024 * 1024 { bail!("terminal input is too large"); }
                 let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
-                manager.mobile.desktop_input(id, || terminals.write(id, &bytes))?;
+                // Queued, not written here: a program that is not reading
+                // must hold up neither this request nor the pane's gate (#661).
+                manager.typing.send(&manager.mobile, terminals, id, &bytes)?;
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
@@ -109,6 +113,8 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let tab = string(&params, "tabId")?;
     let value = match method {
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
+        // `opened`: only shown, which does not start an agent nobody is about to use.
+        "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
         "ensureStarted" => { manager.ensure_started(session, tab)?; Value::Null }
         "events" => serde_json::to_value(manager.load_events(session, tab)?)?,
         "eventsOpen" => serde_json::to_value(manager.history_downloads.open(session, tab, || manager.load_events(session, tab))?)?,
@@ -118,9 +124,13 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "pane" => serde_json::to_value(manager.pane_of(session, tab))?,
         "queued" => serde_json::to_value(manager.queued(session, tab))?,
         "sendConfirmed" => serde_json::to_value(manager.send_confirmed(session, tab, string(&params, "text")?.into())?)?,
+        "resendUnsent" => serde_json::to_value(manager.resend_unsent(session, tab)?)?,
+        "resendMessage" => serde_json::to_value(manager.resend_message(session, tab, params["seq"].as_u64().context("seq is required")?)?)?,
+        "submitWaiting" => json!(manager.submit_waiting(session, tab, params["seq"].as_u64().context("seq is required")?)?),
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
-        "send" => serde_json::to_value(manager.send(session, tab, string(&params, "text")?.into(),
-            serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?)?)?,
+        "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
+            serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64())?)?,
+        "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }
         "interrupt" => json!(manager.interrupt(session, tab)?),
         "stop" => { manager.stop(session, tab)?; Value::Null }
         "closeTab" => { manager.close_tab(session, tab)?; Value::Null }
@@ -133,6 +143,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
         "markRead" => { manager.mark_read(session, tab)?; Value::Null }
         "handoff" => serde_json::to_value(manager.handoff(session, tab)?)?,
+        "toTerminal" => { manager.codex_stdio_to_terminal(session, tab)?; Value::Null }
         _ => bail!("unsupported local session operation"),
     };
     Ok(value)

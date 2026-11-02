@@ -359,6 +359,152 @@ fn an_issue_is_created_with_assignees_and_labels() {
     assert_eq!(create_with(&mut none().api(), &session, REPO, &crowded).unwrap_err().kind, IssueOpErrorKind::Invalid);
 }
 
+/// What the project's remote still names: the repository before it was renamed to [`REPO`].
+const OLD_NAME: &str = "acme/gadgets";
+const ORIGIN: &str = "git@github.com:acme/gadgets.git";
+
+/// `GET repos/{asked}`, as GitHub answers it once the redirect is followed:
+/// the recorded repository, named `name`.
+fn repository_read(asked: &str, name: &str) -> Value {
+    let mut repository = reply("comments", 1);
+    repository["full_name"] = json!(name);
+    call("GET", &format!("repos/{asked}"), None, repository)
+}
+
+/// A write GitHub answers with a redirect, which `gh` doesn't follow.
+fn redirected(method: &str, path: &str, body: Value) -> Value {
+    json!({"method": method, "path": path, "body": body, "error": "moved"})
+}
+
+fn no_origin() -> Option<String> {
+    panic!("the origin is read only when GitHub redirects a write")
+}
+
+fn steps(names: &[&str]) -> Vec<Value> {
+    names.iter().flat_map(|name| recording()["steps"][name].as_array().unwrap().clone()).collect()
+}
+
+#[test]
+fn a_write_to_a_renamed_repository_goes_to_its_current_name() {
+    let session = session();
+    let input = IssueCreate {
+        title: "[TerminalX test] IM-1 create check — ignore".into(),
+        description: "Created by the IM-1 live check; closed as not planned right away.".into(),
+        assignees: vec!["sam".into()],
+        labels: vec!["question".into()],
+        ..IssueCreate::default()
+    };
+    // The old name is read once; the labels and the create go to the name GitHub answers with.
+    let mut calls = vec![repository_read(OLD_NAME, REPO)];
+    calls.extend(steps(&["options", "create"]));
+    let mut replay = Replay::of(calls);
+    let created = write_with(&mut replay.api(), &session, OLD_NAME, no_origin, |api, repo| create_with(api, &session, repo, &input)).unwrap();
+    replay.done();
+    assert_eq!((created.issue.identifier.as_str(), created.repo.as_deref()), ("#530", Some(REPO)));
+
+    // Kept for the session, whatever the case: status, comment, assign and label go straight there.
+    let mut replay = Replay::step("create_close");
+    write_with(&mut replay.api(), &session, "Acme/Gadgets", no_origin, |api, repo| set_state_with(api, repo, "530", &StateChange::Close { reason: CloseReason::NotPlanned })).unwrap();
+    replay.done();
+    let mut replay = Replay::step("comment_add");
+    write_with(&mut replay.api(), &session, OLD_NAME, no_origin, |api, repo| comment_add_with(api, repo, SANDBOX, "[TerminalX test] IM-1 live check comment — will be deleted")).unwrap();
+    replay.done();
+    let mut replay = Replay::step("assignees_me");
+    write_with(&mut replay.api(), &session, OLD_NAME, no_origin, |api, repo| set_assignees_with(api, repo, SANDBOX, &["@sam".into()])).unwrap();
+    replay.done();
+    let mut replay = Replay::step("labels_set");
+    write_with(&mut replay.api(), &session, OLD_NAME, no_origin, |api, repo| set_labels_with(api, &session, repo, SANDBOX, &["Documentation".into(), "question".into()])).unwrap();
+    replay.done();
+
+    // Any other failure is the write's own: no second read, and the name stays known.
+    let mut replay = Replay::of(vec![json!({"method": "GET", "path": "repos/acme/widgets/issues/527", "error": "network"})]);
+    assert_eq!(write_with(&mut replay.api(), &session, OLD_NAME, no_origin, |api, repo| set_title_with(api, repo, SANDBOX, "T")).unwrap_err().kind, IssueOpErrorKind::Network);
+    replay.done();
+    // A repository GitHub can't find stops the write before it is sent.
+    let mut replay = Replay::of(vec![json!({"method": "GET", "path": "repos/acme/gone", "error": "not_found"})]);
+    assert_eq!(write_with(&mut replay.api(), &session, "acme/gone", no_origin, |api, repo| set_title_with(api, repo, SANDBOX, "T")).unwrap_err().kind, IssueOpErrorKind::NotFound);
+    replay.done();
+}
+
+#[test]
+fn reading_the_comments_learns_the_current_name_too() {
+    let session = session();
+    // Reads go to the old name: `gh` follows the redirect for them.
+    let mut replay = Replay::of(vec![
+        call("GET", "repos/acme/gadgets/issues/527", None, reply("details", 0)),
+        call("GET", "user", None, reply("comments", 0)),
+        repository_read(OLD_NAME, REPO),
+        call("GET", "repos/acme/gadgets/issues/527/comments?per_page=50&page=1", None, reply("comments", 2)),
+    ]);
+    comments_with(&mut replay.api(), &session, OLD_NAME, SANDBOX, None).unwrap();
+    replay.done();
+    let mut replay = Replay::step("title_set");
+    write_with(&mut replay.api(), &session, OLD_NAME, no_origin, |api, repo| set_title_with(api, repo, SANDBOX, "[TerminalX test] issue-management sandbox — ignore (title edit check)")).unwrap();
+    replay.done();
+}
+
+#[test]
+fn a_write_github_still_redirects_says_where_the_repository_is_now() {
+    let session = session();
+    // Renamed again after its name was read: the write is refused, nothing changes.
+    let renamed_again = || Replay::of(vec![repository_read(OLD_NAME, REPO), issue_read(527), redirected("PATCH", "repos/acme/widgets/issues/527", json!({"title": "T"})), repository_read(OLD_NAME, "acme/sprockets")]);
+    let mut replay = renamed_again();
+    let error = write_with(&mut replay.api(), &session, OLD_NAME, || Some(ORIGIN.into()), |api, repo| set_title_with(api, repo, SANDBOX, "T")).unwrap_err();
+    replay.done();
+    assert_eq!(error.kind, IssueOpErrorKind::Moved);
+    assert_eq!(error.message, "GitHub now names this repository acme/sprockets, so nothing was changed. Point the project at it with git remote set-url origin git@github.com:acme/sprockets.git, then try again.");
+    // Trying again goes to the name GitHub gave, with no read of it.
+    let issue = reply("details", 0);
+    let mut replay = Replay::of(vec![call("GET", "repos/acme/sprockets/issues/527", None, issue.clone()), call("PATCH", "repos/acme/sprockets/issues/527", Some(json!({"title": "T"})), issue)]);
+    write_with(&mut replay.api(), &session, OLD_NAME, no_origin, |api, repo| set_title_with(api, repo, SANDBOX, "T")).unwrap();
+    replay.done();
+
+    // No command for an origin the name didn't come from, or none (a cloud project).
+    for origin in [None, Some("git@github.com:someone/else.git"), Some("https://gitlab.com/acme/gadgets.git")] {
+        let mut replay = renamed_again();
+        let error = write_with(&mut replay.api(), &self::session(), OLD_NAME, || origin.map(String::from), |api, repo| set_title_with(api, repo, SANDBOX, "T")).unwrap_err();
+        replay.done();
+        assert_eq!(error.message, "GitHub now names this repository acme/sprockets, so nothing was changed. Try again.", "{origin:?}");
+    }
+
+    // Redirected while the repository's name stands: something else moved, like a transferred issue.
+    let mut replay = Replay::of(vec![repository_read(REPO, REPO), issue_read(527), redirected("PATCH", "repos/acme/widgets/issues/527", json!({"title": "T"})), repository_read(REPO, REPO)]);
+    let error = write_with(&mut replay.api(), &self::session(), REPO, no_origin, |api, repo| set_title_with(api, repo, SANDBOX, "T")).unwrap_err();
+    replay.done();
+    assert_eq!(error, IssueOpError::new(IssueOpErrorKind::Moved, Provider::Github));
+}
+
+/// This repository's name before it was renamed (#699). GitHub still
+/// redirects it to the current one.
+const LIVE_OLD_NAME: &str = "terminalx-ai/raccoon";
+
+/// Live, opt-in (`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test live_renamed -- --ignored --nocapture`):
+/// a create sent to this repository by its old name, with the real `gh`
+/// login. It sends no title, so GitHub refuses it once it reaches the
+/// repository, and nothing is created.
+#[test]
+#[ignore]
+fn live_renamed_repository_writes_reach_it() {
+    if std::env::var("TERMINALX_LIVE_ISSUE_SANDBOX").as_deref() != Ok("1") {
+        return;
+    }
+    let cwd = std::env::temp_dir();
+    let untitled = json!({});
+    // Sent to the old name: GitHub redirects it, and `gh` doesn't follow a write.
+    let sent_as_before = gh_api(&cwd, "POST", &format!("repos/{LIVE_OLD_NAME}/issues"), Some(&untitled)).unwrap_err();
+    assert_eq!(sent_as_before.kind, IssueOpErrorKind::Moved);
+    // Sent to the current name, it reaches the repository.
+    let mut written_to = String::new();
+    let reached = write_with(&mut gh(&cwd), &session(), LIVE_OLD_NAME, || None, |api, repo| {
+        written_to = repo.to_string();
+        api("POST", &format!("repos/{repo}/issues"), Some(&untitled))
+    })
+    .unwrap_err();
+    println!("{LIVE_OLD_NAME} is {written_to} now; the write reached it: {}", reached.message);
+    assert!(!written_to.eq_ignore_ascii_case(LIVE_OLD_NAME));
+    assert_eq!(reached.kind, IssueOpErrorKind::Invalid);
+}
+
 #[test]
 fn the_recording_holds_no_personal_data_or_secret() {
     let text = include_str!("../fixtures/github_issue_ops.json");

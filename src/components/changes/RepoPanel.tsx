@@ -39,12 +39,13 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [commits, setCommits] = useState<CommitInfo[]>([]);
+  /** Null until the history is read: an empty list is then really empty. */
+  const [commits, setCommits] = useState<CommitInfo[] | null>(null);
   const [openCommit, setOpenCommit] = useState<string | null>(null);
 
   useEffect(() => {
     setStatus(null);
-    setCommits([]);
+    setCommits(null);
     setSelected(null);
     setNotice(null);
     setError(null);
@@ -62,7 +63,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   useEffect(() => {
     if (!active || sub !== "history") return;
     let cancelled = false;
-    source.logCommits(null, 60).then((next) => !cancelled && setCommits(next)).catch(() => {});
+    source.logCommits(null, 60).then((next) => !cancelled && setCommits(next)).catch(() => !cancelled && setCommits([]));
     return () => {
       cancelled = true;
     };
@@ -133,7 +134,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             {status?.operation ? `A ${status.operation} is in progress. ` : ""}
             {status?.conflicted?.length
               ? `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
-              : "Finish or abort it in the workspace's terminal."}
+              : status?.operation === "merge" && source.unfinishedMerge
+                ? "Commit or abort it from Changes, which shows what the merge brought in."
+                : "Finish or abort it in the workspace's terminal."}
           </span>
         </div>
       )}
@@ -165,7 +168,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 <Button
                   size="sm"
                   variant="accent"
-                  disabled={!message.trim() || !files.length || !!busy}
+                  // Committing stages everything, conflict markers included.
+                  disabled={!message.trim() || !files.length || !!busy || !!status?.conflicted?.length}
                   onClick={commit}
                 >
                   {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} Commit
@@ -223,8 +227,12 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 
       {sub === "history" && (
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-1.5 py-1">
-          {commits.length === 0 && <div className="px-2 py-4 text-xs text-muted-foreground">No commits yet.</div>}
-          {commits.map((c) => (
+          {commits === null ? (
+            <div role="status" className="flex items-center gap-1.5 px-2 py-4 text-xs text-faint"><Loader2 className="size-3 animate-spin" /> Loading history…</div>
+          ) : commits.length === 0 ? (
+            <div className="px-2 py-4 text-xs text-muted-foreground">No commits yet.</div>
+          ) : null}
+          {(commits ?? []).map((c) => (
             <CommitRow key={c.sha} source={source} commit={c} open={openCommit === c.sha} onToggle={() => setOpenCommit((o) => (o === c.sha ? null : c.sha))} />
           ))}
         </div>

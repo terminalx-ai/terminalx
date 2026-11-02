@@ -415,6 +415,8 @@ export function createRefusalMessage(code: string): string {
       return "The price shown is out of date. Close this and start again to see the current one.";
     case "cloud_workspace_agent_credential_required":
       return "The organization has no login for that agent.";
+    case "cloud_agent_credential_reauth_required":
+      return "The organization's login for that agent was revoked or expired. Sign it in again in Agent logins.";
     case "cloud_workspace_repository_not_accessible":
     case "cloud_workspace_repository_credential_required":
       return "TerminalX cannot reach one of those repositories with the organization's GitHub access.";

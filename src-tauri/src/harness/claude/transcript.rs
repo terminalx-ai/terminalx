@@ -376,6 +376,15 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         if v["isVisibleInTranscriptOnly"].as_bool() == Some(true) {
             return None;
         }
+        // Written for the record only: a resumed session's report on a
+        // background task the session before left running. The CLI shows the
+        // line and starts no turn, so a turn opened here would never close.
+        if v["queueTranscriptOnly"].as_bool() == Some(true) {
+            if let Some(summary) = tagged(&text_of(&v["message"]["content"]), "summary").filter(|summary| !summary.is_empty()) {
+                out.push(Payload::Status { text: summary.into() });
+            }
+            return None;
+        }
         // Ahead of the meta check: a scheduled prompt is written as meta, and
         // dropping it left the CLI working on a turn the tab thought was over.
         if let Some(started_by) = started_by(&v) {
@@ -413,7 +422,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             });
         }
         "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
-            out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false });
+            out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false, detail: None });
         }
         "assistant" => decode_assistant(&v, out),
         "system" if v["subtype"] == "api_error" => {
@@ -422,7 +431,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             // retrying; only the last attempt is the request failing.
             match (v["retryAttempt"].as_u64(), v["maxRetries"].as_u64()) {
                 (Some(attempt), Some(max_retries)) => out.push(Payload::ApiRetry { attempt: attempt as u32, max_retries: max_retries as u32, reason: Some(message.into()) }),
-                _ => out.push(Payload::Error { message: message.into(), fatal: false }),
+                _ => out.push(Payload::Error { message: message.into(), fatal: false, detail: None }),
             }
         }
         "system" if v["subtype"] == "compact_boundary" => {
@@ -463,7 +472,7 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
         return;
     }
     if interruption(&prompt) {
-        out.push(Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false });
+        out.push(Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None });
         return;
     }
     if command_output(&prompt) {
@@ -902,6 +911,20 @@ mod tests {
         // A notification with no summary still says what it is.
         let (p, _) = started_by_of(&started_record("task_notification", origin, "<task-notification><task-id>b1</task-id></task-notification>"));
         assert_eq!(said(&p), ["A background task reported in"]);
+    }
+
+    /// A resumed session reports a background task the one before left
+    /// running, for the record only (`queueTranscriptOnly`): the CLI shows the
+    /// line and stays idle. Opening a turn for it left the tab "Working" with
+    /// nothing running.
+    #[test]
+    fn a_report_written_for_the_record_only_is_a_line_and_opens_no_turn() {
+        let content = r#"<task-notification>\n<task-id>bn60s1dtw</task-id>\n<status>stopped</status>\n<summary>Background shell command didn't finish before the previous session ended</summary>\n</task-notification>"#;
+        let origin = r#","origin":{"kind":"task-notification"},"queueSkipAttachments":true,"queueTranscriptOnly":true"#;
+        let line = started_record("task_notification", origin, content).replace(r#""turnOrigin":"task_notification","#, "");
+        let (p, mark) = started_by_of(&line);
+        assert_eq!(mark, None);
+        assert!(matches!(p.as_slice(), [Payload::Status { text }] if text == "Background shell command didn't finish before the previous session ended"), "{p:?}");
     }
 
     #[test]

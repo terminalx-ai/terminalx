@@ -569,7 +569,7 @@ fn live_acp_escape_stops_the_turn_and_the_queued_message_goes_on() {
 
 /// The rig's session shared, with one admitted driver: what a guest's
 /// requests go through, over the same tab and the same pane.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 fn shared_with_a_driver(rig: &Rig) -> crate::pairing::PairingManager {
     use crate::local_sharing::{tests as fixtures, Role};
     let harness = match rig.cli().0 {
@@ -598,7 +598,7 @@ fn shared_with_a_driver(rig: &Rig) -> crate::pairing::PairingManager {
 }
 
 /// One request from the guest, as the share's router takes it.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 fn guest_asks(pairing: &crate::pairing::PairingManager, rig: &Rig, method: &str, extra: serde_json::Value) -> Result<serde_json::Value> {
     // The share lets a guest write four times a second; the test is not about that.
     if let Some(guest) = rig.manager.sharing.lock().unwrap().sessions.get_mut(SESSION).and_then(|share| share.guests.get_mut("connection")) {
@@ -637,7 +637,7 @@ fn share_activity(rig: &Rig) -> Vec<String> {
 /// and put "Session closed" over the host's tab. It is Escape, as the host's
 /// own Stop is, and what guests queued behind the turn is kept. The stop that
 /// ends the process is the one that says `force`.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn a_guest_s_stop_is_an_escape_and_only_a_forced_one_ends_the_process() {
     for kind in BOTH {
@@ -667,8 +667,54 @@ fn a_guest_s_stop_is_an_escape_and_only_a_forced_one_ends_the_process() {
     }
 }
 
+/// An agent being stopped for sitting idle holds a guest's prompt as it
+/// holds the host's (#727): what a guest queued stays queued until the stop
+/// is done and then goes, and a guest's prompt waits for it and goes, where
+/// one was dropped and the other refused.
+#[cfg(all(unix, feature = "desktop"))]
+#[test]
+fn a_guest_s_queued_and_new_prompts_wait_out_an_idle_stop() {
+    use crate::issue_pipeline::admission::{fence, Kind, Scope};
+    let parking = || fence(Kind::Hold, [Scope::Tab(SESSION.into(), TAB.into())]);
+    let rig = with_a_cli_that_names_its_first_byte(CliKind::Claude);
+    let pairing = shared_with_a_driver(&rig);
+    rig.compose("start", 0);
+    rig.cli_takes("start");
+    assert_eq!(guest_asks(&pairing, &rig, "session.send", json!({ "text": "then the docs" })).unwrap()["queued"], true);
+    rig.interrupt();
+    assert_eq!(rig.status(), TabStatus::Idle);
+
+    let stopping = parking();
+    pairing.drain_share_queue(SESSION).unwrap();
+    assert_eq!(waiting_from_guests(&rig), ["then the docs"]);
+    assert_eq!(share_activity(&rig), ["queued"]);
+    drop(stopping);
+    pairing.drain_share_queue(SESSION).unwrap();
+    assert!(waiting_from_guests(&rig).is_empty());
+    assert_eq!(share_activity(&rig), ["queued", "prompt"]);
+    assert_eq!(rig.told().last().map(String::as_str), Some("user: then the docs"));
+
+    rig.cli_takes("then the docs");
+    rig.interrupt();
+    let stopping = parking();
+    if let Some(guest) = rig.manager.sharing.lock().unwrap().sessions.get_mut(SESSION).and_then(|share| share.guests.get_mut("connection")) {
+        guest.last_write = 0;
+    }
+    std::thread::scope(|scope| {
+        let pairing = &pairing;
+        let asked = scope.spawn(move || pairing.share_rpc(SESSION, "connection", "session.send", json!({ "sessionId": SESSION, "tabId": TAB, "text": "and the tests" })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!asked.is_finished(), "a guest's prompt waits for the stop");
+        drop(stopping);
+        let answer = asked.join().unwrap().expect("sent once the stop is done");
+        assert_ne!(answer["queued"], true);
+    });
+    assert_eq!(rig.told().last().map(String::as_str), Some("user: and the tests"));
+    assert_eq!(share_activity(&rig), ["queued", "prompt", "prompt"]);
+}
+
 /// With nothing running a guest's Stop types nothing and ends nothing.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn a_guest_s_stop_with_nothing_running_does_nothing() {
     let rig = with_a_cli_that_names_its_first_byte(CliKind::Claude);
@@ -688,7 +734,7 @@ fn a_guest_s_stop_with_nothing_running_does_nothing() {
 /// steering prompt. It is Escape and then that prompt as the next message:
 /// kept on the host, ahead of what was already waiting, and sent to the same
 /// process once the interrupted turn has ended.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn a_guest_s_steer_interrupts_and_goes_next_to_the_same_process() {
     for kind in BOTH {

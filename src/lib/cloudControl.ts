@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
-import { getTabLog } from "@/lib/agentEvents";
-import { WORKSPACE_STOPPED } from "@/lib/cloudAgentApi";
+import { getTabLog, lastSeq } from "@/lib/agentEvents";
+import { WORKSPACE_STOPPED, type AgentTabInfo, type OutboxEntry } from "@/lib/cloudAgentApi";
 import { getCloudAgents, loadCloudAgents, refreshFromCheckpoint, relistCloudCheckpoints, syncLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
 import {
   applyCloudSnapshot,
@@ -23,7 +23,7 @@ import { failureMessage, PHASES, phaseOf, RUNTIME_NOT_PICKED_UP, runtimeNotPicke
 import { getCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import { archiving, deletion, isArchived, isOpen, lifecycleErrorMessage, machineRunning, resuming, stopping } from "@/lib/cloudLifecycle";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudIssueOutcome, type CloudSessionRequest } from "@/lib/cloudNewSession";
-import { cloudPipelineSettings } from "@/lib/issuePipeline";
+import { cloudPipelineSettings, pipelineLaunchDefaults } from "@/lib/issuePipeline";
 import { issueWorktreeName } from "@/lib/issueSession";
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
@@ -31,7 +31,9 @@ import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
 import { DEFAULT_PERMISSION_MODE, pickerMode } from "@/lib/models";
+import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
+import type { AgentEvent, RecoveryKind } from "@/types/events";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
 import type { RuntimeIssueRef, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
@@ -80,8 +82,8 @@ export const CLOUD_CONTROL_VERSION = 1;
  * - `"both"` (what ships; the owner's decision of 2026-10-04): every
  *   cloud command is refused until the person turns on "Let agents in local
  *   sessions control cloud workspaces" in Settings (off by default), AND
- *   with it on, each command that would start billed compute or stop a
- *   workspace still asks the person in the window first.
+ *   with it on, routine compute is authorized without another dialog.
+ *   Stopping a workspace still asks the person in the window first.
  * - `"setting"`: the setting alone. Once on, the commands run as asked.
  * - `"confirm"`: the question in the window alone, with no setting.
  *
@@ -112,6 +114,7 @@ export const CLOUD_CONTROL_SETTING = "Let agents in local sessions control cloud
  * refusal here, should a request arrive by another way.
  */
 let settingOn = false;
+let settingRevision = 0;
 const settingListeners = new Set<() => void>();
 
 export function cloudControlEnabled(): boolean {
@@ -125,6 +128,8 @@ export function subscribeCloudControlSetting(listener: () => void): () => void {
 
 /** What native code says the switch is (read at boot, and after it was changed). Also how tests set it. */
 export function setCloudControlEnabled(enabled: boolean) {
+  // Even a repeated disable invalidates reads started before this update.
+  settingRevision++;
   if (settingOn === enabled) return;
   settingOn = enabled;
   for (const listener of [...settingListeners]) listener();
@@ -132,8 +137,12 @@ export function setCloudControlEnabled(enabled: boolean) {
 
 /** Read the switch from native code. Off when it cannot be read. */
 export async function loadCloudControlSetting(): Promise<boolean> {
-  setCloudControlEnabled(await cloudControlNative.setting().catch(() => false));
-  return settingOn;
+  const revision = ++settingRevision;
+  const enabled = (await cloudControlNative.setting().catch(() => false)) === true;
+  // A newer refresh or local update owns the cache. This stale read grants nothing.
+  if (revision !== settingRevision) return false;
+  setCloudControlEnabled(enabled);
+  return enabled;
 }
 
 /** Why a question was not answered with "yes", in words the person or a caller can act on. */
@@ -176,18 +185,16 @@ function allowed(): boolean {
   return policy === "confirm" || settingOn;
 }
 
-function assertAllowed() {
-  if (!allowed()) {
+function assertAllowed(granted = allowed()) {
+  if (!granted) {
     throw new CloudControlError("cloud_control_disabled", "Cloud workspaces cannot be used from the command line until that is turned on in TerminalX.", `In TerminalX, open Settings and turn on "${CLOUD_CONTROL_SETTING}".`);
   }
 }
 
 /**
- * Ask the person before something that starts billed compute or stops a
- * workspace. The question says it came from the command line. Having turned
- * the setting on is not an answer to it: the setting lets agents ask, the
- * person still decides each time. Only under `"setting"` alone is nothing
- * asked.
+ * Confirm a disruptive stop, or a request under the legacy confirm-only
+ * policy. Routine compute under the shipped policy uses the Settings grant.
+ * Only under `"setting"` alone is nothing asked.
  *
  * The question is a native dialog (`cloud_control_confirm`): only its agree
  * button agrees (Refuse, a dismissal and no answer within 40 seconds all
@@ -210,6 +217,17 @@ async function confirmInWindow(what: string, okLabel: string): Promise<void> {
   if (answer === "accepted") return;
   const { message, recovery } = refusalWords(answer);
   throw new CloudControlError("declined", message, recovery);
+}
+
+/** The Settings grant authorizes routine compute, including billed wake/create. */
+async function authorizeRoutineCompute(what: string, okLabel: string): Promise<void> {
+  assertAllowed();
+  if (policy === "confirm") {
+    await confirmInWindow(what, okLabel);
+    return;
+  }
+  // Native dispatch precedes catalog/quote I/O; recheck the grant at admission.
+  assertAllowed((await loadCloudControlSetting()) && allowed());
 }
 export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume"] as const;
 
@@ -532,6 +550,14 @@ function assertReadable(you: WorkspaceYou | null) {
 const sent = new Map<string, Promise<unknown>>();
 const SENT_KEYS = 500;
 
+/**
+ * The last message `send` put in for each tab (by workspace key and tab), and
+ * how far this desktop knew the tab before it: a status `wait` reads that was
+ * reported up to that seq is from before the message (#668).
+ */
+const lastSends = new Map<string, { commandId: string; seq: number }>();
+const sendKey = (workspaceKey: string, tabId: string) => `${workspaceKey}\0${tabId}`;
+
 function send(params: Params): Promise<unknown> {
   const key = text(params, "idempotencyKey");
   if (!key) return sendOnce(params);
@@ -605,11 +631,13 @@ async function sendOnce(params: Params) {
   const gate = tabGate(you, lease, Date.now(), tab.info.status === "in_progress" || tab.info.status === "waiting", personName);
   if (gate.blocked) throw forbidden(gate.blocked);
   const before = new Set(getCloudAgents(scope).outbox.map((entry) => entry.clientCommandId));
+  const known = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
+  const knew = Math.max(known.info.lastSeq, lastSeq(target.sessionId, tab.tabId));
   // The message resumes a stopped workspace, which starts billing its compute.
-  const confirmResume = () => confirmInWindow(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
+  const confirmResume = () => authorizeRoutineCompute(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
   if (getAccount().status.agentCommandWake === true) {
     // The server decides (PRO-89): posted so that it starts nothing, a workspace that is not running refuses it
-    // and keeps nothing. No list read a moment ago can be stale. Only then is the person asked, and it is sent again.
+    // and keeps nothing. No list read a moment ago can be stale. Then the Settings grant authorizes the wake.
     try {
       await backend.send(tab.tabId, message, [], { wake: false });
     } catch (error) {
@@ -625,6 +653,12 @@ async function sendOnce(params: Params) {
     await backend.send(tab.tabId, message, []);
   }
   const entry = getCloudAgents(scope).outbox.find((candidate) => !before.has(candidate.clientCommandId) && candidate.tabId === tab.tabId);
+  if (entry) {
+    const key = sendKey(target.workspaceKey, tab.tabId);
+    lastSends.delete(key);
+    lastSends.set(key, { commandId: entry.clientCommandId, seq: knew });
+    if (lastSends.size > SENT_KEYS) lastSends.delete(lastSends.keys().next().value!);
+  }
   return {
     session: target.key,
     tabId: tab.tabId,
@@ -663,16 +697,71 @@ const WAIT_CHECKPOINT_MS = 5_000;
  */
 export const WAIT_CHUNK_SECONDS = 30;
 
-function settledReason(tab: CloudAgentTab, pending: boolean): "permission" | "stop" | "stopped" | null {
-  if (tab.info.status === "waiting" || tab.info.pendingPermissions.length > 0) return "permission";
-  // A message still on its way is work to wait for.
-  if (pending) return null;
-  if (tab.info.status === "completed") return "stop";
-  if (tab.info.status === "idle") return "stopped";
+/**
+ * Why a wait ends: someone can answer the agent, it stopped on an error, it
+ * asks in its own terminal, its turn ended, or nothing runs.
+ */
+export type WaitSettled = { reason: "permission" } | { reason: "recovery"; recovery: RecoveryKind } | { reason: "terminal" } | { reason: "stop" } | { reason: "stopped" };
+
+/** The newest committed event of a transcript, as `lastSeq` finds its seq. */
+function lastCommitted(events: AgentEvent[]): AgentEvent | undefined {
+  for (let i = events.length - 1; i >= 0; i--) if (events[i].payload.type !== "delta") return events[i];
+  return undefined;
+}
+
+/** A prompt typed in, an error taken back, or a request decided: the turn has moved on from any wait before it. */
+function movesOn(event: AgentEvent | undefined): boolean {
+  const p = event?.payload;
+  return (p?.type === "user_message" && !p.queued) || (p?.type === "recovery" && !p.kind) || p?.type === "permission_decided";
+}
+
+/**
+ * Why a wait ends now (#668), or null while the tab works or a message to it
+ * is on its way.
+ *
+ * - "permission" only for what someone can answer: a request the runtime
+ *   holds. It holds an agent's questions as it holds its permission requests.
+ * - A waiting tab is judged only on a transcript that has reached its status:
+ *   one behind may tell of an earlier stop. An error the agent stopped on is
+ *   "recovery", with its kind (the window's "Needs attention"); no error and
+ *   nothing to answer is a prompt only the agent's own terminal shows.
+ * - A status the transcript has moved past (a tab that streams here hears of
+ *   an event before the status that follows it) ends nothing.
+ */
+export function settledReason(info: Pick<AgentTabInfo, "status" | "pendingPermissions" | "followUps" | "lastSeq">, events: AgentEvent[], onItsWay: boolean): WaitSettled | null {
+  if (info.pendingPermissions.length > 0) return { reason: "permission" };
+  // A message still on its way is work to wait for: what the tab says now is from before it.
+  if (onItsWay) return null;
+  const last = lastCommitted(events);
+  const seen = last?.seq ?? 0;
+  if (info.status === "waiting") {
+    if (seen < info.lastSeq) return null;
+    const recovery = recoveryFromEvents(events);
+    if (recovery) return { reason: "recovery", recovery };
+    return seen === info.lastSeq && !movesOn(last) ? { reason: "terminal" } : null;
+  }
+  // A follow-up the runtime holds starts as soon as the turn ends, and a prompt after the status starts a turn of its own.
+  if (info.followUps.length > 0 || (last?.payload.type === "user_message" && !last.payload.queued)) return null;
+  if (info.status === "completed") return { reason: "stop" };
+  if (info.status === "idle") return { reason: "stopped" };
   return null;
 }
 
 const OUTBOX_PENDING = new Set(["unsent", "queued", "leased"]);
+
+/**
+ * Whether a message to the tab has not reached its agent yet, as this desktop
+ * sees it: still in the mailbox, or typed by the runtime after the status held
+ * here was reported. One the runtime holds as a follow-up is not: it goes when
+ * the turn allows, and the tab's own state says why it waits.
+ */
+function messageOnItsWay(tab: CloudAgentTab, outbox: OutboxEntry[], sent: { commandId: string; seq: number } | undefined): boolean {
+  if (outbox.some((entry) => entry.tabId === tab.tabId && OUTBOX_PENDING.has(entry.state))) return true;
+  if (!sent) return false;
+  const typed = outbox.some((entry) => entry.clientCommandId === sent.commandId && entry.state === "applied")
+    && !tab.info.followUps.some((followUp) => followUp.clientCommandId === sent.commandId);
+  return typed && tab.info.lastSeq <= sent.seq;
+}
 
 /** Until the tab needs someone or its turn ends. It follows the runtime while it runs and never wakes a stopped one. */
 async function wait(params: Params, sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now: () => number = Date.now) {
@@ -690,15 +779,19 @@ async function wait(params: Params, sleep: (ms: number) => Promise<void> = (ms) 
   try {
     for (;;) {
       const live = !!connectedCloudClient(target.workspaceKey);
-      // Connected, the runtime feeds the tab; only otherwise is the checkpoint read.
-      if (!live) await refreshFromCheckpoint(scope, tab.tabId).catch(() => undefined);
+      const known = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
+      // Connected, the runtime feeds the tab's status, and its transcript only while it streams here. The checkpoint is
+      // read when not connected, or for a waiting tab whose transcript is behind its status: why it waits is told there.
+      const behind = !known.live && known.info.status === "waiting" && known.info.lastSeq > lastSeq(target.sessionId, tab.tabId);
+      const checkpoint = !live || behind;
+      if (checkpoint) await refreshFromCheckpoint(scope, tab.tabId).catch(() => undefined);
       const snapshot = getCloudAgents(scope);
       const current = snapshot.tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
-      const pending = snapshot.outbox.some((entry) => entry.tabId === tab.tabId && OUTBOX_PENDING.has(entry.state));
-      const reason = settledReason(current, pending);
-      if (reason) return { session: target.key, tabId: tab.tabId, reason, status: current.info.status };
+      const onItsWay = messageOnItsWay(current, snapshot.outbox, lastSends.get(sendKey(target.workspaceKey, tab.tabId)));
+      const settled = settledReason(current.info, getTabLog(target.sessionId, tab.tabId).events, onItsWay);
+      if (settled) return { session: target.key, tabId: tab.tabId, ...settled, status: current.info.status };
       if (now() >= deadline) return { session: target.key, tabId: tab.tabId, reason: "timeout", status: current.info.status };
-      await sleep(Math.min(live ? WAIT_LIVE_MS : WAIT_CHECKPOINT_MS, Math.max(0, deadline - now())));
+      await sleep(Math.min(checkpoint ? WAIT_CHECKPOINT_MS : WAIT_LIVE_MS, Math.max(0, deadline - now())));
     }
   } finally {
     lease?.release();
@@ -748,8 +841,12 @@ async function sessionsCreate(params: Params) {
   };
   if (issue) {
     const settings = cloudPipelineSettings(project.key, prefs);
+    const pipeline = params.noPipeline !== true && settings.enabled;
     request.title = `${issue.identifier} ${issue.title}`.slice(0, 80);
-    request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline: params.noPipeline !== true && settings.enabled, settings };
+    request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline, settings };
+    // As the issue page starts one: the switches at the project's defaults for
+    // an issue, said outright so an older runtime does not take its own (#700).
+    if (pipeline) request.pipeline = pipelineLaunchDefaults(settings, true);
   }
   let outcome: CloudIssueOutcome | null = null;
   const plan = planCloudStart(project);
@@ -762,7 +859,7 @@ async function sessionsCreate(params: Params) {
       throw new CloudControlError("cloud_workspace_stopped", `The project's workspace ${workspace.name} is stopped. A new session there resumes it, which starts billing its compute.`, "Pass --wake to resume it for this session, or resume it first with terminalx cloud resume.");
     }
     const resumes = plan.kind === "wake" && down;
-    if (resumes) await confirmInWindow(`start a session in the stopped cloud workspace ${workspace.name}. That resumes it, which starts billing its compute.`, "Resume and start");
+    if (resumes) await authorizeRoutineCompute(`start a session in the stopped cloud workspace ${workspace.name}. That resumes it, which starts billing its compute.`, "Resume and start");
     let woke = resumes;
     let key: string;
     try {
@@ -775,7 +872,7 @@ async function sessionsCreate(params: Params) {
         },
         wakeIfStopped: async () => {
           if (params.wake !== true) return false;
-          await confirmInWindow(`start a session in the cloud workspace ${workspace.name}, which has stopped. That resumes it, which starts billing its compute.`, "Resume and start");
+          await authorizeRoutineCompute(`start a session in the cloud workspace ${workspace.name}, which has stopped. That resumes it, which starts billing its compute.`, "Resume and start");
           woke = true;
           return true;
         },
@@ -806,7 +903,7 @@ async function sessionsCreate(params: Params) {
       "Pass --confirm-spend to create it.",
     );
   }
-  await confirmInWindow(`create a new cloud workspace for ${project.fullName} on ${prepared.providerLabel}. Its compute is billed while it runs.`, "Create workspace");
+  await authorizeRoutineCompute(`create a new cloud workspace for ${project.fullName} on ${prepared.providerLabel}. Its compute is billed while it runs.`, "Create workspace");
   const idempotencyKey = text(params, "idempotencyKey");
   if (idempotencyKey) {
     prepared.pending.idempotencyKey = idempotencyKey;
@@ -912,7 +1009,7 @@ async function resume(params: Params, sleep: Sleep = pause, now: () => number = 
   if (item.workspace.state !== "suspended" || isOpen(item.latestOperation)) {
     throw new CloudControlError("cloud_workspace_not_stopped", `This workspace is ${deriveCloudActivity(item).label.toLowerCase()}; only a stopped one can be resumed.`, stopping(item) ? "Run the command again once it has stopped." : null);
   }
-  await confirmInWindow(`resume the cloud workspace ${item.workspace.name}, which starts billing its compute.`, "Resume workspace");
+  await authorizeRoutineCompute(`resume the cloud workspace ${item.workspace.name}, which starts billing its compute.`, "Resume workspace");
   // The one explicit wake: the same call as the menu's Resume.
   await resumeCloudWorkspace(item);
   void refreshCloudCatalog(target.orgId);

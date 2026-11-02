@@ -18,10 +18,11 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
+import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
@@ -31,6 +32,7 @@ import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } f
 import { TranscriptionInputSubmenu } from "./TranscriptionInputPicker";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
+import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
@@ -97,6 +99,7 @@ export type Handoff = { label: string; prompt: string } | { label: string; run: 
  */
 export function Composer({
   tab,
+  sendScope = tab.id,
   cwd,
   commands: givenCommands,
   files: givenFiles,
@@ -105,6 +108,7 @@ export function Composer({
   draft,
   onDraftChange,
   onSend,
+  sentAfter,
   history = NO_HISTORY,
   onStop,
   onSetModel,
@@ -128,6 +132,8 @@ export function Composer({
   autoFocus,
 }: {
   tab: TabEntry;
+  /** Stable backend/tab identity; pending sends survive view replacement. */
+  sendScope?: string;
   cwd?: string;
   /** Where the `/` list comes from when the tab does not run in `cwd` on this computer (a cloud tab: its runtime). */
   commands?: ComposerCommands | null;
@@ -139,6 +145,8 @@ export function Composer({
   draft: string;
   onDraftChange: (v: string) => void;
   onSend: (text: string, images: ImageInput[]) => Promise<void> | void;
+  /** The tab's newest event, read as Send is pressed: the sent message's own event comes after it (#727). */
+  sentAfter?: () => number;
   /** The messages already sent in this tab, oldest first, for Up and Down to recall (`sentMessages`). */
   history?: string[];
   onStop: () => void;
@@ -195,7 +203,17 @@ export function Composer({
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [highlight, setHighlight] = useState<{ list: string | null; row: number }>({ list: null, row: 0 });
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
+  const sending = !!useComposerSend(sendScope).pending;
+  // A send outlives its composer: one that fails after this one has gone puts its message back in the saved draft.
+  const latestDraft = useRef(draft);
+  latestDraft.current = draft;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   // The model and permission pickers open on a click and an accessibility press too.
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshPickerModels() });
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -283,7 +301,8 @@ export function Composer({
     };
   }, [commandSource]);
 
-  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
+  const dictationContext = useDictationContext(tab.id, cwd, remote, draft, caret);
+  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref, dictationContext);
   useDictationShortcuts(dictation, !!autoFocus);
   const keysOf = useShortcutKeycaps();
 
@@ -387,22 +406,37 @@ export function Composer({
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || sending || disabled) return;
-    setSending(true);
-    try {
-      await onSend(text, attach.images);
-    } catch {
-      // The owning tab renders the send error. Keep the draft and attachments
-      // here so the reader can retry without selecting them again.
-      return;
-    } finally {
-      setSending(false);
-    }
-    // Sending a recalled message gives back the draft that was set aside for it.
-    onDraftChange(recall.sent());
-    attach.clear();
+    if ((!text && !attachments.length) || disabled) return;
+    const previews = attachments.map((a) => ({ url: a.previewUrl, name: a.name }));
+    const operation = beginComposerSend(sendScope, { text, images: previews, pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
+    if (!operation) return;
+    // The message goes to the chat at once, drawn as sending, and the composer
+    // is free for the next one (#727): what was set aside to send a recalled
+    // message comes back, or nothing. Failing, the message comes back here.
+    const completeHistory = recall.captureSend();
+    // Bind this send's learnable correction before the draft is cleared.
+    const learnOnSuccess = dictation.prepareSend(text);
+    onDraftChange(completeHistory() ?? "");
+    const images = attach.setAside();
     ref.current?.focus({ preventScroll: true });
-  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange, recall.sent]);
+    try {
+      await onSend(text, images.images);
+    } catch (error) {
+      // Back in the composer; into the tab's saved draft once this one has gone.
+      if (mounted.current) {
+        const back = withReturned(latestDraft.current, text);
+        if (back !== latestDraft.current) onDraftChange(back);
+      } else returnToDraft(tab.id, text);
+      images.settle(false);
+      // Keep terminal failure with the same owner so a remounted tab sees it.
+      finishComposerSend(sendScope, operation, error);
+      return;
+    }
+    images.settle(true);
+    // Learning belongs to this accepted send even if a newer draft is visible.
+    learnOnSuccess();
+    finishComposerSend(sendScope, operation);
+  }, [draft, attachments, attach, disabled, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {
@@ -449,7 +483,7 @@ export function Composer({
   const runs = model ? aliasRuns(model, reportedModel) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   // A level the agent reported that this model's list does not carry is still the one in use.
-  const efforts = model?.efforts.length && tab.effort && !model.efforts.includes(tab.effort) ? [...model.efforts, tab.effort] : (model?.efforts ?? []);
+  const efforts = effortChoices(model, tab.effort);
   // The pickers show what the agent is running. A choice it has not confirmed yet is said beside them, not shown as made.
   const pendingNote = pendingSettingsNote(tab, models, busy);
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
@@ -626,7 +660,8 @@ export function Composer({
               </WithTooltip>
             )}
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
-            {busy && canStop && !draft.trim() && !attachments.length ? (
+            {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
+            {!sending && busy && canStop && !draft.trim() && !attachments.length ? (
               <WithTooltip label={stopMode === "force" ? "Stop session" : "Stop"} keys={keysOf(stopMode === "interrupt" ? "session.interrupt" : "session.stop")}>
                 <Button
                   size="icon-sm"
@@ -639,12 +674,13 @@ export function Composer({
                 </Button>
               </WithTooltip>
             ) : (
-              <WithTooltip label={busy ? "Queue" : "Send"} keys={keysOf("composer.send")}>
+              <WithTooltip label={sending ? "Sending…" : busy ? "Queue" : "Send"} keys={keysOf("composer.send")}>
                 <Button
                   size="icon-sm"
                   className={CORNER}
                   variant={draft.trim() || attachments.length ? "accent" : "secondary"}
-                  aria-label="Send"
+                  aria-label={sending ? "Sending" : "Send"}
+                  aria-busy={sending}
                   disabled={disabled || sending || (!draft.trim() && !attachments.length)}
                   onClick={() => void send()}
                 >

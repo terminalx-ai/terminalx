@@ -125,6 +125,14 @@ describe("who works on an issue", () => {
     expect(workers[2].machine).toBe(null);
   });
 
+  // #686: before the fix a Mac opened from Finder sent "This Mac", which reads as the reader's own here.
+  it("never names another of the reader's Macs 'This Mac'", () => {
+    const mine = (id: string, label: string | undefined) => claim({ person: { name: "Me", you: true }, device: label === undefined ? undefined : { id, label }, sessionId: `s-${id}`, title: id });
+    const workers = remoteWorkers(answer([mine("a", "This Mac"), mine("b", " this mac "), mine("c", ""), mine("d", undefined), mine("e", "This Mac mini")]), NOW, NOW).get(K)!;
+    const byTitle = Object.fromEntries(workers.map((worker) => [worker.title, workerLabel(worker, NOW)]));
+    expect(byTitle).toEqual({ a: "You · on another machine", b: "You · on another machine", c: "You · on another machine", d: "You · on another machine", e: "You · on This Mac mini" });
+  });
+
   it("shows a teammate's cloud session once though each of their machines publishes it", () => {
     const cloud = { cloud: true, key: "same-session" };
     const workers = remoteWorkers(answer([claim({ ...cloud, since: NOW - 50 * MIN, lastActiveAt: NOW - 5 * MIN }), claim({ ...cloud, since: NOW - 40 * MIN, lastActiveAt: NOW - MIN }), claim({ key: "another-session" })]), NOW, NOW).get(K)!;

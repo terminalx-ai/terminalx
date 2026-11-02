@@ -155,4 +155,93 @@ describe("a compaction", () => {
     expect(screen.getByText(/Context compacted from 220k to 14k tokens/)).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  it("preserves reported zero and small counts and leaves missing counts absent", () => {
+    const view = render(<TurnBlock turn={compacted({ preTokens: 17, postTokens: 0 })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Context compacted from 17 to 0 tokens")).toBeDefined();
+    view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Context compacted")).toBeDefined();
+  });
+
+  it("renders stopped and uncertain work without claiming successful compaction", () => {
+    const lifecycle = { turnId: "turn", itemId: "item", generation: 1, retrying: false, state: "stopped", stoppedBy: "interrupted" };
+    const view = render(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined, lifecycle })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Compaction stopped: turn interrupted")).toBeDefined();
+    view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined, lifecycle: { ...lifecycle, state: "unknown" }, uncertain: true })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Compaction status unknown: could not save status")).toBeDefined();
+    expect(screen.queryByText(/Context compacted/)).toBeNull();
+  });
+});
+
+it("lists the files a finished turn changed, folding the rest, and hides them when turned off", () => {
+  setPrefs({ turnChanges: true, foldToolCalls: false });
+  const value = turn([]);
+  const edit = (path: string) => ({ kind: "tool", key: path, call: { callId: path, name: "Edit", toolType: "file_edit", input: { file_path: path }, edits: [{ path, kind: "update", oldText: "a", newText: "b\nc" }], result: { text: "" } } });
+  value.work = ["/repo/a.css", "/repo/b.html", "/repo/c.ts", "/repo/d.ts"].map(edit) as Turn["work"];
+  value.completed = { status: "ok", ts: "2026-10-03T00:00:01Z" };
+  const { rerender } = render(<TooltipProvider><TurnBlock turn={value} sessionId="s" cwd="/repo" stream={[]} working={false} /></TooltipProvider>);
+  const row = screen.getByTestId("turn-changes");
+  expect(row.textContent).toBe("a.css+2 −1b.html+2 −1+2 more+4 −2");
+  fireEvent.click(screen.getByText("+2 more"));
+  expect(screen.getByTestId("turn-changes").textContent).toContain("d.ts");
+  setPrefs({ turnChanges: false });
+  rerender(<TooltipProvider><TurnBlock turn={{ ...value }} sessionId="s" cwd="/repo" stream={[]} working={false} /></TooltipProvider>);
+  expect(screen.queryByTestId("turn-changes")).toBeNull();
+});
+
+// #722: what became of a message on its way to the agent.
+describe("a message on its way to the agent", () => {
+  it("marks a dropped prompt as never answered and offers to send it again", () => {
+    const value = turn([]);
+    value.prompt!.replaced = true;
+    const onSendAgain = vi.fn();
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onSendAgain={onSendAgain} />);
+    expect(screen.getByTestId("prompt-replaced").textContent).toContain("Not answered");
+    fireEvent.click(screen.getByRole("button", { name: "Send again" }));
+    expect(onSendAgain).toHaveBeenCalledWith(1);
+    cleanup();
+    // Where it cannot be sent again (a cloud tab, a viewer), it still says so.
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByTestId("prompt-replaced")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
+  });
+
+  it("shows what the agent received once, with what was sent behind it", () => {
+    const value = turn([]);
+    value.prompt!.text = "so I want you to and same is happening";
+    value.prompt!.sent = "and same is happening";
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getAllByTestId("reader-message")).toHaveLength(1);
+    const changed = screen.getByTestId("prompt-changed");
+    expect(changed.textContent).toContain("Changed on the way");
+    expect(changed.querySelector("div")?.textContent).toBe("and same is happening");
+    expect(screen.queryByTestId("prompt-replaced")).toBeNull();
+  });
+
+  it("says why a queued message has not gone in, and offers no Send now meanwhile", () => {
+    const value = turn([]);
+    value.work = [{ kind: "queued", key: "q2", seq: 2, text: "and then lint", inputOccupied: true }];
+    render(<TooltipProvider><TurnBlock turn={value} sessionId="s" stream={[]} working onSendQueuedNow={vi.fn()} /></TooltipProvider>);
+    expect(screen.getByTestId("queued-message").textContent).toContain("and then lint");
+    expect(screen.getByTestId("input-occupied").textContent).toContain("input box already has text in it");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+  });
+});
+
+describe("a message stopped before it was typed (#722)", () => {
+  it("says it was never sent and offers it again, as a prompt or a queued message", () => {
+    const value = turn([]);
+    value.prompt!.withdrawn = true;
+    value.work = [{ kind: "queued", key: "q2", seq: 2, text: "and lint", withdrawn: true }];
+    const onSendAgain = vi.fn();
+    render(<TooltipProvider><TurnBlock turn={value} sessionId="s" stream={[]} working onSendQueuedNow={vi.fn()} onSendAgain={onSendAgain} /></TooltipProvider>);
+    const notes = screen.getAllByTestId("prompt-withdrawn");
+    expect(notes).toHaveLength(2);
+    expect(notes[0].textContent).toContain("Not sent");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    const again = screen.getAllByRole("button", { name: "Send again" });
+    fireEvent.click(again[0]);
+    fireEvent.click(again[1]);
+    expect(onSendAgain.mock.calls).toEqual([[1], [2]]);
+  });
 });

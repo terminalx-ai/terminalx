@@ -799,7 +799,7 @@ pub fn issue_prompt(template: &str, issue: &crate::issues::Issue) -> String {
 /// automation's own saved permission mode rather than the session store's
 /// default or whatever an interactive session last used.
 fn run_tab(automation: &Automation) -> crate::session_ops::NewTab {
-    crate::session_ops::NewTab {
+    crate::session_ops::NewTab { transport: Default::default(),
         harness: automation.harness.clone(),
         model: automation.model.clone(),
         effort: automation.effort.clone(),
@@ -851,6 +851,7 @@ fn start_run(
                 base_ref: automation.base_ref.clone(),
                 worktree_name,
                 on_main: false,
+                checkout_branch: None,
                 issue,
                 automation: Some(index::AutomationRef {
                     id: automation.id.clone(),

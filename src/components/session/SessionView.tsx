@@ -13,13 +13,14 @@ import { SessionIssueWork } from "@/components/issues/IssueWork";
 import { linkText } from "@/lib/issueWork";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { useShortcut } from "@/lib/hotkeys";
-import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 import { checkoutLabel, worktreeCheckout } from "@/lib/checkout";
 import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { TabView } from "./TabView";
+import { EmptySession } from "./EmptySession";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
@@ -108,6 +109,8 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       statusKey={session.tabs.map((item) => item.status).join(",")}
       settleSessionId={workspace ? session.id : undefined}
       workspace={workspace}
+      terminals
+      computer
     />
   );
 }
@@ -449,31 +452,34 @@ export function SessionView({
   const own = worktreeCheckout(session, store.workspaces);
   const movedTo = own && own.branch !== session.branch ? checkoutLabel(own) : null;
   // One action for local and cloud tabs, so a remapped shortcut switches either.
+  // A cloud tab's terminal is the runtime's, which also moves a native Codex tab there (#644).
+  const viewPlace = { remote: !local, toTerminal: local ? undefined : backend.toTerminal };
   useShortcut("session.toggleTerminalView", () => {
-    if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, { remote: !local });
+    if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, viewPlace);
   });
   const ed = useEditors();
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
 
-  // A local session with no agent opens a shell. A cloud one never opens
-  // anything by itself: that could wake a stopped workspace.
+  // Opening a session shows that session (#721). One with no tabs shows its
+  // own page (`EmptySession`): its closed tabs, a new tab, Reopen. It is
+  // never swapped for another session in the same folder, and nothing is
+  // opened in it that the reader did not ask for. Closing the main window's
+  // last tab returns to welcome. A cloud session never opens anything by
+  // itself either: that could wake a stopped workspace.
   //
-  // Opening an empty checkout still opens its shell. Closing the main
-  // window's last tab returns to welcome instead; do not start a shell while
-  // that navigation settles. The compact floating window keeps its fallback.
-  // An existing shell or page is never replaced when an agent tab closes.
+  // The compact floating window has no room for that page: a local session
+  // there with no agent opens a shell, on opening and when its last tab
+  // closes. An existing shell or page is never replaced when an agent tab closes.
   const shownKind = useRef(selectedKind);
   shownKind.current = selectedKind;
   const openedOn = useRef<string | null>(null);
   useEffect(() => {
     const opening = openedOn.current !== session.id;
     openedOn.current = session.id;
-    if (!local || session.tabs.length || shownKind.current === "browser" || shownKind.current === "terminal") return;
-    if (!opening && (!compact || shownKind.current)) return;
-    // A compact window has no panel to open.
-    if (!compact && !getPrefs().panelOpen) setPrefs({ panelOpen: true });
+    if (!compact || !local || session.tabs.length || shownKind.current === "browser" || shownKind.current === "terminal") return;
+    if (!opening && shownKind.current) return;
     void activateLatestTerminal(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
   }, [local, compact, session.id, session.cwd, session.tabs.length]);
 
@@ -705,7 +711,7 @@ export function SessionView({
                   aria-label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal}
                   aria-pressed={activeInTerminal}
                   disabled={switching}
-                  onClick={() => void toggleTabView(session, activeTab, { remote: !local })}
+                  onClick={() => void toggleTabView(session, activeTab, viewPlace)}
                   className={cn(activeInTerminal && "bg-veil-strong text-foreground")}
                 >
                   {activeInTerminal ? <MessageSquare /> : <Terminal />}
@@ -837,12 +843,16 @@ export function SessionView({
                   <BrowserView session={session} page={page} active={selected?.kind === "browser" && page.id === selected.id} />
                 </div>
               ))}
-              {!session.tabs.length && !shellPanes.length && !browserPages.length && !cloudTerminals.length && (
+              {/* A local session with no tabs of its own on screen has a page of its own; a cloud one says what state its workspace is in.
+                  A browser page belongs to the folder, so one another session there opened is listed in this row too, but it is
+                  shown only when picked: until then this session's page is, with its closed tabs (#721). */}
+              {!session.tabs.length && !shellPanes.length && !selected && !cloud && <EmptySession session={session} />}
+              {!session.tabs.length && !cloudTerminals.length && cloud && (
                 <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
-                  {cloud?.locked ? (
+                  {cloud.locked ? (
                     // No access (never shared, or removed): the lock pane replaces the whole session body.
                     <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
-                  ) : cloud ? (
+                  ) : (
                     // One state at a time: stopped, loading, or empty (with what this person can do about it).
                     cloud.asleep ? (
                       <>
@@ -862,11 +872,6 @@ export function SessionView({
                         </span>
                       </>
                     )
-                  ) : (
-                    <>
-                      <span>Workspace open</span>
-                      <span className="text-xs text-faint">Open a new terminal or add an agent tab.</span>
-                    </>
                   )}
                 </div>
               )}
@@ -892,6 +897,8 @@ export function SessionView({
             rootName={quick ? quickChatPlace(session) : (project?.name ?? "project")}
             settleSessionId={workspace ? session.id : undefined}
             workspace={workspace}
+            terminals
+            computer
           />
         ))}
       {cloud ? (

@@ -9,7 +9,8 @@ import type { Project, SessionEntry } from "@/types/session";
 
 /** Enable the same launch contract later, without interrupting an active turn. */
 export function SessionPipelineControls({ session, project, tabId, pipeline }: { session: SessionEntry; project?: Project; tabId?: string; pipeline?: IssuePipeline }) {
-  const launch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !tabId ? "Choose an agent conversation first." : undefined);
+  // Shown only while the session has no pipeline; one started from an issue offers the issue's defaults (#700).
+  const launch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !tabId ? "Choose an agent conversation first." : undefined, undefined, session.issue ? "issue" : "session");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const enable = async () => {

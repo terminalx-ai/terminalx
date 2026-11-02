@@ -6,6 +6,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { Toasts } from "@/components/ui/Toasts";
+import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { BypassDialog } from "@/components/session/BypassDialog";
@@ -140,6 +141,7 @@ export function FloatingShell() {
   return (
     <div data-app-shell data-floating-shell className="flex h-full w-full flex-col">
       <div className="pointer-events-none fixed bottom-3 right-3 z-(--z-toast) flex max-h-[calc(100dvh-1.5rem)] w-[320px] max-w-[calc(100vw-1.5rem)] flex-col gap-2">
+        <CloseUndoNotices />
         <Toasts />
       </div>
       <BypassDialog />

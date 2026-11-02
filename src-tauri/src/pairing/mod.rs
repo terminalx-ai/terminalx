@@ -8,11 +8,14 @@ mod crypto;
 mod diagnostics;
 mod direct;
 mod guest;
+mod host_poll;
 mod mobile;
 use crate::local_runtime::mobile::model;
 mod registry;
 mod relay;
+mod send_ids;
 pub(crate) mod sharing;
+mod wire;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -44,7 +47,7 @@ use self::model::{
     HostBindingPayload, HostMetadata, PairingCode, PairingOffer, PairingTransport, RelayStatus,
     CAPABILITY, OFFER_TTL_MS,
 };
-pub use self::model::{PairingConnectionMode, PairingStatus, RelayPhase};
+pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
@@ -183,8 +186,16 @@ impl PairingManager {
         let _ = self.sessions.set(sessions);
     }
 
+    /// A phone starting a session chooses from the models the desktop offers.
+    pub fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
+        self.mobile.attach_models(cache);
+    }
+
     pub(crate) fn attach_runtime(&self, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
         *self.runtime.lock().unwrap() = Some(runtime);
+        // What a phone may be offered is the attached runtime's (#730), and
+        // the connections the previous attachment admitted are done.
+        self.mobile.broadcast_capabilities_changed();
     }
 
     /// No desktop sharing mutex spans an RPC. Once attached, transport failure
@@ -447,44 +458,47 @@ impl PairingManager {
         }
     }
 
-    pub async fn set_host_name(&self, display_name: &str) -> Result<PairingStatus> {
-        let display_name = display_name.trim();
-        if display_name.is_empty()
-            || display_name.chars().count() > 80
-            || display_name.chars().any(char::is_control)
-        {
-            bail!("machine name must contain 1 to 80 visible characters");
+    /// Name this Mac for the user's other devices, or with `None` let it follow
+    /// the computer's own name again. Relay need not be on (#686); when this
+    /// Mac is bound, the account directory takes the name first, so a phone
+    /// never lists one it refused.
+    pub async fn set_host_name(&self, display_name: Option<&str>) -> Result<MachineName> {
+        let chosen = display_name.map(chosen_host_name).transpose()?;
+        let computer_name = tokio::task::spawn_blocking(recent_computer_name).await?;
+        let named = resolve_machine_name(chosen.clone(), None, computer_name);
+        let bound = self.inner.lock().unwrap().host.is_some();
+        let context = self.account_context();
+        let mirror = registry::load_account_mirror()?;
+        let binding = context.zip(mirror.clone()).filter(|(context, mirror)| bound && context.user_id == mirror.user_id);
+        if let Some((context, mirror)) = binding {
+            let keypair = self.host_key(false)?;
+            let payload = HostBindingPayload {
+                host_id: keypair.host_id(),
+                host_public_key_b64: keypair.public_key_b64(),
+                binding_generation: mirror.binding_generation,
+                display_name: named.name.clone(),
+                platform: "darwin".into(),
+                environment_kind: "native".into(),
+                capabilities: vec![CAPABILITY.into()],
+            };
+            tokio::task::spawn_blocking(move || cloud::register_host(&context, &payload)).await??;
         }
-        let context = self
-            .account_context()
-            .ok_or_else(|| anyhow!("sign in before changing this Mac’s name"))?;
-        let mut mirror = registry::load_account_mirror()?
-            .filter(|mirror| mirror.user_id == context.user_id)
-            .ok_or_else(|| anyhow!("host binding is not ready"))?;
-        let keypair = self.host_key(false)?;
-        let payload = HostBindingPayload {
-            host_id: keypair.host_id(),
-            host_public_key_b64: keypair.public_key_b64(),
-            binding_generation: mirror.binding_generation,
-            display_name: display_name.into(),
-            platform: "darwin".into(),
-            environment_kind: "native".into(),
-            capabilities: vec![CAPABILITY.into()],
-        };
-        let context_for_bind = context.clone();
-        let payload_for_bind = payload.clone();
-        tokio::task::spawn_blocking(move || {
-            cloud::register_host(&context_for_bind, &payload_for_bind)
-        })
-        .await??;
-        mirror.host_display_name = Some(display_name.into());
-        registry::save_account_mirror(&mirror)?;
+        let mut settings = crate::store::settings::load();
+        settings.machine_name = chosen;
+        crate::store::settings::save(&settings)?;
+        // The name is the Mac's now, whoever signs in. One an earlier version
+        // kept for an account must not come back when this one is cleared.
+        // Read again: sign-out may have advanced the binding fence meanwhile.
+        if let Some(mut mirror) = registry::load_account_mirror()?.filter(|mirror| mirror.host_display_name.is_some()) {
+            mirror.host_display_name = None;
+            registry::save_account_mirror(&mirror)?;
+        }
         if let Some(host) = self.inner.lock().unwrap().host.as_mut() {
-            host.display_name = display_name.into();
+            host.display_name = named.name.clone();
             host.last_seen_at = Some(Utc::now().to_rfc3339());
         }
         self.emit();
-        Ok(self.snapshot())
+        Ok(named)
     }
 
     pub(super) fn is_stopped(&self) -> bool {
@@ -512,14 +526,20 @@ impl PairingManager {
         self.host_key(false).or_else(|_| self.host_key(true)).ok().map(|keypair| keypair.host_id())
     }
 
-    /// This Mac's name as Settings → Account shows it to `user_id`.
+    /// This Mac's name as Settings → Account shows it to `user_id`, and as
+    /// their other devices see it.
     pub(crate) fn host_name(user_id: &str) -> String {
-        registry::load_account_mirror()
-            .ok()
-            .flatten()
-            .filter(|mirror| mirror.user_id == user_id)
-            .and_then(|mirror| mirror.host_display_name)
-            .unwrap_or_else(host_display_name)
+        Self::machine_name_for(Some(user_id)).name
+    }
+
+    /// This Mac's name as Settings → Account shows it to whoever is signed in.
+    pub fn machine_name(&self) -> MachineName {
+        Self::machine_name_for(self.account_context().map(|context| context.user_id).as_deref())
+    }
+
+    fn machine_name_for(user_id: Option<&str>) -> MachineName {
+        let saved = user_id.and_then(|user_id| saved_host_name(registry::load_account_mirror().ok().flatten().as_ref(), user_id));
+        resolve_machine_name(crate::store::settings::load().machine_name, saved, recent_computer_name())
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
@@ -626,16 +646,15 @@ impl PairingManager {
                 }
             })
             .unwrap_or(1);
-        let display_name = previous
-            .as_ref()
-            .filter(|mirror| mirror.user_id == context.user_id)
-            .and_then(|mirror| mirror.host_display_name.clone())
-            .unwrap_or_else(host_display_name);
+        // Only a name someone chose is kept here; the computer's own is read
+        // again each time, so a rename in System Settings reaches the directory (#686).
+        let saved = saved_host_name(previous.as_ref(), &context.user_id);
+        let display_name = resolve_machine_name(crate::store::settings::load().machine_name, saved.clone(), recent_computer_name()).name;
         let mirror = AccountMirror {
             user_id: context.user_id.clone(),
             email: context.email.clone(),
             display_name: context.display_name.clone(),
-            host_display_name: Some(display_name.clone()),
+            host_display_name: saved,
             binding_generation: generation,
         };
         if let Err(error) = registry::save_account_mirror(&mirror) {
@@ -679,96 +698,8 @@ impl PairingManager {
         self.emit();
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
-            manager.host_poll(epoch, context, relay, generation).await;
+            manager.host_poll(epoch, context.user_id, relay, generation).await;
         });
-    }
-
-    async fn host_poll(
-        self: Arc<Self>,
-        epoch: u64,
-        context: AccountContext,
-        relay: RelayLive,
-        generation: u64,
-    ) {
-        let host_id = relay.relay_host_id.clone();
-        let mut last_heartbeat = 0i64;
-        while self.is_epoch(epoch) && !self.is_stopped() {
-            let now = Utc::now().timestamp_millis();
-            let context_for_request = context.clone();
-            let host_for_request = host_id.clone();
-            let poll = tokio::task::spawn_blocking(move || -> Result<_> {
-                if now - last_heartbeat >= 30_000 {
-                    cloud::heartbeat(&context_for_request, &host_for_request, generation, "live")?;
-                }
-                let grants =
-                    cloud::pending_grants(&context_for_request, &host_for_request, generation)?;
-                let revocations = cloud::pending_revocations(
-                    &context_for_request,
-                    &host_for_request,
-                    generation,
-                )?;
-                Ok((grants, revocations))
-            })
-            .await;
-            match poll {
-                Ok(Ok((grants, revocations))) => {
-                    if now - last_heartbeat >= 30_000 {
-                        last_heartbeat = now;
-                        if let Some(host) = self.inner.lock().unwrap().host.as_mut() {
-                            host.last_seen_at = Some(Utc::now().to_rfc3339());
-                        }
-                    }
-                    for grant in grants {
-                        self.fulfill_grant(epoch, &context, &relay, generation, grant)
-                            .await;
-                    }
-                    for revocation in revocations {
-                        if revocation.user_id != context.user_id
-                            || revocation.host_id != host_id
-                            || revocation.binding_generation != generation
-                        {
-                            continue;
-                        }
-                        if let Ok(Some(device)) = self.registry.automatic_for_grant(
-                            &context.user_id, &revocation.client_installation_id, &revocation.grant_request_id,
-                        ) {
-                            if let Err(error) = self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device.id})) {
-                                // The failed fence disconnects the attachment before
-                                // the persisted credential is retired below.
-                                log::warn!("fence revoked mobile grant: {error:#}");
-                            }
-                        }
-                        if let Ok(Some(device)) = self.registry.revoke_automatic_grant(
-                            &context.user_id,
-                            &revocation.client_installation_id,
-                            &revocation.grant_request_id,
-                        ) {
-                            let _ = self.secrets.delete_device_token(&device.id);
-                            self.cancel_connections(&device.id);
-                            relay.revoke(device.id);
-                        }
-                        let context = context.clone();
-                        let host_id = host_id.clone();
-                        let revocation_id = revocation.revocation_id;
-                        let _ = tokio::task::spawn_blocking(move || {
-                            cloud::acknowledge_revocation(
-                                &context,
-                                &host_id,
-                                &revocation_id,
-                                generation,
-                            )
-                        })
-                        .await;
-                    }
-                    self.emit();
-                }
-                Ok(Err(error)) => {
-                    log::debug!("host binding poll failed: {error:#}");
-                }
-                Err(error) => log::warn!("host binding poll task failed: {error}"),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
     }
 
     async fn fulfill_grant(
@@ -948,6 +879,7 @@ impl PairingManager {
                                     direct_auth_id: Uuid::new_v4().simple().to_string(),
                                 },
                                 None,
+                                None,
                             )
                             .await
                     }
@@ -970,10 +902,14 @@ impl PairingManager {
         connection: ConnectionOpen,
     ) -> Result<()> {
         if keypair.host_id() != relay_host_id {
-            bail!("relay connection named a different host key");
+            return Err(anyhow!("relay connection named a different host key")
+                .context(diagnostics::Stage::PhoneAttach));
         }
         let expected_device = connection.relay_device_id.clone();
-        let socket = relay::open_data_socket(&cell_url, generation, &connection).await?;
+        let socket = relay::open_data_socket(&cell_url, generation, &connection)
+            .await
+            .context(diagnostics::Stage::PhoneAttach)?;
+        self.record_relay_diagnostic(diagnostics::Event::PhoneAttached, 0, None);
         // The plaintext relay hello is sent to the phone only. The host data
         // leg starts with the phone's E2EE hello after its one auth frame.
         let context = PairingConnectionContext::Relay {
@@ -981,15 +917,26 @@ impl PairingManager {
             credential_kind: connection.kind,
             basis_conn_id: connection.conn_id,
         };
-        self.handle_e2ee_socket(socket, context, Some(expected_device))
+        let logged_in = AtomicBool::new(false);
+        self.handle_e2ee_socket(socket, context, Some(expected_device), Some(&logged_in))
             .await
+            .with_context(|| {
+                if logged_in.load(Ordering::SeqCst) {
+                    diagnostics::Stage::PhoneSession
+                } else {
+                    diagnostics::Stage::PhoneHandshake
+                }
+            })
     }
 
+    /// A relay leg passes `logged_in`, which is set, and recorded in the
+    /// relay diagnostics, once the device has logged in.
     async fn handle_e2ee_socket<S>(
-        &self,
+        self: &Arc<Self>,
         mut socket: WebSocketStream<S>,
         connection: PairingConnectionContext,
         expected_device_id: Option<String>,
+        logged_in: Option<&AtomicBool>,
     ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1003,10 +950,10 @@ impl PairingManager {
         };
         let hello: E2eeHello = serde_json::from_str(&hello).context("decode E2EE hello")?;
         let keypair = self.host_key(false)?;
-        let (transport, relay_host_id) = match &connection {
-            PairingConnectionContext::Direct { .. } => ("direct", None),
+        let (transport, relay_host_id, wire_transport) = match &connection {
+            PairingConnectionContext::Direct { .. } => ("direct", None, wire::Transport::Direct),
             PairingConnectionContext::Relay { relay_host_id, .. } => {
-                ("relay", Some(relay_host_id.as_str()))
+                ("relay", Some(relay_host_id.as_str()), wire::Transport::Relay)
             }
         };
         let (ready, mut session) = begin_e2ee_session(&keypair, hello, transport, relay_host_id)?;
@@ -1030,15 +977,25 @@ impl PairingManager {
             .ok()
             .flatten()
             .map(|mirror| mirror.binding_generation);
+        let mark_logged_in = || {
+            if let Some(logged_in) = logged_in {
+                logged_in.store(true, Ordering::SeqCst);
+                self.record_relay_diagnostic(diagnostics::Event::PhoneAuthenticated, 0, None);
+            }
+        };
         if let Some((session_id, link_id)) = self.share_for_token(&auth.device_token, expected_device_id.as_deref()) {
             let authenticated = serde_json::json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
             send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+            mark_logged_in();
             return self.share_socket(socket, session, session_id, link_id).await;
         }
         let device = self
             .registry
             .find_by_token(&auth.device_token, generation)?
-            .ok_or_else(|| anyhow!("paired-device credential was refused"))?;
+            .ok_or_else(|| {
+                anyhow!(diagnostics::Category::Authentication)
+                    .context("paired-device credential was refused")
+            })?;
         // Session invitations are process-local and must never subscribe to
         // the mobile runtime's host-wide broadcasts, even via a disk entry.
         if device.scope == DeviceScope::Session {
@@ -1048,7 +1005,8 @@ impl PairingManager {
             .as_deref()
             .is_some_and(|id| id != device.id)
         {
-            bail!("relay invite was used by a different device credential");
+            return Err(anyhow!(diagnostics::Category::Authentication)
+                .context("relay invite was used by a different device credential"));
         }
         self.registry
             .touch(&device.id, &session.client_public_key_b64)?;
@@ -1065,11 +1023,14 @@ impl PairingManager {
             "transcriptHashB64": session.transcript_hash_b64,
         });
         send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+        mark_logged_in();
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-        let mobile_connection = Arc::new(mobile::MobileConnection::new(
-            self, &device, self.mobile.clone(),
-            outbound_tx,
-        )?);
+        let mobile_connection = Arc::new(
+            mobile::MobileConnection::open(self, &device, outbound_tx, wire_transport)
+                .await
+                .context(diagnostics::Category::LocalRuntime)?,
+        );
+        let mut reassembly = wire::Reassembly::default();
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
         self.connections
             .lock()
@@ -1092,51 +1053,58 @@ impl PairingManager {
                         mobile_connection.close(self);
                         return Ok(());
                     };
-                    mobile_connection.check(self)?;
-                    send_encrypted_text(&mut socket, &mut session, &outgoing.to_string()).await?;
+                    mobile_connection.check_off_runtime(self).await?;
+                    send_message(&mut socket, &mut session, &outgoing, mobile_connection.wire()).await?;
                 }
                 incoming = socket.next() => {
                     let Some(incoming) = incoming else {
                         mobile_connection.close(self);
                         return Ok(());
                     };
-                    let incoming = incoming?;
-                    match incoming {
+                    let plaintext = match incoming? {
                         Message::Text(text) => {
                             let bytes = decode_canonical_base64(&text)?;
-                            let plaintext = session.open(&bytes, PayloadKind::Text)?;
-                            let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                            mobile_connection.check(self)?;
-                            let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
-                            // Revalidate after asynchronous work: queued replies must not
-                            // disclose session data after revocation or account replacement.
-                            // Successful self-unpairing deliberately revokes this connection;
-                            // its acknowledgement contains no session data.
-                            let forgot_self = request["method"] == "pairing.forget"
-                                && response["ok"] == true;
-                            if !forgot_self { mobile_connection.check(self)?; }
-                            send_encrypted_text(&mut socket, &mut session, &response.to_string()).await?;
+                            session.open(&bytes, PayloadKind::Text)?
                         }
                         Message::Binary(bytes) => {
-                            // Binary application streams are deliberately not attached to a
-                            // workspace in this foundation. Authentication and framing still
-                            // fail closed and the socket remains usable for RPC refusals.
-                            let _ = session.open(&bytes, PayloadKind::Binary)?;
+                            // Binary frames carry only the fragments of a request too
+                            // large for one frame (#669). Other binary application streams
+                            // are deliberately not attached to a workspace in this
+                            // foundation; authentication and framing still fail closed.
+                            let frame = session.open(&bytes, PayloadKind::Binary)?;
+                            match reassembly.push(&frame)? {
+                                Some(message) => message,
+                                None => continue,
+                            }
                         }
                         Message::Close(_) => {
                             mobile_connection.close(self);
                             return Ok(());
                         },
-                        Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                        Message::Pong(_) | Message::Frame(_) => {}
-                    }
+                        Message::Ping(bytes) => {
+                            socket.send(Message::Pong(bytes)).await?;
+                            continue;
+                        }
+                        Message::Pong(_) | Message::Frame(_) => continue,
+                    };
+                    let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
+                    mobile_connection.check_off_runtime(self).await?;
+                    let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
+                    // Revalidate after asynchronous work: queued replies must not
+                    // disclose session data after revocation or account replacement.
+                    // Successful self-unpairing deliberately revokes this connection;
+                    // its acknowledgement contains no session data.
+                    let forgot_self = request["method"] == "pairing.forget"
+                        && response["ok"] == true;
+                    if !forgot_self { mobile_connection.check_off_runtime(self).await?; }
+                    send_message(&mut socket, &mut session, &response, mobile_connection.wire()).await?;
                 }
             }
         }
     }
 
     async fn rpc_response(
-        &self,
+        self: &Arc<Self>,
         request: &serde_json::Value,
         device: &DeviceEntry,
         connection: &PairingConnectionContext,
@@ -1174,9 +1142,17 @@ impl PairingManager {
                 self.revoke_device(&device.id).await.map(|_| serde_json::json!({ "forgotten": true }))
             }
             method if allowed_method(device.scope, method) => {
-                match mobile::dispatch(self, mobile_connection, request, device).await {
-                    Some(result) => result,
-                    None => return static_rpc_response(request, device.scope),
+                // Not abandoned on a timeout: a late `session.send` would still run.
+                let dispatched = mobile::off_runtime({
+                    let (manager, connection) = (self.clone(), mobile_connection.clone());
+                    let (request, device) = (request.clone(), device.clone());
+                    move || Ok(mobile::dispatch(&manager, &connection, &request, &device))
+                })
+                .await;
+                match dispatched {
+                    Ok(Some(result)) => result,
+                    Ok(None) => return static_rpc_response(request, device.scope),
+                    Err(error) => Err(error),
                 }
             }
             _ => return static_rpc_response(request, device.scope),
@@ -1508,14 +1484,87 @@ fn computer_name() -> Option<String> {
         .chain(std::fs::read_to_string("/etc/hostname").ok())
         .filter_map(|name| presentable_name(name.split('.').next().unwrap_or("")))
         .next()
+        .or_else(system_host_name)
 }
 
-fn host_display_name() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .and_then(|name| name.split('.').next().map(str::to_string))
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "This Mac".into())
+/// [`computer_name`], read again once it is a minute old: the work-status
+/// publisher asks for this Mac's name on each pass.
+fn recent_computer_name() -> Option<String> {
+    const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+    static RECENT: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
+    let mut recent = RECENT.lock().unwrap();
+    if let Some((at, name)) = recent.as_ref() {
+        if at.elapsed() < FRESH_FOR {
+            return name.clone();
+        }
+    }
+    let name = computer_name();
+    *recent = Some((std::time::Instant::now(), name.clone()));
+    name
+}
+
+/// The kernel's host name ("Studio.local" → "Studio"), for when nothing else
+/// names this computer. "localhost" names every computer, so it is no name.
+#[cfg(unix)]
+fn system_host_name() -> Option<String> {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the call writes at most `buffer.len()` bytes into a buffer that outlives it.
+    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
+    let name = String::from_utf8_lossy(&buffer[..end]);
+    presentable_name(name.split('.').next().unwrap_or("")).filter(|name| !name.eq_ignore_ascii_case("localhost"))
+}
+
+#[cfg(not(unix))]
+fn system_host_name() -> Option<String> {
+    None
+}
+
+/// The name every Mac saved as its own before #686 when it was opened from
+/// Finder or the Dock, which leaves no `HOSTNAME` to read. Nobody chose it,
+/// and on another computer it says the opposite of what is true.
+const PLACEHOLDER_HOST_NAME: &str = "This Mac";
+
+/// What others are shown when nothing names this computer.
+const UNNAMED_HOST: &str = "Unnamed Mac";
+
+/// The name an earlier version kept in `account.json` for `user_id`: one the
+/// user chose in Settings → Account, or the host name it found, but never the
+/// placeholder it saved when it found none.
+fn saved_host_name(mirror: Option<&AccountMirror>, user_id: &str) -> Option<String> {
+    mirror
+        .filter(|mirror| mirror.user_id == user_id)
+        .and_then(|mirror| mirror.host_display_name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != PLACEHOLDER_HOST_NAME)
+        .map(str::to_string)
+}
+
+/// This Mac's name: the one chosen in Settings → Account, else one an earlier
+/// version saved, else the computer's own. `chosen` when it does not follow
+/// the computer's name.
+fn resolve_machine_name(chosen: Option<String>, saved: Option<String>, computer_name: Option<String>) -> MachineName {
+    let chosen = chosen.map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
+    let (name, chosen) = match (chosen, saved) {
+        (Some(name), _) => (name, true),
+        (None, Some(name)) => {
+            let differs = computer_name.as_deref() != Some(name.as_str());
+            (name, differs)
+        }
+        (None, None) => (computer_name.clone().unwrap_or_else(|| UNNAMED_HOST.into()), false),
+    };
+    MachineName { name, chosen, computer_name }
+}
+
+/// A name the user typed for this Mac, as it may be sent: 1 to 80 visible characters.
+fn chosen_host_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        bail!("machine name must contain 1 to 80 visible characters");
+    }
+    Ok(name.into())
 }
 
 fn advertised_endpoints() -> Vec<String> {
@@ -1658,6 +1707,40 @@ where
     Ok(())
 }
 
+/// One application message to the phone: one encrypted text frame, or binary
+/// fragments when it is too large for the transport and the phone reassembles
+/// them. A message neither can carry never reaches the socket, where it would
+/// close the connection (#669): a reply becomes its request's error, and a
+/// notification, which the phone can read again, is dropped.
+async fn send_message<S>(
+    socket: &mut WebSocketStream<S>,
+    session: &mut crypto::E2eeSession,
+    message: &serde_json::Value,
+    wire: &wire::Wire,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let text = message.to_string();
+    match wire.delivery(text.len()) {
+        wire::Delivery::Frame => send_encrypted_text(socket, session, &text).await,
+        wire::Delivery::Fragments => {
+            for fragment in wire.fragments_of(text.as_bytes()) {
+                let frame = session.seal(&fragment, PayloadKind::Binary)?;
+                socket.send(Message::Binary(frame.into())).await?;
+            }
+            Ok(())
+        }
+        wire::Delivery::TooLarge => {
+            let Some(id) = message.get("id").and_then(serde_json::Value::as_str) else {
+                return Ok(());
+            };
+            let refusal = wire.too_large_response(id, text.len());
+            send_encrypted_text(socket, session, &refusal.to_string()).await
+        }
+    }
+}
+
 fn static_rpc_response(request: &serde_json::Value, scope: DeviceScope) -> serde_json::Value {
     let id = request
         .get("id")
@@ -1710,6 +1793,7 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "session.tail",
         "session.sync",
         "sync.capabilities",
+        "transport.negotiate",
         "session.subscribe",
         "session.unsubscribe",
         "session.status",
@@ -1718,16 +1802,26 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "terminal.read",
         "terminal.subscribe",
         "terminal.unsubscribe",
+        // What a tab runs, the models to pick from, and the context a
+        // continuation would carry: reads, as the transcript is.
+        "session.tab",
+        "models.list",
+        "session.prepareContinuation",
         "notifications.missedSince",
         "notifications.subscribe",
         "notifications.unsubscribe",
         "host.describe",
         "pairing.forget",
+        // What a new session can be started with, and this Mac's phone-visible settings.
+        "sessions.options",
+        "mac.settings",
     ];
     const DRIVER: &[&str] = &[
         "pairing.getEndpoints",
         "pairing.provisionRelay",
         "terminal.send",
+        // Starts the tab's agent, and moves a native Codex tab to its terminal.
+        "terminal.open",
         "terminal.control.get",
         "terminal.control.acquire",
         "terminal.control.release",
@@ -1738,6 +1832,16 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.promoteToAgent",
         "session.send",
         "permission.respond",
+        "sessions.create",
+        "mac.setSettings",
+        // The session controls a phone has as the desktop does (#706).
+        "session.stop",
+        "session.interrupt",
+        "session.resendUnsent",
+        "session.setModel",
+        "session.setEffort",
+        "session.setMode",
+        "session.continue",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
@@ -1761,6 +1865,19 @@ mod tests {
         assert!(allowed_method(DeviceScope::Viewer, "session.tail"));
         assert!(!allowed_method(DeviceScope::Viewer, "terminal.send"));
         assert!(!allowed_method(DeviceScope::Viewer, "session.send"));
+        assert!(!allowed_method(DeviceScope::Viewer, "terminal.open"));
+        assert!(allowed_method(DeviceScope::Driver, "terminal.open"));
+        // Every method the phone dispatch answers is reachable through this
+        // gate, which runs first: one left out is refused before its handler.
+        // Reads are a viewer's; whatever changes a session is a driver's only.
+        for read in ["session.tab", "models.list", "session.prepareContinuation", "terminal.read", "terminal.subscribe"] {
+            assert!(allowed_method(DeviceScope::Viewer, read), "{read}");
+        }
+        for control in ["session.stop", "session.interrupt", "session.resendUnsent", "session.setModel", "session.setEffort",
+            "session.setMode", "session.continue", "terminal.open", "steerLease.queueInput"] {
+            assert!(allowed_method(DeviceScope::Driver, control), "{control}");
+            assert!(!allowed_method(DeviceScope::Viewer, control), "{control} is a driver's");
+        }
         assert!(allowed_method(DeviceScope::Driver, "terminal.send"));
         assert!(allowed_method(DeviceScope::Driver, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "permission.respond"));
@@ -1769,6 +1886,16 @@ mod tests {
             DeviceScope::Driver,
             "pairing.provisionRelay"
         ));
+        // Starting a session and changing this Mac's settings: any paired
+        // phone may see the choices, only a driver may act on them.
+        for read in ["sessions.options", "mac.settings"] {
+            assert!(allowed_method(DeviceScope::Viewer, read), "{read}");
+            assert!(allowed_method(DeviceScope::Driver, read), "{read}");
+        }
+        for write in ["sessions.create", "mac.setSettings"] {
+            assert!(!allowed_method(DeviceScope::Viewer, write), "{write}");
+            assert!(allowed_method(DeviceScope::Driver, write), "{write}");
+        }
         for denied in [
             "files.read",
             "git.push",
@@ -1778,6 +1905,130 @@ mod tests {
         ] {
             assert!(!allowed_method(DeviceScope::Driver, denied), "{denied}");
         }
+    }
+
+    /// Through the router a phone actually reaches, with a real local runtime
+    /// as owner: a viewer may read the new-session choices and the settings but
+    /// neither start a session nor change one, a driver may do all four, and a
+    /// revoked phone none.
+    #[test]
+    fn a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows() {
+        use std::os::unix::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(root.path().join("router.log")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pairing::tests::phone_router_child_fixture", "--nocapture"])
+            .env("TERMINALX_TEST_PHONE_ROUTER", "1")
+            .env("TERMINALX_HOME", root.path().join("store"))
+            .env("CLAUDE_CONFIG_DIR", root.path().join("claude"))
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+            .process_group(0).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let result = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if std::time::Instant::now() >= deadline {
+                // SAFETY: the private process group just made for this fixture,
+                // its disposable runtime owner included.
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                child.wait().unwrap();
+                panic!("phone router fixture exceeded its deadline: {}", std::fs::read_to_string(root.path().join("router.log")).unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(result.success(), "{}", std::fs::read_to_string(root.path().join("router.log")).unwrap());
+    }
+
+    #[tokio::test]
+    async fn phone_router_child_fixture() {
+        if std::env::var("TERMINALX_TEST_PHONE_ROUTER").as_deref() != Ok("1") { return; }
+        use serde_json::json;
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        // Installed agents as far as the owner can tell: the stand-ins only exit.
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for agent in ["codex", "claude"] {
+            std::fs::write(bin.join(agent), "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(bin.join(agent), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // The desktop side answers `sessions.options` from its own lookup.
+        assert!(crate::binpath::set_priority_dir(&bin));
+        let devices = json!({"devices":[
+            {"id":"driver","label":"Phone","platform":"test","token":"fixture-hash","scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":"2026-11-01T00:00:00Z"},
+            {"id":"viewer","label":"Tablet","platform":"test","token":"fixture-hash-2","scope":"viewer","provenance":"explicit","bindingGeneration":0,"createdAt":"2026-11-01T00:00:00Z"},
+        ]});
+        crate::store::write_json(&root.join("devices.json"), &devices).unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+        let log = std::fs::File::create(root.join("owner.log")).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        // The runtime the desktop reaches its phones through, as `serve` runs it.
+        let mut owner = Child(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "serve::tests::sharing_reply_owner_fixture", "--nocapture"])
+            .env("TERMINALX_TEST_SHARING_REPLY_OWNER", &root)
+            .env("TERMINALX_HOME", &root).env("CLAUDE_CONFIG_DIR", root.join("claude")).env("PATH", path)
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let client = loop {
+            if let Ok(client) = crate::local_runtime::client::Client::connect(&root) { break client; }
+            assert!(owner.0.try_wait().unwrap().is_none(), "owner exited: {}", std::fs::read_to_string(root.join("owner.log")).unwrap());
+            assert!(std::time::Instant::now() < until, "owner startup deadline");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        let runtime = Arc::new(crate::local_runtime::desktop::Desktop::connect(client, Arc::new(crate::sink::BroadcastSink::new(256))).unwrap());
+        let pairing = Arc::new(PairingManager::new(Arc::new(crate::account::AccountManager::default())));
+        pairing.attach_runtime(runtime.clone());
+        let device = |index: usize| -> DeviceEntry { serde_json::from_value(devices["devices"][index].clone()).unwrap() };
+        let (driver, viewer) = (device(0), device(1));
+        let connect = |device: DeviceEntry| {
+            let pairing = pairing.clone();
+            async move {
+                let (outbound, inbound) = mpsc::channel(64);
+                (Arc::new(mobile::MobileConnection::open(&pairing, &device, outbound, wire::Transport::Direct).await.unwrap()), inbound)
+            }
+        };
+        let ((phone, _phone_inbound), (tablet, _tablet_inbound)) = (connect(driver.clone()).await, connect(viewer.clone()).await);
+        let context = PairingConnectionContext::Direct { direct_auth_id: "fixture".into() };
+        let ask = |device: &DeviceEntry, connection: &Arc<mobile::MobileConnection>, method: &str, params: serde_json::Value| {
+            let request = json!({"id": method, "method": method, "params": params});
+            let (pairing, device, connection, context) = (pairing.clone(), device.clone(), connection.clone(), context.clone());
+            async move { pairing.rpc_response(&request, &device, &context, &connection).await }
+        };
+        let refused = |response: &serde_json::Value| (response["ok"].clone(), response["error"]["code"].clone());
+        let create = json!({"quick": true, "agent": "claude", "text": "Hi from the phone", "clientMessageId": "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11"});
+
+        // A viewer reads the choices and the settings, and acts on neither.
+        assert_eq!(ask(&viewer, &tablet, "sync.capabilities", json!({})).await["result"]["sessionCreate"], 1);
+        let options = ask(&viewer, &tablet, "sessions.options", json!({})).await;
+        assert_eq!(options["ok"], true, "{options}");
+        assert!(options["result"]["agents"].as_array().unwrap().iter().any(|agent| agent["id"] == "claude" && agent["available"] == true), "{options}");
+        assert_eq!(ask(&viewer, &tablet, "mac.settings", json!({})).await["result"], json!({"nativeCodex": false}));
+        assert_eq!(refused(&ask(&viewer, &tablet, "sessions.create", create.clone()).await), (json!(false), json!("forbidden")));
+        assert_eq!(refused(&ask(&viewer, &tablet, "mac.setSettings", json!({"nativeCodex": true})).await), (json!(false), json!("forbidden")));
+        assert!(crate::store::index::load().unwrap().is_empty());
+        assert!(!crate::store::settings::load().experimental.native_codex);
+
+        // A driver does both, and starting the same draft again finds the first session.
+        assert_eq!(ask(&driver, &phone, "mac.setSettings", json!({"nativeCodex": true})).await["result"], json!({"nativeCodex": true}));
+        assert!(crate::store::settings::load().experimental.native_codex);
+        let started = ask(&driver, &phone, "sessions.create", create.clone()).await;
+        assert_eq!(started["ok"], true, "{started}");
+        let session = started["result"]["sessionId"].as_str().unwrap().to_string();
+        assert!(crate::store::index::get(&session).unwrap().is_quick());
+        assert_eq!(ask(&driver, &phone, "sessions.create", create.clone()).await["result"]["sessionId"], session.as_str());
+        assert_eq!(crate::store::index::load().unwrap().len(), 1);
+
+        // A revoked phone reads and changes nothing, and starts nothing.
+        pairing.fence_runtime_mobile("revoke", json!({"deviceId": "driver"})).unwrap();
+        for (method, params) in [("mac.settings", json!({})), ("sessions.options", json!({})), ("mac.setSettings", json!({"nativeCodex": false})),
+            ("sessions.create", json!({"quick": true, "agent": "claude", "text": "Again"}))] {
+            assert_eq!(ask(&driver, &phone, method, params).await["ok"], false, "{method}");
+        }
+        assert!(crate::store::settings::load().experimental.native_codex);
+        assert_eq!(crate::store::index::load().unwrap().len(), 1);
+        runtime.stop_all().unwrap();
+        drop(owner);
     }
 
     #[test]
@@ -1829,6 +2080,100 @@ mod tests {
         if let Some(name) = computer_name() {
             assert!(!name.is_empty() && name.chars().count() <= COMPUTER_NAME_MAX_CHARS && !name.chars().any(char::is_control));
         }
+    }
+
+    fn mirror(user_id: &str, host_display_name: Option<&str>) -> AccountMirror {
+        AccountMirror {
+            user_id: user_id.into(),
+            email: format!("{user_id}@example.invalid"),
+            display_name: user_id.into(),
+            host_display_name: host_display_name.map(str::to_string),
+            binding_generation: 7,
+        }
+    }
+
+    // #686: every Mac opened from Finder saved and published "This Mac", which
+    // another Mac then showed as "You · on This Mac".
+    #[test]
+    fn a_mac_is_named_by_its_choice_then_its_computer_name_and_never_this_mac() {
+        let studio = || Some("Studio".to_string());
+        let resolve = |chosen: Option<&str>, saved: Option<&str>, computer: Option<&str>| {
+            resolve_machine_name(chosen.map(str::to_string), saved.map(str::to_string), computer.map(str::to_string))
+        };
+        assert_eq!(resolve(None, None, Some("Studio")), MachineName { name: "Studio".into(), chosen: false, computer_name: studio() });
+        assert_eq!(resolve(Some(" Desk "), Some("Old"), Some("Studio")), MachineName { name: "Desk".into(), chosen: true, computer_name: studio() });
+        // A name saved by an earlier version stays, and is the user's while it differs from the computer's.
+        assert_eq!(resolve(None, Some("Old"), Some("Studio")), MachineName { name: "Old".into(), chosen: true, computer_name: studio() });
+        assert!(!resolve(None, Some("Studio"), Some("Studio")).chosen);
+        assert_eq!(resolve(Some("  "), None, Some("Studio")).name, "Studio");
+        // Nothing names this computer: a name that reads true on any computer.
+        assert_eq!(resolve(None, None, None), MachineName { name: UNNAMED_HOST.into(), chosen: false, computer_name: None });
+        assert_ne!(UNNAMED_HOST, PLACEHOLDER_HOST_NAME);
+
+        // The placeholder is no saved name; neither is another account's.
+        assert_eq!(saved_host_name(Some(&mirror("u1", Some("This Mac"))), "u1"), None);
+        assert_eq!(saved_host_name(Some(&mirror("u1", Some(" Studio "))), "u1").as_deref(), Some("Studio"));
+        assert_eq!(saved_host_name(Some(&mirror("u1", Some("Studio"))), "u2"), None);
+        assert_eq!(saved_host_name(Some(&mirror("u1", None)), "u1"), None);
+        assert_eq!(saved_host_name(None, "u1"), None);
+
+        assert!(chosen_host_name(" \t ").is_err());
+        assert!(chosen_host_name(&"n".repeat(81)).is_err());
+        assert!(chosen_host_name("Desk\u{0007}").is_err());
+        assert_eq!(chosen_host_name("  Desk Mac ").unwrap(), "Desk Mac");
+    }
+
+    #[tokio::test]
+    async fn a_mac_that_saved_this_mac_is_named_and_renamed_without_relay() {
+        let _home = crate::store::temp_home();
+        let account = Arc::new(crate::account::AccountManager::default());
+        account.set_context_for_test(Some(AccountContext {
+            access_token: "token".into(),
+            user_id: "u1".into(),
+            email: "u1@example.invalid".into(),
+            display_name: "U1".into(),
+            profile_id: "profile".into(),
+            organization_id: "org".into(),
+            relay_entitled: true,
+            generation: 1,
+        }));
+        let manager = PairingManager::new(account);
+        let computer = recent_computer_name();
+        let own_name = computer.clone().unwrap_or_else(|| UNNAMED_HOST.into());
+
+        // What 0.2.21 left behind when opened from Finder or the Dock.
+        registry::save_account_mirror(&mirror("u1", Some("This Mac"))).unwrap();
+        assert_eq!(PairingManager::host_name("u1"), own_name);
+        assert_eq!(manager.machine_name(), MachineName { name: own_name.clone(), chosen: false, computer_name: computer.clone() });
+
+        // Relay is off: no host is bound and nothing is sent anywhere.
+        assert!(manager.inner.lock().unwrap().host.is_none());
+        let named = manager.set_host_name(Some("  Desk Mac ")).await.unwrap();
+        assert_eq!(named, MachineName { name: "Desk Mac".into(), chosen: true, computer_name: computer.clone() });
+        assert_eq!(PairingManager::host_name("u1"), "Desk Mac");
+        // The name is the Mac's, whoever signs in next.
+        assert_eq!(PairingManager::host_name("someone-else"), "Desk Mac");
+        assert_eq!(crate::store::settings::load().machine_name.as_deref(), Some("Desk Mac"));
+        let kept = registry::load_account_mirror().unwrap().unwrap();
+        assert_eq!((kept.host_display_name, kept.binding_generation, kept.user_id.as_str()), (None, 7, "u1"));
+
+        assert!(manager.set_host_name(Some("   ")).await.is_err());
+        assert_eq!(PairingManager::host_name("u1"), "Desk Mac");
+
+        // Cleared, it follows the computer's own name again.
+        let named = manager.set_host_name(None).await.unwrap();
+        assert_eq!(named, MachineName { name: own_name.clone(), chosen: false, computer_name: computer });
+        assert_eq!(PairingManager::host_name("u1"), own_name);
+        assert_eq!(crate::store::settings::load().machine_name, None);
+    }
+
+    #[test]
+    fn a_name_chosen_in_an_earlier_version_is_kept() {
+        let _home = crate::store::temp_home();
+        registry::save_account_mirror(&mirror("u1", Some("Studio"))).unwrap();
+        assert_eq!(PairingManager::host_name("u1"), "Studio");
+        // Another account on this Mac never saw that name.
+        assert_ne!(PairingManager::host_name("u2"), "Studio");
     }
 
     #[test]

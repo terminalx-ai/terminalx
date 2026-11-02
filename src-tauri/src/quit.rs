@@ -112,12 +112,18 @@ pub fn held(app: &AppHandle) -> bool {
                     chosen
                 };
                 if policy == QuitBehavior::StopAll {
+                    // Never reconnect to, or start again, the runtime being stopped.
+                    let state = app.state::<crate::AppState>();
+                    state.runtime_supervisor.halt();
                     // Authenticated, pinned to the owner generation. An unavailable
                     // owner must not be presented as a successful stop-all.
-                    runtime.stop_all()?;
+                    if let Err(error) = runtime.stop_all() {
+                        state.runtime_supervisor.resume(state.runtime().as_deref());
+                        return Err(error);
+                    }
                 }
             } else if requires_stop(stop_all, settings::load().quit_behavior) {
-                anyhow::bail!("The background runtime is unavailable, so stopping agents and terminals could not be confirmed. Reconnect before trying Stop All again.");
+                anyhow::bail!("The background runtime is unavailable, so stopping agents and terminals could not be confirmed. Try Stop All again once TerminalX has reconnected.");
             }
             Ok(true)
         })();

@@ -8,7 +8,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
 }));
 
 function hostApi(request: ReturnType<typeof vi.fn>) {
-  return new HostApi({ request } as unknown as HostConnection);
+  return new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
 }
 
 describe("mobile transcript pages", () => {
@@ -86,6 +86,89 @@ describe("mobile chat sends", () => {
   });
 });
 
+describe("a draft's id (#675)", () => {
+  const note = { id: "note-1", body: "hello", createdAt: 1, author: { userId: "user-1" } };
+  // A Mac answering `sync.capabilities` with `capabilities`, and every send and note as sent.
+  const mac = (capabilities: unknown) => vi.fn(async (method: string) => method === "sync.capabilities"
+    ? capabilities
+    : { ok: true, value: method === "chat.post" ? { status: "sent", message: note } : { status: "sent", queued: false } });
+  // Older Macs refuse fields they do not know: one predating the id, and one predating capabilities.
+  const older = [{ ok: true, value: { transcript: 1, conditionalLists: 1 } }, { ok: false, refusal: { code: "forbidden", message: "unsupported" } }];
+
+  it("goes with a message for the agent only to a Mac that understands it", async () => {
+    const current = mac({ ok: true, value: { transcript: 1, conditionalLists: 1, sendIds: 1 } });
+    await expect(hostApi(current).sendSession("tab-1", "hello", [], "draft-1")).resolves.toEqual({ sent: true, queued: false });
+    expect(current).toHaveBeenLastCalledWith("session.send", { tabId: "tab-1", text: "hello", clientMessageId: "draft-1" });
+    for (const capabilities of older) {
+      const request = mac(capabilities);
+      await expect(hostApi(request).sendSession("tab-1", "hello", [], "draft-1")).resolves.toEqual({ sent: true, queued: false });
+      expect(request).toHaveBeenLastCalledWith("session.send", { tabId: "tab-1", text: "hello" });
+    }
+  });
+
+  it("goes with a worktree note only to a Mac that understands it", async () => {
+    const current = mac({ ok: true, value: { sendIds: 1 } });
+    await expect(hostApi(current).postNote("worktree", "hello", "draft-1")).resolves.toEqual({ sent: true, note });
+    expect(current).toHaveBeenLastCalledWith("chat.post", { worktreeId: "worktree", body: "hello", clientMessageId: "draft-1" });
+    for (const capabilities of older) {
+      const request = mac(capabilities);
+      await expect(hostApi(request).postNote("worktree", "hello", "draft-1")).resolves.toEqual({ sent: true, note });
+      expect(request).toHaveBeenLastCalledWith("chat.post", { worktreeId: "worktree", body: "hello" });
+    }
+  });
+
+  it("asks what the Mac understands once per connection", async () => {
+    const request = mac({ ok: true, value: { sendIds: 1 } });
+    const api = hostApi(request);
+    await api.sendSession("tab-1", "one", [], "draft-1");
+    await api.postNote("worktree", "two", "draft-2");
+    expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(1);
+    // A Mac updated while the phone was away is asked again after the reconnect.
+    api.resetConnection();
+    await api.sendSession("tab-1", "three", [], "draft-3");
+    expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(2);
+  });
+
+  // #730: an update replaces the Mac's runtime while the phone stays connected.
+  it("asks again, and tells whoever shows a feature, when the Mac says its runtime changed or after a reconnect", async () => {
+    let event: (value: { method: string; params?: unknown }) => void = () => {};
+    const request = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: { transcript: 1 } })
+      .mockResolvedValueOnce({ ok: true, value: { transcript: 1, terminal: 1, sendIds: 1 } })
+      .mockResolvedValue({ ok: true, value: { transcript: 1, terminal: 1, sendIds: 1, sessionCreate: 1 } });
+    const api = new HostApi({ request, onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
+    const changed = vi.fn();
+    const stop = api.onFeaturesChanged(changed);
+    expect((await api.features()).terminal).toBeUndefined();
+    expect(await api.features()).toEqual({ transcript: 1 });
+    event({ method: "sessions.changed" });
+    expect(changed).not.toHaveBeenCalled();
+    event({ method: "sync.capabilitiesChanged" });
+    expect(changed).toHaveBeenCalledOnce();
+    expect((await api.features()).terminal).toBe(1);
+    api.resetConnection();
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect((await api.features()).sessionCreate).toBe(1);
+    stop();
+    event({ method: "sync.capabilitiesChanged" });
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(3);
+  });
+
+  it("sends a draft's id only once the Mac's runtime takes it", async () => {
+    let event: (value: { method: string }) => void = () => {};
+    const request = vi.fn(async (method: string, _params?: unknown) => method === "sync.capabilities"
+      ? { ok: true, value: request.mock.calls.filter(([called]) => called === "sync.capabilities").length > 1 ? { sendIds: 1 } : {} }
+      : { ok: true, value: { status: "sent", queued: false } });
+    const api = new HostApi({ request, onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
+    await api.sendSession("tab-1", "one", [], "draft-1");
+    expect(request.mock.calls.find(([method]) => method === "session.send")?.[1]).not.toHaveProperty("clientMessageId");
+    event({ method: "sync.capabilitiesChanged" });
+    await api.sendSession("tab-1", "two", [], "draft-2");
+    expect(request.mock.calls.filter(([method]) => method === "session.send")[1]?.[1]).toMatchObject({ clientMessageId: "draft-2" });
+  });
+});
+
 // PRO-87
 describe("the computer's name and unpairing", () => {
   it("asks the computer what it is called, and takes no answer from an older desktop", async () => {
@@ -137,5 +220,46 @@ describe("conditional lists", () => {
     const api = hostApi(request);
     await api.listNotes("session"); await api.listNotes("session");
     expect(request).toHaveBeenLastCalledWith("chat.list", { worktreeId: "session", limit: 100 });
+  });
+});
+
+describe("the terminal view's requests", () => {
+  it("opens a tab's terminal on the Mac, and says why when it cannot", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ ok: true, value: { opened: true } })
+      .mockResolvedValueOnce({ ok: false, refusal: { code: "unavailable", message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." } });
+    const api = hostApi(request);
+    await expect(api.openTerminal("worktree", "tab")).resolves.toEqual({ opened: true });
+    expect(request).toHaveBeenLastCalledWith("terminal.open", { worktreeId: "worktree", tabId: "tab" });
+    await expect(api.openTerminal("worktree", "tab")).resolves.toEqual({ opened: false, message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." });
+  });
+
+  it("passes the Mac's reason when typing is refused", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ ok: true, value: { accepted: true } })
+      .mockResolvedValueOnce({ ok: false, refusal: { code: "unavailable", message: "Another mobile client or terminal instance owns this driver lease." } });
+    const api = hostApi(request);
+    await expect(api.queueInput("worktree", "tab", "ls\r")).resolves.toEqual({ accepted: true });
+    expect(request).toHaveBeenLastCalledWith("steerLease.queueInput", { worktreeId: "worktree", tabId: "tab", text: "ls\r" });
+    await expect(api.queueInput("worktree", "tab", "x")).resolves.toEqual({ accepted: false, message: "Another mobile client or terminal instance owns this driver lease." });
+  });
+
+  it("hands on the pane's size and the Mac ending the view, and drops a size that is not one", () => {
+    let deliver: (value: unknown) => void = () => {};
+    const subscribe = vi.fn((_method: string, _params: unknown, listener: (value: unknown) => void) => { deliver = listener; return () => {}; });
+    const api = new HostApi({ request: vi.fn(), subscribe, onEvent: () => () => {} } as unknown as HostConnection);
+    const packets: unknown[] = [];
+    api.subscribeTerminal("worktree", "tab", (packet) => packets.push(packet));
+    expect(subscribe).toHaveBeenCalledWith("terminal.subscribe", expect.objectContaining({ worktreeId: "worktree", tabId: "tab", attachMode: "observe" }), expect.any(Function));
+    deliver({ subscriptionId: "s", type: "scrollback", serialized: "\x1b[31mhi", cols: 120, rows: 40 });
+    deliver({ type: "resized", cols: 100, rows: 30 });
+    deliver({ type: "resized", cols: 0, rows: 30 });
+    deliver({ type: "data", chunk: "more" });
+    deliver({ type: "error", error: { code: "unavailable", message: "Terminal output is unavailable." } });
+    expect(packets).toEqual([
+      { type: "scrollback", serialized: "\x1b[31mhi", cols: 120, rows: 40 },
+      { type: "resized", cols: 100, rows: 30 },
+      { type: "resized" },
+      { type: "data", chunk: "more" },
+      { type: "error", message: "Terminal output is unavailable." },
+    ]);
   });
 });

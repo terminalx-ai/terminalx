@@ -1,6 +1,6 @@
 import "@testing-library/dom";
 import type { ReactNode } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IssueWorker } from "@/lib/issueWork";
 
@@ -10,15 +10,47 @@ vi.mock("@/components/ui/tooltip", () => ({
   TooltipContent: ({ children }: { children: ReactNode }) => <div role="tooltip">{children}</div>,
 }));
 
-const { IssueWorkChip, TakenIssueDialog } = await import("./IssueWork");
+const { IssueWorkChip, IssueWorkPanel, TakenIssueDialog } = await import("./IssueWork");
 
-afterEach(cleanup);
+async function cleanupIssueDialogs() {
+  // Radix dispatches this event on the retained dialog in its deferred
+  // unmount callback. Observe it before cleanup detaches the element.
+  const unmounted = screen.queryAllByRole("dialog").map((dialog) =>
+    new Promise<void>((resolve) => {
+      dialog.addEventListener("focusScope.autoFocusOnUnmount", () => resolve(), { once: true });
+    }),
+  );
+  await act(async () => {
+    cleanup();
+    await Promise.all(unmounted);
+  });
+}
+
+afterEach(cleanupIssueDialogs);
 
 const NOW = Date.parse("2026-10-18T12:00:00Z");
 
 function worker(patch: Partial<IssueWorker>): IssueWorker {
   return { key: "k", place: "team", you: false, person: "Alice", machine: null, cloud: false, title: "Alice's session", branch: "alice/11", state: "working", phase: "now", since: NOW - 3600000, lastActive: NOW - 300000, sessionId: null, link: null, ...patch };
 }
+
+it("finishes the dialog's deferred unmount before cleanup resolves", async () => {
+  render(<TakenIssueDialog workers={[worker({})]} onStart={() => {}} onCancel={() => {}} onOpen={null} />);
+  const dialog = screen.getByRole("dialog");
+  const unmounted = vi.fn();
+  dialog.addEventListener("focusScope.autoFocusOnUnmount", unmounted);
+  const completion = cleanupIssueDialogs();
+  expect(dialog.isConnected).toBe(false);
+  expect(unmounted).not.toHaveBeenCalled();
+  await completion;
+  expect(unmounted).toHaveBeenCalledTimes(1);
+  const event = unmounted.mock.calls[0][0] as Event;
+  expect(event).toBeInstanceOf(Event);
+  expect(event.target).toBe(dialog);
+  // Radix's modal close handler runs after our listener and prevents the
+  // default focus restoration. It too must have run before cleanup resolves.
+  expect(event.defaultPrevented).toBe(true);
+});
 
 describe("the work chip", () => {
   it("shows the first and how many more, and each one in full on hover", () => {
@@ -37,6 +69,15 @@ describe("the work chip", () => {
   it("fades work that went quiet", () => {
     render(<IssueWorkChip now={NOW} workers={[worker({ phase: "faded", lastActive: NOW - 3 * 3600000 })]} />);
     expect(screen.getByTestId("issue-work-chip").textContent).toBe("Alice · 3 hours ago");
+    // Not in its hover card, over the rows below (#713): the line says so.
+    const row = screen.getByTestId("issue-worker");
+    expect(row.className).not.toContain("opacity-70");
+    expect(row.textContent).toContain("Was working on this, 3 hours ago");
+  });
+
+  it("dims work that went quiet in the detail pane", () => {
+    render(<IssueWorkPanel now={NOW} workers={[worker({ phase: "faded", lastActive: NOW - 3 * 3600000 })]} />);
+    expect(screen.getByTestId("issue-worker").className).toContain("opacity-70");
   });
 });
 

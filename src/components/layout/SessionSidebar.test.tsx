@@ -322,6 +322,28 @@ describe("the conversation list", () => {
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+  });
+
+  // #721: a session whose tabs were all closed has nothing in the branch's row of tabs to click; it was unreachable here.
+  it("keeps a row of its own for a session of the branch with no tab open, which opens that session", async () => {
+    prefs.setPrefs({ branchSessions: "tabs" });
+    const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+    // m1, the newest, had its last tab closed; m2 and m3 have tabs.
+    await boot([session("m1", "/repos/web", at(9), { tabs: [], activeTab: null }), session("m2", "/repos/web", at(8)), session("m3", "/repos/web", at(7))]);
+    mount();
+    const web = screen.getByRole("group", { name: "web" });
+    // The branch's row stands for the sessions whose tabs are in its row of tabs.
+    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
+    const bare = within(web).getByRole("button", { name: /^Session m1/ });
+    fireEvent.click(bare);
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBe("true");
+    expect(main.getAttribute("aria-current")).toBeNull();
+    // The branch's row opens a session with tabs: the latest of them.
+    fireEvent.click(within(web).getByRole("button", { name: "main, 2 sessions" }));
+    expect(store.getSessionStore().selectedSessionId).toBe("m2");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBeNull();
   });
 
   it("invites a first chat when there is none, and no project to show", async () => {
@@ -338,6 +360,80 @@ describe("the conversation list", () => {
     const destinations = screen.getByRole("toolbar", { name: "Destinations" });
     expect(within(destinations).getAllByRole("button").map((button) => button.textContent)).toEqual(["Dashboard", "Issues", "Automations"]);
     expect(destinations.compareDocumentPosition(screen.getByTestId("conversation-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("renaming from the sidebar", () => {
+  const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+  const tree = (name: string, branch: string, placeholder = false) => ({ path: `/repos/web/.worktrees/${name}`, name, branch, head: "abc1234", isMain: false, managed: true, placeholder, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 });
+  const withTrees = (labels?: Record<string, string>) => {
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_projects") return { projects: [{ ...projects[0], branchLabels: labels }], lastSelected: null };
+      if (command === "list_workspaces") return [...(await base(command, args)), tree("calm-ember-panda", "dc/calm-ember-panda", true), tree("crane", "dc/crane")];
+      if (command === "rename_branch") return { branch: "Pricing-research", project: { ...projects[0], branchLabels: { "Pricing-research": "Pricing research" } }, sessions: [] };
+      if (command === "update_project") return { ...projects[0] };
+      return base(command, args);
+    });
+  };
+  const bootTwo = () =>
+    boot([
+      session("panda", "/repos/web", at(2), { branch: "dc/calm-ember-panda", worktreeName: "calm-ember-panda", cwd: "/repos/web/.worktrees/calm-ember-panda" }),
+      session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+    ]);
+
+  it("offers a developer's few actions on a right-click", async () => {
+    withTrees();
+    await bootTwo();
+    mount();
+    fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Archive", "Delete…"]);
+  });
+
+  it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
+    withTrees();
+    await bootTwo();
+    mount();
+    fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
+    expect(name.value).toBe("dc/crane");
+    fireEvent.change(name, { target: { value: "Pricing research" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Also rename branch" }));
+    expect(screen.getByText("dc/crane → Pricing-research")).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
+    expect(mocks.invoke).toHaveBeenCalledWith("rename_branch", { projectPath: "/repos/web", from: "dc/crane", to: "Pricing-research" });
+    expect(mocks.invoke).toHaveBeenCalledWith("update_project", { path: "/repos/web", patch: { branchLabel: { branch: "Pricing-research", label: "Pricing research" } } });
+  });
+
+  it("shows a branch's label in place of its name, and only relabels it when the branch is left alone", async () => {
+    withTrees({ "dc/crane": "Payments" });
+    await bootTwo();
+    mount();
+    const row = screen.getByRole("button", { name: "Payments, Talk crane" });
+    fireEvent.doubleClick(row);
+    const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
+    expect(name.value).toBe("Payments");
+    fireEvent.change(name, { target: { value: "Billing" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "rename_branch")).toBe(false);
+    expect(mocks.invoke).toHaveBeenCalledWith("update_project", { path: "/repos/web", patch: { branchLabel: { branch: "dc/crane", label: "Billing" } } });
+  });
+
+  it("renames a conversation by its title where the row shows its title", async () => {
+    withTrees();
+    await bootTwo();
+    const { useDialogs } = await import("@/lib/dialogs");
+    let opened: string | null = null;
+    const Probe = () => {
+      opened = useDialogs().renameSession;
+      return null;
+    };
+    render(<Probe />);
+    mount();
+    fireEvent.doubleClick(screen.getByRole("button", { name: /^Talk panda/ }));
+    expect(opened).toBe("panda");
   });
 });
 
@@ -403,12 +499,41 @@ it("keeps removed-workspace provenance separate from a live checkout on the same
     session("live", "/repos/web", new Date().toISOString(), { branch: "topic", worktreeName: "live", cwd: "/repos/web/.raccoon/worktrees/live" }),
   ]);
   mount();
+  // Set apart under its fold, and not among the live work (#696).
+  expect(screen.queryByRole("button", { name: "topic (workspace removed), Talk old" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const kept = screen.getByRole("button", { name: "topic (workspace removed), Talk old" });
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
   expect(screen.getByRole("button", { name: "topic, Talk live" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
 });
 
+
+/** #696: "Review #590", its workspace gone on Oct 24, sat among the live work for good. */
+it("sets removed workspaces apart under a fold, which opens while it holds the open conversation", async () => {
+  const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+  const gone = (name: string) => ({ branch: "main", worktreeRemoved: true, removedWorkspace: { name, path: `/repos/web/.raccoon/worktrees/${name}`, branch: name } });
+  await boot([
+    session("live", "/repos/web", at(3), { branch: "feature", worktreeName: "feature", cwd: "/repos/web/.raccoon/worktrees/feature" }),
+    session("review", "/repos/web", at(2), gone("review-590")),
+    session("other", "/repos/web", at(1), gone("other")),
+  ]);
+  mount();
+  const fold = screen.getByRole("button", { name: "Removed workspaces (2)" });
+  expect(fold.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByRole("button", { name: "feature, Talk live" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Talk review/ })).toBeNull();
+  // Not counted among the few a project shows before "View all".
+  expect(screen.queryByRole("button", { name: "View all" })).toBeNull();
+
+  fireEvent.click(fold);
+  expect(prefs.getPrefs().sidebarSections["removed-workspaces:/repos/web"]).toBe("expanded");
+  fireEvent.click(screen.getByRole("button", { name: "review-590 (workspace removed), Talk review" }));
+  // Folded again, it stays open while it holds the open conversation.
+  fireEvent.click(fold);
+  expect(fold.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByRole("button", { name: "review-590 (workspace removed), Talk review" })).toBeTruthy();
+});
 
 it("marks a collapsed group of kept conversations as a removed workspace", async () => {
   const removed = { branch: "main", worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } };
@@ -417,6 +542,7 @@ it("marks a collapsed group of kept conversations as a removed workspace", async
     session("old2", "/repos/web", new Date().toISOString(), removed),
   ]);
   mount();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const group = screen.getByTitle("topic (workspace removed)");
   expect(group.getAttribute("aria-expanded")).toBe("false");
   fireEvent.click(group);

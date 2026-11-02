@@ -7,6 +7,8 @@ const pty = vi.hoisted(() => ({
   write: vi.fn().mockResolvedValue(undefined),
   resize: vi.fn().mockResolvedValue(undefined),
   detachAll: vi.fn().mockResolvedValue(undefined),
+  shells: vi.fn().mockResolvedValue([]),
+  agents: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@/lib/api", () => ({ pty }));
@@ -233,5 +235,134 @@ describe("an agent tab that was closed", () => {
     const terminal = await loadTerminalStore();
     terminal.dropTabTerminals(["never-shown"]);
     expect(terminal.terminalCounters()).toMatchObject({ instances: 0, panes: 0 });
+  });
+});
+
+describe("the right panel's terminal dock", () => {
+  it("opens numbered shells that are the dock's, not tabs", async () => {
+    const terminal = await loadTerminalStore();
+    const tab = await terminal.openTerminal("s1", "/repo");
+    const first = await terminal.openDockTerminal("s1", "/repo");
+    const second = await terminal.openDockTerminal("s1", "/repo");
+
+    expect(terminal.isDockPane(first.id)).toBe(true);
+    expect(terminal.isDockPane(tab.id)).toBe(false);
+    expect(terminal.isDockPane("tab:dock-1")).toBe(false);
+    expect([first.title, second.title]).toEqual(["Terminal 1", "Terminal 2"]);
+    expect(terminal.dockPanes("s1").map((pane) => pane.id)).toEqual([first.id, second.id]);
+    // The tab strip keeps its own shell selected and numbered.
+    expect(terminal.getTerminalState().selected.s1).toEqual({ kind: "terminal", id: tab.id });
+    expect(terminal.getTerminalState().panes.filter((pane) => pane.sessionId === "s1" && !pane.hidden).map((pane) => pane.id)).toEqual([tab.id]);
+    expect(pty.spawn).toHaveBeenLastCalledWith(second.id, "/repo", 80, 12, undefined, "Terminal 2");
+
+    await terminal.closeTerminal(first.id);
+    expect((await terminal.openDockTerminal("s1", "/repo")).title).toBe("Terminal 3");
+  });
+
+  it("lists a dock shell another window opened in the dock", async () => {
+    const terminal = await loadTerminalStore();
+    await terminal.subscribeTerminals();
+    const opened = listen.mock.calls.find(([name]) => name === "pty_opened")![1] as (event: { payload: unknown }) => void;
+    opened({ payload: { id: "s1:dock-abc", sessionId: "s1", title: "Terminal 4", exited: false } });
+
+    const [pane] = terminal.dockPanes("s1");
+    expect(pane).toMatchObject({ id: "s1:dock-abc", title: "Terminal 4", hidden: true, docked: true });
+    expect(terminal.getTerminalState().active.s1).toBeUndefined();
+  });
+});
+
+describe("a new live connection", () => {
+  const fake = (reattach?: () => void): TerminalInstance => ({
+    el: document.createElement("div"),
+    term: { dispose: vi.fn(), cols: 80, rows: 24 },
+    fit: {},
+    restorable: true,
+    reattach,
+    release: vi.fn(),
+  }) as never;
+
+  it("attaches on-screen terminals again in place and lets the rest be rebuilt when shown", async () => {
+    const terminal = await loadTerminalStore();
+    const shown = fake(vi.fn());
+    const hidden = fake(vi.fn());
+    const cloud = { ...fake(), restorable: false };
+    terminal.getInstance("s1:shown", () => shown, document.body);
+    terminal.getInstance("s1:hidden", () => hidden);
+    terminal.getInstance("cloud:pane", () => cloud);
+    terminal.reattachLocalTerminals();
+    expect(shown.reattach).toHaveBeenCalledOnce();
+    expect(terminal.peekInstance("s1:shown")).toBe(shown);
+    expect(hidden.reattach).not.toHaveBeenCalled();
+    expect(hidden.release).toHaveBeenCalledOnce();
+    expect(terminal.peekInstance("s1:hidden")).toBeUndefined();
+    expect(terminal.peekInstance("cloud:pane")).toBe(cloud);
+    terminal.disposeInstance("s1:shown");
+    terminal.disposeInstance("cloud:pane");
+  });
+
+  it("catches up only the view that fell behind, and only while it is still that attachment (#716)", async () => {
+    const handlers = new Map<string, (event: { payload: { id: string; token: string } }) => void>();
+    listen.mockImplementation(async (event: string, handler: (event: { payload: { id: string; token: string } }) => void) => {
+      handlers.set(event, handler);
+      return () => {};
+    });
+    const terminal = await loadTerminalStore();
+    await terminal.subscribeTerminals();
+    const lagged = (id: string, token: string) => handlers.get("pty_view_lagged")!({ payload: { id, token } });
+    const named = (token: string) => ({ ...fake(vi.fn()), attachedAs: (given: string) => given === token });
+    const behind = named("current");
+    const beside = named("beside");
+    const hidden = named("hidden");
+    terminal.getInstance("s1:behind", () => behind, document.body);
+    terminal.getInstance("s1:beside", () => beside, document.body);
+    terminal.getInstance("s1:hidden", () => hidden);
+
+    // Word of an attachment since replaced changes nothing.
+    lagged("s1:behind", "replaced");
+    expect(behind.reattach).not.toHaveBeenCalled();
+    // The view that fell behind is redrawn in place; the one beside it is left alone.
+    lagged("s1:behind", "current");
+    expect(behind.reattach).toHaveBeenCalledOnce();
+    expect(beside.reattach).not.toHaveBeenCalled();
+    expect(terminal.peekInstance("s1:beside")).toBe(beside);
+    // Off screen, it is let go: the next view rebuilds it from the scrollback.
+    lagged("s1:hidden", "hidden");
+    expect(hidden.reattach).not.toHaveBeenCalled();
+    expect(terminal.peekInstance("s1:hidden")).toBeUndefined();
+    // A pane this window has no terminal for.
+    lagged("s1:unknown", "current");
+    terminal.disposeInstance("s1:behind");
+    terminal.disposeInstance("s1:beside");
+  });
+
+  it("lists what changed in the gap: opened, ended and closed shells, and their agents, but not one still opening", async () => {
+    const handlers = new Map<string, () => void>();
+    listen.mockImplementation(async (event: string, handler: () => void) => {
+      handlers.set(event, handler);
+      return () => {};
+    });
+    const terminal = await loadTerminalStore();
+    const ended = await terminal.openTerminal("s1", "/repo");
+    const closed = await terminal.openTerminal("s1", "/repo");
+    let spawned!: () => void;
+    pty.spawn.mockReturnValueOnce(new Promise<void>((resolve) => (spawned = resolve)));
+    const opening = terminal.openTerminal("s1", "/repo");
+    await vi.waitFor(() => expect(terminal.getTerminalState().panes).toHaveLength(3));
+    const openingId = terminal.getTerminalState().panes[2].id;
+    pty.shells.mockResolvedValue([
+      { id: ended.id, sessionId: "s1", title: ended.title, renamed: false, cwd: "/repo", exited: true, created: ended.created },
+      { id: "s1:other-window", sessionId: "s1", title: "Terminal 9", renamed: false, cwd: "/repo", exited: false, created: "2026-10-30T00:00:00Z" },
+    ]);
+    pty.agents.mockResolvedValue([{ paneId: ended.id, harness: "claude" }, { paneId: "s1:other-window", harness: null }]);
+    handlers.get("local_runtime_reattached")!();
+    await vi.waitFor(() => expect(terminal.getTerminalState().panes.some((pane) => pane.id === "s1:other-window")).toBe(true));
+    const state = terminal.getTerminalState();
+    expect(state.panes.map((pane) => pane.id)).toEqual([ended.id, openingId, "s1:other-window"]);
+    expect(state.panes.find((pane) => pane.id === ended.id)?.exited).toBe(true);
+    expect(state.panes.some((pane) => pane.id === closed.id)).toBe(false);
+    expect(state.agents).toEqual({ [ended.id]: "claude" });
+    expect(pty.kill).not.toHaveBeenCalled();
+    spawned();
+    await opening;
   });
 });

@@ -2,11 +2,13 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { AgentMark } from "@/components/AgentMark";
+import { AgentSetup } from "@/components/session/AgentSetup";
+import { useAgentReadiness } from "@/lib/agentReadiness";
+import type { HarnessInfo } from "@/types/session";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
@@ -24,13 +26,15 @@ import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
+import { AgentIdleSettings } from "./AgentIdleSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
+import { ExperimentalTab } from "./ExperimentalSettings";
 
-const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "experimental", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
@@ -46,6 +50,7 @@ const TAB_LABEL: Record<Tab, string> = {
   integrations: "Integrations",
   storage: "Storage",
   shortcuts: "Shortcuts",
+  experimental: "Experimental",
   about: "About",
 };
 
@@ -137,6 +142,7 @@ export function SettingsPage({
               </>
             )}
             {tab === "shortcuts" && <ShortcutsTab />}
+            {tab === "experimental" && <ExperimentalTab />}
             {tab === "about" && <AboutTab />}
           </div>
         </section>
@@ -178,7 +184,7 @@ function GeneralTab() {
       {CLOUD_CONTROL_HAS_SETTING && (
         <SettingRow
           label={CLOUD_CONTROL_SETTING}
-          description={`Off: the terminalx command line cannot see or change cloud workspaces. ${CLOUD_CONTROL_POLICY === "both" ? "On: any agent running in a local session can list them, read their conversations and send messages to running workspaces. Starting, stopping or creating a workspace still asks you in this window each time." : "On: any agent running in a local session can list them, read their conversations, send messages, and start, stop or create workspaces in your organizations, which can cost money."}`}
+          description={`Off: the terminalx command line cannot see or change cloud workspaces. On: agents in local sessions can list workspaces, read conversations, send messages, launch sessions, and resume or create workspaces within your permissions. This authorizes billed compute without another confirmation. ${CLOUD_CONTROL_POLICY === "both" ? "Stopping a workspace still asks you each time." : "Stopping is also allowed."}`}
           control={
             <Switch
               aria-label={CLOUD_CONTROL_SETTING}
@@ -228,6 +234,11 @@ function GeneralTab() {
         label="Fold tool calls"
         description="Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded."
         control={<Switch checked={prefs.foldToolCalls} onCheckedChange={(v) => setPrefs({ foldToolCalls: v })} />}
+      />
+      <SettingRow
+        label="Show files changed"
+        description="Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it."
+        control={<Switch aria-label="Show files changed" checked={prefs.turnChanges} onCheckedChange={(v) => setPrefs({ turnChanges: v })} />}
       />
       <SettingRow
         label="Autocorrect"
@@ -493,10 +504,18 @@ function BrowserRuntimeRow() {
   );
 }
 
+function AgentSetupRow({ harness }: { harness: HarnessInfo }) {
+  const readiness = useAgentReadiness(harness.id);
+  return <AgentSetup harness={harness} value={readiness.value} checking={readiness.checking} onRefresh={() => {
+    void refreshHarnesses().then(() => readiness.refresh()).catch(() => readiness.refresh());
+  }} />;
+}
+
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
 function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
+  const [checkRun, setCheckRun] = useState(0);
   const [skill, setSkill] = useState<SkillInstallStatus | null>(null);
   const [skillBusy, setSkillBusy] = useState(false);
   const [skillError, setSkillError] = useState<string | null>(null);
@@ -541,7 +560,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         </Button>
       </div>
       <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">TerminalX runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
+        <p className="text-xs text-muted-foreground">Set up an agent on this computer. Local work does not require a TerminalX account.</p>
         <Button
           size="xs"
           variant="ghost"
@@ -550,6 +569,9 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
             setBusy(true);
             try {
               await refreshHarnesses();
+              setCheckRun((run) => run + 1);
+            } catch {
+              setSkillError("Could not re-check installed agents. Try again.");
             } finally {
               setBusy(false);
             }
@@ -575,7 +597,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
                   </span>
                 )}
               </div>
-              <div className="truncate font-mono text-[11px] text-faint">{h.available ? h.path : h.installHint}</div>
+              <div className="mt-2"><AgentSetupRow key={`${h.id}:${checkRun}`} harness={h} /></div>
               <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
                 {h.caps.images && <span>images</span>}
                 {h.caps.permissionModes && <span>permission modes</span>}
@@ -594,6 +616,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul>
+      <AgentIdleSettings />
     </div>
   );
 }
@@ -683,43 +706,14 @@ function IntegrationsTab() {
   );
 }
 
-type UpdateState = { kind: "idle" } | { kind: "checking" } | { kind: "none" } | { kind: "available"; update: Update } | { kind: "installing"; pct: number } | { kind: "error"; message: string };
-
 function AboutTab() {
   const prefs = usePrefs();
   const [version, setVersion] = useState("");
-  const [state, setState] = useState<UpdateState>({ kind: "idle" });
+  const { state } = useUpdate();
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion("dev"));
   }, []);
-
-  const checkNow = async () => {
-    setState({ kind: "checking" });
-    try {
-      const u = await check({ headers: { "X-Raccoon-Channel": prefs.updateChannel } });
-      setState(u ? { kind: "available", update: u } : { kind: "none" });
-    } catch (e) {
-      setState({ kind: "error", message: errorMessage(e) });
-    }
-  };
-
-  const install = async (u: Update) => {
-    setState({ kind: "installing", pct: 0 });
-    try {
-      let total = 0;
-      let got = 0;
-      await u.downloadAndInstall((ev) => {
-        if (ev.event === "Started") total = ev.data.contentLength ?? 0;
-        else if (ev.event === "Progress") {
-          got += ev.data.chunkLength;
-          if (total) setState({ kind: "installing", pct: Math.round((got / total) * 100) });
-        }
-      });
-      await relaunch();
-    } catch (e) {
-      setState({ kind: "error", message: errorMessage(e) });
-    }
-  };
+  const checkNow = () => void checkForUpdate();
 
   return (
     <div className="flex flex-col gap-4 text-sm">
@@ -755,7 +749,7 @@ function AboutTab() {
         }
       />
       <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" onClick={() => void checkNow()} disabled={state.kind === "checking" || state.kind === "installing"}>
+        <Button size="sm" variant="outline" onClick={checkNow} disabled={state.kind === "checking" || state.kind === "installing"}>
           {state.kind === "checking" ? <Loader2 className="animate-spin" /> : <RefreshCw />} Check for updates
         </Button>
         {state.kind === "none" && <span className="text-xs text-muted-foreground">You have the latest version.</span>}
@@ -763,7 +757,7 @@ function AboutTab() {
         {state.kind === "available" && (
           <>
             <span className="text-xs text-foreground">Version {state.update.version} is available.</span>
-            <Button size="sm" onClick={() => void install(state.update)}>
+            <Button size="sm" onClick={() => void installUpdate()}>
               Install and relaunch
             </Button>
           </>

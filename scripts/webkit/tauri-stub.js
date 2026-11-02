@@ -14,6 +14,9 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [ws("w1", "parity-test"), ws("w2", "demo workspace")], repositories: [], quota: { used: 2, limit: 3 }, fetchedAt: now,
     sessions: { w1: { sessions: Array.from({ length: 12 }, (_, i) => session(`s${i}`, i === 11 ? "Last session" : `Session ${i}`)), capabilities: ["session/2"], at: now }, w2: { sessions: [session("s3", "Demo session")], capabilities: null, at: now } } } } };
   const answers = {
+    // Layout fixtures have no app update. The generic plugin handle below is
+    // truthy and would otherwise become a bogus Update after the startup check.
+    "plugin:updater|check": null,
     list_projects: { projects, lastSelected: projects[0]?.path ?? null },
     list_sessions: [],
     list_harnesses: [{ id: "claude", name: "Claude", available: true }],

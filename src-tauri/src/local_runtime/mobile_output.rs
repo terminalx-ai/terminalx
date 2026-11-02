@@ -65,6 +65,9 @@ struct View {
     pane: String,
     token: String,
     buffer: Arc<Mutex<Buffer>>,
+    /// The pane size last told to the phone, which emulates the screen at
+    /// the size the desktop drew it for and must follow its resizes.
+    size: Mutex<Option<(u16,u16)>>,
 }
 impl View {
     fn read(&self, limit: usize) -> Result<String> {
@@ -73,6 +76,12 @@ impl View {
         // them in the other direction. Acknowledgements include raw byte counts.
         self.terminals.ack(&self.pane,&self.token,drawn);
         Ok(text)
+    }
+    /// The pane size, when it changed since the phone was last told.
+    fn resized(&self) -> Option<(u16,u16)> {
+        let now = self.terminals.size(&self.pane).ok()?;
+        let mut told = self.size.lock().unwrap();
+        (*told != Some(now)).then(|| { *told = Some(now); now })
     }
 }
 impl Drop for View {
@@ -94,11 +103,13 @@ impl Observations {
         let token = uuid::Uuid::new_v4().to_string();
         let buffer = Arc::new(Mutex::new(Buffer::default()));
         let output = buffer.clone();
-        let view = View { terminals:terminals.clone(),session:session.into(),tab:tab.into(),pane,token:token.clone(),buffer };
+        let view = View { terminals:terminals.clone(),session:session.into(),tab:tab.into(),pane,token:token.clone(),buffer,size:Mutex::new(None) };
         terminals.attach(&format!("mobile-{token}"),&view.pane,&token,Box::new(move |bytes| output.lock().unwrap().push(bytes)));
         let initial = view.read(usize::MAX)?;
+        let mut reply = json!({"subscriptionId":token,"type":"scrollback","serialized":initial});
+        if let Some((cols,rows)) = view.resized() { reply["cols"] = json!(cols); reply["rows"] = json!(rows); }
         views.insert(token.clone(),view);
-        Ok(json!({"subscriptionId":token,"type":"scrollback","serialized":initial}))
+        Ok(reply)
     }
     pub(crate) fn unsubscribe(&self, id: &str) -> bool { self.0.lock().unwrap().remove(id).is_some() }
     pub(crate) fn poll(&self) -> Result<Value> {
@@ -106,8 +117,14 @@ impl Observations {
         let mut packets = Vec::new();
         for (id,view) in views.iter() {
             if crate::store::index::get(&view.session)?.tab(&view.tab).is_none() { bail!("The observed tab was closed."); }
+            // A resize goes ahead of the output drawn for it: a full-screen
+            // program redraws the whole screen after one.
+            let resized = view.resized();
             let text = view.read(LIVE_PACKET)?;
-            if !text.is_empty() { packets.push(json!({"subscriptionId":id,"text":text})); }
+            if text.is_empty() && resized.is_none() { continue; }
+            let mut packet = json!({"subscriptionId":id,"text":text});
+            if let Some((cols,rows)) = resized { packet["cols"] = json!(cols); packet["rows"] = json!(rows); }
+            packets.push(packet);
         }
         Ok(json!(packets))
     }
@@ -142,5 +159,34 @@ mod tests {
         assert!(buffer.push(&vec![b'x';PER_VIEW]));
         assert!(!buffer.push(b"overflow"));
         assert!(buffer.take(usize::MAX).is_err());
+    }
+    /// The phone emulates the screen at the pane's size, so it is told the
+    /// size first and then each resize, ahead of the output drawn for it.
+    #[test]
+    fn mobile_observations_tell_the_phone_the_pane_size_and_each_resize() {
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let entry: crate::store::index::SessionEntry = serde_json::from_value(json!({
+            "id":"observed","projectPath":root,"cwd":root,"title":"observed",
+            "created":crate::store::index::now(),"modified":crate::store::index::now(),
+            "tabs":[{"id":"tab","harness":"codex","created":crate::store::index::now()}]
+        })).unwrap();
+        crate::store::index::save(&[entry]).unwrap();
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let path = root.to_str().unwrap();
+        let env = vec![("HOME".to_string(),path.to_string()),("ZDOTDIR".to_string(),path.to_string())];
+        terminals.spawn(Arc::new(crate::sink::BroadcastSink::new(64)),"observed-pane",
+            crate::pty::PaneSpec { cwd:path,cols:80,rows:24,command:Some("exec /bin/cat"),env:&env }).unwrap();
+        let view = View { terminals:terminals.clone(),session:"observed".into(),tab:"tab".into(),pane:"observed-pane".into(),
+            token:"view".into(),buffer:Arc::new(Mutex::new(Buffer::default())),size:Mutex::new(None) };
+        assert_eq!(view.resized(),Some((80,24)),"the subscription says the size");
+        let observations = Observations::default();
+        observations.0.lock().unwrap().insert("view".into(),view);
+        assert_eq!(observations.poll().unwrap(),json!([]),"nothing changed, nothing is sent");
+        terminals.resize("observed-pane",120,40).unwrap();
+        assert_eq!(observations.poll().unwrap(),json!([{"subscriptionId":"view","text":"","cols":120,"rows":40}]));
+        assert_eq!(observations.poll().unwrap(),json!([]),"a resize is told once");
+        observations.clear();
+        terminals.kill_all();
     }
 }

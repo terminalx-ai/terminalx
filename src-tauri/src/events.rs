@@ -38,6 +38,45 @@ pub struct SubagentRef {
     pub label: Option<String>,
 }
 
+/// Durable operation scope; a connection generation is not an operation id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionScope {
+    pub session_id: String,
+    pub tab_id: String,
+    pub conversation_id: Option<String>,
+    pub provider: String,
+    pub thread_id: String,
+    pub subagent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompactionEvidence {
+    pub scope: CompactionScope,
+    #[serde(flatten)]
+    pub observation: CompactionObservation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum CompactionObservation {
+    ConnectionOpened { generation: u64 },
+    ContinuityLost { generation: u64, reason: CompactionLoss },
+    ItemStarted { generation: u64, turn_id: String, item_id: String },
+    ItemCompleted { generation: u64, turn_id: String, item_id: String },
+    CompletionReconciled { turn_id: String, item_id: String },
+    TurnError { generation: u64, turn_id: String, will_retry: bool },
+    TurnEnded { generation: u64, turn_id: String, outcome: CompactionTurnEnd },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionLoss { Disconnected, Exited, Restarted }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTurnEnd { Completed, Failed, Interrupted }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockRef {
@@ -246,8 +285,13 @@ pub enum Payload {
         /// Tree id of the checkout when the turn closed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head: Option<String>,
+        /// The agent's provider refused its sign-in (#667).
         #[serde(default)]
         auth_failed: bool,
+        /// A failed turn's last words from the agent itself, when it exited
+        /// before it ever worked: bounded and redacted (`recovery::detail`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     SettingsChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,6 +329,43 @@ pub enum Payload {
     /// Codex as a steer. From here on it is a message the agent has, at this
     /// point in the turn, and no longer one waiting behind it.
     PromptAbsorbed {
+        prompt_seq: u64,
+    },
+    /// The `user_message` at `prompt_seq` has not been typed, because the
+    /// agent's input box already holds something (#722): what the reader
+    /// typed in the terminal, or a prompt the agent put back there. It goes
+    /// in once the box is empty; `occupied: false` says the wait is over.
+    InputOccupied {
+        prompt_seq: u64,
+        occupied: bool,
+    },
+    /// The agent dropped the turn of the `user_message` at `prompt_seq`
+    /// before answering it, and took another prompt in its place (#722):
+    /// Claude Code recorded a later prompt as following the same point in
+    /// the conversation. The message was never answered.
+    PromptReplaced {
+        prompt_seq: u64,
+    },
+    /// What the agent recorded for the `user_message` at `prompt_seq` is
+    /// `text`, not what was sent (#722): the message reached the agent inside
+    /// a longer prompt, or changed on the way. The chat shows `text`, once,
+    /// as what the agent received.
+    PromptChanged {
+        prompt_seq: u64,
+        text: String,
+    },
+    /// The agent received the `user_message` at `prompt_seq` inside the
+    /// prompt it recorded for the message at `into_seq`, which shows it
+    /// (#722): typed into an input box that held that one, or held with it.
+    /// Its own bubble goes; what was sent stays with the message it joined.
+    PromptJoined {
+        prompt_seq: u64,
+        into_seq: u64,
+    },
+    /// The reader stopped the turn while the `user_message` at `prompt_seq`
+    /// was waiting on what the agent's input box held (#722): it was never
+    /// typed, and will not be. It can be sent again.
+    PromptWithdrawn {
         prompt_seq: u64,
     },
     AssistantText {
@@ -343,6 +424,9 @@ pub enum Payload {
         tool_use_id: String,
         tool_name: String,
         input: Value,
+        /// The provider's session directory. A tool may specify a different workdir in its input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,6 +476,14 @@ pub enum Payload {
     ModelRequestStarted,
     UsageUpdate(Usage),
     ContextCompactionStarted,
+    /// Additive lifecycle channel. No current provider emits confirmed starts.
+    ContextCompactionLifecycle {
+        evidence: CompactionEvidence,
+        #[serde(default)]
+        confirmed_start: bool,
+        /// False is live/read-time append uncertainty, never a saved success.
+        persisted: bool,
+    },
     ContextCompacted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_tokens: Option<u64>,
@@ -429,6 +521,10 @@ pub enum Payload {
         message: String,
         #[serde(default)]
         fatal: bool,
+        /// What a launch that was refused said: bounded and redacted
+        /// (`recovery::detail`), shown under the allowlisted message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     Unknown {
         kind: String,
@@ -450,7 +546,8 @@ impl Payload {
     /// Previews and running counters are superseded by their committed event,
     /// so they are emitted but never written to the log.
     pub fn is_persisted(&self) -> bool {
-        !matches!(self, Payload::Delta(_) | Payload::UsageUpdate(_) | Payload::ModelRequestStarted | Payload::ProviderSettings { .. })
+        !matches!(self, Payload::Delta(_) | Payload::UsageUpdate(_) | Payload::ModelRequestStarted | Payload::ProviderSettings { .. }
+            | Payload::ContextCompactionLifecycle { persisted: false, .. })
     }
 
     pub fn is_turn_boundary(&self) -> bool {

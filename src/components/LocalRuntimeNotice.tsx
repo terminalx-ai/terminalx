@@ -1,69 +1,134 @@
-import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { errorMessage, localRuntime, type LocalRuntimeState } from "@/lib/api";
+import { errorMessage, type LocalRuntimeOutdated } from "@/lib/api";
+import { bootLocalRuntime, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
 
-const reloadWindow = () => window.location.reload();
+/** A short gap says nothing: most reconnect before anyone would notice. */
+export const QUIET_MS = 3_000;
+/** Past this a failure is no blip, and asking for an attempt now may help. */
+export const STALLED_MS = 2 * 60_000;
 
-/** Connection state is separate from session state: losing a view says nothing
- * about whether its agent stopped. Reattachment is an explicit reader action. */
-export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => void }) {
-  const [state, setState] = useState<LocalRuntimeState | null>(null);
+/** Connection health only: a gap never means an agent stopped (#643). The
+ * desktop reconnects by itself; this says so, and asks for nothing unless
+ * retrying cannot help or has not helped for minutes. A runtime that stopped
+ * answering is the exception: only restarting it helps (#661). So is one
+ * older than the app (#730), which the desktop replaces once its agents'
+ * turns are done, and which this offers to restart now. */
+export function LocalRuntimeNotice() {
+  const { state, readAt } = useLocalRuntime();
+  const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
-  const revision = useRef(0);
-  const reloaded = useRef(false);
-  const reloadOnce = useRef(() => {});
-  reloadOnce.current = () => {
-    if (reloaded.current) return;
-    reloaded.current = true;
-    reload();
-  };
-
+  const [restarting, setRestarting] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  /** The older runtime whose notice was hidden: it comes back for another. */
+  const [hidden, setHidden] = useState<string | null>(null);
+  useEffect(() => { void bootLocalRuntime(); }, []);
+  // A failed restart is news only while the runtime is still not answering.
+  useEffect(() => { if (state?.state !== "unresponsive") setFailure(null); }, [state]);
+  const down = state?.state === "connecting" ? state.downMs + Math.max(0, now - readAt) : 0;
+  // Shown again as the gap crosses each threshold, without asking again.
   useEffect(() => {
-    let cancelled = false;
-    const unlisten: (() => void)[] = [];
-    const disconnected = () => {
-      revision.current++;
-      if (!cancelled) setState({ state: "unavailable", message: "Live output is disconnected. Agents and terminal commands may still be running." });
-    };
-    void (async () => {
-      for (const event of ["local_runtime_disconnected", "local_runtime_view_disconnected", "local_runtime_reattached"]) {
-        const stop = await listen(event, event === "local_runtime_reattached" ? () => { if (!cancelled) reloadOnce.current(); } : disconnected);
-        if (cancelled) { stop(); return; }
-        unlisten.push(stop);
-      }
-      const requested = revision.current;
-      const found = await localRuntime.status();
-      if (!cancelled && revision.current === requested) setState(found);
-    })().catch((error: unknown) => {
-      if (!cancelled) setState({ state: "unavailable", message: errorMessage(error) });
-    });
-    return () => { cancelled = true; unlisten.forEach((stop) => stop()); };
-  }, []);
+    if (state?.state !== "connecting") return;
+    const next = [QUIET_MS, STALLED_MS].find((threshold) => threshold > down);
+    if (next === undefined) return;
+    const timer = setTimeout(() => setNow(Date.now()), next - down);
+    return () => clearTimeout(timer);
+  }, [state, readAt, down]);
 
-  async function reconnect() {
-    if (busy) return;
-    setBusy(true);
-    revision.current++;
-    try {
-      const found = await localRuntime.reconnect();
-      if (found.state === "connected") reloadOnce.current();
-      else setState(found.state === "unavailable" ? found : { state: "unavailable", message: "The background runtime is not available. Reopen TerminalX to try again." });
-    } catch (error) {
-      setState({ state: "unavailable", message: errorMessage(error) });
-    } finally {
-      setBusy(false);
-    }
+  if (state?.state === "updating") {
+    return (
+      <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+        <div className="min-w-0 flex-1 text-xs">
+          <div className="font-medium">Updating the TerminalX runtime</div>
+          <p className="mt-1 text-muted-foreground">Stopping the {state.from ?? "older"} runtime and starting {state.to}, the one this app came with. Each agent picks up its conversation again when its tab starts.</p>
+        </div>
+      </aside>
+    );
   }
-
-  if (state?.state !== "unavailable") return null;
+  if (state?.state === "connected" && state.outdated && hidden !== state.epoch) {
+    const { epoch } = state;
+    return <OutdatedNotice key={epoch} epoch={epoch} outdated={state.outdated} onHide={() => setHidden(epoch)} />;
+  }
+  if (state?.state === "unresponsive") {
+    // Reconnecting would reach the same wedged process; only a restart
+    // recovers, and that stops its agents, so it is the reader's call. Only
+    // the runtime this window found not responding: another window may
+    // already have replaced it.
+    const { epoch } = state;
+    const restart = async () => {
+      setRestarting(true);
+      setFailure(null);
+      try { await restartLocalRuntime(epoch); }
+      catch (error) { setFailure(errorMessage(error)); }
+      finally { setRestarting(false); }
+    };
+    return (
+      <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+        <div className="min-w-0 flex-1 text-xs">
+          <div className="font-medium">TerminalX runtime is not responding</div>
+          <p className="mt-1 text-muted-foreground">{state.message} Restarting it stops the agents and terminals it runs; each agent picks up its conversation again when its tab starts.</p>
+          {failure && <p role="alert" className="mt-1 text-destructive">{failure}</p>}
+        </div>
+        <Button variant="outline" size="sm" disabled={restarting} onClick={() => void restart()}>{restarting ? "Restarting…" : "Restart runtime"}</Button>
+      </aside>
+    );
+  }
+  if (state?.state !== "connecting" && state?.state !== "unavailable") return null;
+  if (state.state === "connecting" && down < QUIET_MS) return null;
+  const retry = async () => {
+    setBusy(true);
+    try { await reconnectLocalRuntime(); } finally { setBusy(false); }
+  };
+  const reconnecting = state.state === "connecting" && down < STALLED_MS
+    ? `${state.terminal ? "Reconnecting terminal output" : "Reconnecting"}… (attempt ${state.attempt})`
+    : null;
   return (
     <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
       <div className="min-w-0 flex-1 text-xs">
-        <div className="font-medium">Live connection unavailable</div>
-        <p className="mt-1 text-muted-foreground">{state.message}</p>
+        <div className="font-medium">{reconnecting ?? "Live connection unavailable"}</div>
+        <p className="mt-1 text-muted-foreground">{reconnecting ? "Agents and terminal commands keep running." : state.message}</p>
       </div>
-      <Button variant="outline" size="sm" disabled={busy} onClick={() => void reconnect()}>{busy ? "Reconnecting…" : "Reconnect"}</Button>
+      {!reconnecting && <Button variant="outline" size="sm" disabled={busy} onClick={() => void retry()}>{busy ? "Reconnecting…" : "Try again"}</Button>}
+    </aside>
+  );
+}
+
+/** A runtime older than the app (#730): what the switch waits for (anything
+ * restarting it would cut short), and a restart now, which stops all of it.
+ * Each agent picks up its conversation again when its tab starts. Only the
+ * runtime this window was told about: another window may already have
+ * replaced it. After a switch that failed it does not try again by itself. */
+function OutdatedNotice({ epoch, outdated, onHide }: { epoch: string; outdated: LocalRuntimeOutdated; onHide: () => void }) {
+  const [restarting, setRestarting] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const { running, app, work, problem, failed } = outdated;
+  const restart = async () => {
+    setRestarting(true);
+    setFailure(null);
+    try { await replaceLocalRuntime(epoch); }
+    catch (error) { setFailure(errorMessage(error)); }
+    finally { setRestarting(false); }
+  };
+  const waiting = failed
+    ? `Restarting it with ${app} failed, and it will not try again by itself.`
+    : work === null
+    ? `It restarts with ${app} once it has checked that nothing it runs would be cut short.`
+    : work.length === 0 ? `Nothing it runs would be cut short: it restarts with ${app} in a moment.`
+    : `It restarts with ${app} once nothing it runs would be cut short. It is waiting for:`;
+  const busy = !failed && work !== null && work.length > 0;
+  return (
+    <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+      <div className="min-w-0 flex-1 text-xs">
+        <div className="font-medium">TerminalX runtime is older than the app</div>
+        <p className="mt-1 text-muted-foreground">The runtime running your agents is {running ? `version ${running}` : "an earlier version"}; this app is {app}. {waiting}</p>
+        {busy && <ul className="mt-1 list-disc pl-4 text-muted-foreground">{work.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+        <p className="mt-1 text-muted-foreground">Restarting now stops {busy ? (work.length === 1 ? "that" : "all of that") : "its agents"}, and its terminals and whatever they run; each agent picks up its conversation again when its tab starts.</p>
+        {(failure ?? problem) && <p role="alert" className="mt-1 text-destructive">{failure ?? problem}</p>}
+      </div>
+      <div className="flex shrink-0 flex-col gap-1.5">
+        <Button variant="outline" size="sm" disabled={restarting} onClick={() => void restart()}>{restarting ? "Restarting…" : "Restart now"}</Button>
+        <Button variant="ghost" size="sm" onClick={onHide}>Hide</Button>
+      </div>
     </aside>
   );
 }

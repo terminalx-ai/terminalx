@@ -14,11 +14,11 @@
 //!   fires for every tool and can return `deny`, which blocks the call and
 //!   tells the model why — that is what "Ask every time" is built on.
 //!
-//! Every fact here was read out of the installed CLI (codex-cli 0.152.0): the
-//! JSON schemas it embeds for each hook's stdin and stdout, `codex --help`,
-//! and a real interactive turn driven through a PTY.
+//! The original hook contract was read from codex-cli 0.152.0. Launch
+//! isolation and unchanged PreToolUse acknowledgements are verified against
+//! 0.164.0; the resolved executable must advertise `--no-daemon` before use.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -48,6 +48,55 @@ const REPORT_TIMEOUT_SECS: u64 = 10;
 /// The app-side wait must match, or a card would go on offering buttons for a
 /// request the CLI has already given up on.
 pub const PERMISSION_WAIT: Duration = Duration::from_secs(DECIDING_TIMEOUT_SECS);
+
+/// Worded so `RecoveryKind::classify` reads it as `SignedOut` ("agent is
+/// signed out"), whose banner offers the Codex sign-in shell.
+pub const SIGN_IN_REQUIRED: &str = "The agent is signed out: Codex is showing its sign-in screen, so the prompt was not sent. Sign in, then stop the session and press Up in the composer to recall and send your prompt.";
+
+/// Only used before SessionStart. Inspect the newest full screen, so an old
+/// sign-in menu cleared by the CLI cannot block the composer after login.
+pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
+    let frame = output.windows(4).rposition(|bytes| bytes == b"\x1b[2J").map_or(output, |at| &output[at + 4..]);
+    let text = crate::harness::tui::screen_text(frame).to_ascii_lowercase();
+    (text.contains("signinwithchatgpt")
+        && (text.contains("apikey") || text.contains("devicecode")))
+        .then_some(SIGN_IN_REQUIRED)
+}
+
+/// What Codex's input box holds, read from the screen it has drawn (#722).
+///
+/// Codex 0.166 draws the box at the foot of the screen: a row starting with
+/// `›`, the rows the text wraps onto indented under it, then a blank row and
+/// the footer that names the model. Prompts it took are echoed higher up with
+/// the same glyph, so the box is the last such row. An empty box shows a
+/// suggestion drawn faint (`Ask Codex to do anything`); anything drawn at
+/// normal weight is in it.
+///
+/// A box with no blank row under it before the screen ends is not one this
+/// can tell from the footer, and is taken as unseen rather than waited on.
+pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
+    use crate::harness::tui::Composer;
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
+    let cell = |row: u16, col: u16| screen.cell(row, col).map_or("", |cell| cell.contents());
+    let blank = |row: u16| (0..cols).all(|col| cell(row, col).trim().is_empty());
+    let Some(first) = (0..rows).rev().find(|row| cell(*row, 0) == "›" && cell(*row, 1).trim().is_empty()) else { return Composer::Unseen };
+    let Some(end) = (first + 1..rows).find(|row| blank(*row)) else { return Composer::Unseen };
+    let mut words = Vec::new();
+    for row in first..end {
+        let mut line = String::new();
+        for col in u16::from(row == first)..cols {
+            let Some(cell) = screen.cell(row, col) else { continue };
+            line.push_str(if cell.dim() || !cell.has_contents() { " " } else { cell.contents() });
+        }
+        words.extend(line.split(char::is_whitespace).filter(|word| !word.is_empty()).map(str::to_owned));
+    }
+    if words.is_empty() {
+        Composer::Empty
+    } else {
+        Composer::Holds(words.join(" "))
+    }
+}
 
 fn timeout_for(event: &str) -> u64 {
     if matches!(event, "PermissionRequest" | "PreToolUse") {
@@ -93,27 +142,63 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// The shell command line the pane runs. `Terminals::spawn` execs it from a
-/// login shell, so it is one string rather than an argv.
-pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
-    let program = crate::binpath::resolve("codex")?;
-    let mut c = quote(&program.to_string_lossy());
-    if let Some(id) = opts.resume {
-        c.push_str(&format!(" resume {}", quote(id)));
+/// A resolved CLI admitted for an isolated session launch.
+pub struct Launcher {
+    program: PathBuf,
+}
+
+impl Launcher {
+    pub fn resolve() -> anyhow::Result<Self> {
+        let program = crate::binpath::resolve("codex")
+            .ok_or_else(|| anyhow::anyhow!("Codex is not installed. Install it and log in, then try again."))?;
+        Self::inspect(program, Duration::from_secs(5))
     }
-    if !opts.model.is_empty() {
-        c.push_str(&format!(" -m {}", quote(opts.model)));
+
+    fn inspect(program: PathBuf, timeout: Duration) -> anyhow::Result<Self> {
+        // Probe each launch: upgrades can replace the executable at the same
+        // path. A stale positive cache must not admit an incompatible CLI.
+        let mut probe = std::process::Command::new(&program);
+        probe.arg("--help").env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
+        let help = crate::git::output_within(probe, timeout).map_err(|error| {
+            let reason = match error {
+                crate::git::RunError::TimedOut => "the help command timed out",
+                crate::git::RunError::Stopped => "the help command was stopped",
+                crate::git::RunError::Failed(_) => "the help command exited unsuccessfully",
+                crate::git::RunError::Spawn(_) => "the help command could not start",
+            };
+            anyhow::anyhow!("Could not verify Codex's --no-daemon support: {reason}. Check that `codex --help` completes successfully, or update Codex (0.164.0 is verified), then retry. No agent was started.")
+        })?;
+        if !help.lines().any(|line| line.split_whitespace().next() == Some("--no-daemon")) {
+            anyhow::bail!("TerminalX requires Codex's --no-daemon option to keep each session isolated. Update Codex to a version with this option (0.164.0 is verified), then retry. No agent was started.");
+        }
+        Ok(Self { program })
     }
-    if let Some(e) = opts.effort.filter(|e| !e.is_empty()) {
-        c.push_str(&format!(" -c {}", quote(&format!("model_reasoning_effort={e}"))));
+
+    /// The shell command line the pane runs. `Terminals::spawn` execs it from
+    /// a login shell, so it is one string rather than an argv.
+    pub fn command(&self, opts: LaunchOptions<'_>) -> String {
+        // Hooks authenticate this launch with its tab, socket and token. A shared
+        // Codex daemon inherits those from whichever tab started it, including a
+        // retired owner after an app restart (#638). Keep the engine in this
+        // launch so every hook inherits the same identity as its TUI.
+        let mut c = format!("{} --no-daemon", quote(&self.program.to_string_lossy()));
+        if let Some(id) = opts.resume {
+            c.push_str(&format!(" resume {}", quote(id)));
+        }
+        if !opts.model.is_empty() {
+            c.push_str(&format!(" -m {}", quote(opts.model)));
+        }
+        if let Some(e) = opts.effort.filter(|e| !e.is_empty()) {
+            c.push_str(&format!(" -c {}", quote(&format!("model_reasoning_effort={e}"))));
+        }
+        let (approval, sandbox) = super::stance(opts.permission_mode);
+        if approval == BYPASS {
+            c.push_str(" --dangerously-bypass-approvals-and-sandbox");
+        } else {
+            c.push_str(&format!(" -a {approval} -s {sandbox}"));
+        }
+        c
     }
-    let (approval, sandbox) = super::stance(opts.permission_mode);
-    if approval == BYPASS {
-        c.push_str(" --dangerously-bypass-approvals-and-sandbox");
-    } else {
-        c.push_str(&format!(" -a {approval} -s {sandbox}"));
-    }
-    Some(c)
 }
 
 /// The stance that means "no sandbox, no questions"; it is a flag of its own
@@ -136,23 +221,73 @@ pub fn permission_decision(allow: bool) -> Value {
 /// The reply a `PreToolUse` hook prints to gate a tool the reader has been
 /// asked about. A denial has to carry a reason — Codex rejects
 /// `permissionDecision: "deny"` without one — and the model is shown it as
-/// `Command blocked by PreToolUse hook: <reason>`.
+/// `Command blocked by PreToolUse hook: <reason>`. An unchanged allowed tool
+/// is acknowledged with an empty object: Codex 0.164.0 only accepts
+/// `permissionDecision: "allow"` when it also carries rewritten input.
 pub fn pre_tool_decision(allow: bool) -> Value {
-    let (decision, reason) = if allow {
-        ("allow", "The user allowed this action.")
-    } else {
-        ("deny", "The user declined this action.")
-    };
+    if allow {
+        return json!({});
+    }
     json!({ "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": decision,
-        "permissionDecisionReason": reason,
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "The user declined this action.",
     }})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::tui::Composer;
+
+    fn drawn(output: &[u8]) -> vt100::Parser {
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(40).unwrap(), std::num::NonZeroU16::new(110).unwrap(), 0);
+        parser.process(output);
+        parser
+    }
+
+    /// Codex 0.166.0, recorded in a 110 by 40 pty: idle with its suggestion
+    /// in the box, and holding a prompt wrapped over three rows (#722).
+    #[test]
+    fn codexs_input_box_is_read_from_the_screen_it_drew() {
+        assert_eq!(composer(drawn(include_bytes!("fixtures/composer_idle.bin")).screen()), Composer::Empty, "the suggestion is drawn faint");
+        let Composer::Holds(text) = composer(drawn(include_bytes!("fixtures/composer_holding.bin")).screen()) else { panic!("the prompt is in the box") };
+        assert!(text.starts_with("This is a long prompt") && text.ends_with("create a proper issue with expected behavior"), "every wrapped row, not the footer: {text}");
+        // No blank row between the box and the end of the screen: the footer
+        // cannot be told from the box, so it is not read as the box.
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(4).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+        parser.process("\x1b[3;1H› typed\r\n  GPT-6 xhigh".as_bytes());
+        assert_eq!(composer(parser.screen()), Composer::Unseen);
+        assert_eq!(composer(drawn(b"").screen()), Composer::Unseen);
+    }
+
+    #[test]
+    fn login_menu_blocks_but_a_cleared_menu_does_not() {
+        let menu = b"\x1b[2J\x1b[1mSign in with ChatGPT\x1b[0m\r\nSign in with an API key";
+        assert_eq!(blocking_screen(menu), Some(SIGN_IN_REQUIRED));
+        let mut ready = menu.to_vec();
+        ready.extend_from_slice(b"\x1b[2JOpenAI Codex\r\nmodel: gpt-6-astra\r\n> ");
+        assert_eq!(blocking_screen(&ready), None);
+        assert_eq!(blocking_screen(b"OpenAI Codex\r\n> explain API keys"), None);
+        assert_eq!(blocking_screen(b"\x1b[38;5"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires installed Codex with daemon support; isolated home, loopback provider, no model or account"]
+    fn fresh_and_resumed_tabs_keep_their_hook_routing_with_a_shared_daemon() {
+        let launcher = Launcher::resolve().expect("install a supported Codex to run its live routing regression");
+        let fresh = launcher.command(LaunchOptions { resume: None, model: "", effort: None, permission_mode: "bypassPermissions" });
+        let resumed = launcher.command(LaunchOptions { resume: Some("fixture-resume-id"), model: "", effort: None, permission_mode: "bypassPermissions" });
+        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/local-runtime/codex-routing-probe.py");
+        let output = std::process::Command::new("python3")
+            .arg(probe)
+            .arg("--codex").arg(&launcher.program)
+            .arg("--fresh-command").arg(fresh)
+            .arg("--resume-command").arg(resumed)
+            .output().expect("run the real Codex routing regression");
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 
     #[test]
     fn only_local_owner_deciding_hooks_use_the_extended_wait() {
@@ -191,16 +326,16 @@ mod tests {
 
     #[test]
     fn a_new_tab_starts_a_conversation_and_an_old_one_resumes_it() {
-        if crate::binpath::resolve("codex").is_none() {
-            return;
-        }
-        let fresh = launch_command(LaunchOptions { resume: None, model: "gpt-5.6-sol", effort: Some("high"), permission_mode: "auto" }).unwrap();
+        let launcher = Launcher { program: PathBuf::from("/opt/codex") };
+        let fresh = launcher.command(LaunchOptions { resume: None, model: "gpt-5.6-sol", effort: Some("high"), permission_mode: "auto" });
+        assert!(fresh.starts_with("'/opt/codex' --no-daemon "));
         assert!(!fresh.contains(" resume "));
         assert!(fresh.contains(" -m 'gpt-5.6-sol'"));
         assert!(fresh.contains(" -c 'model_reasoning_effort=high'"));
         assert!(fresh.contains(" -a on-request -s workspace-write"));
 
-        let back = launch_command(LaunchOptions { resume: Some("01a0-uuid"), model: "", effort: None, permission_mode: "auto" }).unwrap();
+        let back = launcher.command(LaunchOptions { resume: Some("01a0-uuid"), model: "", effort: None, permission_mode: "auto" });
+        assert!(back.starts_with("'/opt/codex' --no-daemon resume '01a0-uuid' "));
         assert!(back.contains(" resume '01a0-uuid'"));
         assert!(!back.contains(" -m "));
         assert!(!back.contains("model_reasoning_effort"));
@@ -208,10 +343,8 @@ mod tests {
 
     #[test]
     fn each_permission_mode_names_a_stance_the_cli_accepts() {
-        if crate::binpath::resolve("codex").is_none() {
-            return;
-        }
-        let line = |mode| launch_command(LaunchOptions { resume: None, model: "", effort: None, permission_mode: mode }).unwrap();
+        let launcher = Launcher { program: PathBuf::from("/opt/codex") };
+        let line = |mode| launcher.command(LaunchOptions { resume: None, model: "", effort: None, permission_mode: mode });
         // Plan reads but never writes.
         assert!(line("plan").contains(" -a on-request -s read-only"));
         // Ask every time still runs Codex on its own terms; the gate is the
@@ -229,19 +362,89 @@ mod tests {
     /// thread is launched in its tab's mode like a fresh one.
     #[test]
     fn an_unset_mode_launches_in_bypass_fresh_and_resumed() {
-        if crate::binpath::resolve("codex").is_none() {
-            return;
-        }
+        let launcher = Launcher { program: PathBuf::from("/opt/codex") };
         for resume in [None, Some("01a0-uuid")] {
             for mode in ["", crate::store::index::DEFAULT_PERMISSION_MODE] {
-                let c = launch_command(LaunchOptions { resume, model: "", effort: None, permission_mode: mode }).unwrap();
+                let c = launcher.command(LaunchOptions { resume, model: "", effort: None, permission_mode: mode });
                 assert!(c.contains(" --dangerously-bypass-approvals-and-sandbox"), "{mode:?} {resume:?}: {c}");
                 assert!(!c.contains(" -a "), "{mode:?} {resume:?}");
             }
-            let manual = launch_command(LaunchOptions { resume, model: "", effort: None, permission_mode: "manual" }).unwrap();
+            let manual = launcher.command(LaunchOptions { resume, model: "", effort: None, permission_mode: "manual" });
             assert!(manual.contains(" -a on-request -s workspace-write"));
             assert!(!manual.contains("dangerously"));
         }
+    }
+
+    #[cfg(unix)]
+    fn help_program(directory: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let program = directory.join("codex");
+        std::fs::write(&program, format!("#!/bin/sh\n[ \"$*\" = '--help' ] || exit 91\n{body}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        program
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_codex_cannot_produce_a_fresh_or_resume_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = help_program(directory.path(), "printf 'Usage: codex [OPTIONS]\nOptions:\n  --no-alt-screen\n'");
+        for resume in [None, Some("saved-conversation")] {
+            let result = Launcher::inspect(program.clone(), Duration::from_secs(5))
+                .map(|launcher| launcher.command(LaunchOptions { resume, model: "", effort: None, permission_mode: "bypassPermissions" }));
+            let error = result.expect_err("a CLI without isolation support must be rejected before building an agent command").to_string();
+            assert!(error.contains("--no-daemon"));
+            assert!(error.contains("Update Codex"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supported_codex_keeps_isolation_and_permissions_fresh_and_resumed() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = help_program(directory.path(), "printf 'Options:\n  --no-daemon\n    Run without the shared background server.\n'");
+        let launcher = Launcher::inspect(program.clone(), Duration::from_secs(5)).unwrap();
+        for resume in [None, Some("saved-conversation")] {
+            for mode in ["bypassPermissions", "manual", "plan"] {
+                let command = launcher.command(LaunchOptions { resume, model: "", effort: None, permission_mode: mode });
+                let prefix = format!("{} --no-daemon{}", quote(&program.to_string_lossy()), if resume.is_some() { " resume 'saved-conversation'" } else { "" });
+                assert!(command.starts_with(&prefix));
+                assert_eq!(command.contains("--dangerously-bypass-approvals-and-sandbox"), mode == "bypassPermissions");
+                if mode == "manual" { assert!(command.ends_with(" -a on-request -s workspace-write")); }
+                if mode == "plan" { assert!(command.ends_with(" -a on-request -s read-only")); }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_or_ambiguous_capability_checks_never_enable_a_launch() {
+        let directory = tempfile::tempdir().unwrap();
+        for (body, timeout, reason) in [
+            ("printf '  --no-daemon\n'; exit 2", Duration::from_secs(5), "exited unsuccessfully"),
+            ("printf '  --no-daemon-other\n'", Duration::from_secs(5), "Update Codex"),
+            ("exec sleep 30", Duration::from_millis(50), "timed out"),
+            ("sleep 2 2>/dev/null & printf '  --no-daemon\\n'; exit 0", Duration::from_millis(50), "timed out"),
+            ("sleep 2 >/dev/null & printf '  --no-daemon\\n'; exit 0", Duration::from_millis(50), "timed out"),
+        ] {
+            let program = help_program(directory.path(), body);
+            let error = Launcher::inspect(program, timeout).err().expect("an unsuccessful probe must reject launch");
+            assert!(error.to_string().contains(reason), "{body}: {error}");
+        }
+        let error = Launcher::inspect(directory.path().join("missing"), Duration::from_secs(5)).err().unwrap();
+        assert!(error.to_string().contains("could not start"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_codex_at_the_same_path_refreshes_its_capability() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = help_program(directory.path(), "printf '  --no-alt-screen\n'");
+        assert!(Launcher::inspect(program.clone(), Duration::from_secs(5)).is_err());
+        help_program(directory.path(), "printf '  --no-daemon\n'");
+        assert!(Launcher::inspect(program.clone(), Duration::from_secs(5)).is_ok());
+        help_program(directory.path(), "printf '  --no-alt-screen\n'");
+        assert!(Launcher::inspect(program, Duration::from_secs(5)).is_err());
     }
 
     #[test]
@@ -260,6 +463,6 @@ mod tests {
         let block = pre_tool_decision(false);
         assert_eq!(block["hookSpecificOutput"]["permissionDecision"], "deny");
         assert!(!block["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().is_empty());
-        assert_eq!(pre_tool_decision(true)["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(pre_tool_decision(true), json!({}));
     }
 }

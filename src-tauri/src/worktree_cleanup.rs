@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::git;
+use crate::issue_pipeline::admission;
 use crate::landed::{self, Fetch};
 use crate::session_ops;
 use crate::sink::EventSink;
@@ -328,7 +329,14 @@ pub struct Host<'a> {
     pub confine: Option<&'a Path>,
     pub live: &'a dyn Fn(&[SessionEntry]) -> Live,
     pub fetch: Fetch,
+    /// Stops a session's agents and waits for them to be gone, for a removal
+    /// finished after its worktree went ([`reconcile`]). `None` where this
+    /// host runs no agents.
+    pub stop_agents: Option<StopAgents<'a>>,
 }
+
+/// Stops a session's agents, waiting for them to be gone; why not, if not.
+pub type StopAgents<'a> = &'a dyn Fn(&SessionEntry) -> Result<(), String>;
 
 pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -610,22 +618,6 @@ fn holds_git_dir(dir: &Path, depth: usize) -> bool {
     std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && holds_git_dir(&entry.path(), depth - 1))
 }
 
-/// The git operation that is under way in the checkout, if one is.
-fn operation_in_progress(path: &Path) -> Result<Option<&'static str>, ()> {
-    let dir = git::run(path, &["rev-parse", "--absolute-git-dir"]).map_err(|_| ())?;
-    let dir = Path::new(dir.trim());
-    let marks = [
-        ("MERGE_HEAD", "merge"),
-        ("rebase-merge", "rebase"),
-        ("rebase-apply", "rebase"),
-        ("CHERRY_PICK_HEAD", "cherry-pick"),
-        ("REVERT_HEAD", "revert"),
-        ("BISECT_LOG", "bisect"),
-        ("sequencer", "cherry-pick or revert"),
-    ];
-    Ok(marks.into_iter().find(|(mark, _)| std::fs::symlink_metadata(dir.join(mark)).is_ok()).map(|(_, what)| what))
-}
-
 fn describe_changes(listing: &str) -> String {
     let (mut conflicts, mut untracked, mut staged, mut modified) = (0, 0, 0, 0);
     for line in listing.lines() {
@@ -742,13 +734,13 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
             return (Verdict::Active, Some(format!("{running}.")));
         }
 
-        match operation_in_progress(&path) {
+        match git::operation_in_progress(&path) {
             Ok(None) => {}
             Ok(Some(what)) => {
                 candidate.brief = Some(format!("a {what} is in progress"));
                 return (Verdict::InProgress, Some(format!("A {what} is in progress.")));
             }
-            Err(()) => return unverifiable("Git could not read the checkout's state."),
+            Err(_) => return unverifiable("Git could not read the checkout's state."),
         }
         match git::run(&path, &["status", "--porcelain", "--untracked-files=all", "--"]) {
             Ok(out) => listing = out,
@@ -917,8 +909,8 @@ fn result(item: &RemoveItem, outcome: Outcome, reason: impl Into<Option<String>>
 /// A worktree that is not on disk. Nothing can be read of it, so nothing is
 /// removed and git's records are left as they are. The one thing done here
 /// finishes a removal that was cut short: when git no longer lists the
-/// worktree but sessions that ran in it still point there, they are filed
-/// under the project (never deleted).
+/// worktree but sessions that ran in it still point there, their agents are
+/// stopped and they are filed under the project (never deleted).
 fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>, item: &RemoveItem, target: &Path) -> ItemResult {
     let Some(parent) = target.parent().filter(|parent| parent.is_dir()) else {
         return result(item, Outcome::Skipped, "Its folder cannot be reached, so nothing about it could be checked.".to_string());
@@ -950,6 +942,17 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
         .collect();
     if left.is_empty() {
         return result(item, Outcome::Skipped, "Nothing is at that path. If an earlier clean-up removed it, there is nothing left to do.".to_string());
+    }
+    // An agent still running there works in a folder that is gone, and filed
+    // under the project its session would go on from the project's own
+    // checkout (#696). Stopped first, or nothing is filed, and nothing starts
+    // in those sessions again until they are filed.
+    let _filing = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), left.iter().map(|session| admission::Scope::Session(session.id.clone())));
+    if let Some(stop) = host.stop_agents {
+        let failed: Vec<String> = left.iter().filter_map(|session| stop(session).err().map(|error| format!("\"{}\": {error}", session.title))).collect();
+        if !failed.is_empty() {
+            return result(item, Outcome::Failed, format!("It was already removed, but its sessions' agents could not be stopped, so its sessions were left as they were. {}", failed.join("; ")));
+        }
     }
     match session_ops::mark_workspace_sessions_removed(&repository.root, &left) {
         Ok(moved) => {
@@ -990,8 +993,12 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         step(Step::Measuring);
         git::size_on_disk(&target)
     });
-    // Everything is read again now, as late as it can be.
+    // Everything is read again now, as late as it can be, and from here to
+    // the end nothing starts in it: a prompt admitted before this is a turn
+    // the inspection sees, and one sent after is refused. Every other
+    // workspace's prompts are admitted meanwhile (#727).
     step(Step::Checking);
+    let _removing = admission::fence(admission::Kind::Refuse(admission::WORKSPACE_REMOVED), [admission::Scope::checkout(&target)]);
     let sessions = match index::load() {
         Ok(sessions) => sessions,
         Err(error) => return result(item, Outcome::Skipped, format!("The session index could not be read, so nothing was removed: {error:#}")),
@@ -1112,7 +1119,16 @@ impl Jobs {
     }
 }
 
+/// Where a test holds a sizing mid-walk (#727): run once, at the first entry walked.
+#[cfg(test)]
+pub(crate) static WALKING: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
 fn walk_size(path: &Path, stop: &AtomicBool) -> Option<u64> {
+    #[cfg(test)]
+    {
+        let hold = WALKING.lock().unwrap_or_else(|error| error.into_inner()).take();
+        if let Some(hold) = hold { hold(); }
+    }
     if stop.load(Ordering::Relaxed) {
         return None;
     }

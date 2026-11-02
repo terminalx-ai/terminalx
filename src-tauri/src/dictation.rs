@@ -25,6 +25,9 @@ pub struct DictationEvent {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Untransformed recognition for stream revision matching; never logged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// The System Settings privacy pane that can resolve this error.
@@ -45,9 +48,7 @@ fn trace(kind: &str, text: Option<&str>, message: Option<&str>, segment: Option<
     let segment = segment.map_or_else(String::new, |index| format!(" segment={index}"));
     let detail = match (text, message) {
         (Some(t), _) => {
-            let head: String = t.chars().take(40).collect();
-            let more = if t.chars().count() > 40 { "…" } else { "" };
-            format!(" len={} {:?}", t.chars().count(), format!("{head}{more}"))
+            format!(" len={}", t.chars().count())
         }
         (None, Some(m)) => format!(" {m}"),
         (None, None) => String::new(),
@@ -63,13 +64,17 @@ fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) 
     trace("error", None, Some(&message), None);
     let _ = app.emit(
         "dictation",
-        DictationEvent { kind: "error", text: None, message: Some(message), settings: Some(settings), segment: None },
+        DictationEvent { kind: "error", text: None, raw: None, message: Some(message), settings: Some(settings), segment: None },
     );
 }
 
 fn emit_segment(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>, segment: Option<u64>) {
+    emit_recognition(app, kind, text, None, message, segment);
+}
+
+fn emit_recognition(app: &AppHandle, kind: &'static str, text: Option<String>, raw: Option<String>, message: Option<String>, segment: Option<u64>) {
     trace(kind, text.as_deref(), message.as_deref(), segment);
-    let _ = app.emit("dictation", DictationEvent { kind, text, message, settings: None, segment });
+    let _ = app.emit("dictation", DictationEvent { kind, text, raw, message, settings: None, segment });
 }
 
 /// System output volume, read and written through AppleScript. Best effort:
@@ -96,7 +101,7 @@ mod mac {
     use objc2::rc::Retained;
     use objc2::AllocAnyThread;
     use objc2_avf_audio::{AVAudioFormat, AVAudioPCMBuffer};
-    use objc2_foundation::NSError;
+    use objc2_foundation::{NSArray, NSError, NSLocale, NSString};
     use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFTranscription};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -493,6 +498,7 @@ mod mac {
         restarts: AtomicU32,
         /// A recogniser that immediately completes every new task must not spin.
         last_restart: Mutex<Instant>,
+        personalization: Mutex<crate::transcription::context::RunContext>,
     }
 
     impl Default for Dictation {
@@ -514,6 +520,7 @@ mod mac {
                 segments: Arc::new(Mutex::new(AppleSegmentTracker::default())),
                 restarts: AtomicU32::new(0),
                 last_restart: Mutex::new(now.checked_sub(RESTART_INTERVAL).unwrap_or(now)),
+                personalization: Mutex::new(crate::transcription::context::RunContext::default()),
             }
         }
     }
@@ -534,7 +541,7 @@ mod mac {
             self.active.lock().unwrap().is_some()
         }
 
-        pub fn start(self: &Arc<Self>, app: AppHandle, transcription: Arc<Transcription>) -> Result<(), String> {
+        pub fn start(self: &Arc<Self>, app: AppHandle, transcription: Arc<Transcription>, context: crate::transcription::context::RunContext) -> Result<(), String> {
             if self.is_active() {
                 return Ok(());
             }
@@ -549,6 +556,7 @@ mod mac {
                 emit(&app, "error", None, Some(msg.clone()));
                 return Err(msg);
             }
+            *self.personalization.lock().unwrap() = context;
             // Under the hardened runtime a microphone refusal is silent —
             // zeroes rather than an error — so settle every privacy service
             // this engine needs before opening the capture.
@@ -559,21 +567,30 @@ mod mac {
             let continue_after_prompt = move |result: Result<(), permission::Kind>| match result {
                 Ok(()) => {
                     if let Err(error) = me.begin(continuation_app.clone(), &continuation_model) {
+                        me.clear_personalization();
                         emit(&continuation_app, "error", None, Some(error));
                     }
                 }
                 Err(kind) => {
+                    me.clear_personalization();
                     emit_permission_denied(&continuation_app, kind);
                 }
             };
             match permission::begin(self.permissions.clone(), needs_speech, continue_after_prompt) {
-                permission::Start::Ready => self.begin(app, &model),
+                permission::Start::Ready => self.begin(app, &model).inspect_err(|_| self.clear_personalization()),
                 permission::Start::Denied(kind) => {
+                    self.clear_personalization();
                     let message = emit_permission_denied(&app, kind);
                     Err(message)
                 }
                 permission::Start::Pending => Ok(()),
             }
+        }
+
+        fn clear_personalization(&self) {
+            let mut context = self.personalization.lock().unwrap();
+            context.cancel();
+            *context = crate::transcription::context::RunContext::default();
         }
 
         fn begin(self: &Arc<Self>, app: AppHandle, model: &str) -> Result<(), String> {
@@ -654,6 +671,7 @@ mod mac {
             let app_on_main = app.clone();
             app.run_on_main_thread(move || {
                 if let Err(error) = me.begin_apple_on_main(app_on_main.clone()) {
+                    me.clear_personalization();
                     emit(&app_on_main, "error", None, Some(error));
                 }
             })
@@ -661,12 +679,14 @@ mod mac {
             Ok(())
         }
 
-        unsafe fn configured_apple_request(recognizer: &SFSpeechRecognizer) -> Retained<SFSpeechAudioBufferRecognitionRequest> {
+        unsafe fn configured_apple_request(&self, _recognizer: &SFSpeechRecognizer) -> Retained<SFSpeechAudioBufferRecognitionRequest> {
             let request = SFSpeechAudioBufferRecognitionRequest::new();
             request.setShouldReportPartialResults(true);
-            if recognizer.supportsOnDeviceRecognition() {
-                request.setRequiresOnDeviceRecognition(true);
-            }
+            // Never let personalization or audio fall back to Apple servers.
+            request.setRequiresOnDeviceRecognition(true);
+            let context = self.personalization.lock().unwrap();
+            let strings: Vec<_> = context.bias.iter().map(|s| NSString::from_str(s)).collect();
+            request.setContextualStrings(&NSArray::from_retained_slice(&strings));
             request.setAddsPunctuation(true);
             request
         }
@@ -689,8 +709,9 @@ mod mac {
                 if !result.is_null() {
                     let result = &*result;
                     let transcription = result.bestTranscription();
-                    let text = transcription.formattedString().to_string();
+                    let raw = transcription.formattedString().to_string();
                     let is_final = result.isFinal();
+                    let text = me.personalization.lock().unwrap().process(&raw, &app, "apple", is_final);
                     let segment = segments.lock().unwrap().observe(apple_segment_bounds(&transcription), is_final);
                     if !text.trim().is_empty() {
                         produced.store(true, Ordering::SeqCst);
@@ -703,14 +724,14 @@ mod mac {
                             Route::Local { .. } => None,
                         });
                         log::debug!("dictation Apple final stopping={is_stopping} generation={generation} task_state={task_state:?}");
-                        emit_segment(&app, "final", Some(text), None, segment);
+                        emit_recognition(&app, "final", Some(text), Some(raw), None, segment);
                         if is_stopping {
                             me.finish(&app);
                         } else {
                             me.schedule_apple_restart(app.clone(), generation);
                         }
                     } else {
-                        emit_segment(&app, "partial", Some(text), None, segment);
+                        emit_recognition(&app, "partial", Some(text), Some(raw), None, segment);
                     }
                 }
                 if !error.is_null() && !handled_final {
@@ -779,7 +800,7 @@ mod mac {
             self.restarts.fetch_add(1, Ordering::SeqCst);
             *self.last_restart.lock().unwrap() = Instant::now();
             self.segments.lock().unwrap().restart_request();
-            let request = Self::configured_apple_request(&recognizer);
+            let request = self.configured_apple_request(&recognizer);
             let handler = self.apple_result_handler(app.clone(), generation);
             let task = recognizer.recognitionTaskWithRequest_resultHandler(&request, &handler);
 
@@ -811,11 +832,19 @@ mod mac {
 
         fn begin_apple_on_main(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
             unsafe {
-                let recognizer = SFSpeechRecognizer::new();
+                let language = self.personalization.lock().unwrap().data.options.language.clone();
+                let recognizer = if let Some(language) = language {
+                    let locale = NSLocale::initWithLocaleIdentifier(NSLocale::alloc(), &NSString::from_str(&language));
+                    SFSpeechRecognizer::initWithLocale(SFSpeechRecognizer::alloc(), &locale)
+                        .ok_or("Speech recognition does not support this language.")?
+                } else { SFSpeechRecognizer::new() };
+                if !recognizer.supportsOnDeviceRecognition() {
+                    return Err("On-device speech recognition is unavailable for this language. Choose a downloaded model in Settings → Transcription.".into());
+                }
                 if !recognizer.isAvailable() {
                     return Err("Speech recognition is not available for your language right now.".into());
                 }
-                let request = Self::configured_apple_request(&recognizer);
+                let request = self.configured_apple_request(&recognizer);
                 let shared_request = Arc::new(Mutex::new(RequestHandle(request.clone())));
 
                 let Opened { capture, frames, opening, restore_volume } = self.open_capture()?;
@@ -889,26 +918,43 @@ mod mac {
             };
             if let Some((id, path, audio)) = local {
                 emit(&app, "transcribing", None, None);
+                let context = self.personalization.lock().unwrap().clone();
                 let me = self.clone();
                 std::thread::Builder::new()
                     .name("dictation-transcribe".into())
                     .spawn(move || {
                         // The pump may still be draining the last chunk.
                         std::thread::sleep(std::time::Duration::from_millis(60));
+                        if context.is_cancelled() { return; }
                         let samples = audio.lock().unwrap().clone();
                         if is_silent(&samples) {
+                            let status = if context.data.options.noise_guard { crate::transcription::noise::NoiseStatus::NoAudio }
+                                else { crate::transcription::noise::NoiseStatus::Disabled };
+                            context.process_with_noise("", &app, &id, true, &crate::transcription::noise::NoiseResult::new(status));
                             emit(&app, "error", None, Some(NO_AUDIO.into()));
                         } else {
-                            match transcription.engine.transcribe(&id, &path, &samples) {
-                                // A model can be handed real speech and still
-                                // make no words of it. An empty composer would
-                                // read as a dictation that quietly vanished.
-                                Ok(text) if text.trim().is_empty() => emit(&app, "error", None, Some(NOT_RECOGNISED.into())),
-                                Ok(text) => emit(&app, "final", Some(text), None),
+                            let result = transcription.engine.transcribe(&id, &path, &samples, &context);
+                            if context.is_cancelled() { return; }
+                            match result {
+                                Ok(text) => {
+                                    let detector_path = if context.data.options.noise_guard {
+                                        crate::transcription::download::model_path(&crate::transcription::catalog::DETECTOR).ok()
+                                    } else { None };
+                                    let noise = transcription.engine.noise.evaluate(context.data.options.noise_guard,
+                                        detector_path.as_deref(), &samples, &context.cancelled);
+                                    if context.is_cancelled() { return; }
+                                    let empty_raw = text.trim().is_empty();
+                                    let text = context.process_with_noise(&text, &app, &id, true, &noise);
+                                    if empty_raw && noise.status != crate::transcription::noise::NoiseStatus::NoSpeech {
+                                        emit(&app, "error", None, Some(NOT_RECOGNISED.into()));
+                                    } else {
+                                        emit(&app, "final", Some(text), None);
+                                    }
+                                },
                                 Err(e) => emit(&app, "error", None, Some(format!("{e:#}"))),
                             }
                         }
-                        me.finish(&app);
+                        if !context.is_cancelled() { me.finish(&app); }
                     })
                     .map_err(|e| e.to_string())?;
                 return Ok(());
@@ -940,6 +986,7 @@ mod mac {
         fn finish(&self, app: &AppHandle) {
             let taken = self.active.lock().unwrap().take();
             if let Some(mut a) = taken {
+                self.clear_personalization();
                 if let Some(level) = a.restore_volume.take() {
                     volume::set(level);
                 }
@@ -1273,7 +1320,7 @@ impl Dictation {
     pub fn is_active(&self) -> bool {
         false
     }
-    pub fn start(self: &std::sync::Arc<Self>, app: AppHandle, _t: std::sync::Arc<crate::transcription::Transcription>) -> Result<(), String> {
+    pub fn start(self: &std::sync::Arc<Self>, app: AppHandle, _t: std::sync::Arc<crate::transcription::Transcription>, _context: crate::transcription::context::RunContext) -> Result<(), String> {
         emit(&app, "error", None, Some("Dictation is only available on macOS.".into()));
         Err("Dictation is only available on macOS.".into())
     }

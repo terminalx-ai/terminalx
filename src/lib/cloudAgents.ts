@@ -1,7 +1,7 @@
 import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents } from "@/lib/agentEvents";
+import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents, setFeedContinuity } from "@/lib/agentEvents";
 import type { ImageInput } from "@/lib/api";
 import { CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages } from "@/lib/cloudComposer";
 import type { CloudImageRef } from "@/lib/cloudAgentApi";
@@ -103,6 +103,9 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+/** Issued mutations outlive disposable stores. Do not clear this queue on
+ * account changes: A -> B -> A must still wait for A's older native operation. */
+const cacheMutations = new Map<string, Promise<void>>();
 /** The signed-in account (`context.account`), as `@/lib/account` reports it; "" while signed out. */
 let account = "";
 
@@ -205,6 +208,7 @@ export function resetCloudAgents() {
     for (const tab of s.tabs.values()) if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
   }
   stores.clear();
+  caughtUp.clear();
   // After the stores are gone, so clearing a draft queues no save.
   const typed = new Set(draftTabs);
   draftTabs.clear();
@@ -321,7 +325,27 @@ function scheduleSave(s: Store, tabId: string) {
   );
 }
 
-async function saveNow(s: Store, tabId: string) {
+function queueCacheMutation(s: Store, tabId: string, mutate: (owner: string) => Promise<void>): Promise<void> {
+  const owner = cacheAccount(s);
+  const key = JSON.stringify([owner, s.scope.organizationId, s.scope.workspaceId, tabId]);
+  const previous = cacheMutations.get(key) ?? Promise.resolve();
+  const writing = previous.catch(() => undefined).then(() => mutate(owner));
+  cacheMutations.set(key, writing);
+  return writing.finally(() => {
+    if (cacheMutations.get(key) === writing) cacheMutations.delete(key);
+  });
+}
+
+async function mutateCache(s: Store, owner: string, tabId: string, entry: CachedTab | null) {
+  await cloudAgentApi.cacheSave(owner, s.scope, tabId, entry);
+}
+
+function saveNow(s: Store, tabId: string): Promise<void> {
+  return queueCacheMutation(s, tabId, (owner) => persistNow(s, tabId, owner));
+}
+
+async function persistNow(s: Store, tabId: string, owner: string) {
+  if (stores.get(cloudAgentsKey(s.scope)) !== s) return;
   if (isDevScope(s.scope)) return;
   const tab = s.tabs.get(tabId);
   if (!tab || tab.placeholder || !tab.info.sessionId) return;
@@ -337,11 +361,7 @@ async function saveNow(s: Store, tabId: string) {
     draft: tab.draft || undefined,
     updatedAt: Date.now(),
   };
-  try {
-    await cloudAgentApi.cacheSave(cacheAccount(s), s.scope, tabId, entry);
-  } catch {
-    // The cache is only a head start; the checkpoint and the runtime hold the truth.
-  }
+  await mutateCache(s, owner, tabId, entry).catch(() => {});
 }
 
 /** Cloud tabs with a draft in `@/lib/drafts`, to forget with this account (a tab the runtime closed keeps its id there). */
@@ -371,6 +391,9 @@ function restoreDraft(s: Store, tab: CloudAgentTab, draft: string | undefined) {
   tab.draft = draft;
   draftTabs.add(tab.tabId);
   setDraft(tab.tabId, draft);
+  // Reaffirm the restored value through the serialized writer. A cache read
+  // started before another write is not proof of what remains on disk now.
+  scheduleSave(s, tab.tabId);
 }
 
 /** Write pending cache entries now (e.g. before leaving the page). */
@@ -575,7 +598,8 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
   if (pending) clearTimeout(pending);
   s.saves.delete(tab.tabId);
   if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
-  if (!isDevScope(s.scope)) void cloudAgentApi.cacheSave(cacheAccount(s), s.scope, tab.tabId, null).catch(() => undefined);
+  if (!isDevScope(s.scope)) void queueCacheMutation(s, tab.tabId,
+    (owner) => mutateCache(s, owner, tab.tabId, null)).catch(() => undefined);
 }
 
 export async function syncLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient) {
@@ -626,6 +650,25 @@ export function watchLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient
 }
 
 /**
+ * The live feeds of each tab, by `sessionId/tabId`, that caught up from the
+ * runtime's own history over a connection that is still up. While one has,
+ * the tab's log is continuous with that history, and a compaction it shows
+ * running is running (#644). With none, the reader may have missed how it
+ * ended, and it is shown as unknown.
+ */
+const caughtUp = new Map<string, Set<object>>();
+
+function noteCaughtUp(sessionId: string, tabId: string, feed: object, on: boolean) {
+  const k = `${sessionId}/${tabId}`;
+  const feeds = caughtUp.get(k) ?? new Set<object>();
+  if (on) feeds.add(feed);
+  else feeds.delete(feed);
+  if (feeds.size) caughtUp.set(k, feeds);
+  else caughtUp.delete(k);
+  setFeedContinuity(sessionId, tabId, feeds.size > 0);
+}
+
+/**
  * Stream a tab live. Call only while the connection is up: reading never
  * wakes compute. Resumes after the cached cursor; overlapping replays are
  * merged by seq.
@@ -639,6 +682,21 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
   const sessionId = tab.info.sessionId;
   tab.live = true;
   publish(s);
+  // This feed has caught up once its replay is merged over a live connection,
+  // and has not from when that connection drops until the resume's replay.
+  const feed = {};
+  let ended = false;
+  const caught = (on: boolean) => {
+    if (!on || !ended) noteCaughtUp(sessionId, tabId, feed, on);
+  };
+  const offState = client.onState((state) => {
+    if (state.state !== "connected") caught(false);
+  });
+  const end = () => {
+    ended = true;
+    offState();
+    caught(false);
+  };
   const onEvent = (raw: unknown) => {
     const ev = raw as AgentEvent;
     if (!ev || typeof ev !== "object" || !ev.payload) return;
@@ -677,8 +735,10 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
         publish(s);
         scheduleSave(s, tabId);
       },
+      onReplayed: () => caught(client.connection.state === "connected"),
     });
   } catch (error) {
+    end();
     const current = s.tabs.get(tabId);
     if (current) current.live = false;
     publish(s);
@@ -692,6 +752,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
   }
   return () => {
     stop?.();
+    end();
     const current = s.tabs.get(tabId);
     if (current) current.live = false;
     publish(s);

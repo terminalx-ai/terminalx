@@ -5,6 +5,7 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { pty, type PaneAgent, type ShellPane } from "@/lib/api";
 import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
+import { recordTerminalMemory } from "@/lib/terminalMemory";
 
 /**
  * Terminal panes per session, and the live xterm of each one that has been
@@ -31,6 +32,8 @@ export interface TerminalPane {
   hidden?: boolean;
   /** Spawned by the backend for an agent tab, so closing it is the backend's. */
   owned?: boolean;
+  /** A shell in the right panel's terminal dock: hidden from the tab strip, listed in the dock. */
+  docked?: boolean;
 }
 
 export interface OpenTerminalOptions {
@@ -39,6 +42,7 @@ export interface OpenTerminalOptions {
   /** Run this instead of an interactive shell; the pane exits with it. */
   command?: string;
   hidden?: boolean;
+  docked?: boolean;
 }
 
 export interface TerminalState {
@@ -91,6 +95,10 @@ export interface TerminalInstance {
   fit: FitAddon;
   /** Stops whatever feeds it output; called when the instance is disposed. */
   release?: () => void;
+  /** Attach again over a new connection, the screen redrawn from the backend's scrollback. */
+  reattach?: () => void;
+  /** Whether it is attached now under `token`, the name of one attachment of its pane's output. */
+  attachedAs?: (token: string) => boolean;
   /** May be rebuilt from the backend's bounded scrollback without ending the process. */
   restorable?: boolean;
 }
@@ -129,6 +137,7 @@ export function getInstance(id: string, create: () => TerminalInstance, host?: H
   let inst = instances.get(id);
   if (!inst) {
     inst = create();
+    recordTerminalMemory(inst.term);
     const size = sizes.get(id);
     // Replay must use the grid the PTY printed into, before a view refits it.
     if (size) inst.term.resize(size.cols, size.rows);
@@ -198,12 +207,42 @@ export function onInstanceDisposed(listener: (inst: TerminalInstance) => void) {
   disposals.add(listener);
 }
 
+/**
+ * This window's connection to its panes' output was replaced (#643): the old
+ * one delivers nothing more. A terminal on screen attaches again in place and
+ * is redrawn from the backend's scrollback; one off screen is let go, and the
+ * next view to show it builds it afresh from that same scrollback.
+ */
+export function reattachLocalTerminals() {
+  for (const [id, inst] of [...instances]) {
+    if (!inst.reattach) continue;
+    if (inst.el.isConnected) inst.reattach();
+    else disposeInstance(id);
+  }
+}
+
+/**
+ * One of this window's terminals fell too far behind its pane, and the
+ * backend stopped sending it output (#716). Nothing else on the window's
+ * connection was touched. On screen it attaches again in place and is
+ * redrawn from the pane's scrollback; off screen it is let go, and the next
+ * view to show it builds it afresh from that same scrollback. Word of an
+ * attachment that has since been replaced changes nothing.
+ */
+export function catchUpLaggedView(id: string, token: string) {
+  const inst = instances.get(id);
+  if (!inst?.attachedAs?.(token)) return;
+  if (inst.el.isConnected) inst.reattach?.();
+  else disposeInstance(id);
+}
+
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
   const paneExists = state.panes.some((pane) => pane.id === id);
   if (!paneExists) sizes.delete(id);
   if (inst) {
+    recordTerminalMemory(inst.term, true);
     if (inst.restorable && paneExists) sizes.set(id, { cols: inst.term.cols, rows: inst.term.rows });
     inst.release?.();
     inst.term.dispose();
@@ -233,6 +272,21 @@ function adoptShell(shell: ShellPane) {
     if (known.title !== title || known.created !== created) set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title, created } : pane)) });
     return;
   }
+  if (isDockPane(shell.id)) {
+    // The right panel's terminal: listed in its dock in every window, never as a tab.
+    const pane: TerminalPane = {
+      id: shell.id,
+      sessionId: shell.sessionId,
+      title: shell.title || `Terminal ${dockPanes(shell.sessionId).length + 1}`,
+      created: shell.created ?? new Date().toISOString(),
+      exited: shell.exited,
+      exitCode: null,
+      hidden: true,
+      docked: true,
+    };
+    set({ panes: [...state.panes, pane] });
+    return;
+  }
   const pane: TerminalPane = {
     id: shell.id,
     sessionId: shell.sessionId,
@@ -257,6 +311,8 @@ async function register() {
     // Closed in another window: its process is already gone, so only this window's tab and xterm are left to drop.
     await listen<string>("pty_closed", (e) => forgetPane(e.payload));
     await listen<PaneAgent>("pane_agent", (e) => notePaneAgent(e.payload));
+    await listen("local_runtime_reattached", () => void resyncPanes().catch(() => {}));
+    await listen<{ id: string; token: string }>("pty_view_lagged", (e) => catchUpLaggedView(e.payload.id, e.payload.token));
   } catch {
     /* outside a webview */
   }
@@ -288,6 +344,26 @@ async function register() {
     .catch(() => {
       /* outside a webview, or a backend that does not follow terminals */
     });
+}
+
+/** Shell tabs whose spawn is on its way: not listed by the backend yet, and not closed. */
+const spawning = new Set<string>();
+
+/**
+ * The live connection was replaced: shells opened, renamed, closed or ended,
+ * and agents started in them, while this window could not hear of it.
+ */
+async function resyncPanes() {
+  const known = new Set(state.panes.map((pane) => pane.id));
+  const [shells, agents] = await Promise.all([pty.shells(), pty.agents()]);
+  for (const shell of shells) adoptShell(shell);
+  const listed = new Map(shells.map((shell) => [shell.id, shell]));
+  set({ panes: state.panes.map((pane) => (listed.get(pane.id)?.exited && !pane.exited ? { ...pane, exited: true } : pane)) });
+  // Only shell tabs and dock terminals: an agent tab's pane is the tab's to close.
+  const closed = state.panes.filter((pane) => known.has(pane.id) && (!pane.hidden || pane.docked) && !pane.owned
+    && !isAgentPane(pane.id) && !listed.has(pane.id) && !spawning.has(pane.id));
+  for (const pane of closed) forgetPane(pane.id);
+  set({ agents: Object.fromEntries(agents.flatMap(({ paneId, harness }) => (harness ? [[paneId, harness]] : []))) });
 }
 
 /** An agent came to the front of a pane's terminal, or the one that was there left. */
@@ -344,8 +420,9 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
   counter++;
   const id = opts.id ?? `${sessionId}:${Date.now().toString(36)}${counter}${windowMark}`;
   if (state.panes.some((p) => p.id === id)) await closeTerminal(id);
+  const hidden = opts.hidden || opts.docked;
   const number = nextTerminalNumber(sessionId);
-  if (!opts.hidden && !opts.title) terminalNumbers.set(sessionId, number);
+  if (!hidden && !opts.title) terminalNumbers.set(sessionId, number);
   const pane: TerminalPane = {
     id,
     sessionId,
@@ -353,15 +430,17 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
     created: new Date().toISOString(),
     exited: false,
     exitCode: null,
-    hidden: opts.hidden,
+    hidden,
+    docked: opts.docked,
   };
   set({
     panes: [...state.panes, pane],
-    active: opts.hidden ? state.active : { ...state.active, [sessionId]: id },
-    selected: opts.hidden ? state.selected : { ...state.selected, [sessionId]: { kind: "terminal", id } },
+    active: hidden ? state.active : { ...state.active, [sessionId]: id },
+    selected: hidden ? state.selected : { ...state.selected, [sessionId]: { kind: "terminal", id } },
   });
+  spawning.add(id);
   try {
-    // A shell tab is named for every window; an agent tab's own pane is not a tab.
+    // A shell tab or dock terminal is named for every window; an agent tab's own pane is not a tab.
     await pty.spawn(id, cwd, cols, rows, opts.command, opts.hidden ? undefined : pane.title);
   } catch (e) {
     const rest = state.panes.filter((p) => p.id !== id);
@@ -377,6 +456,8 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
       selected,
     });
     throw e;
+  } finally {
+    spawning.delete(id);
   }
   return pane;
 }
@@ -449,6 +530,30 @@ export function isAgentPane(id: string): boolean {
 }
 
 /**
+ * A shell in the right panel's terminal dock. Its id names its session like
+ * any shell's, so the backend closes it with the session, and marks it as the
+ * dock's so no window lists it as a tab.
+ */
+export function isDockPane(id: string): boolean {
+  const [, rest] = id.split(":", 2);
+  return !isAgentPane(id) && !!rest?.startsWith("dock-");
+}
+
+/** A session's dock terminals, in the order they were opened. */
+export function dockPanes(sessionId: string, panes: readonly TerminalPane[] = state.panes): TerminalPane[] {
+  return panes.filter((pane) => pane.sessionId === sessionId && pane.docked);
+}
+
+/** Open another terminal in a session's right-panel dock. */
+export async function openDockTerminal(sessionId: string, cwd: string, cols = 80, rows = 12): Promise<TerminalPane> {
+  const numbers = dockPanes(sessionId).map((pane) => Number(/^Terminal (\d+)$/.exec(pane.title)?.[1] ?? 0));
+  const title = `Terminal ${Math.max(0, ...numbers) + 1}`;
+  counter++;
+  const id = `${sessionId}:dock-${Date.now().toString(36)}${counter}${windowMark}`;
+  return openTerminal(sessionId, cwd, cols, rows, { id, title, docked: true });
+}
+
+/**
  * The agent tabs are gone (closed here, or removed by the backend): let go of
  * their panes and xterms. The backend stops the CLI when it removes a tab, but
  * nothing told this window, so every closed tab kept its terminal and its
@@ -514,8 +619,9 @@ export function clearSelectedBrowser(sessionId: string, id: string) {
  * already have produced output before this window heard about it; the view
  * gets that from the backend's scrollback when it attaches.
  */
-export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">) {
+export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">, isCurrent: () => boolean = () => true) {
   await subscribeTerminals();
+  if (!isCurrent()) return;
   const live = { ...pane, created: new Date().toISOString(), exited: false, exitCode: null };
   // The same pane can be adopted twice: a tab whose CLI is replaced in place
   // keeps its pane, so the exit the old process reported is stale news.

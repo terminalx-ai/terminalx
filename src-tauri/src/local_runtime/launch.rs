@@ -86,23 +86,24 @@ pub fn install(source: &Path, home: &Path) -> Result<PathBuf> {
 }
 
 pub fn connect_or_start(source: &Path, home: &Path) -> Result<Arc<Client>> {
-    launch(source,home,None)
+    launch(source,home,None,None)
 }
 
-pub fn connect_desktop(source: &Path, home: &Path, application: &str) -> Result<Arc<Client>> {
-    let client = launch(source,home,Some(application))?;
-    let status: serde_json::Value = client.call("status",serde_json::json!({}))?;
+/// `log` is where a runtime started here keeps its log, rotated by the
+/// runtime itself. Discarding it left a wedged runtime with no account (#661).
+pub fn connect_desktop(source: &Path, home: &Path, application: &str, log: Option<&Path>) -> Result<Arc<Client>> {
+    let client = launch(source,home,Some(application),log)?;
+    let status = client.liveness(super::client::LIFECYCLE_TIMEOUT)?;
     if cfg!(target_os = "macos") && status["localRuntime"]["nativeTray"] != true {
-        bail!("The running local owner does not support the desktop tray. Its work was left running; attach with a compatible build after it finishes.");
+        return Err(super::client::Blocked("The running local owner does not support the desktop tray. Its work was left running; attach with a compatible build after it finishes.".into()).into());
     }
     Ok(client)
 }
 
-fn launch(source: &Path, home: &Path, application: Option<&str>) -> Result<Arc<Client>> {
+/// Hold the home's launch lock, which serializes launchers, not runtimes:
+/// the runtime owns its separate lock. Released when the file is dropped.
+fn launch_lock(home: &Path, deadline: Instant) -> Result<File> {
     use std::os::fd::AsRawFd;
-    let home = std::fs::canonicalize(home)?;
-    private_dir(&home.join("run"))?;
-    // Serializes launchers, not runtimes. The runtime owns its separate lock.
     let launch = OpenOptions::new().read(true).write(true).create(true).truncate(false)
         .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(home.join("run/local-launch.lock"))?;
     let metadata = launch.metadata()?;
@@ -110,13 +111,19 @@ fn launch(source: &Path, home: &Path, application: Option<&str>) -> Result<Arc<C
     if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 || metadata.nlink() != 1 {
         bail!("local launch lock is not private");
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        // SAFETY: descriptor remains owned by `launch` until this function returns.
-        if unsafe { libc::flock(launch.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 { break; }
+        // SAFETY: descriptor remains owned by `launch` until it is returned.
+        if unsafe { libc::flock(launch.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 { return Ok(launch); }
         if Instant::now() >= deadline { bail!("another desktop is starting the local runtime"); }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Path>) -> Result<Arc<Client>> {
+    let home = std::fs::canonicalize(home)?;
+    private_dir(&home.join("run"))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let _launch = launch_lock(&home, deadline)?;
     // A live but incompatible owner is an error, never permission to start a
     // competing process or terminate the running owner's work.
     if std::os::unix::net::UnixStream::connect(home.join("run/hooks.sock")).is_ok() {
@@ -134,8 +141,21 @@ fn launch(source: &Path, home: &Path, application: Option<&str>) -> Result<Arc<C
     } else {
         command.env_remove("TERMINALX_LOCAL_DESKTOP").env_remove("TERMINALX_LOCAL_APPLICATION");
     }
-    command.args(["--runtime-kind", "local", "--data-dir"]).arg(&home)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.args(["--runtime-kind", "local", "--data-dir"]).arg(&home).stdin(Stdio::null());
+    // The runtime takes the log over once it starts; until then, whatever it
+    // prints (an argument it refuses) goes there too.
+    match log.map(|log| -> Result<(File, File)> {
+        if let Some(parent) = log.parent() { std::fs::create_dir_all(parent)?; }
+        let file = super::log_file::open(log)?;
+        Ok((file.try_clone()?, file))
+    }) {
+        Some(Ok((stdout, stderr))) => { command.arg("--log-file").arg(log.expect("opened")).stdout(stdout).stderr(stderr); }
+        Some(Err(error)) => {
+            log::warn!("local runtime log: {error:#}");
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        None => { command.stdout(Stdio::null()).stderr(Stdio::null()); }
+    }
     // SAFETY: setsid is async-signal-safe and this hook only creates an OS
     // session. No allocator, lock or inherited window pipe is used after fork.
     unsafe {
@@ -158,6 +178,215 @@ fn launch(source: &Path, home: &Path, application: Option<&str>) -> Result<Arc<C
             bail!("local runtime did not become ready; it was not stopped");
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Stop the runtime that holds `home` without asking it, for one that has
+/// stopped answering (#661). Only a process running a runtime installed in
+/// this home is signalled, and with it the processes it started: their
+/// terminals close with it, and an agent left running would hold on to the
+/// conversation the next runtime resumes. `false` when no runtime was running.
+pub fn kill_owner(home: &Path) -> Result<bool> {
+    kill_holder(home, None)
+}
+
+/// [`kill_owner`], of process `expected` only when it is given: a runtime
+/// that started in its place in the meantime is left alone.
+fn kill_holder(home: &Path, expected: Option<libc::pid_t>) -> Result<bool> {
+    let home = std::fs::canonicalize(home)?;
+    let _launch = launch_lock(&home, Instant::now() + Duration::from_secs(30))?;
+    let socket = home.join("run/hooks.sock");
+    let Some(pid) = listener(&socket) else { return Ok(false) };
+    if expected.is_some_and(|expected| expected != pid) { return Ok(false); }
+    owned_runtime(&home, pid)?;
+    log::warn!("stopping the local runtime (pid {pid}) without asking it");
+    let children = children(pid);
+    // The runtime leads its own group (it calls setsid), which holds every
+    // helper it started without a terminal of its own.
+    // SAFETY: getpgid only reads the process table.
+    let group = unsafe { libc::getpgid(pid) } == pid;
+    let signal = |sig| {
+        // SAFETY: the pid was just identified as this home's runtime.
+        unsafe { libc::kill(if group { -pid } else { pid }, sig) };
+    };
+    signal(libc::SIGTERM);
+    if !exited(pid, &socket, Duration::from_secs(3)) {
+        signal(libc::SIGKILL);
+        if !exited(pid, &socket, Duration::from_secs(5)) { bail!("The local runtime (pid {pid}) did not exit."); }
+    }
+    // Each terminal leads a session of its own. Its program had the terminal
+    // hung up on it; one that ignored that is ended here.
+    // SAFETY: a negative pid names the group that child leads, if it leads one.
+    for child in &children { unsafe { libc::kill(-child, libc::SIGTERM) }; }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    // SAFETY: signal zero only checks that the group still exists.
+    while Instant::now() < deadline && children.iter().any(|child| unsafe { libc::kill(-child, 0) } == 0) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // SAFETY: as above.
+    for child in &children { unsafe { libc::kill(-child, libc::SIGKILL) }; }
+    Ok(true)
+}
+
+/// Check that `pid` runs a runtime installed in `home`, and so is one to stop.
+fn owned_runtime(home: &Path, pid: libc::pid_t) -> Result<()> {
+    let executable = executable(pid).context("identify the process holding the runtime socket")?;
+    if executable.parent().and_then(Path::parent) != Some(home.join("runtime").as_path())
+        || executable.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
+        bail!("The process holding the runtime socket ({}) is not a TerminalX runtime of this home; it was left running.", executable.display());
+    }
+    Ok(())
+}
+
+/// How long a runtime that has stopped its work may take to exit.
+const EXIT_AFTER_STOP: Duration = Duration::from_secs(30);
+
+/// When a runtime that was asked to stop and did not may be stopped without
+/// asking, as [`kill_owner`] does, with its terminals and what they run.
+pub enum Fallback<'a> {
+    /// Restart now, or a runtime that stopped answering: whatever it runs
+    /// stops with it.
+    Forced,
+    /// The desktop replacing it by itself (#730): only once it agreed to
+    /// stop, as `stopping` says, and so refuses any new work.
+    Agreed(&'a dyn Fn() -> bool),
+}
+
+/// The runtime was left running, and nothing of it was stopped.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct LeftRunning(pub &'static str);
+
+/// Whether `error` says the runtime was left running, nothing of it stopped.
+pub fn left_running(error: &anyhow::Error) -> bool { error.downcast_ref::<LeftRunning>().is_some() }
+
+/// Stop the runtime holding `home` the way quitting with Stop All does, and
+/// wait until it has gone, so the next attachment starts the bundled runtime
+/// in its place (#730). `stop_all` asks the runtime this desktop attached to,
+/// pinned to it: one that has been replaced since refuses, and is left alone,
+/// as is one that refuses for work under way (`runtime_busy`). One that agreed
+/// to stop and does not exit after it is stopped without asking; one that did
+/// not agree only as `fallback` allows. Either way each agent picks up its
+/// conversation again when its tab next starts. An error that left the
+/// runtime running says so ([`left_running`]).
+pub fn retire(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: Fallback<'_>) -> Result<()> {
+    retire_within(home, stop_all, fallback, EXIT_AFTER_STOP)
+}
+
+fn retire_within(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: Fallback<'_>, exit_after_stop: Duration) -> Result<()> {
+    let home = std::fs::canonicalize(home)?;
+    let socket = home.join("run/hooks.sock");
+    let Some(pid) = listener(&socket) else { return Ok(()) };
+    owned_runtime(&home, pid).map_err(|error| error.context(LeftRunning("The process holding the runtime socket was left running.")))?;
+    log::info!("stopping the local runtime (pid {pid}) so the one bundled with this app takes its place");
+    match stop_all() {
+        // It agreed: one that lingers is stopped without asking.
+        Ok(()) => if exited(pid, &socket, exit_after_stop) { return Ok(()); }
+        Err(error) if refused(&error, "runtime_restarted") => {
+            return Err(error.context(LeftRunning("The TerminalX runtime was replaced before it could be stopped; nothing was stopped.")));
+        }
+        Err(error) if refused(&error, "runtime_busy") => {
+            return Err(error.context(LeftRunning("The TerminalX runtime has work under way; nothing was stopped.")));
+        }
+        Err(error) => match fallback {
+            Fallback::Forced => log::warn!("the local runtime did not stop its work when asked ({error:#}); stopping it without asking"),
+            Fallback::Agreed(stopping) if stopping() => {
+                log::warn!("the local runtime agreed to stop but did not finish ({error:#}); stopping it without asking");
+            }
+            Fallback::Agreed(_) => {
+                return Err(error.context(LeftRunning("The TerminalX runtime did not agree to stop; nothing was stopped.")));
+            }
+        },
+    }
+    kill_holder(&home, Some(pid))?;
+    if !exited(pid, &socket, Duration::ZERO) { bail!("The TerminalX runtime (pid {pid}) did not exit."); }
+    Ok(())
+}
+
+/// Whether the runtime refused with `code`, anywhere in `error`'s chain.
+pub fn refused(error: &anyhow::Error, code: &str) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == code))
+}
+
+/// Whether the runtime has gone: its pid no longer exists, or nothing
+/// listens on its socket any more (it may be exiting, or not yet reaped).
+fn exited(pid: libc::pid_t, socket: &Path, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        // SAFETY: signal zero only checks that the process exists.
+        let gone = unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone || listener(socket).is_none_or(|holder| holder != pid) { return true; }
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The process listening on `socket`, as the kernel records it.
+fn listener(socket: &Path) -> Option<libc::pid_t> {
+    use std::os::fd::AsRawFd;
+    let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        let mut pid: libc::pid_t = 0;
+        let mut size = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        // SAFETY: LOCAL_PEERPID writes one pid_t into the buffer it is given.
+        let read = unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&mut pid as *mut libc::pid_t).cast(), &mut size) };
+        (read == 0 && pid > 0).then_some(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: an all-zero ucred is valid, and SO_PEERCRED fills exactly one.
+        let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: as above.
+        let read = unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut credentials as *mut libc::ucred).cast(), &mut size) };
+        (read == 0 && credentials.pid > 0).then_some(credentials.pid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = stream.as_raw_fd();
+        None
+    }
+}
+
+/// The executable a process is running.
+fn executable(pid: libc::pid_t) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: proc_pidpath writes at most the buffer's size.
+        let length = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if length <= 0 { return Err(std::io::Error::last_os_error().into()); }
+        path.truncate(length as usize);
+        Ok(PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(path)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(std::fs::read_link(format!("/proc/{pid}/exe"))?)
+    }
+}
+
+/// The processes `pid` started that are still its children.
+fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut pids = vec![0 as libc::pid_t; 4096];
+        // SAFETY: the buffer's byte size is passed; the count returned fits it.
+        let count = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int) };
+        pids.truncate(count.clamp(0, 4096) as usize);
+        pids.retain(|child| *child > 0);
+        pids
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+        entries.flatten().filter_map(|entry| {
+            let child: libc::pid_t = entry.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            // The parent is the second field after the parenthesised name.
+            let parent: libc::pid_t = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+            (parent == pid).then_some(child)
+        }).collect()
     }
 }
 
@@ -204,5 +433,185 @@ mod tests {
         std::fs::create_dir(home.join("runtime")).unwrap();
         std::fs::set_permissions(home.join("runtime"), std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(install(&source, &home).is_err());
+    }
+
+    const OWNER_HOME: &str = "TERMINALX_TEST_UNRESPONSIVE_OWNER_HOME";
+
+    /// A runtime that holds its socket and never answers, as one wedged
+    /// behind a lock does, with a terminal of its own in its own session.
+    #[test]
+    fn unresponsive_owner_child() {
+        use std::os::unix::net::UnixListener;
+        let Some(home) = std::env::var_os(OWNER_HOME).map(PathBuf::from) else { return };
+        let _listener = UnixListener::bind(home.join("run/hooks.sock")).unwrap();
+        let mut terminal = Command::new("/bin/sleep");
+        terminal.arg("600");
+        // SAFETY: setsid is async-signal-safe.
+        unsafe { terminal.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
+        let mut terminal = terminal.spawn().unwrap();
+        std::fs::write(home.join("terminal.pid"), terminal.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(600));
+        let _ = terminal.kill();
+        let _ = terminal.wait();
+    }
+
+    /// Start `executable` as the wedged owner of a fresh home, and wait until
+    /// it holds the socket. Returns the home, the owner and its terminal's pid.
+    fn wedged_owner(fixture: &Path, executable: impl Fn(&Path) -> PathBuf) -> (PathBuf, std::process::Child, libc::pid_t) {
+        let home = fixture.join("home");
+        std::fs::create_dir(&home).unwrap();
+        private_dir(&home.join("run")).unwrap();
+        let mut owner = Command::new(executable(&home));
+        owner.args(["--exact", "local_runtime::launch::tests::unresponsive_owner_child", "--nocapture"])
+            .env(OWNER_HOME, &home).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // SAFETY: as the launcher does: the owner leads a session of its own.
+        unsafe { owner.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
+        let mut owner = owner.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let terminal = loop {
+            if let Ok(pid) = std::fs::read_to_string(home.join("terminal.pid")) { break pid.parse().unwrap(); }
+            if Instant::now() >= deadline || owner.try_wait().unwrap().is_some() {
+                let _ = owner.kill();
+                panic!("the fixture owner never held its socket");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        (std::fs::canonicalize(home).unwrap(), owner, terminal)
+    }
+
+    fn running(pid: libc::pid_t) -> bool {
+        // SAFETY: signal zero only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn an_unresponsive_owner_is_stopped_with_the_terminals_it_started() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, mut owner, terminal) = wedged_owner(fixture.path(), |home| {
+            // Installed as the launcher installs a runtime, so it is one of this home's.
+            let installed = home.join("runtime/fixture");
+            std::fs::create_dir_all(&installed).unwrap();
+            let installed = installed.join("terminalx-serve");
+            std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+            installed
+        });
+        assert_eq!(listener(&home.join("run/hooks.sock")), Some(owner.id() as libc::pid_t));
+        assert!(kill_owner(&home).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while owner.try_wait().unwrap().is_none() || running(terminal) {
+            assert!(Instant::now() < deadline, "the owner or its terminal outlived the restart");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!kill_owner(&home).unwrap(), "nothing is left to stop");
+    }
+
+    fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
+        wedged_owner(fixture, |home| {
+            let installed = home.join("runtime/fixture");
+            std::fs::create_dir_all(&installed).unwrap();
+            let installed = installed.join("terminalx-serve");
+            std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+            installed
+        })
+    }
+
+    fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {
+        let _ = owner.kill();
+        let _ = owner.wait();
+        // SAFETY: the fixture's own terminal session.
+        unsafe { libc::kill(-terminal, libc::SIGKILL) };
+    }
+
+    /// #730: a runtime that stops its work and exits when asked is not
+    /// stopped any other way.
+    #[test]
+    fn retiring_a_runtime_that_stops_when_asked_waits_for_it_to_exit() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, owner, terminal) = installed_owner(fixture.path());
+        let owner = std::sync::Mutex::new(owner);
+        let asked = std::cell::Cell::new(false);
+        retire_within(&home, || {
+            asked.set(true);
+            // As a runtime does once it has stopped its agents: it exits.
+            let mut owner = owner.lock().unwrap();
+            owner.kill().unwrap();
+            owner.wait().unwrap();
+            Ok(())
+        }, Fallback::Agreed(&|| panic!("it stopped when asked")), Duration::from_secs(10)).unwrap();
+        assert!(asked.get());
+        assert!(running(terminal), "a runtime asked to stop closes its own terminals; nothing else was signalled");
+        reap(owner.into_inner().unwrap(), terminal);
+    }
+
+    /// #730: a runtime that agreed to stop and does not exit, or did not stop
+    /// when Restart now asked, or agreed and could not finish, is stopped
+    /// without asking, with its terminals.
+    #[test]
+    fn a_runtime_that_does_not_stop_when_asked_is_stopped_without_asking() {
+        for answer in ["never exits", "refuses, forced", "agreed, then failed"] {
+            let fixture = tempfile::tempdir().unwrap();
+            let (home, mut owner, terminal) = installed_owner(fixture.path());
+            let stop = || if answer == "never exits" { Ok(()) } else { anyhow::bail!("timed out") };
+            let agreed = || true;
+            let fallback = match answer { "refuses, forced" => Fallback::Forced, _ => Fallback::Agreed(&agreed) };
+            retire_within(&home, stop, fallback, Duration::from_millis(300)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while owner.try_wait().unwrap().is_none() || running(terminal) {
+                assert!(Instant::now() < deadline, "{answer}: the owner or its terminal outlived the switch");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// #730: the desktop's stop is pinned to the runtime it saw. One replaced
+    /// in the meantime refuses it, and is not stopped any other way either.
+    #[test]
+    fn a_runtime_replaced_before_it_was_retired_is_left_running() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, mut owner, terminal) = installed_owner(fixture.path());
+        let replaced = || Err(super::super::client::Refused { code: "runtime_restarted".into(), message: "Refresh runtime status before stopping all work.".into() }.into());
+        let error = retire_within(&home, replaced, Fallback::Forced, Duration::from_millis(300)).unwrap_err();
+        assert!(error.to_string().contains("replaced") && refused(&error, "runtime_restarted") && left_running(&error), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        // Nor one that refuses for work under way.
+        let busy = || Err(super::super::client::Refused { code: "runtime_busy".into(), message: "an agent is mid-turn".into() }.into());
+        let error = retire_within(&home, busy, Fallback::Forced, Duration::from_millis(300)).unwrap_err();
+        assert!(error.to_string().contains("work under way") && refused(&error, "runtime_busy") && left_running(&error), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        // #730 review: replacing it by itself, any other failure before it
+        // agreed to stop (a re-read that failed, a timeout, no free request
+        // place) leaves it running too.
+        for failure in ["could not read what it runs", "busy"] {
+            let stop = || if failure == "busy" {
+                Err(super::super::client::Refused { code: "busy".into(), message: "Too many requests.".into() }.into())
+            } else { anyhow::bail!("{failure}") };
+            let error = retire_within(&home, stop, Fallback::Agreed(&|| false), Duration::from_millis(300)).unwrap_err();
+            assert!(left_running(&error) && format!("{error:#}").contains("did not agree to stop"), "{error:#}");
+            assert!(owner.try_wait().unwrap().is_none() && running(terminal), "{failure}: nothing was stopped");
+        }
+        reap(owner, terminal);
+
+        // Nor is a socket held by anything but this home's runtime touched.
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, mut owner, terminal) = wedged_owner(fixture.path(), |_| std::env::current_exe().unwrap());
+        let error = retire_within(&home, || panic!("a stranger is never asked"), Fallback::Forced, Duration::ZERO).unwrap_err();
+        assert!(format!("{error:#}").contains("not a TerminalX runtime") && left_running(&error), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        reap(owner, terminal);
+        // With no runtime at all there is nothing to do.
+        assert!(retire_within(&home, || panic!("nothing to ask"), Fallback::Forced, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn a_socket_held_by_anything_but_this_homes_runtime_is_left_alone() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (home, mut owner, terminal) = wedged_owner(fixture.path(), |_| std::env::current_exe().unwrap());
+        let error = kill_owner(&home).unwrap_err();
+        assert!(error.to_string().contains("not a TerminalX runtime"), "{error:#}");
+        assert!(owner.try_wait().unwrap().is_none() && running(terminal));
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        // SAFETY: the fixture's own terminal session.
+        unsafe { libc::kill(-terminal, libc::SIGKILL) };
     }
 }

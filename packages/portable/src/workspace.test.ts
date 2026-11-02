@@ -602,6 +602,25 @@ describe("workspace RPC client", () => {
     client.close();
   });
 
+  it("says when an agent tab's replay is all in, and again after each resume, never for a live event (#644)", async () => {
+    const runtime = new FakeRuntime();
+    runtime.agentEvents = [1, 2].map((seq) => ({ seq, id: `e${seq}` }));
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const order: string[] = [];
+    await client.subscribeSession("s1", "t1", (event) => order.push(`event ${(event as { seq: number }).seq}`), { onReplayed: () => order.push("replayed") });
+    expect(order).toEqual(["event 1", "event 2", "replayed"]);
+    runtime.deliver({ event: "session.event", params: { subscriptionId: "sub-1", cursor: "7:3", event: { seq: 3 } } });
+    expect(order.at(-1)).toBe("event 3");
+    // A reconnect resumes from the cursor: what the runtime holds after it, then the word that it is all in.
+    runtime.agentEvents.push({ seq: 3, id: "e3" }, { seq: 4, id: "e4" });
+    runtime.drop();
+    runtime.connect();
+    await settle();
+    expect(order.slice(4)).toEqual(["event 4", "replayed"]);
+    client.close();
+  });
+
   it("lists and configures agent tabs, gives configure a stable request id, and hands broadcasts to listeners", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);
@@ -714,6 +733,23 @@ describe("workspace RPC client", () => {
       old.connect(WORKSPACE_CAPABILITIES.filter((capability) => capability !== "pipeline/2"));
       await expect(before.listPipelineReviewers()).rejects.toMatchObject({ code: "capability_not_granted" });
       expect(old.sent.some((frame) => frame.method === "pipeline.reviewers")).toBe(false);
+      before.close();
+    });
+
+    it("negotiates repository session targets and never sends them to an older runtime", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      const repository = { identity: "github.com/acme/api", directory: "api" };
+      await client.createAgentTab({ agent: "codex", useWorktree: true, repository });
+      expect(runtime.sent.find((frame) => frame.method === "session.create")?.params).toMatchObject({ repository });
+      client.close();
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect(WORKSPACE_CAPABILITIES.filter((capability) => capability !== "session-repository/1"));
+      expect(() => before.createAgentTab({ agent: "codex", repository })).toThrow("cloud_repository_session_runtime_update_required");
+      expect(old.sent.some((frame) => frame.method === "session.create")).toBe(false);
+      await before.createAgentTab({ agent: "codex" });
       before.close();
     });
 

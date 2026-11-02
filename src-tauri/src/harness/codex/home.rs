@@ -21,6 +21,12 @@
 //! In a cloud workspace (`cloud_grants`) `auth.json` links instead to the
 //! workspace's credential on tmpfs, and is absent while there is none.
 //!
+//! Native Codex (#644) talks to Codex's app server, which reports its own
+//! progress, so it must not also run Raccoon's hooks. In a cloud workspace it
+//! runs in a second home, `$TERMINALX_HOME/codex-native`, built the same way
+//! but with no hooks at all ([`prepare_native`]); its threads' rollouts live
+//! there. On a Mac it uses the reader's own home, which has no Raccoon hooks.
+//!
 //! Raccoon itself never writes into the reader's home — it is read, and
 //! linked to. What the links mean is that Codex keeps its own house: a
 //! refreshed token lands in the reader's `auth.json`, a plugin cache in their
@@ -78,6 +84,18 @@ static BUILDING: Mutex<()> = Mutex::new(());
 
 pub fn managed_root() -> Result<PathBuf> {
     crate::store::ensure_dir(crate::store::root()?.join("codex"))
+}
+
+const NATIVE_HOME: &str = "codex-native";
+
+/// The hook-free home native Codex runs in inside a cloud workspace.
+pub fn native_root() -> Result<PathBuf> {
+    crate::store::ensure_dir(crate::store::root()?.join(NATIVE_HOME))
+}
+
+/// Where native threads made here keep their rollouts, if any were made.
+pub fn native_root_if_made() -> Option<PathBuf> {
+    crate::store::root().ok().map(|root| root.join(NATIVE_HOME)).filter(|home| home.is_dir())
 }
 
 /// The reader's own Codex home: `$CODEX_HOME`, else `~/.codex`.
@@ -388,12 +406,84 @@ fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path, clou
     Ok(!state.trust.is_empty())
 }
 
+/// Build (or refresh) the home native Codex runs in inside a cloud workspace,
+/// and return the path to put in `CODEX_HOME`: the settings and links of
+/// [`prepare`], the workspace's credential (`cloud_auth`, the launch grant's),
+/// the checkout trusted, and an empty `hooks.json` with no hook trust, so no
+/// Raccoon hook ever runs for an app-server session.
+pub fn prepare_native(cwd: &str, cloud_auth: Option<Option<PathBuf>>) -> Result<PathBuf> {
+    let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let native = native_root()?;
+    prepare_native_in(&native, user_root(), cwd, cloud_auth)?;
+    Ok(native)
+}
+
+fn prepare_native_in(native: &Path, user: Option<PathBuf>, cwd: &str, cloud_auth: Option<Option<PathBuf>>) -> Result<()> {
+    let user = user.filter(|u| u.is_dir());
+    if let Some(user) = &user {
+        for name in LINKED {
+            if *name == "auth.json" && cloud_auth.is_some() {
+                continue;
+            }
+            if let Err(e) = link(native, user, name) {
+                log::warn!("native codex home: {e:#}");
+            }
+        }
+    }
+    if let Some(source) = &cloud_auth {
+        if let Err(e) = crate::cloud_grants::link_codex_auth(native, source.as_deref()) {
+            log::warn!("native codex home: {e:#}");
+        }
+    }
+    let hooks_path = native.join("hooks.json");
+    let hooks = serde_json::to_vec_pretty(&no_hooks())?;
+    if std::fs::read(&hooks_path).ok().as_deref() != Some(hooks.as_slice()) {
+        crate::store::write_atomic(&hooks_path, &hooks)?;
+    }
+    let config_path = native.join("config.toml");
+    let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let user_toml = user.map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    write_config(&config_path, &user_toml, &previous, cwd, &BTreeMap::new())?;
+    dismiss_update_prompt(native);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn trust() -> BTreeMap<String, String> {
         BTreeMap::from([("/h/hooks.json:stop:0:0".to_string(), "sha256:abc".to_string())])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_native_home_carries_the_workspace_credential_and_settings_but_no_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, native, grant) = (dir.path().join("user"), dir.path().join("native"), dir.path().join("grant-auth.json"));
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(user.join("auth.json"), "{\"reader\":true}").unwrap();
+        std::fs::write(user.join("AGENTS.md"), "be brief").unwrap();
+        std::fs::write(user.join("config.toml"), "model = \"gpt-5.6-sol\"\nnotify = [\"helper\"]\n").unwrap();
+        std::fs::write(&grant, "{\"workspace\":true}").unwrap();
+        // Hooks a terminal tab's home had would not follow it here.
+        std::fs::write(native.join("hooks.json"), "{\"hooks\":{\"Stop\":[]}}").unwrap();
+
+        prepare_native_in(&native, Some(user.clone()), "/work/repo", Some(Some(grant.clone()))).unwrap();
+        assert_eq!(std::fs::read_link(native.join("auth.json")).unwrap(), grant, "the workspace's credential, never the reader's");
+        assert_eq!(std::fs::read_link(native.join("AGENTS.md")).unwrap(), user.join("AGENTS.md"));
+        let hooks: Value = serde_json::from_slice(&std::fs::read(native.join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(hooks, no_hooks());
+        let config: toml::Table = toml::from_str(&std::fs::read_to_string(native.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(config["model"].as_str(), Some("gpt-5.6-sol"));
+        assert!(config.get("notify").is_none());
+        assert_eq!(config["projects"]["/work/repo"]["trust_level"].as_str(), Some("trusted"));
+        assert!(config["hooks"]["state"].as_table().is_some_and(|state| state.is_empty()), "no hook is trusted");
+
+        // A workspace with no Codex credential has none here either.
+        prepare_native_in(&native, Some(user), "/work/repo", Some(None)).unwrap();
+        assert!(native.join("auth.json").symlink_metadata().is_err());
     }
 
     #[test]

@@ -58,7 +58,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -76,6 +76,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.addTab": "session/2",
   "session.delete": "session/2",
   "session.interrupt": "session/3",
+  "session.toTerminal": "session/3",
   "runtime.agents": "agents/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
@@ -116,6 +117,7 @@ export const MUTATING_METHODS = new Set([
   "session.update",
   "session.addTab",
   "session.delete",
+  "session.toTerminal",
   "cleanup.remove",
   "workspace.remove",
   "workspace.sweepMerged",
@@ -190,6 +192,8 @@ export interface AgentTabInfo {
   tabId: string;
   title: string | null;
   harness: string;
+  /** Native Codex (#644): absent for an agent run in the tab's terminal. Its terminal view moves it there (`moveAgentTabToTerminal`). */
+  transport?: "experimentalCodexStdio";
   /** What the agent is running. */
   model: string;
   effort: string | null;
@@ -490,6 +494,12 @@ export interface SessionSubscribeOptions {
   /** The cursor after each event or replay, to keep for the next subscription. */
   onCursor?(cursor: string | undefined): void;
   onStatus?(change: AgentTabStatusChange): void;
+  /**
+   * The runtime's replay was handed to `onEvent`: everything its history
+   * holds after the cursor is here now. Again after each resume (a
+   * reconnect, a new runtime generation).
+   */
+  onReplayed?(): void;
 }
 
 /** A terminal as `pty.create`, `pty.list` and `pty.attach` describe it. */
@@ -960,6 +970,7 @@ export class WorkspaceRpcClient {
       onReplay: (result) => {
         for (const entry of (result.events as { cursor: string; event: unknown }[] | undefined) ?? []) onEvent(entry.event);
         if (typeof result.cursor === "string") moved(result.cursor);
+        options.onReplayed?.();
       },
       listener: (notification) => {
         if (notification.event === "session.status") {
@@ -1001,13 +1012,18 @@ export class WorkspaceRpcClient {
     title?: string;
     prompt?: string;
     useWorktree?: boolean;
+    /** `session-repository/1`: advertised checkout, verified by the runtime before session creation. */
+    repository?: { identity: string; directory: string };
     issue?: RuntimeIssueRef;
     issueBody?: string | null;
     pipeline?: boolean;
     pipelineOptions?: { autoMerge: boolean; resolveConflicts: boolean };
     pipelineSettings?: Record<string, unknown>;
     worktreeName?: string | null;
+    /** The desktop's Native Codex setting (#644): a Codex tab goes through Codex's app server where it can. An older runtime ignores it. */
+    nativeCodex?: boolean;
   }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null; startError?: string | null }> {
+    if (params.repository && !this.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
     return this.mutate("session.create", defined);
   }
@@ -1037,6 +1053,15 @@ export class WorkspaceRpcClient {
     return { interrupted: result.interrupted === true };
   }
 
+  /**
+   * Native Codex's terminal view (#644): move the tab to Codex's own terminal
+   * on the same thread, for good, and start it there. The runtime refuses it
+   * mid-turn and to anyone who may not start the agent's terminal.
+   */
+  moveAgentTabToTerminal(sessionId: string, tabId: string): Promise<{ sessionId: string; tabId: string }> {
+    return this.mutate("session.toTerminal", { sessionId, tabId });
+  }
+
   /** The sessions this connection may see (`session.list`). */
   async listSessions(): Promise<RuntimeSession[]> {
     const result = await this.call<{ sessions?: RuntimeSession[] }>("session.list");
@@ -1053,7 +1078,7 @@ export class WorkspaceRpcClient {
   /** Another agent tab in an existing session (`session/2`, manage only). */
   addSessionTab(
     sessionId: string,
-    params: { agent: string; model?: string; effort?: string | null; mode?: string },
+    params: { agent: string; model?: string; effort?: string | null; mode?: string; nativeCodex?: boolean },
   ): Promise<{ sessionId: string; tabId: string; session: RuntimeSession; tab?: AgentTabInfo | null }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
     return this.mutate("session.addTab", { sessionId, ...defined });

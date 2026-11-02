@@ -19,9 +19,14 @@ vi.mock("@/lib/tabViews", () => ({
   clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
-// The transcript is not under test; the real composer in its footer is.
-vi.mock("@/components/chat/Chat", () => ({ Chat: ({ footer }: { footer: React.ReactNode }) => <div>{footer}</div> }));
-vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn() }), useDictationShortcuts: vi.fn() }));
+// The transcript is not under test; the real composer in its footer is, and
+// the message it hands the chat to draw as sending (#727).
+vi.mock("@/components/chat/Chat", () => ({
+  Chat: ({ footer, sending }: { footer: React.ReactNode; sending?: { text: string } | null }) => (
+    <div>{sending && <div role="status" data-text={sending.text}>Sending…</div>}{footer}</div>
+  ),
+}));
+vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn(), prepareSend: vi.fn(() => vi.fn()) }), useDictationShortcuts: vi.fn() }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
 
 import { TabView } from "./TabView";
@@ -197,5 +202,236 @@ describe.each(["local", "cloud"] as const)("composer history in a %s tab", (kind
     resetComposerHistory();
     await mount();
     expect(walk("ArrowUp", 4)).toEqual(["third, queued while working", "one more thing", "second", "first"]);
+  });
+});
+
+// #637: exercise the real local backend/composer with a deferred runtime reply.
+// #727: the message is in the chat as sending at once, and the composer is free.
+describe("detached runtime send acknowledgment", () => {
+  it.each(["accepted", "queued", "refused"])("shows the message as sending before a %s runtime reply and preserves edits", async (outcome) => {
+    let resolve!: (value: { queued: boolean; events: AgentEvent[] }) => void;
+    let reject!: (error: Error) => void;
+    const delivery = new Promise<{ queued: boolean; events: AgentEvent[] }>((yes, no) => { resolve = yes; reject = no; });
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args?: { text?: string }) => {
+      if (command === "send_message") { sends.push(args!.text!); return delivery; }
+      return original(command, args);
+    });
+    const view = render(<LocalTab />);
+    fireEvent.change(field(), { target: { value: "hello" } });
+    fireEvent.click(view.getByRole("button", { name: "Send" }));
+    expect(view.getByText("Sending…").dataset.text).toBe("hello");
+    expect(field().value).toBe("");
+    expect(sends).toEqual(["hello"]);
+    expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ text: "hello", images: [], pressedAt: expect.any(Number) }));
+    press("Enter");
+    fireEvent.change(field(), { target: { value: "next" } });
+    await act(async () => {
+      if (outcome === "refused") reject(new Error("delivery uncertain"));
+      else resolve({ queued: outcome === "queued", events: [] });
+    });
+    expect(view.queryByText("Sending…")).toBeNull();
+    // A message that was not sent comes back, ahead of what was written meanwhile.
+    expect(field().value).toBe(outcome === "refused" ? "hello\n\nnext" : "next");
+    expect(sends).toEqual(["hello"]);
+  });
+});
+
+// R1/R2: real module-level draft/history stores, real Composer and local adapter;
+// only IPC delivery is deferred. No detached process is launched by these drafts.
+describe("pending send ownership across session remounts", () => {
+  function deferDelivery() {
+    let resolve!: (value: { queued: boolean; events: AgentEvent[] }) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<{ queued: boolean; events: AgentEvent[] }>((yes, no) => { resolve = yes; reject = no; });
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args?: { text?: string }) => {
+      if (command === "send_message") { sends.push(args!.text!); return promise; }
+      return original(command, args);
+    });
+    return { resolve, reject };
+  }
+
+  describe.each(["accepted", "queued", "refused"])("%s reply", (outcome) => {
+    it.each([undefined, "N", "", "P"])("preserves remounted draft ownership for %j", async (next) => {
+      const delivery = deferDelivery();
+      let view = render(<LocalTab />);
+      fireEvent.change(field(), { target: { value: "P" } });
+      fireEvent.click(view.getByRole("button", { name: "Send" }));
+      view.unmount();
+      // A write without any mounted composer must also be tracked, even P -> P.
+      if (next !== undefined) act(() => setDraft(session.tabs[0].id, next));
+      view = render(<LocalTab />);
+      expect(view.getByText("Sending…")).toBeTruthy();
+      expect(view.getByRole("button", { name: "Sending" }).hasAttribute("disabled")).toBe(true);
+      press("Enter");
+      expect(sends).toEqual(["P"]);
+      await act(async () => {
+        if (outcome === "refused") delivery.reject(new Error("network disconnected"));
+        else delivery.resolve({ queued: outcome === "queued", events: [] });
+      });
+      expect(view.queryByText("Sending…")).toBeNull();
+      // Refused, P comes back to the draft, ahead of whatever was written there since.
+      const refused = next === undefined || next === "" || next === "P" ? "P" : `P\n\n${next}`;
+      expect(field().value).toBe(outcome === "refused" ? refused : (next ?? ""));
+      expect(sends).toEqual(["P"]);
+      if (outcome === "refused") {
+        expect(view.getAllByText("The connection was lost. The process outcome is unknown.").length).toBeGreaterThan(0);
+        view.unmount();
+        view = render(<LocalTab />);
+        expect(view.getAllByText("The connection was lost. The process outcome is unknown.").length).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  it("retains a rejection that arrives with no view mounted", async () => {
+    const delivery = deferDelivery();
+    let view = render(<LocalTab />);
+    fireEvent.change(field(), { target: { value: "P" } });
+    press("Enter");
+    view.unmount();
+    await act(async () => delivery.reject(new Error("network disconnected")));
+    view = render(<LocalTab />);
+    expect(view.queryByText("Sending…")).toBeNull();
+    expect(view.getAllByText("The connection was lost. The process outcome is unknown.").length).toBeGreaterThan(0);
+    expect(field().value).toBe("P");
+    expect(sends).toEqual(["P"]);
+  });
+
+  it("observes edits in the returned composer before original acceptance", async () => {
+    const delivery = deferDelivery();
+    let view = render(<LocalTab />);
+    fireEvent.change(field(), { target: { value: "P" } });
+    press("Enter");
+    view.unmount();
+    view = render(<LocalTab />);
+    fireEvent.change(field(), { target: { value: "N" } });
+    press("Enter");
+    await act(async () => delivery.resolve({ queued: false, events: [] }));
+    expect(field().value).toBe("N");
+    expect(sends).toEqual(["P"]);
+    expect(view.queryByText("Sending…")).toBeNull();
+  });
+
+  it.each([false, true])("retains newer browsing and saved N (remount=%s)", async (remount) => {
+    saved = [user("H")];
+    const delivery = deferDelivery();
+    let view = render(<LocalTab />);
+    await waitFor(() => { press("ArrowUp"); expect(field().value).toBe("H"); });
+    press("ArrowDown");
+    fireEvent.change(field(), { target: { value: "P" } });
+    press("Enter");
+    if (remount) { view.unmount(); view = render(<LocalTab />); }
+    fireEvent.change(field(), { target: { value: "N" } });
+    press("ArrowUp");
+    expect(field().value).toBe("H");
+    await act(async () => delivery.resolve({ queued: false, events: [] }));
+    expect(field().value).toBe("H");
+    press("ArrowDown");
+    expect(field().value).toBe("N");
+    expect(sends).toEqual(["P"]);
+  });
+
+  it.each([false, true])("restores the untouched recalled-send draft (remount=%s)", async (remount) => {
+    saved = [user("H")];
+    const delivery = deferDelivery();
+    let view = render(<LocalTab />);
+    await waitFor(() => { press("ArrowUp"); expect(field().value).toBe("H"); });
+    press("ArrowDown");
+    fireEvent.change(field(), { target: { value: "saved draft" } });
+    press("ArrowUp");
+    press("Enter");
+    if (remount) { view.unmount(); view = render(<LocalTab />); }
+    await act(async () => delivery.resolve({ queued: false, events: [] }));
+    expect(field().value).toBe("saved draft");
+    expect(sends).toEqual(["H"]);
+  });
+});
+
+// R3: real TabView/Composer and ownership/draft stores; the cloud backend's
+// enqueue boundary is deferred independently of live connection attachment.
+describe("cloud send ownership across connection generations", () => {
+  function deferredCloud() {
+    let resolve!: (value: { queued: boolean; events: AgentEvent[] }) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<{ queued: boolean; events: AgentEvent[] }>((yes, no) => { resolve = yes; reject = no; });
+    const send = vi.fn(() => promise);
+    const backend = { ...cloudBackend(() => {}), send };
+    return { backend, send, resolve, reject };
+  }
+  function cloudView(backend: SessionBackend) {
+    return <TooltipProvider><TabView session={session} tab={session.tabs[0]} active backend={backend} /></TooltipProvider>;
+  }
+
+  describe.each([false, true])("remount=%s", (remount) => {
+    it.each(["accepted", "refused"])("retains pending ownership and current feedback on %s", async (outcome) => {
+      const delivery = deferredCloud();
+      let view = render(cloudView(delivery.backend));
+      fireEvent.change(field(), { target: { value: "P" } });
+      press("Enter");
+      expect(delivery.send).toHaveBeenCalledExactlyOnceWith(session.tabs[0].id, "P", []);
+      const reconnected = { ...delivery.backend, generation: "g2" };
+      if (remount) { view.unmount(); view = render(cloudView(reconnected)); }
+      else view.rerender(cloudView(reconnected));
+      expect(view.getByText("Sending…")).toBeTruthy();
+      expect(view.getByRole("button", { name: "Sending" }).hasAttribute("disabled")).toBe(true);
+      press("Enter");
+      expect(delivery.send).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        if (outcome === "accepted") delivery.resolve({ queued: true, events: [] });
+        else delivery.reject(new Error("enqueue refused"));
+      });
+      expect(view.queryByText("Sending…")).toBeNull();
+      expect(field().value).toBe(outcome === "accepted" ? "" : "P");
+      expect(delivery.send).toHaveBeenCalledTimes(1);
+      if (outcome === "refused") {
+        expect(view.getByText(/Could not queue the command/)).toBeTruthy();
+        view.unmount();
+        view = render(cloudView({ ...reconnected, generation: "g3" }));
+        expect(view.getByText(/Could not queue the command/)).toBeTruthy();
+      }
+    });
+
+    it("preserves a newer draft when g1 accepts after reconnect", async () => {
+      const delivery = deferredCloud();
+      let view = render(cloudView(delivery.backend));
+      fireEvent.change(field(), { target: { value: "P" } });
+      press("Enter");
+      const reconnected = { ...delivery.backend, generation: "g2" };
+      if (remount) { view.unmount(); view = render(cloudView(reconnected)); }
+      else view.rerender(cloudView(reconnected));
+      fireEvent.change(field(), { target: { value: "N" } });
+      press("Enter");
+      await act(async () => delivery.resolve({ queued: true, events: [] }));
+      expect(field().value).toBe("N");
+      expect(delivery.send).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each(["organization", "workspace", "session"])("keeps a different %s destination independent of an old failure", async (part) => {
+    const first = deferredCloud();
+    const second = deferredCloud();
+    const key = part === "organization" ? `cloud:org-2:ws-1:${logSessionId}`
+      : part === "workspace" ? `cloud:org-1:ws-2:${logSessionId}`
+      : `cloud:org-1:ws-1:other-${logSessionId}`;
+    const other = { ...second.backend, key, generation: "g2" };
+    let view = render(cloudView(first.backend));
+    fireEvent.change(field(), { target: { value: "P" } });
+    press("Enter");
+    view.unmount();
+    view = render(cloudView(other));
+    expect(view.queryByText("Sending…")).toBeNull();
+    fireEvent.change(field(), { target: { value: "N" } });
+    press("Enter");
+    expect(second.send).toHaveBeenCalledTimes(1);
+    await act(async () => first.reject(new Error("old destination refused")));
+    expect(view.getByText("Sending…").dataset.text).toBe("N");
+    expect(view.queryByText(/Could not queue the command/)).toBeNull();
+    // The tab's draft is the tab's, whichever destination: the refused P is not lost (#727).
+    expect(field().value).toBe("P");
+    await act(async () => second.resolve({ queued: true, events: [] }));
+    expect(field().value).toBe("P");
+    expect(first.send).toHaveBeenCalledTimes(1);
+    expect(second.send).toHaveBeenCalledTimes(1);
   });
 });

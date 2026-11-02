@@ -229,7 +229,7 @@ impl OpenCode {
         let duration_ms = self.turn_started_at.take().map(|t| t.elapsed().as_millis() as u64);
         let usage = self.last_usage.map(|(used, max)| Usage { context_used: Some(used), context_max: max, ..Default::default() });
         let mut out = self.commit_open_text();
-        out.push(Action::Emit(Payload::TurnCompleted { status, final_text, usage, duration_ms, head: None, auth_failed }));
+        out.push(Action::Emit(Payload::TurnCompleted { status, final_text, usage, duration_ms, head: None, auth_failed, detail: None }));
         out
     }
 
@@ -405,6 +405,7 @@ impl OpenCode {
                 let patterns = p["patterns"].as_array().map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|list| !list.is_empty());
                 let mut out = self.commit_open_text();
                 out.push(Action::Emit(Payload::PermissionRequested {
+                    cwd: None,
                     request_id,
                     tool_use_id: p["callID"].as_str().or_else(|| p["tool"]["callID"].as_str()).unwrap_or("").into(),
                     tool_name: tool,
