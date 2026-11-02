@@ -445,23 +445,21 @@ export class TranscriptReducer {
         break;
       }
       case "prompt_withdrawn": {
-        const message = findMessage(turns, payload.promptSeq);
-        if (message) {
-          message.withdrawn = true;
-          message.inputOccupied = undefined;
-        }
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, inputOccupied: undefined }));
         break;
       }
       case "prompt_joined": {
         // Received inside another message's prompt, which shows it: its own bubble goes, and what was sent stays with that one.
-        const taken = takeMessage(turns, payload.promptSeq);
+        const taken = takeMessage(this.turns, payload.promptSeq);
         if (!taken) break;
         const { prompt, from } = taken;
-        const into = findMessage(turns, payload.intoSeq);
-        if (into) into.sent = [into.sent ?? into.text, prompt.text].join("\n\n");
+        this.touch(from);
+        this.changeMessage(payload.intoSeq, (into) => ({ sent: [into.sent ?? into.text, prompt.text].join("\n\n") }));
         if (!from.prompt && !from.work.length && !from.completed) {
-          turns.splice(turns.indexOf(from), 1);
-          if (current === from) current = null;
+          this.turns.splice(this.turns.indexOf(from), 1);
+          this.versions.delete(from);
+          this.shown.delete(from);
+          if (this.current === from) this.current = null;
         }
         break;
       }
@@ -886,6 +884,21 @@ export class ConversationView {
   transcript(live: boolean): Transcript {
     return this.reducer.snapshot(live);
   }
+}
+
+/** The line a chat shows while a compaction runs (`Transcript.compacting`), on the desktop and the phone. */
+export const COMPACTING_LINE = "Compacting context…";
+
+/**
+ * What a compaction's row says, the same on the desktop and the phone
+ * (#644). Null while it runs: the chat's `COMPACTING_LINE` says so then.
+ */
+export function compactionStatus(item: Extract<WorkItem, { kind: "compaction" }>): string | null {
+  const lifecycle = item.lifecycle;
+  if (lifecycle?.state === "item_started") return null;
+  if (lifecycle?.state === "stopped") return `Compaction stopped: turn ${lifecycle.stoppedBy === "interrupted" ? "interrupted" : "failed"}`;
+  if (lifecycle?.state === "unknown") return item.uncertain ? "Compaction status unknown: could not save status" : "Compaction status unknown";
+  return "Context compacted";
 }
 
 /** Runs of two or more consecutive calls to one groupable tool fold into one row. */

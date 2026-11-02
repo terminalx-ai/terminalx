@@ -1,0 +1,101 @@
+{
+  "sourceCommit": "9d60f18c36af47592651ba1b16ec536eb2ddda1d",
+  "checks": {
+    "typescript": "passed",
+    "vitest": {
+      "passed": 3370,
+      "files": 289
+    },
+    "clippy": "passed --all-targets -- -D warnings",
+    "cargoTest": {
+      "unitPassed": 2242,
+      "ignored": 18,
+      "cliPassed": 6,
+      "integrationPassed": 2
+    }
+  },
+  "notes": [
+    "Clippy checked the same production source before its commit; only attribution/documentation was added afterward.",
+    "The initial UI matcher failure is retained; equivalent text-content assertion passed on rerun.",
+    "Dedicated native crate cancellation/recovery test and paired model matrix will be rerun after the resource reservation."
+  ],
+  "logs": [
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-check.log",
+      "sizeBytes": 857,
+      "sha256": "2442ccce1bf9813c857e291a0666769d9c9658c214fcceccfb12b41d157ea9c5"
+    },
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-clippy.log",
+      "sizeBytes": 407,
+      "sha256": "0fc28b66aee90e09263dc2c4453bc04ff52c7dd7fe6e24bd5cf50e03598c8e30"
+    },
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-final-tsc.log",
+      "sizeBytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-final-vitest.log",
+      "sizeBytes": 20207,
+      "sha256": "3f08782ce71dbcaed9b3dc03a5722dc2cf2991713b046b3b351d79379f9db1bd"
+    },
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-final-cargo.log",
+      "sizeBytes": 214240,
+      "sha256": "ca55250afa4037403b9f162267e8da1fff5571c432b8bfb03be7a1e8486a9229"
+    },
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-native-tests.log",
+      "sizeBytes": 1451,
+      "sha256": "42e7f69b8da732e5c2eb5c17c2f77d4b6555e4dd6619955b9b646dcd105e71c5"
+    },
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-ui-tests.log",
+      "sizeBytes": 1292,
+      "sha256": "dbfd35e3868d5daeac74c2ed99b926311b06d282a30013feaec664b04de5e4cd"
+    },
+    {
+      "path": "/tmp/tx439-kmesvcjt/production-detector-ui-tests-v2.log",
+      "sizeBytes": 290,
+      "sha256": "620b6310bd6d9ab442997238ee1596af1635359a3c9c404d2fdc700d41898c2c"
+    }
+  ],
+  "loaderRepair": {
+    "baseCommit": "9d60f18c36af47592651ba1b16ec536eb2ddda1d",
+    "checks": {
+      "typescript": "passed",
+      "vitest": "289 files / 3370 tests passed",
+      "clippy": "all targets, warnings denied: passed",
+      "cargoTest": "2243 unit, 6 CLI, 2 integration passed; 18 ignored",
+      "nativeDetector": "3 passed including cancellation recovery"
+    },
+    "logs": [
+      {
+        "path": "/tmp/tx439-kmesvcjt/production-detector-final-tsc-v2.log",
+        "sizeBytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "/tmp/tx439-kmesvcjt/production-detector-final-vitest-v2.log",
+        "sizeBytes": 20207,
+        "sha256": "760a403cecbb909d6d5301f53f7855faac6ded8bfe8f99774168ff47f8b5866b"
+      },
+      {
+        "path": "/tmp/tx439-kmesvcjt/production-detector-final-cargo-v2.log",
+        "sizeBytes": 214138,
+        "sha256": "d06412c91322675869901a462118bba7d042281472c56c1341fe3705f77d5a72"
+      },
+      {
+        "path": "/tmp/tx439-kmesvcjt/production-detector-final-clippy-v2.log",
+        "sizeBytes": 211,
+        "sha256": "36efdb47eea977e3c3295d650aa4dfe349b4b721f67d9a6d4b92264d8c230c39"
+      },
+      {
+        "path": "/tmp/tx439-kmesvcjt/production-detector-native-tests-v2.log",
+        "sizeBytes": 834,
+        "sha256": "819b18bc20587a286f5f3f5b47be96c3abd08b74bc9362332ac24812482a172f"
+      }
+    ]
+  }
+}

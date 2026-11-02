@@ -188,13 +188,23 @@ pub struct Claimed {
 
 /// The tab a claimed launch starts. A launch that names no mode (or a blank
 /// one) starts in the default launch mode, bypass, like any other session.
+///
+/// A launch created with the desktop's Native Codex setting on (#745) goes
+/// through Codex's app server under the rules of a workspace's
+/// `session.create`: Codex only, in a mode the app server can serve. A Codex
+/// older than its minimum still falls back to the terminal engine at the
+/// tab's first launch.
 pub(crate) fn new_tab(claim: &Claim) -> crate::session_ops::NewTab {
-    crate::session_ops::NewTab { transport: Default::default(),
+    let mut tab = crate::session_ops::NewTab { transport: Default::default(),
         harness: claim.agent.clone(),
         model: claim.model.clone().unwrap_or_default(),
         effort: claim.effort.clone(),
         permission_mode: crate::store::index::requested_mode(claim.mode.clone()),
+    };
+    if claim.native_codex {
+        crate::session_ops::native_codex(&mut tab, false);
     }
+    tab
 }
 
 /// `launch` of a claim response.
@@ -221,6 +231,11 @@ pub struct Claim {
     pub prompt: Option<String>,
     #[serde(default)]
     pub repositories: Vec<Repository>,
+    /// The desktop's Settings → Experimental → Native Codex when it created
+    /// the workspace (§19.1, #745). Absent from a server or desktop from
+    /// before it: a terminal tab, as before.
+    #[serde(default)]
+    pub native_codex: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

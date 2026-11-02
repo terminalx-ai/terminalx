@@ -1444,6 +1444,8 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+  /** Settings → Experimental → Native Codex for a Codex launch (#745): the runtime starts the first tab on Codex's app server where it can. */
+  nativeCodex?: boolean;
 }
 
 /** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
@@ -1680,7 +1682,7 @@ export interface UsageWindow {
 }
 
 /** Why a received window did not replace the one shown under its key. */
-export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline";
+export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline" | "notYetStarted" | "endedWindow";
 
 /** A manual refresh that did not reach the provider, and when the button will. */
 export interface UsageRefreshSkip {
@@ -1692,7 +1694,7 @@ export interface UsageRefreshSkip {
 /** Live usage from a Claude turn that was not used, newer than any that was. */
 export interface LiveUsageRefused {
   at: number;
-  reason: "unidentified" | "launchMismatch" | "statuslineMismatch";
+  reason: "unidentified" | "launchUnknown" | "launchMismatch" | "statuslineMismatch";
 }
 
 // The fields marked optional below are absent from a background runtime older than #729.
@@ -2506,6 +2508,9 @@ export interface TranscriptionModel {
   downloading: boolean;
   progress?: DownloadProgress;
   page: string;
+}
+export interface TranscriptionDetector extends TranscriptionModel {
+  readiness: "missing" | "invalid" | "verifiedFile" | "error";
 }
 export interface DownloadProgress {
   id: string;

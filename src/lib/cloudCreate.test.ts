@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+
+const invoke = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({ ...(await importOriginal<typeof import("@tauri-apps/api/core")>()), invoke }));
 import type { CloudWorkspaceClientError, CloudWorkspaceSnapshot } from "@/lib/api";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import {
@@ -219,6 +222,36 @@ describe("createWorkspace", () => {
     expect(create).toHaveBeenCalledTimes(2);
     expect(create.mock.calls[1][0]).toEqual(create.mock.calls[0][0]);
     expect(kept).toBeNull();
+  });
+
+  it("asks for a native Codex first tab only for Codex, when Settings → Experimental says so, and resends what it asked (#745)", async () => {
+    let on = true;
+    invoke.mockImplementation(async (command: string) => (command === "experimental_settings" ? { nativeCodex: on } : undefined));
+    const launchOf = async (agent: string) => {
+      const { api } = fakeApi();
+      await createWorkspace(api, form({ agent, model: "" }));
+      return vi.mocked(api.cloudWorkspaceCreate).mock.calls[0][0].launch;
+    };
+    expect(await launchOf("codex")).toEqual({ agent: "codex", model: null, effort: "high", mode: "acceptEdits", prompt: "Fix the login", nativeCodex: true });
+    expect(await launchOf("claude")).not.toHaveProperty("nativeCodex");
+    on = false;
+    expect(await launchOf("codex")).not.toHaveProperty("nativeCodex");
+    // A setting that cannot be read asks for nothing.
+    invoke.mockRejectedValue(new Error("no app"));
+    expect(await launchOf("codex")).not.toHaveProperty("nativeCodex");
+
+    // Decided once: a retry resends the request it was quoted with, whatever the setting says by then.
+    on = true;
+    invoke.mockReset().mockImplementation(async (command: string) => (command === "experimental_settings" ? { nativeCodex: on } : undefined));
+    const create = vi.fn().mockRejectedValueOnce(clientError("cloud_workspace_create_outcome_unknown", true)).mockResolvedValueOnce(snapshot());
+    const { api } = fakeApi({ cloudWorkspaceCreate: create });
+    let kept: PendingCreate | null = null;
+    await expect(createWorkspace(api, form({ agent: "codex", model: "" }), { onPending: (p) => (kept = p) })).rejects.toMatchObject({ code: "cloud_workspace_create_outcome_unknown" });
+    on = false;
+    await createWorkspace(api, form({ agent: "codex", model: "" }), { pending: kept });
+    expect(create.mock.calls[1][0]).toEqual(create.mock.calls[0][0]);
+    expect(create.mock.calls[1][0].launch.nativeCodex).toBe(true);
+    invoke.mockReset();
   });
 
   it("drops the request after a definite refusal such as the quota", async () => {

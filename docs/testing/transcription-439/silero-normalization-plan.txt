@@ -1,0 +1,4 @@
+Before inference: classify a fresh held-out FSDD split, every test-index-1 file (60), at gains 1,0.03,0.001, with paired raw vs peak-normalized detector input. Normalization is x / max(abs(x)); zero input stays zero. Threshold stays 0.5, any-frame rule unchanged. Do not change ASR audio or tune a threshold.
+Retain original 51 synthetic/stress cases as DEVELOPMENT regression controls (already inspected, not held-out).
+Fresh generated non-speech: seed4391; 5 seconds each of white noise, random impulses, multi-tone hum, single tones at 80,440,1000,4000Hz, repeated chirps, at amplitudes 0.001,0.02,0.5 (24 clips). Generated controls are not representative real ambient noise.
+Use complete fresh split regardless of outcome. No model/runtime integration. A passing candidate still needs actual ASR retention and broader real noise/microphone acceptance before app use.

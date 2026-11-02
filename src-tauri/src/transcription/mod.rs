@@ -7,6 +7,11 @@ pub mod audio;
 pub mod catalog;
 pub mod download;
 pub mod engine;
+pub mod noise;
+pub mod commands;
+mod detector_file;
+pub mod context;
+pub mod personalization;
 
 use std::sync::Arc;
 
@@ -135,9 +140,10 @@ impl Transcription {
     }
 
     pub fn delete(&self, id: &str) -> anyhow::Result<()> {
-        let spec = catalog::find(id).ok_or_else(|| anyhow::anyhow!("unknown model {id}"))?;
+        let spec = catalog::downloadable(id).ok_or_else(|| anyhow::anyhow!("unknown model {id}"))?;
         self.downloads.cancel(id);
         self.engine.unload_if(id);
+        if id == catalog::DETECTOR.id { self.engine.noise.unload(); }
         download::delete(spec)
     }
 }
@@ -175,3 +181,6 @@ mod tests {
         assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(test)]
+mod evaluation;

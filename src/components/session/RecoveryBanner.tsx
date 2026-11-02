@@ -21,10 +21,12 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
+  /** A native Codex tab (#644), which has no terminal to check until it is moved to one. */
+  native?: boolean;
   /** When the plan's usage limit is what stopped the turn: which window, and when it resets. */
   limit?: UsageLimit | null;
   waiting: boolean;
@@ -54,7 +56,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   if (!kind && !waiting) return null;
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
   const limitReset = kind === "usage_limit" && limit?.resetsAt != null && limit.resetsAt <= now;
-  const offer = recoveryOffer(kind, { asks: asks.length, limitReset, canResend: !!onResend, canSendContinue: !!onSendContinue, canSignIn: !!onSignIn });
+  const offer = recoveryOffer(kind, { asks: asks.length, limitReset, canResend: !!onResend, canSendContinue: !!onSendContinue, canSignIn: !!onSignIn, native });
   // Only a request to answer: the request's own card says it all, with stopping in its action bar.
   if (!kind && asks.length) {
     const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={onStop}>Stop session</Button>;

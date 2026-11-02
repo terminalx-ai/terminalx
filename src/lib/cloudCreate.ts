@@ -1,16 +1,17 @@
-import type {
-  CloudProviderSummary,
-  CloudWorkspaceClientError,
-  CloudWorkspaceCreateInput,
-  CloudWorkspaceLaunchInput,
-  CloudWorkspaceListItem,
-  CloudWorkspacePreflight,
-  CloudWorkspaceProviderId,
-  CloudWorkspaceQuote,
-  CloudWorkspaceQuoteInput,
-  CloudWorkspaceRepositoryInput,
-  CloudWorkspaceSetup,
-  CloudWorkspaceSnapshot,
+import {
+  experimental,
+  type CloudProviderSummary,
+  type CloudWorkspaceClientError,
+  type CloudWorkspaceCreateInput,
+  type CloudWorkspaceLaunchInput,
+  type CloudWorkspaceListItem,
+  type CloudWorkspacePreflight,
+  type CloudWorkspaceProviderId,
+  type CloudWorkspaceQuote,
+  type CloudWorkspaceQuoteInput,
+  type CloudWorkspaceRepositoryInput,
+  type CloudWorkspaceSetup,
+  type CloudWorkspaceSnapshot,
 } from "@/lib/api";
 import { roleRefusedMessage } from "@/lib/accountRoles";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
@@ -102,6 +103,18 @@ export function launchInput(form: CreateForm): CloudWorkspaceLaunchInput {
 }
 
 /**
+ * The launch a person's create sends. With Settings → Experimental → Native
+ * Codex on, a Codex launch asks its runtime to start the first tab on Codex's
+ * app server, under the runtime's rules for any new Codex tab (#745). Decided
+ * when the create is quoted and kept in the pending request, so a retry
+ * resends the same bytes.
+ */
+export async function personLaunchInput(form: CreateForm): Promise<CloudWorkspaceLaunchInput> {
+  const launch = launchInput(form);
+  return (await experimental.nativeCodexFor(form.agent)) ? { ...launch, nativeCodex: true } : launch;
+}
+
+/**
  * Check the repositories and, when there is a first prompt, that the
  * organization has a login for its agent (PRO-78): a prompt sent to an agent
  * at its sign-in screen is never read. A workspace without a first prompt
@@ -172,6 +185,7 @@ export async function quoteCreate(
   options.onStep?.("quoting");
   const setup = await api.cloudWorkspaceSetup(form.provider!, options.orgId ?? null);
   const quote = await api.cloudWorkspaceQuote({ provider: form.provider!, ...setup.defaults }, options.orgId ?? null);
+  const launch = await personLaunchInput(form);
   const idempotencyKey = options.newKey?.() ?? crypto.randomUUID();
   return {
     quote,
@@ -185,7 +199,7 @@ export async function quoteCreate(
         confirmProviderSpend: true,
         idempotencyKey,
         repositories,
-        launch: launchInput(form),
+        launch,
       },
     },
   };

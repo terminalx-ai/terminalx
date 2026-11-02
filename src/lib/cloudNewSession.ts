@@ -7,7 +7,7 @@ import { cloudOrgArg, defaultOrgId, findCloudWorkspace, getCloudCatalog, isChang
 import {
   CreateRefused,
   createWorkspace,
-  launchInput,
+  personLaunchInput,
   phaseOf,
   preflightCreate,
   repositoriesInput,
@@ -326,7 +326,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
       confirmProviderSpend: true,
       idempotencyKey,
       repositories,
-      launch: launchInput(form),
+      launch: await personLaunchInput(form),
     },
   };
   return { orgId, project, form, pending, quote, quota, providerLabel: provider.label };

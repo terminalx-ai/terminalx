@@ -602,6 +602,25 @@ describe("workspace RPC client", () => {
     client.close();
   });
 
+  it("says when an agent tab's replay is all in, and again after each resume, never for a live event (#644)", async () => {
+    const runtime = new FakeRuntime();
+    runtime.agentEvents = [1, 2].map((seq) => ({ seq, id: `e${seq}` }));
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const order: string[] = [];
+    await client.subscribeSession("s1", "t1", (event) => order.push(`event ${(event as { seq: number }).seq}`), { onReplayed: () => order.push("replayed") });
+    expect(order).toEqual(["event 1", "event 2", "replayed"]);
+    runtime.deliver({ event: "session.event", params: { subscriptionId: "sub-1", cursor: "7:3", event: { seq: 3 } } });
+    expect(order.at(-1)).toBe("event 3");
+    // A reconnect resumes from the cursor: what the runtime holds after it, then the word that it is all in.
+    runtime.agentEvents.push({ seq: 3, id: "e3" }, { seq: 4, id: "e4" });
+    runtime.drop();
+    runtime.connect();
+    await settle();
+    expect(order.slice(4)).toEqual(["event 4", "replayed"]);
+    client.close();
+  });
+
   it("lists and configures agent tabs, gives configure a stable request id, and hands broadcasts to listeners", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);

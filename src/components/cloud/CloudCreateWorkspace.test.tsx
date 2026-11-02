@@ -9,7 +9,15 @@ import { refreshHarnesses } from "@/lib/sessions";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import type { HarnessInfo } from "@/types/session";
 
+/** Settings → Experimental → Native Codex, as the dialog reads it for a new tab of an agent. */
+const nativeCodex = vi.hoisted(() => ({ on: false, asked: [] as string[] }));
 vi.mock("@/lib/api", () => ({
+  experimental: {
+    nativeCodexFor: async (agent: string) => {
+      nativeCodex.asked.push(agent);
+      return agent === "codex" && nativeCodex.on;
+    },
+  },
   api: {
     cloudProviders: vi.fn(),
     cloudWorkspaceRepositories: vi.fn(),
@@ -83,6 +91,8 @@ const snapshot = (phase: string, patch: { workspace?: object; operation?: object
 
 beforeEach(async () => {
   account.multiOrg = false;
+  nativeCodex.on = false;
+  nativeCodex.asked = [];
   localStorage.clear();
   for (const fn of Object.values(mocked)) fn.mockReset();
   catalog.models = MODELS;
@@ -372,6 +382,27 @@ describe("CloudCreateWorkspace launch settings", () => {
     expect(await createdLaunch()).toMatchObject({ agent: "codex", model: "gpt-5.6-sol", effort: "high", mode: "manual" });
     expect(mocked.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), null, "codex");
     expect(getPrefs()).toMatchObject({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "manual" });
+  });
+
+  it("asks for a native Codex first tab when Settings → Experimental → Native Codex is on and the agent is Codex (#745)", async () => {
+    nativeCodex.on = true;
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "bypassPermissions" });
+    await fill();
+    expect(await createdLaunch()).toMatchObject({ agent: "codex", prompt: "Fix the login", nativeCodex: true });
+    expect(nativeCodex.asked).toEqual(["codex"]);
+  });
+
+  it("asks for nothing more for another agent, or with Native Codex off (#745)", async () => {
+    nativeCodex.on = true;
+    await fill();
+    expect(await createdLaunch()).not.toHaveProperty("nativeCodex");
+    cleanup();
+    mocked.cloudWorkspaceCreate.mockClear();
+    nativeCodex.on = false;
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "bypassPermissions" });
+    await fill();
+    expect(await createdLaunch()).toMatchObject({ agent: "codex" });
+    expect(mocked.cloudWorkspaceCreate.mock.calls[0][0].launch).not.toHaveProperty("nativeCodex");
   });
 
   it("offers the agents New Session offers for a cloud project, installed on this computer or not", async () => {

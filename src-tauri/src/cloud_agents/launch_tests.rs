@@ -145,6 +145,7 @@ fn claim(repositories: Vec<Repository>) -> Claim {
         mode: Some("acceptEdits".into()),
         prompt: Some("Fix the login\nand add a test".into()),
         repositories,
+        native_codex: false,
     }
 }
 
@@ -453,6 +454,166 @@ fn a_claimed_launch_without_a_mode_starts_in_bypass() {
     }
     let named = crate::session_ops::new_tab_entry(&new_tab(&claim(Vec::new())));
     assert_eq!(named.permission_mode, "acceptEdits");
+}
+
+/// #745: a launch created with Native Codex on starts its tab under the same
+/// rules as a workspace's `session.create` with `nativeCodex`: Codex only, in
+/// a mode the app server can serve. Without the field (an older server or
+/// desktop), a terminal tab, as before.
+#[test]
+fn a_launch_created_with_native_codex_starts_a_native_codex_tab_where_it_can() {
+    use crate::store::index::AgentTransport::{ExperimentalCodexStdio as Native, Pty};
+    let parsed = |extra: Value| {
+        let mut body = json!({ "launchId": "launch_1", "state": "deliver", "workBranch": "terminalx/x", "agent": "codex" });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<Claim>(body).unwrap()
+    };
+    let transport = |claim: Claim| crate::session_ops::new_tab_entry(&new_tab(&claim)).transport;
+    assert!(!parsed(json!({})).native_codex, "a server from before the field");
+    assert_eq!(transport(parsed(json!({ "nativeCodex": true }))), Native);
+    assert_eq!(transport(parsed(json!({ "nativeCodex": true, "mode": "auto" }))), Native);
+    assert_eq!(transport(parsed(json!({}))), Pty, "the setting off, or an older server or desktop");
+    assert_eq!(transport(parsed(json!({ "nativeCodex": false }))), Pty);
+    assert_eq!(transport(parsed(json!({ "nativeCodex": true, "mode": "manual" }))), Pty, "Ask every time");
+    assert_eq!(transport(parsed(json!({ "nativeCodex": true, "agent": "claude" }))), Pty);
+}
+
+const NATIVE_LAUNCH_CASE: &str = "TERMINALX_TEST_NATIVE_LAUNCH_CASE";
+
+/// Stands in for Codex: answers the version probe from `version`, records
+/// every launch, plays the app server (one turn per `turn/start`, each frame
+/// recorded in `received`, no hooks to list) and otherwise stays up as the
+/// terminal Codex.
+const LAUNCH_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+printf '%s\n' "$*" >> "$here/launches"
+case "$1" in
+  --version) cat "$here/version"; exit 0 ;;
+  --help) printf '%s\n' "Usage: codex [OPTIONS]" "      --no-daemon  Keep this session to itself"; exit 0 ;;
+  app-server) ;;
+  *) exec sleep 10 ;;
+esac
+while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"hooks/list"'*) printf '{"id":%s,"error":{"code":-32601,"message":"not in this stand-in"}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ;;
+  esac
+done
+"#;
+
+/// #745 end to end on the runtime: a Native Codex launch is started by the
+/// real starter, its first prompt goes to Codex's app server once, and a
+/// redelivery to the same disk never sends it again. A Codex older than the
+/// app server's minimum takes the launch on the terminal engine, as before.
+/// In processes of their own, because each puts a stand-in `codex` first on
+/// the lookup path.
+#[test]
+fn a_native_codex_launch_delivers_its_prompt_once_through_the_app_server() {
+    for case in ["supported", "too-old"] {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cloud_agents::launch::tests::native_launch_child", "--nocapture"])
+            .env(NATIVE_LAUNCH_CASE, case)
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+            .spawn().unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if std::time::Instant::now() >= until {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("{case}: the launch did not finish");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "{case}: {}", std::fs::read_to_string(dir.path().join("child.log")).unwrap());
+    }
+}
+
+#[test]
+fn native_launch_child() {
+    use crate::store::index::{self, AgentTransport};
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(case) = std::env::var(NATIVE_LAUNCH_CASE) else { return };
+    let _home = crate::store::temp_home();
+    let home = crate::store::root().unwrap();
+    std::env::set_var("CODEX_HOME", home.join("user-codex"));
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), LAUNCH_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("version"), if case == "supported" { "codex-cli 0.166.0\n" } else { "codex-cli 0.163.0\n" }).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let read = |name: &str| std::fs::read_to_string(bin.join(name)).unwrap_or_default();
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < until, "{case}: {what}: launches {:?}, received {:?}", read("launches"), read("received"));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    let sink: Arc<dyn crate::sink::EventSink> = Arc::new(crate::sink::BroadcastSink::new(256));
+    let manager = crate::session::SessionManager::new(
+        sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    /// The real starter, for an agent this test installed and signed in.
+    struct Installed(ManagerStarter);
+    impl Starter for Installed {
+        fn available(&self, _agent: &str) -> bool { true }
+        fn start(&self, cwd: &Path, claim: &Claim, title: &str) -> Result<(String, String), StartError> { self.0.start(cwd, claim, title) }
+    }
+    let root = home.join("workspace");
+    let starter = Installed(ManagerStarter { manager: manager.clone(), sink, root: root.to_string_lossy().into_owned(), agents: std::sync::Weak::new() });
+    let mut intent = claim(Vec::new());
+    (intent.agent, intent.model, intent.mode, intent.native_codex) = ("codex".into(), None, None, true);
+    let api = FakeApi::new(Some(intent));
+    let launcher = Launcher {
+        api: api.clone(),
+        starter: Arc::new(starter),
+        checkout: Arc::new(GitCheckout::default()),
+        store: Store::open(&home),
+        incarnation: "incarnation-aaaaaaaaaaaa".into(),
+        root,
+        cancel_poll: CANCEL_POLL,
+    };
+
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()), "{case}");
+    let outcome = api.completions.lock().unwrap()[0].clone();
+    let (session, tab) = (outcome.session_id.unwrap(), outcome.tab_id.unwrap());
+    let transport = index::get(&session).unwrap().tab(&tab).unwrap().transport;
+    if case == "too-old" {
+        assert_eq!(transport, AgentTransport::Pty, "an older Codex takes the launch on the terminal engine");
+        wait_for("the terminal Codex was not launched", &|| read("launches").lines().any(|line| line.starts_with("--no-daemon")));
+        // The terminal engine asks the app server for its hooks; no conversation starts there.
+        assert!(!read("received").contains("/start"), "no thread or turn on the app server: {:?}", read("received"));
+        manager.stop(&session, &tab).unwrap();
+        return;
+    }
+    assert_eq!(transport, AgentTransport::ExperimentalCodexStdio);
+    let turns = || read("received").lines().filter(|line| line.contains(r#""method":"turn/start""#)).map(str::to_owned).collect::<Vec<_>>();
+    wait_for("the first prompt never reached the app server", &|| !turns().is_empty());
+    assert!(turns()[0].contains("Fix the login\\nand add a test"), "{:?}", turns());
+    assert!(!read("launches").lines().any(|line| line.starts_with("--no-daemon")), "no terminal Codex: {:?}", read("launches"));
+
+    // The runtime restarts on the same disk and the server redelivers the
+    // launch: its outcome is reported again, and the prompt is not resent.
+    *api.state.lock().unwrap() = "claimed".into();
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    let completions = api.completions.lock().unwrap().clone();
+    assert_eq!((completions.len(), completions[1].tab_id.as_deref()), (2, Some(tab.as_str())));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(turns().len(), 1, "the first prompt is sent once");
+    manager.stop(&session, &tab).unwrap();
 }
 
 #[test]
