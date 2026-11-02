@@ -51,7 +51,7 @@
     "react-native-web": "~0.21.0",
     "react-native-worklets": "0.10.1",
     "tweetnacl": "1.0.3",
-    "zod": "4.5.4"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@react-native/metro-config": "0.86.3",
