@@ -175,12 +175,12 @@ impl SessionManager {
     /// composer prompt's.
     fn redeliver(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, sent: Sent) {
         let Engine::Cli(p) = &rt.engine else { return };
-        let (pane, ready) = (p.pane_id.clone(), p.ready.clone());
+        let (pane, ready, stops) = (p.pane_id.clone(), p.ready.clone(), p.input.stops);
         let queued = rt.turn_open && !rt.turn_by_command;
         let echo = ComposerEcho { queued, seq: sent.seq, ..ComposerEcho::new(sent.text.clone(), sent.images.len()) };
         self.await_composer_echo(rt, echo, &sent.text);
         let attachments = sent.images.iter().map(|image| image.url.clone()).collect();
-        self.type_prompt(rt_arc, &pane, sent.text, attachments, PromptDelivery { ready: Some(ready), seq: Some(sent.seq), queued, ..Default::default() });
+        self.type_prompt(rt_arc, &pane, sent.text, attachments, PromptDelivery { ready: Some(ready), seq: Some(sent.seq), queued, stops, ..Default::default() });
     }
 
     /// "Resend last prompt": the last prompt the tab's agent never answered,
