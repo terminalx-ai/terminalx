@@ -597,6 +597,7 @@ mod tests {
                 created: index::now(),
                 modified: index::now(),
                 archived: false,
+                archive: Default::default(),
                 pinned: false,
                 active_tab: None,
                 link: None,

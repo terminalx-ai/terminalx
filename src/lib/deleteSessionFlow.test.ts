@@ -20,7 +20,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { CONVERSATION_DELETION } from "./conversationRetention";
-import { confirmDeleteSession } from "./deleteSessionFlow";
+import { confirmDeleteSession, confirmDeleteSessions } from "./deleteSessionFlow";
 
 const cwd = "/p/.raccoon/worktrees/quiet-amber-fox";
 const session = { id: "s1", title: "Fix login", projectPath: "/p", cwd, worktreeName: "quiet-amber-fox", worktreeRemoved: false } as SessionEntry;
@@ -147,3 +147,57 @@ describe("confirmDeleteSession", () => {
   });
 });
 
+describe("confirmDeleteSessions: several at once (#718)", () => {
+  /** A quick chat, in its scratch folder unless it was pointed at `cwd`. */
+  const chat = (id: string, cwd = `/home/.raccoon/quick/${id}`) =>
+    ({ id, kind: "quick", title: `Chat ${id}`, projectPath: `/home/.raccoon/quick/${id}`, cwd, worktreeName: null, worktreeRemoved: false }) as SessionEntry;
+  const folder = (id: string, files: number, more = false) => ({ path: `/home/.raccoon/quick/${id}`, files, more, inUse: true });
+
+  beforeEach(() => {
+    for (const mock of [ask, message, deleteSession, soleWorkspaceOf, openWorkspaceDelete, quickChatScratch]) mock.mockReset();
+    deleteSession.mockResolvedValue(undefined);
+    message.mockResolvedValue(undefined);
+  });
+
+  it("names the files in the quick chats' scratch folders before deleting them, as the dialog for one does", async () => {
+    const scratches: Record<string, ReturnType<typeof folder>> = { a: folder("a", 2), b: folder("b", 0) };
+    quickChatScratch.mockImplementation(async (id: string) => scratches[id]);
+    ask.mockResolvedValue(true);
+
+    expect(await confirmDeleteSessions([chat("a"), chat("b"), atRoot])).toBe(true);
+    const [text, options] = ask.mock.calls[0];
+    expect(text).toContain("A quick chat's scratch folder holds 2 files, which are deleted with it:\n/home/.raccoon/quick/a");
+    // The empty one needs no mention, and nothing here is unknown or the reader's own.
+    expect(text).not.toContain("/home/.raccoon/quick/b");
+    expect(text).not.toMatch(/could not be read|not touched/);
+    expect(options.okLabel).toBe("Delete 3 and files");
+    expect(deleteSession.mock.calls.map(([id]) => id)).toEqual(["a", "b", "s2"]);
+  });
+
+  it("says which folders could not be read and which are the reader's own, and deletes nothing when cancelled", async () => {
+    const scratches: Record<string, ReturnType<typeof folder>> = { c: folder("c", 1, true), d: folder("d", 3) };
+    quickChatScratch.mockImplementation(async (id: string) => {
+      if (id === "e") throw new Error("gone");
+      return scratches[id];
+    });
+    ask.mockResolvedValue(false);
+
+    expect(await confirmDeleteSessions([chat("c", "/Users/me/notes"), chat("d"), chat("e")])).toBe(false);
+    const [text, options] = ask.mock.calls[0];
+    expect(text).toContain("2 quick chats' scratch folders hold 4 or more files, which are deleted with them:\n/home/.raccoon/quick/c\n/home/.raccoon/quick/d");
+    expect(text).toContain("One quick chat's scratch folder could not be read; it is deleted with whatever is in it.");
+    expect(text).toContain("The folder one of them runs in is yours and is not touched.");
+    expect(options.okLabel).toBe("Delete 3 and files");
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps the plain wording when no scratch folder holds anything", async () => {
+    quickChatScratch.mockImplementation(async (id: string) => folder(id, 0));
+    ask.mockResolvedValue(true);
+
+    await confirmDeleteSessions([chat("f"), session]);
+    const [text, options] = ask.mock.calls[0];
+    expect(text).toBe(`Delete 2 sessions? Their transcripts and attachments are removed. Their workspaces stay on disk.\n\n${CONVERSATION_DELETION}`);
+    expect(options.okLabel).toBe("Delete 2");
+  });
+});

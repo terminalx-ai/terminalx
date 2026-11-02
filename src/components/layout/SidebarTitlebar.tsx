@@ -1,4 +1,4 @@
-import { Check, FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
+import { Archive, Check, FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -6,7 +6,7 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { cn } from "@/lib/cn";
 import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { startSessionIn } from "@/lib/sessions";
+import { setShowArchived, startSessionIn, useSessionStore } from "@/lib/sessions";
 import type { Project } from "@/types/session";
 import { ProjectGlyph } from "./ProjectRail";
 import { TITLEBAR_INSET } from "./AppShell";
@@ -14,9 +14,9 @@ import { TITLEBAR_INSET } from "./AppShell";
 /**
  * The sidebar's titlebar, the same in both layouts: after the window's own
  * controls, Hide sidebar; at the right, the View menu (conversations grouped
- * by project or one flat list, and which sessions show: all, Unread or Needs
- * you), then Search and New chat, all plain icon buttons like the one that
- * hides the sidebar.
+ * by project or one flat list, which sessions show: all, Unread or Needs
+ * you, and whether the archived ones are listed too), then Search and New
+ * chat, all plain icon buttons like the one that hides the sidebar.
  */
 export function SidebarTitlebar({
   onHide,
@@ -82,24 +82,28 @@ export function SidebarTitlebar({
 
 /**
  * How the list is drawn and what it shows. The icon is the layout's; while a
- * filter narrows the list the button looks pressed and says which. The filter
- * covers local and cloud sessions alike (`useSidebarFilter`) and opens on a
- * click, an accessibility press and the keyboard (`useRowMenu`).
+ * filter narrows the list, or the archived conversations are shown, the
+ * button looks pressed and says so. The filter covers local and cloud
+ * sessions alike (`useSidebarFilter`) and opens on a click, an accessibility
+ * press and the keyboard (`useRowMenu`). Show archived (#718) lists each
+ * project's archived conversations, and the chats', under a fold of their own.
  */
 function ViewMenu({ grouped }: { grouped: boolean }) {
   const filter = useSidebarFilter();
+  const { showArchived } = useSessionStore();
   const menu = useRowMenu();
   const showing = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
-  const label = filter.active ? `View: showing ${showing}` : "View";
+  const label = filter.active ? `View: showing ${showing}` : showArchived ? "View: showing archived" : "View";
+  const tooltip = filter.active ? `Showing: ${showing}` : showArchived ? "Showing archived" : grouped ? "Grouped by project" : "One list of chats";
   return (
     <DropdownMenu {...menu.root}>
-      <WithTooltip label={filter.active ? `Showing: ${showing}` : grouped ? "Grouped by project" : "One list of chats"}>
+      <WithTooltip label={tooltip}>
         <DropdownMenuTrigger asChild {...menu.trigger}>
           <Button
             variant="ghost"
             size="icon-sm"
             aria-label={label}
-            className={cn(filter.active ? "bg-veil-raised text-foreground" : "text-faint hover:text-foreground")}
+            className={cn(filter.active || showArchived ? "bg-veil-raised text-foreground" : "text-faint hover:text-foreground")}
             data-testid="sidebar-filter"
             data-filter={filter.filter}
           >
@@ -124,6 +128,10 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
             {entry.label}
           </DropdownMenuItem>
         ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem role="menuitemcheckbox" aria-checked={showArchived} onSelect={() => setShowArchived(!showArchived)}>
+          {showArchived ? <Check /> : <Archive />} Show archived
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

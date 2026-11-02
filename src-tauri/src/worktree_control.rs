@@ -57,7 +57,8 @@ pub(crate) struct WorktreeSession {
     /// The project it belongs to; `None` for a quick chat.
     pub project: Option<String>,
     pub belongs_to: Belonging,
-    /// Archived sessions show nowhere in the app, and go with the worktree too.
+    /// Archived sessions are out of the sidebar's list (Show archived lists
+    /// them), and go with the worktree too.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
     /// Filled in only by the delete's preview.

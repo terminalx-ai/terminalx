@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Archive, Ellipsis, GitBranch, Pencil, Pin, Settings, SquarePen, Trash2 } from "@/icons";
+import { Archive, CheckSquare, Ellipsis, GitBranch, Pencil, Pin, Settings, SquarePen, Trash2 } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { UpdateButton } from "./UpdateNotice";
@@ -24,7 +24,9 @@ import { sessionStatus, type SessionEntry } from "@/types/session";
 import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { PROJECT_COLORS, colorCss } from "./PixelMascot";
 import { BotFace } from "./BotFace";
-import { FilteredEmpty, RemovedWorkspaces, RowContextMenu, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, RowContextMenu, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { SidebarBulkBar } from "./SidebarBulkBar";
+import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations } from "./CloudOrganizations";
@@ -63,16 +65,21 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
   const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
   const filter = useSidebarFilter();
+  // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
+  const showArchived = store.showArchived && !filter.active;
   // Unread or Needs you: only the conversations that pass, and the open one.
   const conversations = useMemo(
-    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId),
-    [filter, store.sessions, store.selectedSessionId],
+    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived),
+    [filter, store.sessions, store.selectedSessionId, showArchived],
   );
-  const showAgents = useMemo(() => mixesAgents(conversations), [conversations]);
+  // Show archived (#718): the archived ones, under a fold of their own at the end.
+  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions) : []), [showArchived, store.sessions]);
+  const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
+  const showAgents = useMemo(() => mixesAgents(listed), [listed]);
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
   const live = conversations.filter((session) => !session.worktreeRemoved);
   const removed = conversations.filter((session) => session.worktreeRemoved);
-  const chatRow = (session: SessionEntry) => (
+  const chatRow = (session: SessionEntry, inArchive = false) => (
     <ChatRow
       key={session.id}
       session={session}
@@ -80,9 +87,10 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
       link={conversationLink(session, store.projects, chatsPath, store.workspaces)}
       summaries={summaries}
       showAgent={showAgents}
+      inArchive={inArchive}
     />
   );
-  const summaries = useSessionSummaries(conversations, true);
+  const summaries = useSessionSummaries(listed, true);
 
   const run = (action: () => Promise<unknown>) => () => {
     action().then(() => setError(null), (cause) => setError(errorMessage(cause)));
@@ -107,7 +115,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
         {conversations.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
-        ) : conversations.length === 0 ? (
+        ) : conversations.length === 0 && archived.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -118,15 +126,20 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           </button>
         ) : (
           <ul className="flex flex-col gap-px">
-            {live.map(chatRow)}
+            {live.map((session) => chatRow(session))}
             {removed.length > 0 && (
               <RemovedWorkspaces
                 id="chats"
                 count={new Set(removed.map((session) => session.removedWorkspace?.path ?? session.id)).size}
                 opened={filter.active || removed.some((session) => session.id === store.selectedSessionId)}
               >
-                {removed.map(chatRow)}
+                {removed.map((session) => chatRow(session))}
               </RemovedWorkspaces>
+            )}
+            {archived.length > 0 && (
+              <ArchivedSessions id="list" count={archived.length} opened={archived.some((session) => session.id === store.selectedSessionId)}>
+                {archived.map((session) => chatRow(session, true))}
+              </ArchivedSessions>
             )}
           </ul>
         )}
@@ -134,6 +147,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
         <DevelopmentSection />
       </nav>
 
+      <SidebarBulkBar sessions={store.sessions} />
       <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 pb-2 pt-1" data-testid="sidebar-account-row">
         {/* The account; Settings keeps the far end. */}
         <div className="min-w-0 max-w-[70%]">
@@ -158,14 +172,21 @@ function ChatRow({
   link,
   summaries,
   showAgent,
+  inArchive = false,
 }: {
   session: SessionEntry;
   selected: boolean;
   link: ReturnType<typeof conversationLink>;
   summaries: Summaries;
   showAgent: boolean;
+  /** Drawn under the Archived fold, which says it already. */
+  inArchive?: boolean;
 }) {
   const title = conversationTitle(session);
+  const ids = [session.id];
+  const pickedNow = usePickedSessions();
+  const picking = pickedNow.length > 0;
+  const picked = isPicked(ids, pickedNow);
   const status = sessionStatus(session);
   const { animations } = usePrefs();
   const summary = summaries.get(session.id);
@@ -182,14 +203,19 @@ function ChatRow({
         <ContextMenu>
         <ContextMenuTrigger asChild>
         <div
-          className={cn(actionRow, "relative flex items-center gap-3 rounded-lg py-1.5 pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
+          className={cn(actionRow, "relative flex items-center gap-3 rounded-lg py-1.5 pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50", picked && "bg-info/12 ring-1 ring-inset ring-info/45")}
+          {...{ [ROW_ATTRIBUTE]: session.id }}
           title={[title, session.worktreeRemoved ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null, preview.text, said && said !== preview.text ? said : null].filter(Boolean).join("\n")}
         >
           <button
             type="button"
-            onClick={() => selectSession(session.id)}
-            onDoubleClick={rename}
+            onClick={(event) => {
+              if (pickOnClick(event, ids)) return;
+              selectSession(session.id);
+            }}
+            onDoubleClick={picking ? undefined : rename}
             aria-current={selected ? "true" : undefined}
+            aria-pressed={picking ? picked : undefined}
             aria-label={title}
             className="flex min-w-0 flex-1 items-center gap-3 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
@@ -199,6 +225,7 @@ function ChatRow({
                 {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
                 <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{title}</span>
                 {session.worktreeRemoved && <span className="shrink-0 text-[10px] text-faint">removed</span>}
+                {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
                 <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>{relativeTime(conversationTime(session))}</span>
               </span>
               <span className="flex items-center gap-2">
@@ -212,6 +239,7 @@ function ChatRow({
             </span>
           </button>
           <RowActions>
+            {session.archived && <UnarchiveButton session={session} title={title} />}
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${title}`}>
                 <Ellipsis />
@@ -231,6 +259,9 @@ function ChatRow({
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
             <Archive /> {session.archived ? "Unarchive" : "Archive"}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => togglePicked(ids)}>
+            <CheckSquare /> {picked ? "Deselect" : "Select"}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           {session.worktreeName && !session.worktreeRemoved && (
