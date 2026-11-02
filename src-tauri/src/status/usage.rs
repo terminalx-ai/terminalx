@@ -143,6 +143,9 @@ pub enum Refusal {
     /// No reset deadline while the shown window still runs, from a status
     /// line that may be repeating a tab's sample from before that window.
     NoDeadline,
+    /// The shown window's deadline, already passed when it was observed: the
+    /// window that just ended, seen again, which does not confirm a reset.
+    EndedWindow,
 }
 
 impl Refusal {
@@ -151,6 +154,7 @@ impl Refusal {
             Refusal::EarlierWindow => "earlier reset than the shown window",
             Refusal::OlderObservation => "not newer than the shown window",
             Refusal::NoDeadline => "no reset time while the shown window runs",
+            Refusal::EndedWindow => "repeats the shown window after its reset",
         }
     }
 }
@@ -203,6 +207,9 @@ pub struct RefreshSkip {
 pub enum LiveRefusal {
     /// The system Claude account could not be identified.
     Unidentified,
+    /// The tab captured no Claude account when it started, for example
+    /// because Claude Code was not signed in yet.
+    LaunchUnknown,
     /// The tab started under a different Claude account than the current one.
     LaunchMismatch,
     /// The status line reported a different Claude account.
@@ -213,6 +220,7 @@ impl LiveRefusal {
     fn describe(self) -> &'static str {
         match self {
             LiveRefusal::Unidentified => "the system Claude account could not be identified",
+            LiveRefusal::LaunchUnknown => "the tab's Claude account was not known when it started",
             LiveRefusal::LaunchMismatch => "the tab started under a different Claude account",
             LiveRefusal::StatuslineMismatch => "the status line reported a different Claude account",
         }
@@ -229,6 +237,8 @@ pub struct LiveRefused {
 #[derive(Default)]
 struct PollState {
     last_success: Option<i64>,
+    /// Claude only: every Codex answer replaces all of its windows, so
+    /// `last_success` already says when Codex usage last changed.
     last_updated: Option<i64>,
     last_attempt: Option<i64>,
     last_manual: Option<i64>,
@@ -479,24 +489,32 @@ fn judge(incoming: &UsageWindow, current: Option<&UsageWindow>) -> Verdict {
         // Only the endpoint's fresh answer can say a running window has no
         // deadline; a status line may be repeating a sample from before it.
         (None, Some(_)) if incoming.source != "oauth" => Verdict::Refuse(Refusal::NoDeadline),
-        _ if later_observation(incoming, current) => Verdict::Take(Taken::Newer),
-        _ => Verdict::Refuse(Refusal::OlderObservation),
+        _ if !later_observation(incoming, current) => Verdict::Refuse(Refusal::OlderObservation),
+        // The shown window, observed again after its deadline: seeing the
+        // window that just ended does not confirm a reset (#738). The endpoint
+        // asked more than the tolerance past it has nothing running, which
+        // `settled` shows as not started.
+        (Some(next), Some(_)) if next <= incoming.updated_at && !over_when_asked(incoming) => {
+            Verdict::Refuse(Refusal::EndedWindow)
+        }
+        _ => Verdict::Take(Taken::Newer),
     }
 }
 
+/// An endpoint window whose deadline had passed, by more than the tolerance,
+/// before the request started. Within it the window may not have rolled yet.
+fn over_when_asked(window: &UsageWindow) -> bool {
+    window.source == "oauth"
+        && window.resets_at.is_some_and(|reset| reset.saturating_add(RESET_TOLERANCE_MS) <= window.updated_at)
+}
+
 /// What to show for a window the judge took.
-fn settled(mut window: UsageWindow, current: Option<&UsageWindow>) -> UsageWindow {
-    let over_when_asked = window.resets_at.is_some_and(|reset| reset.saturating_add(RESET_TOLERANCE_MS) <= window.updated_at);
-    if window.source == "oauth" && over_when_asked {
+fn settled(mut window: UsageWindow) -> UsageWindow {
+    if over_when_asked(&window) {
         // The endpoint answered with a window that had ended before it was
         // asked: none has started since, so none of its usage still counts.
         window.used_percent = 0.0;
         window.resets_at = None;
-    } else if expired(&window, window.updated_at)
-        && current.is_some_and(|shown| shown.resets_at.zip(window.resets_at).is_some_and(|(a, b)| same_deadline(a, b)))
-    {
-        // A status line repeating an expired window does not confirm a reset.
-        window.updated_at = current.map_or(window.updated_at, |shown| shown.updated_at);
     }
     window
 }
@@ -513,8 +531,7 @@ fn merge_claude_windows(received: Vec<UsageWindow>, shown: &mut HashMap<String, 
         let current = shown.get(&window.key);
         let verdict = judge(&window, current);
         if matches!(verdict, Verdict::Take(_)) {
-            let show = settled(window.clone(), current);
-            shown.insert(window.key.clone(), show);
+            shown.insert(window.key.clone(), settled(window.clone()));
         }
         Decision { received: window, verdict }
     }).collect()
@@ -745,7 +762,6 @@ fn finish_codex_refresh(inner: &mut Inner, answer: Result<Value>, now: i64) -> R
             let received = apply_codex(inner, &result, now);
             log::info!("Codex usage refresh ({}): received [{received}]; replaced all", trigger(manual));
             inner.codex.last_success = Some(now);
-            inner.codex.last_updated = Some(now);
             inner.codex.retry_at = None;
             inner.codex.error = None;
             inner.codex.failures = 0;
@@ -815,6 +831,8 @@ fn ingest_attributed_claude(inner: &mut Inner, account: Option<String>, launch_a
     let reported = payload.get("_raccoon_usage_account").and_then(Value::as_str);
     let refusal = if account.is_none() {
         Some(LiveRefusal::Unidentified)
+    } else if launch_account.is_none() {
+        Some(LiveRefusal::LaunchUnknown)
     } else if account.as_deref() != launch_account {
         Some(LiveRefusal::LaunchMismatch)
     } else if reported != account.as_deref() {
@@ -847,14 +865,13 @@ fn apply_claude_live(inner: &mut Inner, payload: &Value, now: i64) -> bool {
             log::debug!("Claude live usage {}: kept shown ({})", format_received(&window), why.describe());
             continue;
         }
-        if let Some(previous) = current {
-            if same_sample(&window, previous)
-                && (expired(&window, now) || now.saturating_sub(previous.updated_at) < STATUSLINE_THROTTLE_MS) {
-                continue;
-            }
+        // `judge` already refused an expired window seen again, so an
+        // identical sample here is a running window: throttle its receipts.
+        if current.is_some_and(|previous| same_sample(&window, previous)
+            && now.saturating_sub(previous.updated_at) < STATUSLINE_THROTTLE_MS) {
+            continue;
         }
-        let show = settled(window, current);
-        inner.windows.insert(key, show);
+        inner.windows.insert(key, settled(window));
         changed = true;
     }
     changed
@@ -1046,7 +1063,6 @@ impl UsageStore {
                     let received = apply_codex(&mut inner, &result, now_ms());
                     log::info!("Codex usage after a reset: received [{received}]; replaced all");
                     inner.codex.last_success = Some(now_ms());
-                    inner.codex.last_updated = inner.codex.last_success;
                     inner.codex.skipped = None;
                     inner.codex.retry_at = None;
                     inner.codex.error = None;
@@ -1690,6 +1706,56 @@ mod tests {
         assert_eq!(claude_revalidate_at(&inner), Some(70_000));
     }
 
+    /// #738: within a minute of its deadline the endpoint repeating the
+    /// expired window kept that window's old update time, but still counted as
+    /// an update: "Last refreshed just now" beside a window awaiting update.
+    #[test]
+    fn an_endpoint_reply_repeating_the_window_that_just_ended_is_not_an_update() {
+        let store = UsageStore::default();
+        let reset = WEEK_RESET * 1000;
+        let first = reset - 10 * MINUTE;
+        let mut inner = store.inner.lock().unwrap();
+        apply_claude_live(&mut inner, &session_sample(80, WEEK_RESET), first - MINUTE);
+        assert!(begin_claude_refresh(&mut inner, first, true, None));
+        let reply = |used: f32, at: i64| claude_oauth::parse_response(&json!({"five_hour": {"utilization": used, "resets_at": "2026-09-07T05:00:19.600000+00:00"}}), at);
+        finish_claude_refresh(&mut inner, 0, Ok(reply(82.0, first)), first, first + 300).unwrap();
+        assert_eq!((shown(&inner, "five_hour").used_percent, inner.claude.last_updated), (82.0, Some(first)));
+
+        // Thirty seconds past the deadline the endpoint still has that window,
+        // with a later percentage. Nothing replaces it and nothing is updated.
+        let check = reset + MINUTE / 2;
+        assert!(begin_claude_refresh(&mut inner, check, false, None), "the deadline makes a check due");
+        let answer = reply(84.0, check);
+        let line = decisions_log(&merge_claude_windows(answer.clone(), &mut HashMap::from([("five_hour".to_string(), shown(&inner, "five_hour"))])));
+        assert_eq!(line, "received [five_hour 84% 2026-09-07T05:00:19.600Z: kept shown (repeats the shown window after its reset)]; no newer usage");
+        finish_claude_refresh(&mut inner, 0, Ok(answer), check, check + 300).unwrap();
+        let session = shown(&inner, "five_hour");
+        assert_eq!((session.used_percent, session.updated_at, session.source.as_str()), (82.0, first, "oauth"));
+        assert_eq!(inner.claude.refused, vec![RefusedWindow { key: "five_hour".into(), label: "5h".into(), reason: Refusal::EndedWindow }]);
+        assert_eq!(claude_revalidate_at(&inner), Some(check + MINUTE), "one follow-up check is still due");
+        drop(inner);
+        let snapshot = store.snapshot_at(&HashSet::new(), check + 300);
+        assert_eq!((snapshot.claude.last_success_at, snapshot.claude.last_updated_at), (Some(check), Some(first)));
+        assert!(snapshot.windows.iter().find(|window| window.key == "five_hour").unwrap().stale);
+        assert_eq!(serde_json::to_value(&snapshot.claude.refused).unwrap()[0]["reason"], json!("endedWindow"));
+
+        // The follow-up a minute later is past the tolerance: the endpoint has
+        // nothing running in that window, which is an update.
+        let follow_up = check + MINUTE;
+        let mut inner = store.inner.lock().unwrap();
+        assert!(begin_claude_refresh(&mut inner, follow_up, false, None));
+        finish_claude_refresh(&mut inner, 0, Ok(reply(84.0, follow_up)), follow_up, follow_up + 300).unwrap();
+        let session = shown(&inner, "five_hour");
+        assert_eq!((session.used_percent, session.resets_at, session.updated_at), (0.0, None, follow_up));
+        assert_eq!((inner.claude.last_updated, inner.claude.refused.clone()), (Some(follow_up), vec![]));
+
+        // A tab repeating the window that just ended is refused the same way.
+        let mut inner = Inner::default();
+        apply_claude_live(&mut inner, &session_sample(80, WEEK_RESET), first);
+        assert!(!apply_claude_live(&mut inner, &session_sample(83, WEEK_RESET), reset + 1_000));
+        assert_eq!((shown(&inner, "five_hour").used_percent, shown(&inner, "five_hour").updated_at), (80.0, first));
+    }
+
     /// #729: "Last refreshed just now" came from an answer that replaced
     /// nothing. Such an answer leaves `lastUpdatedAt` alone and says why.
     #[test]
@@ -1765,6 +1831,30 @@ mod tests {
             assert!(ingest_attributed_claude(&mut inner, Some("account-b".into()), Some("account-b"), &sample(23, "account-a"), 5_000));
         }
         assert_eq!(refused(5_000).map(|r| r.reason), Some(LiveRefusal::StatuslineMismatch));
+    }
+
+    /// #738: a tab that captured no Claude account at launch (Claude Code not
+    /// signed in yet) was reported as started under a different account.
+    #[test]
+    fn live_usage_from_a_tab_launched_with_no_account_says_the_account_was_unknown() {
+        let store = UsageStore::default();
+        let mut sample = session_sample(10, 100);
+        sample["_raccoon_usage_account"] = json!("account-a");
+        {
+            let mut inner = store.inner.lock().unwrap();
+            assert!(ingest_attributed_claude(&mut inner, Some("account-a".into()), None, &sample, 1_000));
+            assert!(inner.windows.is_empty());
+        }
+        let refused = store.snapshot_at(&HashSet::new(), 1_000).claude.live_refused;
+        assert_eq!(refused, Some(LiveRefused { at: 1_000, reason: LiveRefusal::LaunchUnknown }));
+        assert_eq!(serde_json::to_value(refused).unwrap(), json!({"at": 1_000, "reason": "launchUnknown"}));
+        let mut inner = store.inner.lock().unwrap();
+        // A tab started under the account now signed in is used.
+        assert!(ingest_attributed_claude(&mut inner, Some("account-a".into()), Some("account-a"), &sample, 2_000));
+        assert_eq!(inner.claude_live.showing(), None);
+        // With no system account either, that is what the card names.
+        assert!(ingest_attributed_claude(&mut inner, None, None, &sample, 3_000));
+        assert_eq!(inner.claude_live.showing().map(|refused| refused.reason), Some(LiveRefusal::Unidentified));
     }
 
     /// #729: within its debounce the Codex button did nothing visible. The
