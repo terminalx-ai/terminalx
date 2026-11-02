@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { DictationContext } from "./dictationContext";
 import { isTranscriptionInputSaving } from "./transcriptionInput";
-import { applyFinal, applyPartial, EMPTY_BUFFER, spokenText, type DictationBuffer } from "./dictationText";
+import { applyFinal, applyPartial, EMPTY_BUFFER, spokenText, rawSpokenText, type DictationBuffer, type DictationPart } from "./dictationText";
 
 /**
  * Dictation into the composer. The Rust side owns the microphone and Apple's
@@ -24,6 +25,10 @@ export interface DictationState {
    * final result that lands in the same tick as the stop is never missed.
    */
   text: string;
+  /** Raw stream paired with text, for ownership after a user edit. */
+  raw?: string;
+  /** Known utterance boundaries for edit ownership, including settled parts. */
+  parts?: readonly DictationPart[];
   /** Which dictation this is. A composer follows only the one it started. */
   session: number;
   /** Which composer (tab id) the text belongs to. */
@@ -59,6 +64,7 @@ export function useDictation(): DictationState {
 interface DictationEvent {
   kind: "partial" | "final" | "error" | "stopped" | "listening" | "transcribing";
   text?: string;
+  raw?: string;
   message?: string;
   settings?: "microphone" | "speechRecognition";
   /** Stable identity derived from Apple's transcription segment timestamps. */
@@ -73,9 +79,8 @@ interface DictationEvent {
  */
 function trace(e: DictationEvent) {
   const text = e.text ?? "";
-  const head = text.length > 40 ? `${text.slice(0, 40)}…` : text;
   const segment = e.segment == null ? "" : ` segment=${e.segment}`;
-  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : `${segment} len=${text.length} ${JSON.stringify(head)}`;
+  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : `${segment} len=${text.length}`;
   void invoke("frontend_log", { level: "debug", message: `dictation ${e.kind}${detail}` }).catch(() => {});
 }
 
@@ -104,15 +109,15 @@ async function subscribe() {
           {
             const now = performance.now();
             const sincePreviousMs = previousPartialAt == null ? undefined : now - previousPartialAt;
-            buffer = applyPartial(buffer, p.text ?? "", { segment: p.segment, sincePreviousMs });
+            buffer = applyPartial(buffer, p.text ?? "", { segment: p.segment, raw: p.raw, sincePreviousMs });
             previousPartialAt = now;
           }
-          set({ text: spokenText(buffer) });
+          set({ text: spokenText(buffer), raw: buffer.rawCommitted == null ? undefined : rawSpokenText(buffer), parts: buffer.parts });
           break;
         case "final":
-          buffer = applyFinal(buffer, p.text ?? "", { segment: p.segment });
+          buffer = applyFinal(buffer, p.text ?? "", { segment: p.segment, raw: p.raw });
           previousPartialAt = null;
-          set({ text: spokenText(buffer) });
+          set({ text: spokenText(buffer), raw: buffer.rawCommitted == null ? undefined : rawSpokenText(buffer), parts: buffer.parts });
           break;
         case "error":
           previousPartialAt = null;
@@ -164,20 +169,21 @@ export async function refreshDictationEngine() {
  * tell its own text from a later one's. `null` if dictation is already going
  * or the next recording's input preference is still being saved.
  */
-export function startDictation(target: string): number | null {
+export function startDictation(target: string, personalization?: DictationContext): number | null {
   if (state.phase !== "idle" || isTranscriptionInputSaving()) return null;
-  buffer = EMPTY_BUFFER;
+  // Track identities from the first result, even before optional raw metadata.
+  buffer = { ...EMPTY_BUFFER, parts: [] };
   previousPartialAt = null;
   stopping = false;
   const session = state.session + 1;
-  set({ phase: "starting", text: "", session, target, error: null, settings: null });
+  set({ phase: "starting", text: "", raw: undefined, parts: undefined, session, target, error: null, settings: null });
   opening = (async () => {
     // The listener is in place before the microphone is, so no result can
     // arrive before there is somewhere for it to go.
     await subscribe();
     if (state.session !== session) return;
     try {
-      await invoke("dictation_start");
+      await invoke("dictation_start", { personalization: personalization ?? { target } });
     } catch (e) {
       stopping = false;
       set({ phase: "idle", target: null, error: String(e) });

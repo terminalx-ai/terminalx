@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
+import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
@@ -300,7 +301,8 @@ export function Composer({
     };
   }, [commandSource]);
 
-  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
+  const dictationContext = useDictationContext(tab.id, cwd, remote, draft, caret);
+  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref, dictationContext);
   useDictationShortcuts(dictation, !!autoFocus);
   const keysOf = useShortcutKeycaps();
 
@@ -412,6 +414,8 @@ export function Composer({
     // is free for the next one (#727): what was set aside to send a recalled
     // message comes back, or nothing. Failing, the message comes back here.
     const completeHistory = recall.captureSend();
+    // Bind this send's learnable correction before the draft is cleared.
+    const learnOnSuccess = dictation.prepareSend(text);
     onDraftChange(completeHistory() ?? "");
     const images = attach.setAside();
     ref.current?.focus({ preventScroll: true });
@@ -429,8 +433,10 @@ export function Composer({
       return;
     }
     images.settle(true);
+    // Learning belongs to this accepted send even if a newer draft is visible.
+    learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, attachments, attach, disabled, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id]);
+  }, [draft, attachments, attach, disabled, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {

@@ -17,7 +17,7 @@ vi.mock("@/lib/tabViews", () => ({
   clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
-vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn() }), useDictationShortcuts: vi.fn() }));
+vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn(), prepareSend: vi.fn(() => vi.fn()) }), useDictationShortcuts: vi.fn() }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
 
 import { TabView } from "./TabView";
