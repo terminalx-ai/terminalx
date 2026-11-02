@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent, Payload } from "./events";
-import { buildTranscript, ConversationView, conversationEvents, TranscriptReducer } from "./transcript";
+import { buildTranscript, compactionStatus, ConversationView, conversationEvents, TranscriptReducer } from "./transcript";
 
 /**
  * The incremental transcript (#727) against the whole-log build it replaces:
@@ -255,5 +255,20 @@ describe("ConversationView", () => {
     const merged = events.slice(0, 20);
     expect(view.update(merged).events()).toHaveLength(20);
     expect(json(view.transcript(false))).toEqual(json(buildTranscript(merged, false, { compactionContinuityKnown: true })));
+  });
+});
+
+describe("what a compaction's row says, on the desktop and the phone (#644)", () => {
+  const row = (lifecycle?: { state: "item_started" | "completed" | "unknown" | "stopped"; stoppedBy?: "failed" | "interrupted" }, uncertain?: boolean) =>
+    ({ kind: "compaction" as const, key: "k", seq: 1, uncertain, lifecycle: lifecycle && { turnId: "turn", itemId: "item", generation: 1, retrying: false, ...lifecycle } });
+  it("says nothing while it runs, and what became of it otherwise", () => {
+    expect(compactionStatus(row({ state: "item_started" }))).toBeNull();
+    expect(compactionStatus(row({ state: "completed" }))).toBe("Context compacted");
+    // An older log's compaction, with no lifecycle: it happened.
+    expect(compactionStatus(row())).toBe("Context compacted");
+    expect(compactionStatus(row({ state: "unknown" }))).toBe("Compaction status unknown");
+    expect(compactionStatus(row({ state: "unknown" }, true))).toBe("Compaction status unknown: could not save status");
+    expect(compactionStatus(row({ state: "stopped", stoppedBy: "interrupted" }))).toBe("Compaction stopped: turn interrupted");
+    expect(compactionStatus(row({ state: "stopped", stoppedBy: "failed" }))).toBe("Compaction stopped: turn failed");
   });
 });

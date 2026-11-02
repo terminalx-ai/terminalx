@@ -95,4 +95,15 @@ describe("the phone's session controls, as the desktop's", () => {
     expect(recoveryState([event(1, { type: "recovery", kind: "failed" }), event(2, { type: "user_message", text: "next", queued: false })], 0).kind).toBeNull();
     expect(recoveryState([event(1, { type: "recovery", kind: "signed_out" })], 0).offer.signIn).toBe(false);
   });
+
+  it("never sends a native Codex tab to a terminal it does not have, and still sends a terminal tab there (#644)", () => {
+    const event = (seq: number, payload: unknown) => ({ id: String(seq), sessionId: "s", tabId: "t", harness: "codex", seq, ts: "", payload }) as never;
+    for (const kind of ["permission_expired", "delivery_unconfirmed"]) {
+      const lapsed = [event(1, { type: "recovery", kind })];
+      expect(recoveryState(lapsed, 0, { transport: "experimentalCodexStdio" }).offer.message, kind).not.toMatch(/terminal/i);
+      // A tab whose agent runs in its terminal, and an older Mac that does not say, keep pointing there.
+      expect(recoveryState(lapsed, 0, { transport: "pty" }).offer.message, kind).toMatch(/Check the terminal/);
+      expect(recoveryState(lapsed, 0, null).offer.message, kind).toMatch(/Check the terminal/);
+    }
+  });
 });

@@ -56,7 +56,7 @@ const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace:
 
 const NAMES: Record<string, string> = { "u-alice": "Alice", "u-bob": "Bob" };
 
-function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown>; interrupts?: boolean } = {}) {
+function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; continuous?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown>; interrupts?: boolean } = {}) {
   const state = options.state === undefined ? "ready" : options.state;
   const snapshot = {
     connection: { state: options.connection ?? (state === "ready" ? "connected" : "suspended") },
@@ -66,7 +66,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     canApprove: options.canApprove ?? false,
     hasKey: options.hasKey ?? true,
     interrupts: options.interrupts ?? false,
-    tabs: Array.from({ length: options.tabs ?? 1 }, (_, index) => ({ tabId: index ? `t${index + 1}` : "t1", sessionId: "s1", title: index ? `Second ${index}` : "Fix login", status: "in_progress", source: "live", pendingPermissions: [], events: index ? [] : (options.events ?? [event(1, { type: "user_message", text: "run the tests", queued: false })]), truncated: false, noKey: options.noKey ?? false })),
+    tabs: Array.from({ length: options.tabs ?? 1 }, (_, index) => ({ tabId: index ? `t${index + 1}` : "t1", sessionId: "s1", title: index ? `Second ${index}` : "Fix login", status: "in_progress", source: "live", pendingPermissions: [], events: index ? [] : (options.events ?? [event(1, { type: "user_message", text: "run the tests", queued: false })]), truncated: false, noKey: options.noKey ?? false, continuous: options.continuous ?? false })),
     outbox: options.outbox ?? [],
     error: null,
   };
@@ -194,6 +194,27 @@ describe("a cloud workspace screen", () => {
     await click("Stop the agent");
     expect(session.stop).toHaveBeenCalledWith("t1");
     expect(session.interrupt).not.toHaveBeenCalled();
+  });
+
+  it("shows a compaction as running only while the tab's live feed has caught up, and as compacted only once it ended (#644)", async () => {
+    const scope = { sessionId: "s1", tabId: "t1", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
+    const lifecycle = (seq: number, evidence: Record<string, unknown>) => event(seq, { type: "context_compaction_lifecycle", persisted: true, confirmedStart: true, evidence: { scope, generation: 1, ...evidence } });
+    const started = [event(1, { type: "user_message", text: "/compact", queued: false }), lifecycle(2, { type: "connection_opened" }), lifecycle(3, { type: "item_started", turnId: "turn", itemId: "item" })];
+    world({ events: started, continuous: true });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Compacting context…");
+    expect(text()).not.toContain("Context compacted");
+    // Not caught up (reconnecting, a checkpoint, not followed): how it ended may not have been heard.
+    world({ events: started, continuous: false });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Compaction status unknown");
+    expect(text()).not.toContain("Compacting context…");
+    expect(text()).not.toContain("Context compacted");
+    // It ended: compacted, caught up or not.
+    world({ events: [...started, lifecycle(4, { type: "item_completed", turnId: "turn", itemId: "item" })], continuous: false });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("Context compacted");
+    expect(text()).not.toContain("Compacting context…");
   });
 
   it("shows a running workspace live and sends without asking", async () => {

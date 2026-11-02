@@ -1,5 +1,5 @@
 import type { Token } from "marked";
-import type { Delivery, Turn, WorkItem } from "@terminalx/portable/transcript";
+import { compactionStatus, type Delivery, type Turn, type WorkItem } from "@terminalx/portable/transcript";
 import { markdownBlocks, textChunks } from "./markdown-blocks";
 
 export type TurnRow = { key: string; startsTurn: boolean; ts?: string } & (
@@ -37,6 +37,8 @@ export function turnRows(turn: Turn): TurnRow[] {
     note(rows, turn.prompt);
   }
   for (const item of turn.work) {
+    // A compaction that runs has no row of its own: the conversation's "Compacting context…" line stands for it.
+    if (item.kind === "compaction" && compactionStatus(item) === null) continue;
     if (item.kind === "text") addMarkdown(item.key, item.text, item.messageTs);
     // A message the agent took mid-turn is the reader's, drawn like the prompt.
     else if (item.kind === "message") {

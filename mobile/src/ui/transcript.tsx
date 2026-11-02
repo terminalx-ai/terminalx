@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Terminal as TerminalIcon } from "lucide-react-native";
-import { messageTime } from "@terminalx/portable/transcript";
+import { COMPACTING_LINE, compactionStatus, messageTime } from "@terminalx/portable/transcript";
 import type { PendingAsk, Turn, WorkItem } from "@terminalx/portable/transcript";
 import { Button, Card } from "./primitives";
 import { useTheme } from "./theme";
@@ -24,6 +24,12 @@ export function PermissionCard({ ask, connected, answering, error, onRespond }: 
     {!connected ? <Text style={[styles.permissionHint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
     {error ? <LinkedText style={[styles.permissionHint, { color: palette.danger }]}>{`${error} The request may have lapsed; check your Mac.`}</LinkedText> : null}
   </Card>;
+}
+
+/** A compaction is running (`Transcript.compacting`): said at the newest edge of the conversation, as the desktop's chat does. */
+export function CompactingLine() {
+  const { palette } = useTheme();
+  return <Text accessibilityLiveRegion="polite" style={[styles.compacting, { color: palette.muted }]}>{COMPACTING_LINE}</Text>;
 }
 
 /** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */
@@ -54,7 +60,8 @@ function WorkRow({ item }: { item: WorkItem }) {
   if (item.kind === "message") return <ReaderBubble text={item.text} ts={item.messageTs} note={deliveryNote(item)} />;
   if (item.kind === "decision") return <LinkedText style={[styles.reasoning, { color: item.allowed ? palette.success : palette.danger }]}>{item.label}</LinkedText>;
   if (item.kind === "subagent") return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{`${item.label ?? "Background agent"} · ${item.done ? "done" : "working"}`}</LinkedText>;
-  if (item.kind === "compaction") return <Text style={[styles.reasoning, { color: palette.muted }]}>Context compacted</Text>;
+  // Running, it has no row: the conversation's `CompactingLine` says so (#644).
+  if (item.kind === "compaction") { const status = compactionStatus(item); return status === null ? null : <Text style={[styles.reasoning, { color: palette.muted }]}>{status}</Text>; }
   if (item.kind === "retry") return <Text style={[styles.reasoning, { color: palette.warning }]}>Retrying · {item.attempt}/{item.maxRetries}</Text>;
   return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{item.text}</LinkedText>;
 }
@@ -82,6 +89,7 @@ const styles = StyleSheet.create({
   work: { gap: 10, paddingHorizontal: 3 },
   body: { fontSize: 15, lineHeight: 22 },
   reasoning: { fontSize: 13, fontStyle: "italic", lineHeight: 19 },
+  compacting: { fontSize: 13, lineHeight: 19, paddingHorizontal: 3, paddingTop: 12 },
   tool: { minHeight: 38, borderRadius: 10, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 11, paddingVertical: 8 },
   toolText: { flex: 1, fontSize: 13 },
   permission: { padding: 15, gap: 7, marginTop: 10 },

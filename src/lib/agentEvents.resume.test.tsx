@@ -109,6 +109,28 @@ it("keeps compaction unknown during a pending reconnect read, then restores only
   hook.unmount();
 });
 
+it("leaves a cloud tab's continuity to its live feed: a local resume does not clear it (#644)", async () => {
+  const store = await import("./agentEvents");
+  mocks.sessions = [{ id: "synthetic", tabs: [{ id: "tab", status: "in_progress" }] }];
+  mocks.listSessions.mockResolvedValue(mocks.sessions);
+  mocks.loadEvents.mockResolvedValueOnce(compactionHistory());
+  await store.loadTab("synthetic", "tab");
+  store.mergeTabEvents("cloud-session", "cloud-tab", []);
+  store.setFeedContinuity("cloud-session", "cloud-tab", true);
+  await store.reconcileAgentEvents();
+  // The local tab waits for its own history read; the cloud tab's feed still holds.
+  expect(store.getTabLog("synthetic", "tab").compactionContinuityKnown).toBe(false);
+  expect(store.getTabLog("cloud-session", "cloud-tab").compactionContinuityKnown).toBe(true);
+  // Its feed dropped: unknown until the feed catches up again, whatever is read locally.
+  store.setFeedContinuity("cloud-session", "cloud-tab", false);
+  await store.reconcileAgentEvents();
+  expect(store.getTabLog("cloud-session", "cloud-tab").compactionContinuityKnown).toBe(false);
+  // A feed ending for a tab whose log is gone leaves nothing behind.
+  store.dropTabLog("cloud-session", "cloud-tab");
+  store.setFeedContinuity("cloud-session", "cloud-tab", false);
+  expect(store.getTabLog("cloud-session", "cloud-tab").loaded).toBe(false);
+});
+
 // Source-derived races from the #644 independent review. Promise resolution
 // supplies the schedule; these do not use provider events or timer deadlines.
 function compactionHistory(): AgentEvent[] {

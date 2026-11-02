@@ -5,7 +5,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, Keyboard, Pencil, RefreshCw, Send, Shrink, Users, X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
-import type { Delivery, Turn, WorkItem } from "@/lib/transcript";
+import { compactionStatus, type Delivery, type Turn, type WorkItem } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { MessageTime } from "./MessageTime";
 import { Markdown } from "./Markdown";
@@ -399,11 +399,9 @@ function ReaderMessage({
 function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "compaction" }>; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useDisclosure(item.key);
   // The existing Chat indicator owns animation; do not add a second spinner.
-  if (item.lifecycle?.state === "item_started") return null;
+  const status = compactionStatus(item);
+  if (status === null) return null;
   const count = (value: number) => value < 1000 ? String(value) : `${Math.round(value / 1000)}k`;
-  const status = item.lifecycle?.state === "stopped"
-    ? `Compaction stopped: turn ${item.lifecycle.stoppedBy === "interrupted" ? "interrupted" : "failed"}`
-    : item.lifecycle?.state === "unknown" ? (item.uncertain ? "Compaction status unknown: could not save status" : "Compaction status unknown") : "Context compacted";
   const label = (
     <>
       {status}{item.preTokens != null ? ` from ${count(item.preTokens)}` : ""}

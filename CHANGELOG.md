@@ -115,6 +115,43 @@
   redraws at the next frame. The phone shows replies once they are complete,
   as before. (#644)
 
+### Cloud workspaces
+
+- Show a compaction in a cloud workspace's agent tab as **Compacting
+  context…** while it runs, then **Context compacted**. The tab said
+  "Compaction status unknown" the whole time, even while connected. A tab
+  counts as caught up once its live connection has replayed the workspace's
+  saved history; while that connection is down or reconnecting, a compaction
+  still shows as unknown, never as running or done. (#644)
+- Say why a native Codex tab in a cloud workspace did not move to its terminal.
+  The workspace's own reason (a turn still running, someone else driving the
+  tab, no right to type in it) shows above the chat, with Dismiss, also when
+  the composer already says why it is off. It used to say "The agent
+  encountered an error", or nothing at all while someone else drove the tab.
+  Local tabs are unchanged. (#644)
+- A waiting native Codex tab no longer says to check the terminal, which it
+  does not have until it moves there: it points to the conversation above, to
+  send a message or stop the session. Its recovery banner for an expired
+  permission request or an unconfirmed prompt no longer sends it there
+  either. Tabs whose agent runs in a terminal are unchanged. (#644)
+
+### Mobile
+
+- Show a compaction on the phone as on the desktop, in cloud workspace tabs
+  and in tabs on a paired Mac: **Compacting context…** while it runs, then
+  **Context compacted**, **Compaction stopped** or **Compaction status
+  unknown**. Every compaction used to read "Context compacted", even while it
+  ran or after the phone lost track of it. A compaction shows as running only
+  once the phone has read the conversation to its end over a live connection.
+  While disconnected, reconnecting or just back from the background, it shows
+  as unknown. A stopped workspace's saved conversation never shows one as
+  running. (#644)
+- A native Codex tab's recovery card on the phone no longer says to check the
+  terminal (an expired permission request, an unconfirmed prompt); it says
+  what to do in the chat instead, as the desktop now does too. The Mac tells
+  the phone which tabs run native Codex; an older Mac keeps the old wording.
+  (#644)
+
 ### Background sessions
 
 - Never hold a send behind slow work. Merged-workspace cleanup, Settings →
