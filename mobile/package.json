@@ -38,7 +38,7 @@
     "expo-secure-store": "~57.0.3",
     "expo-status-bar": "~57.0.1",
     "expo-web-browser": "~57.0.2",
-    "fflate": "0.8.2",
+    "fflate": "0.8.3",
     "lucide-react-native": "1.40.0",
     "marked": "17.0.6",
     "react": "19.2.3",
@@ -51,7 +51,7 @@
     "react-native-web": "~0.21.0",
     "react-native-worklets": "0.10.1",
     "tweetnacl": "1.0.3",
-    "zod": "4.5.4"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@react-native/metro-config": "0.86.3",
