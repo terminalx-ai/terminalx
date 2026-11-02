@@ -161,6 +161,12 @@ impl MintError {
             (_, Some("github_installation_suspended")) => {
                 "the organization's GitHub App installation is suspended on GitHub; an organization owner can unsuspend it there".to_string()
             }
+            (_, Some("github_installation_permissions_required")) => {
+                "an organization admin must approve the GitHub App installation permissions (Contents, Pull requests and Issues: write; Actions, Checks, Commit statuses and Metadata: read) on GitHub, then refresh the installation in TerminalX Settings and retry as a new request".to_string()
+            }
+            (_, Some("github_installation_access_changed")) => {
+                "an organization admin must review the GitHub App installation permissions and selected repositories in TerminalX Settings, refresh the installation, then retry as a new request".to_string()
+            }
             (_, Some("github_repository_not_granted")) => {
                 format!("the GitHub App installation no longer grants access to {subject}; an organization admin can grant it on GitHub")
             }
@@ -892,16 +898,60 @@ mod tests {
 
     #[test]
     fn a_refusal_is_not_papered_over_by_the_cache() {
-        // A revoked or suspended installation is final (the server no longer
-        // falls back to a scoped credential for it), unlike an outage.
-        for code in ["github_installation_revoked", "github_installation_suspended"] {
+        // An installation refusal is final for this request, unlike an outage.
+        // A still-valid token must not hide the server's refusal.
+        for code in ["github_installation_revoked", "github_installation_suspended", "github_installation_permissions_required", "github_installation_access_changed"] {
             let dir = tempfile::tempdir().unwrap();
             seed(dir.path(), Some("acme/api"), "ghs_still_valid", NOW + 2 * MINUTE);
             let api = FakeApi::new(move |_| Err(refused(409, code)));
             let error = resolve_token(dir.path(), Some("acme/api"), &api, &now).unwrap_err();
             assert_eq!(error.code.as_deref(), Some(code));
+            assert_eq!(error.status, Some(409));
+            assert_eq!(api.calls(), 1);
+            assert_eq!(*api.seen.lock().unwrap(), vec![Some("acme/api".into())]);
             assert!(!error.is_outage());
             assert!(read_cached(&dir.path().join(format!("{}.json", cache_key(Some("acme/api"))))).is_none());
+        }
+    }
+
+    #[test]
+    fn installation_refusal_recovery_requires_a_separate_request() {
+        for code in ["github_installation_permissions_required", "github_installation_access_changed"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut refused_once = false;
+            let api = FakeApi::new(move |_| {
+                if !refused_once {
+                    refused_once = true;
+                    Err(refused(409, code))
+                } else {
+                    Ok(minted("ghs_new_request", NOW + 60 * MINUTE))
+                }
+            });
+            let error = resolve_token(dir.path(), Some("acme/api"), &api, &now).unwrap_err();
+            assert_eq!(error, refused(409, code));
+            assert_eq!(api.calls(), 1);
+            assert!(read_cached(&dir.path().join(format!("{}.json", cache_key(Some("acme/api"))))).is_none());
+
+            // Only this new caller invocation may recover; the refusal above is terminal.
+            let token = resolve_token(dir.path(), Some("acme/api"), &api, &now).unwrap();
+            assert_eq!(token.as_str(), "ghs_new_request");
+            assert_eq!(api.calls(), 2);
+            assert_eq!(*api.seen.lock().unwrap(), vec![Some("acme/api".into()), Some("acme/api".into())]);
+        }
+    }
+
+    #[test]
+    fn installation_explanations_are_fixed_and_keep_unauthorized_precedence() {
+        for (code, reason) in [
+            ("github_installation_permissions_required", "an organization admin must approve the GitHub App installation permissions (Contents, Pull requests and Issues: write; Actions, Checks, Commit statuses and Metadata: read) on GitHub, then refresh the installation in TerminalX Settings and retry as a new request"),
+            ("github_installation_access_changed", "an organization admin must review the GitHub App installation permissions and selected repositories in TerminalX Settings, refresh the installation, then retry as a new request"),
+        ] {
+            let mut error = refused(409, code);
+            error.detail = "unsafe-detail-marker".into();
+            assert_eq!(error.explain(None), format!("terminalx: no GitHub access for this cloud workspace: {reason} ({code})"));
+            assert_eq!(error.explain(Some("acme/api")), format!("terminalx: no GitHub access for acme/api: {reason} ({code})"));
+            error.status = Some(401);
+            assert_eq!(error.explain(None), format!("terminalx: no GitHub access for this cloud workspace: the server no longer accepts this workspace's runtime credential; restart the workspace ({code})"));
         }
     }
 
@@ -1075,6 +1125,38 @@ mod tests {
         assert_eq!(seen[0].authorization.as_deref(), Some(format!("Bearer {CREDENTIAL}").as_str()));
         assert_eq!(seen[0].body, serde_json::json!({ "v": 1, "repository": "acme/api" }));
         assert_eq!(seen[1].body, serde_json::json!({ "v": 1 }));
+    }
+
+    #[test]
+    fn installation_http_refusals_drop_upstream_text_and_never_retry() {
+        let state = state_with_credential();
+        for (code, guidance) in [
+            ("github_installation_permissions_required", "must approve the GitHub App installation permissions"),
+            ("github_installation_access_changed", "must review the GitHub App installation permissions and selected repositories"),
+        ] {
+            let (origin, seen) = serve(move |_| (409, serde_json::json!({
+                "error": code,
+                "message": "upstream-message-marker\u{1b}[31m",
+                "detail": "upstream-detail-marker",
+                "token": "upstream-token-marker"
+            }).to_string()));
+            let api = HttpTokenApi::new(&origin, state.path());
+            let cache = tempfile::tempdir().unwrap();
+            seed(cache.path(), Some("acme/api"), "ghs_refused_cache", NOW + 2 * MINUTE);
+            let (exit, out, err) = get(cache.path(), &api, "protocol=https\nhost=github.com\npath=acme/api.git\n");
+            assert_eq!(exit, 1);
+            assert!(out.is_empty());
+            assert!(err.contains(code) && err.contains(guidance) && err.contains("retry as a new request"), "{err}");
+            for marker in ["upstream-message-marker", "upstream-detail-marker", "upstream-token-marker", "ghs_refused_cache", CREDENTIAL, "\u{1b}"] {
+                assert!(!err.contains(marker), "{code}: leaked {marker}");
+            }
+            assert!(read_cached(&cache.path().join(format!("{}.json", cache_key(Some("acme/api"))))).is_none());
+            assert!(!cache.path().join("default.json").exists());
+            let requests = seen.lock().unwrap();
+            assert_eq!(requests.len(), 1, "a refused invocation must not retry or request a default token");
+            assert_eq!(requests[0].path, TOKEN_PATH);
+            assert_eq!(requests[0].body, serde_json::json!({ "v": 1, "repository": "acme/api" }));
+        }
     }
 
     #[test]
