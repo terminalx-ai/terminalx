@@ -1434,6 +1434,8 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+  /** Settings → Experimental → Native Codex for a Codex launch (#745): the runtime starts the first tab on Codex's app server where it can. */
+  nativeCodex?: boolean;
 }
 
 /** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */

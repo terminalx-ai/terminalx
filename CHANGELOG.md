@@ -92,6 +92,13 @@
   hides its page until it is picked. (#721)
 - Offer Undo when closing a session's last running tab. The notice says its
   agent stopped, and Undo reopens the tab on the same conversation. (#721)
+- Native Codex now covers a new cloud workspace's first session. With
+  Settings → Experimental → Native Codex on, a workspace created with Codex
+  and a first prompt opens its first tab as native Codex, and the prompt is
+  sent once, as before. Before, only sessions and tabs started later in the
+  workspace did; the first one opened in Codex's terminal. Ask every time,
+  other agents and the switch off still start a terminal tab, and so does a
+  workspace whose runtime or server predates this. (#745)
 
 ### Chat
 
