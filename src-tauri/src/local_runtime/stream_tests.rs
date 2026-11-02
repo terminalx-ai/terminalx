@@ -6,7 +6,6 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -15,33 +14,7 @@ use crate::local_runtime::client::Client;
 use crate::pty::{PaneSpec, SCROLLBACK_BYTES};
 use crate::sink::EventSink;
 
-/// What was logged at info and above while these tests ran.
-struct Captured(Mutex<Vec<(log::Level, String)>>);
-
-impl log::Log for Captured {
-    fn enabled(&self, metadata: &log::Metadata) -> bool { metadata.level() <= log::Level::Info }
-    fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            self.0.lock().unwrap().push((record.level(), record.args().to_string()));
-        }
-    }
-    fn flush(&self) {}
-}
-
-fn captured() -> &'static Captured {
-    static CAPTURED: OnceLock<&'static Captured> = OnceLock::new();
-    CAPTURED.get_or_init(|| {
-        let captured: &'static Captured = Box::leak(Box::new(Captured(Mutex::default())));
-        log::set_logger(captured).expect("nothing else in this test binary installs a logger");
-        log::set_max_level(log::LevelFilter::Info);
-        captured
-    })
-}
-
-/// The lines logged so far that contain `text`.
-fn logged(text: &str) -> Vec<(log::Level, String)> {
-    captured().0.lock().unwrap().iter().filter(|(_, line)| line.contains(text)).cloned().collect()
-}
+use crate::test_log::{capture, logged};
 
 fn wait(what: &str, done: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -69,7 +42,7 @@ struct Rig {
 
 impl Rig {
     fn new(events: usize) -> Self {
-        captured();
+        capture();
         let home = crate::store::temp_home();
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let endpoint = crate::hooks::prepare_control().unwrap();

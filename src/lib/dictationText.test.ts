@@ -470,3 +470,65 @@ it("retains identities initialized at recording start before raw metadata exists
     { id: 1, raw: "snake case account id end case", text: "account_id" },
   ]);
 });
+
+/**
+ * A local model that streams (#754), as Rust sends it: the whole dictation is
+ * one utterance, segment 0. Each partial is the stream's committed text,
+ * which never changes once shown, with the tentative tail it is still
+ * revising; raw comes beside the processed text, and the final is the whole
+ * transcript processed once.
+ */
+describe("a local model's streamed dictation", () => {
+  const STREAMED = [
+    "Please add a settings",
+    "Please add a settings page for notifications",
+    "Please add a settings page for notifications, then write the unit",
+    "Please add a settings page for notifications, then write the unit tests",
+  ];
+  const FINAL = "Please add a settings page for notifications, then write the unit tests for it.";
+  const stream = (texts: string[], buffer: DictationBuffer = { ...EMPTY_BUFFER, parts: [] }) =>
+    texts.reduce((b, raw) => applyPartial(b, raw, { raw, segment: 0 }), buffer);
+
+  it("revises one live utterance with each partial, never folding one into the next", () => {
+    const buffer = stream(STREAMED);
+    expect(buffer.committed).toBe("");
+    expect(buffer.live).toBe(STREAMED[3]);
+    expect(buffer.parts).toEqual([{ id: 0, raw: STREAMED[3], text: STREAMED[3] }]);
+  });
+
+  it("revises the tentative tail too, not only the end of it", () => {
+    // The tail is what the model may still change: "the unit" became "a unit test".
+    const buffer = stream([STREAMED[2], "Please add a settings page for notifications, then write a unit test"]);
+    expect(buffer.live).toBe("Please add a settings page for notifications, then write a unit test");
+    expect(buffer.committed).toBe("");
+  });
+
+  it("settles on the final, adding the held-back words once and dropping none", () => {
+    const buffer = applyFinal(stream(STREAMED), FINAL, { raw: FINAL, segment: 0 });
+    expect(rawSpokenText(buffer)).toBe(FINAL);
+    expect(buffer.committed).toBe(FINAL);
+    expect(buffer.live).toBe("");
+    expect(buffer.parts).toEqual([{ id: 0, raw: FINAL, text: FINAL }]);
+  });
+
+  it("takes a final processed as a whole, whose words differ from the streamed ones", () => {
+    const processed = "Please add a settings page for notifications. Then write the unit tests for it.";
+    const raw = "please add a settings page for notifications then write the unit tests for it";
+    const buffer = applyFinal(stream(STREAMED.map((t) => t.toLowerCase().replace(/,/g, ""))), processed, { raw, segment: 0 });
+    expect(buffer.committed).toBe(processed);
+  });
+
+  it("takes back the streamed words when the final's text is empty though it heard words: the noise guard", () => {
+    const buffer = applyFinal(stream(["Thank you"], { committed: "", live: "", parts: [] }), "", { raw: "Thank you.", segment: 0 });
+    expect(buffer.committed).toBe("");
+    expect(buffer.live).toBe("");
+    expect(rawSpokenText(buffer)).toBe("");
+    // The part stays, emptied, so its id is not handed to anything else.
+    expect(buffer.parts).toEqual([{ id: 0, raw: "", text: "" }]);
+  });
+
+  it("keeps the streamed words when an empty final heard nothing either", () => {
+    const buffer = applyFinal(stream(["Fix the build"]), "", { raw: "", segment: 0 });
+    expect(buffer.committed).toBe("Fix the build");
+  });
+});

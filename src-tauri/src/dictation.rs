@@ -2,7 +2,10 @@
 //! read through `cpal` (so the reader can pick a device) and its 16 kHz mono
 //! frames go to whichever engine is selected: Apple's speech recogniser,
 //! on-device where it can be, with partial results as they arrive; or a
-//! local model from the catalog, transcribed in one go when the reader stops.
+//! local model from the catalog. A local model that can stream gets the audio
+//! as it arrives and its words come back as partials too (#754); one that
+//! cannot is transcribed in one go when the reader stops (see
+//! `transcription::live`).
 //!
 //! Apple's objects are created and torn down on the main thread; the frame
 //! pump feeds the recogniser from its own thread, which the framework allows.
@@ -34,9 +37,14 @@ pub struct DictationEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<&'static str>,
     /// Stable within one Apple transcription segment and incremented at a
-    /// timestamp boundary. Other engines leave it absent.
+    /// timestamp boundary. A local model's dictation is one utterance, 0
+    /// throughout, whose final replaces everything it streamed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segment: Option<u64>,
+    /// On `listening`: whether words will appear while the reader speaks, or
+    /// only once they stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
 }
 
 /// Every event, into the log before it goes out. Dictation goes wrong in the
@@ -64,8 +72,14 @@ fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) 
     trace("error", None, Some(&message), None);
     let _ = app.emit(
         "dictation",
-        DictationEvent { kind: "error", text: None, raw: None, message: Some(message), settings: Some(settings), segment: None },
+        DictationEvent { kind: "error", text: None, raw: None, message: Some(message), settings: Some(settings), segment: None, live: None },
     );
+}
+
+/// The microphone is open and the engine is ready to hear it.
+fn emit_listening(app: &AppHandle, live: bool) {
+    trace("listening", None, Some(if live { "live" } else { "words at stop" }), None);
+    let _ = app.emit("dictation", DictationEvent { kind: "listening", text: None, raw: None, message: None, settings: None, segment: None, live: Some(live) });
 }
 
 fn emit_segment(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>, segment: Option<u64>) {
@@ -73,8 +87,12 @@ fn emit_segment(app: &AppHandle, kind: &'static str, text: Option<String>, messa
 }
 
 fn emit_recognition(app: &AppHandle, kind: &'static str, text: Option<String>, raw: Option<String>, message: Option<String>, segment: Option<u64>) {
-    trace(kind, text.as_deref(), message.as_deref(), segment);
-    let _ = app.emit("dictation", DictationEvent { kind, text, raw, message, settings: None, segment });
+    emit_event(app, DictationEvent { kind, text, raw, message, settings: None, segment, live: None });
+}
+
+fn emit_event(app: &AppHandle, event: DictationEvent) {
+    trace(event.kind, event.text.as_deref(), event.message.as_deref(), event.segment);
+    let _ = app.emit("dictation", event);
 }
 
 /// System output volume, read and written through AppleScript. Best effort:
@@ -96,17 +114,18 @@ mod volume {
 #[cfg(target_os = "macos")]
 mod mac {
     use super::*;
-    use crate::transcription::{audio, engine::TARGET_RATE, Transcription, APPLE};
+    use crate::transcription::{audio, engine::TARGET_RATE, live, Transcription, APPLE};
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::AllocAnyThread;
     use objc2_avf_audio::{AVAudioFormat, AVAudioPCMBuffer};
     use objc2_foundation::{NSArray, NSError, NSLocale, NSString};
     use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFTranscription};
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::mpsc::Receiver;
     use std::sync::Arc;
+    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     const RESTART_INTERVAL: Duration = Duration::from_secs(2);
@@ -261,6 +280,21 @@ mod mac {
     /// what a microphone the app may not open delivers.
     fn is_silent(samples: &[f32]) -> bool {
         samples.len() < TARGET_RATE as usize / 4 || samples.iter().all(|s| *s == 0.0)
+    }
+
+    /// How a local dictation's words settle once Stop has them all: `raw` is
+    /// the model's own transcript (the stream's last word, or the whole
+    /// recording's), `process` the personalisation and noise guard every
+    /// final goes through. The final names segment 0, as every partial did,
+    /// so the composer replaces what streamed with it; when the noise guard
+    /// heard no speech its text is empty while `raw` still holds the words,
+    /// which is how the composer knows to take back words it showed.
+    fn settle(raw: &str, noise: &crate::transcription::noise::NoiseResult, process: impl FnOnce(&str) -> String) -> DictationEvent {
+        let text = process(raw);
+        if raw.trim().is_empty() && noise.status != crate::transcription::noise::NoiseStatus::NoSpeech {
+            return DictationEvent { kind: "error", text: None, raw: None, message: Some(NOT_RECOGNISED.into()), settings: None, segment: None, live: None };
+        }
+        DictationEvent { kind: "final", text: Some(text), raw: Some(raw.to_string()), message: None, settings: None, segment: Some(0), live: None }
     }
 
     /// The two privacy services dictation can need. The gateway makes the
@@ -455,11 +489,9 @@ mod mac {
             _recognizer: Retained<SFSpeechRecognizer>,
             _handler: RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)>,
         },
-        Local {
-            id: String,
-            path: PathBuf,
-            audio: Arc<Mutex<Vec<f32>>>,
-        },
+        /// A local model. Its worker owns everything else: it reads the
+        /// microphone until Stop closes it, then finishes the dictation.
+        Local,
     }
 
     /// The microphone, its frame stream, how opening it went, and the volume
@@ -499,6 +531,9 @@ mod mac {
         /// A recogniser that immediately completes every new task must not spin.
         last_restart: Mutex<Instant>,
         personalization: Mutex<crate::transcription::context::RunContext>,
+        /// The last local dictation's worker. The next one waits for it, so
+        /// two never hold one model's stream at once.
+        local_worker: Mutex<Option<JoinHandle<()>>>,
     }
 
     impl Default for Dictation {
@@ -521,6 +556,7 @@ mod mac {
                 restarts: AtomicU32::new(0),
                 last_restart: Mutex::new(now.checked_sub(RESTART_INTERVAL).unwrap_or(now)),
                 personalization: Mutex::new(crate::transcription::context::RunContext::default()),
+                local_worker: Mutex::new(None),
             }
         }
     }
@@ -564,9 +600,10 @@ mod mac {
             let me = self.clone();
             let continuation_app = app.clone();
             let continuation_model = model.clone();
+            let continuation_transcription = transcription.clone();
             let continue_after_prompt = move |result: Result<(), permission::Kind>| match result {
                 Ok(()) => {
-                    if let Err(error) = me.begin(continuation_app.clone(), &continuation_model) {
+                    if let Err(error) = me.begin(continuation_app.clone(), continuation_transcription, &continuation_model) {
                         me.clear_personalization();
                         emit(&continuation_app, "error", None, Some(error));
                     }
@@ -577,7 +614,7 @@ mod mac {
                 }
             };
             match permission::begin(self.permissions.clone(), needs_speech, continue_after_prompt) {
-                permission::Start::Ready => self.begin(app, &model).inspect_err(|_| self.clear_personalization()),
+                permission::Start::Ready => self.begin(app, transcription, &model).inspect_err(|_| self.clear_personalization()),
                 permission::Start::Denied(kind) => {
                     self.clear_personalization();
                     let message = emit_permission_denied(&app, kind);
@@ -593,11 +630,11 @@ mod mac {
             *context = crate::transcription::context::RunContext::default();
         }
 
-        fn begin(self: &Arc<Self>, app: AppHandle, model: &str) -> Result<(), String> {
+        fn begin(self: &Arc<Self>, app: AppHandle, transcription: Arc<Transcription>, model: &str) -> Result<(), String> {
             if model == APPLE {
                 self.start_apple(app)
             } else {
-                self.start_local(app, model)
+                self.start_local(app, transcription, model)
             }
         }
 
@@ -642,26 +679,106 @@ mod mac {
 
         // ---- local models
 
-        fn start_local(self: &Arc<Self>, app: AppHandle, id: &str) -> Result<(), String> {
+        fn start_local(self: &Arc<Self>, app: AppHandle, transcription: Arc<Transcription>, id: &str) -> Result<(), String> {
             let spec = crate::transcription::catalog::find(id).ok_or_else(|| format!("unknown model {id}"))?;
             let path = crate::transcription::download::model_path(spec).map_err(|e| e.to_string())?;
+            // Open first: what is said while the model loads is kept in the
+            // frame channel and fed to it as soon as it is ready.
             let Opened { capture, frames, opening, restore_volume } = self.open_capture()?;
-            let audio = Arc::new(Mutex::new(Vec::<f32>::new()));
-            let sink = audio.clone();
-            std::thread::Builder::new()
-                .name("dictation-pump".into())
-                .spawn(move || {
-                    for chunk in frames {
-                        sink.lock().unwrap().extend_from_slice(&chunk);
-                    }
-                })
-                .map_err(|e| e.to_string())?;
+            let context = self.personalization.lock().unwrap().clone();
             self.stopping.store(false, Ordering::SeqCst);
-            *self.active.lock().unwrap() = Some(Active { capture: Some(capture), route: Route::Local { id: id.into(), path, audio }, restore_volume });
-            emit(&app, "listening", None, None);
+            *self.active.lock().unwrap() = Some(Active { capture: Some(capture), route: Route::Local, restore_volume });
+            let previous = self.local_worker.lock().unwrap().take();
+            let me = self.clone();
+            let worker_app = app.clone();
+            let id = id.to_string();
+            let spawned = std::thread::Builder::new().name("dictation-local".into()).spawn(move || {
+                if let Some(previous) = previous {
+                    let _ = previous.join();
+                }
+                me.run_local(&worker_app, &transcription, &id, &path, frames, context);
+            });
+            match spawned {
+                Ok(worker) => *self.local_worker.lock().unwrap() = Some(worker),
+                Err(error) => {
+                    self.finish(&app);
+                    return Err(error.to_string());
+                }
+            }
             // Only once `active` holds the capture, so a failure can undo it.
             self.watch_capture(app, opening);
             Ok(())
+        }
+
+        /// One local dictation, start to finish, on its own thread: load the
+        /// model, stream the microphone into it where the model can stream,
+        /// and once Stop has closed the microphone, settle the words.
+        /// `listening` goes out once the model is ready, so the row above the
+        /// composer can say from the start whether words will appear live.
+        fn run_local(self: &Arc<Self>, app: &AppHandle, transcription: &Transcription, id: &str, path: &Path, frames: Receiver<Vec<f32>>, context: crate::transcription::context::RunContext) {
+            let mut local = match transcription.engine.open(id, path, &context) {
+                Ok(local) => local,
+                Err(error) => {
+                    if !context.is_cancelled() {
+                        emit(app, "error", None, Some(format!("{error:#}")));
+                        self.finish(app);
+                    }
+                    return;
+                }
+            };
+            if context.is_cancelled() {
+                return;
+            }
+            let streams = local.streams();
+            let mut stream = live::begin(id, streams, || local.stream());
+            if !self.stopping.load(Ordering::SeqCst) {
+                emit_listening(app, stream.is_some());
+            }
+            let heard = live::listen(
+                frames,
+                stream.as_mut().map(|s| s as &mut dyn live::LiveStream),
+                &context.cancelled,
+                |raw| {
+                    let text = context.process(raw, app, id, false);
+                    emit_recognition(app, "partial", Some(text), Some(raw.to_string()), None, Some(0));
+                },
+                |reason| {
+                    log::warn!("dictation: live words from {id} stopped ({reason}); the whole recording is transcribed at stop instead");
+                    if !self.stopping.load(Ordering::SeqCst) {
+                        emit_listening(app, false);
+                    }
+                },
+            );
+            // The stream borrows the session; the whole recording may need it.
+            drop(stream);
+            let Some(heard) = heard else { return };
+            let samples = heard.samples;
+            if is_silent(&samples) {
+                let status = if context.data.options.noise_guard { crate::transcription::noise::NoiseStatus::NoAudio }
+                    else { crate::transcription::noise::NoiseStatus::Disabled };
+                context.process_with_noise("", app, id, true, &crate::transcription::noise::NoiseResult::new(status));
+                emit(app, "error", None, Some(NO_AUDIO.into()));
+            } else {
+                let result = match heard.ending {
+                    live::Ending::Streamed(text) => Ok(text),
+                    live::Ending::Recorded(_) => local.transcribe(&samples),
+                };
+                if context.is_cancelled() { return; }
+                match result {
+                    Ok(raw) => {
+                        let detector_path = if context.data.options.noise_guard {
+                            crate::transcription::download::model_path(&crate::transcription::catalog::DETECTOR).ok()
+                        } else { None };
+                        let noise = transcription.engine.noise.evaluate(context.data.options.noise_guard,
+                            detector_path.as_deref(), &samples, &context.cancelled);
+                        if context.is_cancelled() { return; }
+                        let event = settle(&raw, &noise, |raw| context.process_with_noise(raw, app, id, true, &noise));
+                        emit_event(app, event);
+                    }
+                    Err(e) => emit(app, "error", None, Some(format!("{e:#}"))),
+                }
+            }
+            if !context.is_cancelled() { self.finish(app); }
         }
 
         // ---- Apple
@@ -721,7 +838,7 @@ mod mac {
                         let is_stopping = stopping.load(Ordering::SeqCst);
                         let task_state = me.active.lock().unwrap().as_ref().and_then(|active| match &active.route {
                             Route::Apple { task, .. } => Some(task.state()),
-                            Route::Local { .. } => None,
+                            Route::Local => None,
                         });
                         log::debug!("dictation Apple final stopping={is_stopping} generation={generation} task_state={task_state:?}");
                         emit_recognition(&app, "final", Some(text), Some(raw), None, segment);
@@ -893,7 +1010,7 @@ mod mac {
                     route: Route::Apple { request: shared_request, task, _recognizer: recognizer, _handler: handler },
                     restore_volume,
                 });
-                emit(&app, "listening", None, None);
+                emit_listening(&app, true);
                 // Only once `active` holds the capture, so a failure can undo it.
                 self.watch_capture(app, opening);
                 Ok(())
@@ -901,62 +1018,21 @@ mod mac {
         }
 
         /// Stop the microphone; the engine then finishes the last phrase.
-        pub fn stop(self: &Arc<Self>, app: AppHandle, transcription: Arc<Transcription>) -> Result<(), String> {
+        pub fn stop(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
             if !self.is_active() {
                 return Ok(());
             }
             self.stopping.store(true, Ordering::SeqCst);
-            // Closing the capture ends the frame channel, which ends the pump.
+            // Closing the capture ends the frame channel: the Apple pump ends,
+            // and a local worker moves on to the words' end.
             let local = {
                 let mut guard = self.active.lock().unwrap();
                 let Some(a) = guard.as_mut() else { return Ok(()) };
                 a.capture = None;
-                match &a.route {
-                    Route::Local { id, path, audio } => Some((id.clone(), path.clone(), audio.clone())),
-                    Route::Apple { .. } => None,
-                }
+                matches!(a.route, Route::Local)
             };
-            if let Some((id, path, audio)) = local {
+            if local {
                 emit(&app, "transcribing", None, None);
-                let context = self.personalization.lock().unwrap().clone();
-                let me = self.clone();
-                std::thread::Builder::new()
-                    .name("dictation-transcribe".into())
-                    .spawn(move || {
-                        // The pump may still be draining the last chunk.
-                        std::thread::sleep(std::time::Duration::from_millis(60));
-                        if context.is_cancelled() { return; }
-                        let samples = audio.lock().unwrap().clone();
-                        if is_silent(&samples) {
-                            let status = if context.data.options.noise_guard { crate::transcription::noise::NoiseStatus::NoAudio }
-                                else { crate::transcription::noise::NoiseStatus::Disabled };
-                            context.process_with_noise("", &app, &id, true, &crate::transcription::noise::NoiseResult::new(status));
-                            emit(&app, "error", None, Some(NO_AUDIO.into()));
-                        } else {
-                            let result = transcription.engine.transcribe(&id, &path, &samples, &context);
-                            if context.is_cancelled() { return; }
-                            match result {
-                                Ok(text) => {
-                                    let detector_path = if context.data.options.noise_guard {
-                                        crate::transcription::download::model_path(&crate::transcription::catalog::DETECTOR).ok()
-                                    } else { None };
-                                    let noise = transcription.engine.noise.evaluate(context.data.options.noise_guard,
-                                        detector_path.as_deref(), &samples, &context.cancelled);
-                                    if context.is_cancelled() { return; }
-                                    let empty_raw = text.trim().is_empty();
-                                    let text = context.process_with_noise(&text, &app, &id, true, &noise);
-                                    if empty_raw && noise.status != crate::transcription::noise::NoiseStatus::NoSpeech {
-                                        emit(&app, "error", None, Some(NOT_RECOGNISED.into()));
-                                    } else {
-                                        emit(&app, "final", Some(text), None);
-                                    }
-                                },
-                                Err(e) => emit(&app, "error", None, Some(format!("{e:#}"))),
-                            }
-                        }
-                        if !context.is_cancelled() { me.finish(&app); }
-                    })
-                    .map_err(|e| e.to_string())?;
                 return Ok(());
             }
             let me = self.clone();
@@ -1016,10 +1092,11 @@ mod mac {
     #[cfg(test)]
     mod tests {
         use super::{
-            is_no_speech_error, is_silent, permission, restart_decision, AppleSegmentTracker,
-            Dictation, RestartDecision, MAX_RESTARTS, NO_SPEECH_CODE, NO_SPEECH_DOMAIN,
+            is_no_speech_error, is_silent, permission, restart_decision, settle, AppleSegmentTracker,
+            Dictation, RestartDecision, MAX_RESTARTS, NOT_RECOGNISED, NO_SPEECH_CODE, NO_SPEECH_DOMAIN,
             RESTART_INTERVAL, TARGET_RATE,
         };
+        use crate::transcription::noise::{NoiseResult, NoiseStatus};
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
@@ -1120,6 +1197,47 @@ mod mac {
                 }
                 assert!(!gateway.calls.lock().unwrap().iter().any(|call| call.starts_with("request_")));
             }
+        }
+
+        /// What reaches the composer once a local dictation's words are in,
+        /// as JSON, since that is the contract `dictationText.ts` reads.
+        fn settled(raw: &str, noise: NoiseStatus, process: impl FnOnce(&str) -> String) -> serde_json::Value {
+            serde_json::to_value(settle(raw, &NoiseResult::new(noise), process)).unwrap()
+        }
+
+        #[test]
+        fn a_local_final_names_the_segment_its_partials_did_and_carries_the_raw_words() {
+            assert_eq!(
+                settled("fix the build", NoiseStatus::Disabled, |raw| format!("{raw}.")),
+                serde_json::json!({ "kind": "final", "text": "fix the build.", "raw": "fix the build", "segment": 0 })
+            );
+        }
+
+        #[test]
+        fn speech_the_noise_guard_rejects_settles_as_no_text_with_the_words_it_takes_back() {
+            let noise = NoiseResult::new(NoiseStatus::NoSpeech);
+            assert_eq!(
+                settled("Thank you.", NoiseStatus::NoSpeech, |raw| noise.apply(raw.to_string())),
+                serde_json::json!({ "kind": "final", "text": "", "raw": "Thank you.", "segment": 0 })
+            );
+        }
+
+        #[test]
+        fn sound_with_no_words_in_it_says_nothing_was_recognised() {
+            for noise in [NoiseStatus::Disabled, NoiseStatus::Speech, NoiseStatus::Unavailable] {
+                assert_eq!(
+                    settled(" ", noise, |raw| raw.to_string()),
+                    serde_json::json!({ "kind": "error", "message": NOT_RECOGNISED })
+                );
+            }
+        }
+
+        #[test]
+        fn no_words_and_no_speech_settle_quietly() {
+            assert_eq!(
+                settled("", NoiseStatus::NoSpeech, |_| String::new()),
+                serde_json::json!({ "kind": "final", "text": "", "raw": "", "segment": 0 })
+            );
         }
 
         #[test]
@@ -1324,7 +1442,7 @@ impl Dictation {
         emit(&app, "error", None, Some("Dictation is only available on macOS.".into()));
         Err("Dictation is only available on macOS.".into())
     }
-    pub fn stop(self: &std::sync::Arc<Self>, _app: AppHandle, _t: std::sync::Arc<crate::transcription::Transcription>) -> Result<(), String> {
+    pub fn stop(self: &std::sync::Arc<Self>, _app: AppHandle) -> Result<(), String> {
         Ok(())
     }
 }

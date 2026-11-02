@@ -35,6 +35,24 @@
   Reject symlink and nonregular detector cache entries without blocking capture.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
+- Dictating with a downloaded model that can stream, such as the recommended
+  Parakeet Unified EN 0.6B, shows the words in the composer while you speak,
+  as Built in does. Before, nothing appeared until you stopped. The words come
+  about a second at a time, roughly two seconds behind you. Whether a model
+  streams is the model's own answer, read from its weights. Stop finishes the
+  stream rather than transcribing the whole recording again, so a long
+  dictation settles sooner: after 30 seconds of speech, about 70 ms after Stop
+  instead of 250 ms on an Apple Silicon Mac. Under ten seconds the two are
+  about the same. The final text still goes through the dictionary, learned
+  corrections and the noise guard, and words streamed for noise the guard
+  rejects are taken back. Words you delete while they stream stay deleted.
+  Models that cannot stream (Whisper, Canary) say "Listening. Words appear
+  when you stop.", and each model's card in Settings → Transcription says
+  which kind it is. A stream that will not start, or breaks part way, falls
+  back to transcribing the recording at Stop, and the log says why. On the
+  first dictation after launch or a model change, "Opening the microphone…"
+  stays up for the moment the model takes to load (under a fifth of a second
+  for Parakeet here); what you say meanwhile is kept. (#754)
 
 ### Issue pipelines
 

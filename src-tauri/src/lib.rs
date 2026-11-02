@@ -125,6 +125,8 @@ mod recovery;
 mod continuation;
 pub mod skills;
 mod store;
+#[cfg(test)]
+mod test_log;
 mod status;
 mod stats;
 #[cfg(feature = "desktop")]
