@@ -445,23 +445,21 @@ export class TranscriptReducer {
         break;
       }
       case "prompt_withdrawn": {
-        const message = findMessage(turns, payload.promptSeq);
-        if (message) {
-          message.withdrawn = true;
-          message.inputOccupied = undefined;
-        }
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, inputOccupied: undefined }));
         break;
       }
       case "prompt_joined": {
         // Received inside another message's prompt, which shows it: its own bubble goes, and what was sent stays with that one.
-        const taken = takeMessage(turns, payload.promptSeq);
+        const taken = takeMessage(this.turns, payload.promptSeq);
         if (!taken) break;
         const { prompt, from } = taken;
-        const into = findMessage(turns, payload.intoSeq);
-        if (into) into.sent = [into.sent ?? into.text, prompt.text].join("\n\n");
+        this.touch(from);
+        this.changeMessage(payload.intoSeq, (into) => ({ sent: [into.sent ?? into.text, prompt.text].join("\n\n") }));
         if (!from.prompt && !from.work.length && !from.completed) {
-          turns.splice(turns.indexOf(from), 1);
-          if (current === from) current = null;
+          this.turns.splice(this.turns.indexOf(from), 1);
+          this.versions.delete(from);
+          this.shown.delete(from);
+          if (this.current === from) this.current = null;
         }
         break;
       }
