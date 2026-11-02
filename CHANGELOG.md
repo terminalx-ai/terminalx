@@ -61,6 +61,20 @@
   the resolver works now ends the pipeline at once, and the resolver is told to
   stop. A merge is left as it is when a person interrupted the resolver or
   stopped the pipeline. (#736)
+- A conflict resolver that ends its turn to wait for its own checks is no
+  longer marked failed. On #733 the resolver had resolved and staged every
+  file and was waiting for a 7-minute test run in the background when the
+  pipeline recorded "The resolver ended without a status block." With the
+  merge clean-up from #736 it would also have aborted that merge under the
+  running tests. The pipeline now keeps the checkout reserved while the
+  resolver's tab has work running, for up to 30 minutes, and takes the report
+  from the turn that work wakes. Past that, the resolver is asked once for its
+  report. A resolver that ends a turn without its report and with nothing
+  running gets one reminder, as the author and reviewer do. Its merge is
+  never aborted while its checks still run, and Stop hands the checkout over
+  at once. Carrying a pipeline on from a failed resolution now checks the head
+  against the current base first, and resolves again if it conflicts, instead
+  of pushing a stale merge for review. (#753)
 
 ### Changes panel
 

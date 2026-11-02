@@ -56,6 +56,8 @@ fn note_waiting(pipelines: &[Pipeline]) {
             State::Waiting => waiting_since(pipeline),
             // A reviewer waiting on checks it started: they run in this workspace.
             State::Working if pipeline.stage == Stage::Review => pipeline.review_pending_since.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)),
+            // So is a conflict resolver waiting on work it left running (#753).
+            State::Working if pipeline.stage == Stage::Resolve => pipeline.resolution.as_ref().and_then(|resolution| resolution.waiting_since.as_deref()).and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)),
             _ => None,
         })
         .collect();
@@ -75,7 +77,7 @@ pub fn waiting_since(pipeline: &Pipeline) -> Option<DateTime<Utc>> {
 }
 
 /// When each pipeline waiting on GitHub (checks, mergeability, a merge
-/// queue), or on its reviewer's own checks, began to wait.
+/// queue), or on its reviewer's or conflict resolver's own checks, began to wait.
 pub fn waits() -> Vec<DateTime<Utc>> {
     WAITING.lock().unwrap_or_else(|error| error.into_inner()).clone()
 }

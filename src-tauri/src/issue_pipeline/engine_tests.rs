@@ -82,6 +82,9 @@ struct World {
     busy: BTreeSet<String>,
     /// Agents TerminalX stopped, with the note left in each transcript.
     stopped_agents: Vec<(String, String)>,
+    /// What each conversation's agent left running, by [`key`]: it goes
+    /// with the agent when that is stopped.
+    background: BTreeMap<String, String>,
 }
 
 struct FakeHost(Mutex<World>);
@@ -152,6 +155,7 @@ impl FakeHost {
             running: BTreeSet::new(),
             busy: BTreeSet::new(),
             stopped_agents: Vec::new(),
+            background: BTreeMap::new(),
         }))
     }
 
@@ -177,6 +181,15 @@ impl FakeHost {
         } else {
             world.busy.remove(&key(who));
         }
+    }
+
+    /// A conversation's agent left `what` running, or nothing.
+    fn left_running(&self, who: &SessionRef, what: Option<&str>) {
+        let mut world = self.world();
+        match what {
+            Some(what) => world.background.insert(key(who), what.into()),
+            None => world.background.remove(&key(who)),
+        };
     }
 
     fn stopped_agents(&self) -> Vec<String> {
@@ -223,8 +236,13 @@ impl Host for FakeHost {
             return Ok(AgentStop::Busy);
         }
         world.running.remove(&key(who));
+        world.background.remove(&key(who));
         world.stopped_agents.push((key(who), note.to_string()));
         Ok(AgentStop::Stopped)
+    }
+
+    fn background_work(&self, who: &SessionRef) -> Option<String> {
+        self.world().background.get(&key(who)).cloned()
     }
 
     fn session(&self, session_id: &str) -> Result<SessionEntry> {
@@ -284,7 +302,7 @@ impl Host for FakeHost {
 
     fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
         let world = self.world();
-        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work }))
+        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work, waiting_since: None }))
     }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let mut resolver = session("resolver", None);
@@ -3128,6 +3146,12 @@ fn a_resolver_that_stops_short_of_its_merge_commit_has_its_unfinished_merge_abor
         let run = Run::start(&github_issue(), false);
         resolving(&run);
         turn_completed(&run.host, "resolver", "t1", Some(&report));
+        if reason == failed("The resolver ended without a status block.") {
+            // Asked once more first, its merge left as it is meanwhile (#753).
+            assert!(run.pipeline().resolution.is_some() && run.host.aborts().is_empty());
+            assert_eq!(run.host.prompts_to("resolver").len(), 2);
+            turn_completed(&run.host, "resolver", "t1", Some(&report));
+        }
         let stopped = run.pipeline();
         assert_eq!((stopped.state, stopped.reason.clone()), (State::NeedsYou, Some(reason.clone())));
         assert!(stopped.resolution.is_none(), "the checkout is released");
@@ -3293,4 +3317,172 @@ fn a_poll_while_the_resolver_works_on_an_open_pull_request_changes_nothing() {
     assert_eq!((looked.stage, looked.state, looked.events.len()), (Stage::Resolve, State::Working, resolving.events.len()));
     assert!(looked.resolution.is_some() && run.host.aborts().is_empty());
     assert_eq!(run.host.prompts_to("resolver").len(), 1);
+}
+
+// ---- a conflict resolver still at work when its turn ends (#753) ------------
+
+const TESTS_RUNNING: &str = "a background command it has not heard back from";
+
+impl Run {
+    /// The resolver committed its merge at C2, and the base no longer
+    /// conflicts with it.
+    fn merge_committed(&self) {
+        let mut world = self.host.world();
+        world.workspace.head = C2.into();
+        world.workspace.merging.clear();
+        world.workspace.dirty.clear();
+        world.conflict = false;
+        let pr = world.pr.as_mut().unwrap();
+        pr.mergeable = "MERGEABLE".into();
+        pr.merge_state = "CLEAN".into();
+    }
+}
+
+#[test]
+fn a_resolver_that_ends_its_turn_to_wait_for_its_own_checks_is_judged_on_the_turn_they_wake() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    // Resolved and staged, the tests started in the background, and the turn ended to wait for them.
+    run.host.left_running(&resolver_tab(), Some(TESTS_RUNNING));
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+    turn_completed(&run.host, "resolver", "t1", Some("The Rust tests take about seven minutes; waiting for them."));
+    let waiting = run.pipeline();
+    assert_eq!((waiting.stage, waiting.state, waiting.reason.clone()), (Stage::Resolve, State::Working, None));
+    assert!(waiting.resolution.as_ref().is_some_and(|resolution| resolution.waiting_since.is_some()), "the checkout stays reserved");
+    assert!(super::admission::check("author", "t1").is_err());
+    assert!(run.host.aborts().is_empty());
+    assert_eq!(run.host.world().workspace.merging, [BASE], "its staged resolution is not undone under its tests");
+    assert_eq!(run.host.prompts_to("resolver").len(), 1, "nothing is typed into it while it waits");
+    let pending = waiting.events.last().unwrap();
+    assert_eq!((pending.kind.as_str(), pending.message.as_str()), ("resolutionPending", "The conflict resolver ended its turn waiting on a background command it has not heard back from. Its report is waited for up to 30 minutes."));
+    assert_eq!(waiting.note.as_deref(), Some("The conflict resolver is waiting on a background command it has not heard back from; its report is due within 30 minutes."));
+    assert_eq!(engine::holding_at(run.host.now()), 1, "a cloud workspace is kept awake for it");
+
+    // A poll meanwhile changes nothing, and nor does another turn it ends to wait again.
+    assert_eq!(run.poll().events.len(), waiting.events.len());
+    turn_completed(&run.host, "resolver", "t1", Some("Still running."));
+    assert_eq!(run.pipeline().events.len(), waiting.events.len());
+    assert!(run.pipeline().resolution.is_some());
+
+    // The tests pass, and the turn they wake commits the merge and reports.
+    run.host.left_running(&resolver_tab(), None);
+    run.merge_committed();
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Merged pinned main as one merge commit.")));
+    let resolved = run.pipeline();
+    assert_eq!((resolved.stage, resolved.state, resolved.review_commit.as_deref()), (Stage::Review, State::Working, Some(C2)));
+    assert!(resolved.resolution.is_none());
+    assert_eq!(run.host.world().pushes, [C1, C2]);
+    assert!(run.host.aborts().is_empty());
+    assert!(run.kinds().contains(&"resolved".to_string()));
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+}
+
+#[test]
+fn a_resolver_that_ends_its_turn_without_a_report_and_nothing_running_is_asked_once_more() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    turn_completed(&run.host, "resolver", "t1", Some("Resolved the six files."));
+    let asked = run.pipeline();
+    assert_eq!((asked.stage, asked.state, asked.reminded), (Stage::Resolve, State::Working, true));
+    assert!(asked.resolution.is_some() && run.host.aborts().is_empty());
+    let prompts = run.host.prompts_to("resolver");
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("nothing you started is still running") && prompts[1].contains("```terminalx-status"), "{}", prompts[1]);
+    let reminder = asked.events.last().unwrap();
+    assert_eq!((reminder.kind.as_str(), reminder.message.as_str()), ("reminder", "Asked the conflict resolver session again: it ended its turn without a status block, with nothing it started still running."));
+
+    // The turn that answers finishes the merge.
+    run.merge_committed();
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Committed the merge; checks pass.")));
+    let resolved = run.pipeline();
+    assert_eq!((resolved.stage, resolved.review_commit.as_deref()), (Stage::Review, Some(C2)));
+    assert_eq!(run.host.world().pushes, [C1, C2]);
+}
+
+#[test]
+fn a_resolver_still_waiting_after_its_time_is_asked_for_its_report_and_then_left_to_a_person() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    run.host.agent(&resolver_tab(), false);
+    run.host.left_running(&resolver_tab(), Some(TESTS_RUNNING));
+    turn_completed(&run.host, "resolver", "t1", Some("Waiting for the tests."));
+    // Not interrupted while it is at work, however long it has waited.
+    run.host.world().now += TimeDelta::minutes(30);
+    run.host.agent(&resolver_tab(), true);
+    run.poll();
+    assert_eq!(run.host.prompts_to("resolver").len(), 1);
+
+    // Idle past its time: asked once for its report on what it has.
+    run.host.agent(&resolver_tab(), false);
+    let asked = run.poll();
+    let prompts = run.host.prompts_to("resolver");
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("waiting on work you started for 30 minutes") && prompts[1].contains("do not end this turn to wait again"), "{}", prompts[1]);
+    assert!(asked.reminded && asked.resolution.is_some());
+    assert_eq!(asked.events.last().unwrap().message, "Asked the conflict resolver session again: it has waited 30 minutes on work it started, and gave no report.");
+    run.poll();
+    assert_eq!(run.host.prompts_to("resolver").len(), 2, "asked once");
+
+    // It ends that turn without a report, its tests still running: a
+    // person's, and its merge is not undone under them.
+    turn_completed(&run.host, "resolver", "t1", Some("The tests are still going."));
+    let stopped = run.pipeline();
+    let failed = StopReason::Failed { step: "Resolving conflicts".into(), message: "The resolver ended without a status block.".into() };
+    assert_eq!((stopped.state, stopped.reason.clone()), (State::NeedsYou, Some(failed)));
+    assert!(stopped.resolution.is_none());
+    assert!(run.host.aborts().is_empty());
+    assert_eq!(stopped.events.last().unwrap().message, "The conflict resolver's merge of main at 5555555555 is unfinished, and the resolver is still waiting on a background command it has not heard back from. It is left as it is.");
+}
+
+#[test]
+fn stopping_a_pipeline_whose_resolver_waits_on_its_checks_hands_over_the_checkout() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    run.host.agent(&resolver_tab(), false);
+    run.host.left_running(&resolver_tab(), Some(TESTS_RUNNING));
+    turn_completed(&run.host, "resolver", "t1", Some("Waiting for the tests."));
+    assert!(run.pipeline().resolution.is_some());
+    let stopped = act(&run.host, &run.id, Action::Stop).unwrap();
+    assert_eq!(stopped.state, State::Stopped);
+    // Stopped with its checks: no turn is left to end and release the checkout.
+    assert_eq!(run.host.stopped_agents(), [key(&resolver_tab())]);
+    assert!(stopped.resolution.is_none());
+    assert!(super::admission::check("author", "t1").is_ok());
+    assert!(run.host.aborts().is_empty(), "after Stop the merge is the person's");
+    assert_eq!(stopped.events.last().unwrap().message, "The conflict resolver's merge of main at 5555555555 is unfinished. It is left as it is for you to inspect: commit or abort it from the Changes panel.");
+}
+
+#[test]
+fn carrying_on_from_a_failed_resolution_compares_the_head_with_the_base_before_pushing() {
+    for case in ["conflicts", "clean", "switch off"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        // It committed its merge and then gave up: the merge sits unpushed while the base moves on.
+        run.merge_committed();
+        turn_completed(&run.host, "resolver", "t1", Some(&resolver_blocked("The remote moved while the checks ran")));
+        assert_eq!((run.pipeline().stage, run.pipeline().state), (Stage::Resolve, State::NeedsYou));
+        run.host.world().conflict = case != "clean";
+        if case == "switch off" {
+            set_resolve_conflicts(&run.host, &run.id, false).unwrap();
+        }
+        let carried = act(&run.host, &run.id, Action::Advance).unwrap();
+        match case {
+            "conflicts" => {
+                // Resolved again from the head it left, with nothing pushed.
+                assert_eq!((carried.stage, carried.state, carried.resolutions), (Stage::Resolve, State::Working, 2), "{:?}", carried.note);
+                assert_eq!(carried.resolution.as_ref().map(|resolution| resolution.head.as_str()), Some(C2));
+                assert_eq!(run.host.prompts_to("resolver").len(), 2);
+                assert_eq!(run.host.world().pushes, [C1]);
+            }
+            "clean" => {
+                assert_eq!((carried.stage, carried.state, carried.review_commit.as_deref()), (Stage::Review, State::Working, Some(C2)));
+                assert_eq!(run.host.world().pushes, [C1, C2]);
+            }
+            _ => {
+                assert_eq!((carried.state, carried.reason), (State::NeedsYou, Some(StopReason::Conflicts)));
+                assert_eq!(run.host.prompts_to("resolver").len(), 1);
+                assert_eq!(run.host.world().pushes, [C1]);
+            }
+        }
+    }
 }

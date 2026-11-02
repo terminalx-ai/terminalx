@@ -131,7 +131,8 @@ pub struct Event {
     /// `reviewPending`, `verdict`, `findingsPosted`, `findingsSent`, `pushed`,
     /// `reminder`, `waiting`, `readyToMerge`, `needsYou`, `answered`, `merged`,
     /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`,
-    /// `resolutionRequested`, `resolved`, `resolutionStopped`, `mergeAborted`
+    /// `resolutionRequested`, `resolutionPending` (a resolver waiting on work
+    /// it left running), `resolved`, `resolutionStopped`, `mergeAborted`
     /// (a resolver's unfinished merge undone), `mergeLeft` (one left as it
     /// is, and why), `note`.
     pub kind: String,
@@ -275,6 +276,11 @@ pub struct Resolution {
     pub base: String,
     pub base_commit: String,
     pub return_stage: Stage,
+    /// When the resolver first ended a turn without its report while work it
+    /// started was still running. Its report is waited for until
+    /// [`engine::RESOLVE_CHECKS_MINUTES`] after this, and then asked for once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_since: Option<String>,
 }
 
 /// The newest lines of the record kept per pipeline.
