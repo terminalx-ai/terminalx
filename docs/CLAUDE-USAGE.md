@@ -67,7 +67,7 @@ failure of the request itself, or a provider's Retry-After, still holds it.
 
 Expired Claude windows keep their last-known percentage, show an expired/stale
 label and muted meter, and remain stale even when recently received. A status
-line repeating that expired window does not advance its confirmation timestamp.
+line or endpoint reply repeating that expired window replaces nothing (#738).
 Each detail window has its own freshness label. No elapsed-time path invents
 0%: only the provider's answer shows a window as not started (below).
 
@@ -131,10 +131,11 @@ Each received window now gets a verdict against the window shown under its key
   receipt of the previous window, such as an idle tab's last sample) or from an
   endpoint window already over when the request started; the same window
   observed no later; a deadline that had passed when the shown window was
-  observed; no deadline from a status line while the shown window still
-  runs (only the endpoint's fresh answer may say a running window has none);
-  or a later status-line deadline before a window the endpoint saw running
-  has ended.
+  observed; the same window observed after its deadline (`endedWindow`, #738:
+  it does not confirm a reset); no deadline from a status line while the shown
+  window still runs (only the endpoint's fresh answer may say a running window
+  has none); or a later status-line deadline before a window the endpoint saw
+  running has ended.
 
 An earlier deadline is not always the previous window (#737). Windows under
 one key follow each other and never overlap. If the endpoint says at request
@@ -160,8 +161,10 @@ The endpoint names an account window with nothing running (`five_hour`,
 a window not yet started, 0% with no countdown, and it replaces an expired one.
 An endpoint window whose deadline had already passed more than 60 s before the
 request is shown the same way: none of its usage still counts. Within 60 s of
-its deadline it may not have rolled yet, so it keeps its earlier confirmation
-time and the follow-up check runs.
+its deadline it may not have rolled yet, so it is refused as `endedWindow`: the
+shown window stays as it was, the answer is not an update (the card says
+"Checked … · no newer usage" and "5h kept: the reply still had the window that
+just expired"), and the follow-up check a minute later settles it.
 
 The snapshot carries the outcome. `claude.lastUpdatedAt` is the last answer
 that replaced at least one window; `lastSuccessAt` the last answer at all. The
@@ -172,9 +175,12 @@ just now · no newer usage", and `claude.refused` gives each kept window's
 reason; the card lists those that leave an older window up.
 
 Live usage refused for attribution (the system account cannot be identified,
-the tab started under another account, or the status line reported another)
-is `claude.liveRefused` while it is newer than any live sample used. The card
-shows it as a warning; it is not shown beside newer live data.
+`unidentified`; the tab captured no account when it started, for example before
+Claude Code was signed in, `launchUnknown` (#738); the tab started under another
+account, `launchMismatch`; or the status line reported another,
+`statuslineMismatch`) is `claude.liveRefused` while it is newer than any live
+sample used. The card shows it as a warning; it is not shown beside newer live
+data.
 
 A manual refresh that does not reach the provider records `skipped` (`reason`:
 `inFlight`, `retryPending`, `recent`, `resetInFlight`; and `nextAt`, when the

@@ -539,9 +539,11 @@ const REFUSAL_COPY: Record<UsageRefusal, string> = {
   olderObservation: "a newer value had already arrived",
   noDeadline: "the reply had no reset time while the shown window runs",
   notYetStarted: "the window the endpoint saw running had not ended",
+  endedWindow: "the reply still had the window that just expired",
 };
 
 const LIVE_REFUSAL_COPY: Record<LiveUsageRefused["reason"], string> = {
+  launchUnknown: "the tab's Claude account wasn't known when it started",
   launchMismatch: "its tab started under a different Claude account than the one signed in now",
   statuslineMismatch: "the status line reported a different Claude account",
   unidentified: "the signed-in Claude account can't be identified",
