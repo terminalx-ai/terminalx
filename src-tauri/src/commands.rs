@@ -3184,8 +3184,8 @@ pub async fn dictation_start(app: AppHandle, state: State<'_, AppState>, persona
 
 #[tauri::command]
 pub async fn dictation_stop(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    let (dictation, transcription) = (state.dictation.clone(), state.transcription.clone());
-    tauri::async_runtime::spawn_blocking(move || dictation.stop(app, transcription)).await.map_err(err)?
+    let dictation = state.dictation.clone();
+    tauri::async_runtime::spawn_blocking(move || dictation.stop(app)).await.map_err(err)?
 }
 
 // ------------------------------------------------------------------ transcription models

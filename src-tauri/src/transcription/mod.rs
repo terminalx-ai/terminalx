@@ -7,6 +7,7 @@ pub mod audio;
 pub mod catalog;
 pub mod download;
 pub mod engine;
+pub mod live;
 pub mod noise;
 pub mod commands;
 mod detector_file;

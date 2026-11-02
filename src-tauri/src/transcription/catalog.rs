@@ -30,6 +30,12 @@ pub struct ModelSpec {
     pub speed: u8,
     pub accuracy: u8,
     pub recommended: bool,
+    /// Whether these weights give words while the reader speaks, for the
+    /// model's card, which has to answer before anything is downloaded.
+    /// Dictation itself never reads this: it asks the loaded model
+    /// (`capabilities().supports_streaming`), and the real-weights test in
+    /// `engine.rs` holds the two to the same answer.
+    pub live_words: bool,
 }
 
 impl ModelSpec {
@@ -58,6 +64,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 79,
         accuracy: 90,
         recommended: true,
+        live_words: true,
     },
     ModelSpec {
         id: "nemotron-3.5-asr-streaming-0.6b",
@@ -74,6 +81,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 84,
         accuracy: 82,
         recommended: false,
+        live_words: true,
     },
     ModelSpec {
         id: "canary-180m-flash",
@@ -90,6 +98,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 98,
         accuracy: 88,
         recommended: false,
+        live_words: false,
     },
     ModelSpec {
         id: "whisper-small",
@@ -106,6 +115,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 78,
         accuracy: 80,
         recommended: false,
+        live_words: false,
     },
     ModelSpec {
         id: "whisper-large-v3-turbo",
@@ -122,6 +132,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 35,
         accuracy: 88,
         recommended: false,
+        live_words: false,
     },
 ];
 
@@ -138,7 +149,7 @@ pub const DETECTOR: ModelSpec = ModelSpec {
     languages: "Speech detection",
     license: "MIT",
     license_url: "https://github.com/snakers4/silero-vad/blob/5cd7945676eb32225748052e2e6a0580e4686a08/LICENSE",
-    speed: 0, accuracy: 0, recommended: false,
+    speed: 0, accuracy: 0, recommended: false, live_words: false,
 };
 
 pub fn downloadable(id: &str) -> Option<&'static ModelSpec> {

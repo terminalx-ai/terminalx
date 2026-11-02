@@ -2480,6 +2480,8 @@ export interface TranscriptionModel {
   speed: number;
   accuracy: number;
   recommended: boolean;
+  /** These weights give words while the reader speaks. */
+  liveWords: boolean;
   installed: boolean;
   downloading: boolean;
   progress?: DownloadProgress;

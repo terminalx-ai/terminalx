@@ -39,9 +39,15 @@ export interface DictationState {
   available: boolean | null;
   /** Human name of the engine dictation will use, for the mic tooltip. */
   engine: string;
+  /**
+   * Whether words appear while the reader speaks. False for a local model
+   * that cannot stream (or whose stream would not start): its words all
+   * arrive when the reader stops, and the listening row says so.
+   */
+  live: boolean;
 }
 
-let state: DictationState = { phase: "idle", text: "", session: 0, target: null, error: null, settings: null, available: null, engine: "Apple" };
+let state: DictationState = { phase: "idle", text: "", session: 0, target: null, error: null, settings: null, available: null, engine: "Apple", live: true };
 /** The segments behind `state.text`; see `./dictationText`. */
 let buffer: DictationBuffer = EMPTY_BUFFER;
 const listeners = new Set<() => void>();
@@ -67,8 +73,10 @@ interface DictationEvent {
   raw?: string;
   message?: string;
   settings?: "microphone" | "speechRecognition";
-  /** Stable identity derived from Apple's transcription segment timestamps. */
+  /** Stable identity derived from Apple's transcription segment timestamps; 0 throughout a local model's dictation. */
   segment?: number;
+  /** On `listening`: whether words will appear while the reader speaks. */
+  live?: boolean;
 }
 
 /**
@@ -80,7 +88,7 @@ interface DictationEvent {
 function trace(e: DictationEvent) {
   const text = e.text ?? "";
   const segment = e.segment == null ? "" : ` segment=${e.segment}`;
-  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : `${segment} len=${text.length}`;
+  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : e.kind === "listening" ? ` live=${e.live !== false}` : `${segment} len=${text.length}`;
   void invoke("frontend_log", { level: "debug", message: `dictation ${e.kind}${detail}` }).catch(() => {});
 }
 
@@ -99,8 +107,10 @@ async function subscribe() {
       trace(p);
       switch (p.kind) {
         case "listening":
-          // A stop asked for while the microphone was still opening stays a stop.
-          set({ phase: stopping ? "finishing" : "listening", error: null, settings: null });
+          // A stop asked for while the microphone was still opening stays a
+          // stop. A second one can come mid-dictation, when a local model's
+          // stream broke and its words now wait for the end.
+          set({ phase: stopping ? "finishing" : "listening", error: null, settings: null, live: p.live !== false });
           break;
         case "transcribing":
           set({ phase: "finishing" });
@@ -176,7 +186,7 @@ export function startDictation(target: string, personalization?: DictationContex
   previousPartialAt = null;
   stopping = false;
   const session = state.session + 1;
-  set({ phase: "starting", text: "", raw: undefined, parts: undefined, session, target, error: null, settings: null });
+  set({ phase: "starting", text: "", raw: undefined, parts: undefined, session, target, error: null, settings: null, live: true });
   opening = (async () => {
     // The listener is in place before the microphone is, so no result can
     // arrive before there is somewhere for it to go.

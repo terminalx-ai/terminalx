@@ -335,6 +335,17 @@ export function useDictationShortcuts(dictation: Dictation, enabled = true) {
   );
 }
 
+/**
+ * What the listening row says. A model that gives no live words says so, so
+ * an empty composer reads as "not yet" rather than "not heard".
+ */
+function listeningLabel(state: DictationState, held: boolean): string {
+  if (state.phase === "starting") return "Opening the microphone…";
+  if (state.phase === "finishing") return "Finishing…";
+  if (state.live === false) return held ? "Listening. Words appear when you release the key." : "Listening. Words appear when you stop.";
+  return held ? "Listening. Speak, then release the key." : "Listening. Speak, then press the mic again.";
+}
+
 /** The error row and the listening row, above the composer box. */
 export function DictationStatus({ dictation }: { dictation: Dictation }) {
   const { state, dictating } = dictation;
@@ -361,7 +372,7 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
       {dictating && (
         <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
           <span className={cn("size-2 rounded-full", state.phase === "listening" ? "bg-destructive animate-pulse-soft" : "bg-faint")} />
-          {state.phase === "starting" ? "Opening the microphone…" : state.phase === "finishing" ? "Finishing…" : dictation.held ? "Listening. Speak, then release the key." : "Listening. Speak, then press the mic again."}
+          {listeningLabel(state, dictation.held)}
         </div>
       )}
     </>

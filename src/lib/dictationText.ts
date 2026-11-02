@@ -19,6 +19,13 @@
  * guess from the words and the timing where it does not; inside one
  * utterance only the words say whether a result is a rewrite of the last.
  *
+ * A local model that streams sends the same shapes (#754). Its whole
+ * dictation is one utterance, segment 0: each partial is the stream's
+ * committed text, which never changes once shown, with the tentative tail it
+ * is still revising after it. So every partial revises the last, and the
+ * final, which Rust processes as one text the way it always has, replaces
+ * what streamed.
+ *
  * Everything here is pure: the same results always make the same draft.
  */
 
@@ -231,12 +238,39 @@ export function applyPartial(buffer: DictationBuffer, partial: string, result: D
 }
 
 /**
+ * A final for the utterance still live whose own recognition has words but
+ * whose text has none: processing removed them, so the words shown for it go
+ * too. A local model's noise guard does this to audio it streamed words for
+ * but found no speech in. An empty final with nothing recognised either says
+ * only that nothing more was heard, and keeps what was, as it always has.
+ */
+function withdraws(buffer: DictationBuffer, text: string, result: DictationResult): boolean {
+  return !text && !!result.raw?.trim() && result.segment != null && result.segment === buffer.segment && buffer.live !== "";
+}
+
+function withdrawn(buffer: DictationBuffer): DictationBuffer {
+  const updated: DictationBuffer = { committed: buffer.committed, live: "" };
+  if (buffer.rawCommitted != null || buffer.raw != null) {
+    updated.rawCommitted = buffer.rawCommitted ?? buffer.committed;
+    updated.raw = "";
+  }
+  if (buffer.parts != null) {
+    // Kept, emptied: its id must not be handed to the next part, whose owned
+    // words would otherwise be looked up under it.
+    const last = buffer.parts.at(-1);
+    updated.parts = last ? [...buffer.parts.slice(0, -1), { id: last.id, raw: "", text: "" }] : buffer.parts;
+  }
+  return updated;
+}
+
+/**
  * Take a final result: fold raw and formatted forms at the same boundary so
  * an edit can keep ownership even after the live utterance has settled.
  */
 export function applyFinal(buffer: DictationBuffer, final: string, result: DictationResult = {}): DictationBuffer {
   if (outOfOrder(buffer, result)) return buffer;
   const text = final.trim();
+  if (withdraws(buffer, text, result)) return withdrawn(buffer);
   const revision = isRevision(buffer, text, result);
   const updated: DictationBuffer = { committed: !text ? spokenText(buffer)
     : joinSpoken(revision ? buffer.committed : spokenText(buffer), text), live: "" };
