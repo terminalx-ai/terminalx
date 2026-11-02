@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::git;
+use crate::issue_pipeline::admission;
 use crate::landed::{self, Fetch};
 use crate::session_ops;
 use crate::sink::EventSink;
@@ -617,22 +618,6 @@ fn holds_git_dir(dir: &Path, depth: usize) -> bool {
     std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && holds_git_dir(&entry.path(), depth - 1))
 }
 
-/// The git operation that is under way in the checkout, if one is.
-fn operation_in_progress(path: &Path) -> Result<Option<&'static str>, ()> {
-    let dir = git::run(path, &["rev-parse", "--absolute-git-dir"]).map_err(|_| ())?;
-    let dir = Path::new(dir.trim());
-    let marks = [
-        ("MERGE_HEAD", "merge"),
-        ("rebase-merge", "rebase"),
-        ("rebase-apply", "rebase"),
-        ("CHERRY_PICK_HEAD", "cherry-pick"),
-        ("REVERT_HEAD", "revert"),
-        ("BISECT_LOG", "bisect"),
-        ("sequencer", "cherry-pick or revert"),
-    ];
-    Ok(marks.into_iter().find(|(mark, _)| std::fs::symlink_metadata(dir.join(mark)).is_ok()).map(|(_, what)| what))
-}
-
 fn describe_changes(listing: &str) -> String {
     let (mut conflicts, mut untracked, mut staged, mut modified) = (0, 0, 0, 0);
     for line in listing.lines() {
@@ -749,13 +734,13 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
             return (Verdict::Active, Some(format!("{running}.")));
         }
 
-        match operation_in_progress(&path) {
+        match git::operation_in_progress(&path) {
             Ok(None) => {}
             Ok(Some(what)) => {
                 candidate.brief = Some(format!("a {what} is in progress"));
                 return (Verdict::InProgress, Some(format!("A {what} is in progress.")));
             }
-            Err(()) => return unverifiable("Git could not read the checkout's state."),
+            Err(_) => return unverifiable("Git could not read the checkout's state."),
         }
         match git::run(&path, &["status", "--porcelain", "--untracked-files=all", "--"]) {
             Ok(out) => listing = out,
@@ -960,7 +945,9 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
     }
     // An agent still running there works in a folder that is gone, and filed
     // under the project its session would go on from the project's own
-    // checkout (#696). Stopped first, or nothing is filed.
+    // checkout (#696). Stopped first, or nothing is filed, and nothing starts
+    // in those sessions again until they are filed.
+    let _filing = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), left.iter().map(|session| admission::Scope::Session(session.id.clone())));
     if let Some(stop) = host.stop_agents {
         let failed: Vec<String> = left.iter().filter_map(|session| stop(session).err().map(|error| format!("\"{}\": {error}", session.title))).collect();
         if !failed.is_empty() {
@@ -1006,8 +993,12 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         step(Step::Measuring);
         git::size_on_disk(&target)
     });
-    // Everything is read again now, as late as it can be.
+    // Everything is read again now, as late as it can be, and from here to
+    // the end nothing starts in it: a prompt admitted before this is a turn
+    // the inspection sees, and one sent after is refused. Every other
+    // workspace's prompts are admitted meanwhile (#727).
     step(Step::Checking);
+    let _removing = admission::fence(admission::Kind::Refuse(admission::WORKSPACE_REMOVED), [admission::Scope::checkout(&target)]);
     let sessions = match index::load() {
         Ok(sessions) => sessions,
         Err(error) => return result(item, Outcome::Skipped, format!("The session index could not be read, so nothing was removed: {error:#}")),
@@ -1128,7 +1119,16 @@ impl Jobs {
     }
 }
 
+/// Where a test holds a sizing mid-walk (#727): run once, at the first entry walked.
+#[cfg(test)]
+pub(crate) static WALKING: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
 fn walk_size(path: &Path, stop: &AtomicBool) -> Option<u64> {
+    #[cfg(test)]
+    {
+        let hold = WALKING.lock().unwrap_or_else(|error| error.into_inner()).take();
+        if let Some(hold) = hold { hold(); }
+    }
     if stop.load(Ordering::Relaxed) {
         return None;
     }

@@ -4,6 +4,7 @@ import { Check, ChevronDown, ChevronUp, Trash2 } from "lucide-react-native";
 import { disableLocalNotifications, enableLocalNotifications, localNotificationsEnabled } from "@mobile/notifications/local";
 import type { MacSettings } from "@mobile/data/host-api";
 import { useApp } from "@mobile/state/AppProvider";
+import { useHostFeatures } from "@mobile/state/host-features";
 import { hostDisplayName, hostDisplayNames } from "@mobile/store/host-name";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { useTheme, type ThemeName } from "@mobile/ui/theme";
@@ -21,6 +22,8 @@ export default function SettingsScreen() {
   const [macError, setMacError] = useState<string | null>(null);
   const connected = app.connectionStage === "connected";
 
+  // Asked again when the Mac starts or stops offering them (#730).
+  const macOffered = useHostFeatures(app.api, app.activeHost?.id)?.macSettings === 1;
   useEffect(() => {
     let current = true;
     setMac(undefined);
@@ -28,7 +31,7 @@ export default function SettingsScreen() {
     if (!connected) return;
     app.api.macSettings().then((value) => { if (current) setMac(value); }).catch((cause: unknown) => { if (current) { setMac(null); setMacError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { current = false; };
-  }, [app.api, connected, app.activeHost?.id]);
+  }, [app.api, connected, app.activeHost?.id, macOffered]);
 
   const toggleNativeCodex = async (on: boolean) => {
     const before = mac;

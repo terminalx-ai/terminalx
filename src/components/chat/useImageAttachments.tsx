@@ -14,6 +14,14 @@ export interface Attachment {
   previewUrl: string;
 }
 
+/** Images taken out of the composer for a send, until it is known whether it went (`ImageAttachments.setAside`). */
+export interface SetAside {
+  images: ImageInput[];
+  /** Their thumbnails, for the message drawn as sending. */
+  previews: { url: string; name?: string }[];
+  settle: (sent: boolean) => void;
+}
+
 /** Images larger than this are skipped rather than sent as one huge block. */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -29,6 +37,12 @@ export interface ImageAttachments {
   remove: (id: string) => void;
   /** Release every queued image and its preview, after a successful send. */
   clear: () => void;
+  /**
+   * Take the queued images out of the composer for a send that is on its
+   * way (#727), keeping them: `settle(true)` lets them go once it is sent,
+   * `settle(false)` puts the very same images back when it was not.
+   */
+  setAside: () => SetAside;
   /** The queue in the shape `agent.send` takes. */
   images: ImageInput[];
   /** Why the last file offered was not attached (a cloud tab only), until the queue changes again. */
@@ -170,14 +184,47 @@ export function useImageAttachments({
   );
 
   // One object per attachment for as long as it is queued: a send tried again hands over the very
-  // same images, which is how a cloud tab knows not to upload them as new ones.
+  // same images, which is how a cloud tab knows not to upload them as new ones. Those set aside for
+  // a send on its way keep theirs, for when they come back.
   const inputs = useRef(new Map<string, ImageInput>());
+  const aside = useRef(new Map<string, ImageInput>());
   const images = useMemo(() => {
     const kept = new Map<string, ImageInput>();
-    for (const a of attachments) kept.set(a.id, inputs.current.get(a.id) ?? { mediaType: a.mediaType, data: a.data, name: a.name });
+    for (const a of attachments) {
+      kept.set(a.id, inputs.current.get(a.id) ?? aside.current.get(a.id) ?? { mediaType: a.mediaType, data: a.data, name: a.name });
+      aside.current.delete(a.id);
+    }
     inputs.current = kept;
     return [...kept.values()];
   }, [attachments]);
+
+  const current = useRef(attachments);
+  current.current = attachments;
+  const setAside = useCallback((): SetAside => {
+    const taken = current.current;
+    const images = taken.map((a) => inputs.current.get(a.id) ?? { mediaType: a.mediaType, data: a.data, name: a.name });
+    taken.forEach((a, index) => aside.current.set(a.id, images[index]));
+    const ids = new Set(taken.map((a) => a.id));
+    if (taken.length) setAttachments((list) => list.filter((item) => !ids.has(item.id)));
+    if (fileRef.current) fileRef.current.value = "";
+    let settled = false;
+    return {
+      images,
+      previews: taken.map((a) => ({ url: a.previewUrl, name: a.name })),
+      settle: (sent) => {
+        if (settled) return;
+        settled = true;
+        if (sent) {
+          for (const a of taken) {
+            aside.current.delete(a.id);
+            if (a.previewUrl.startsWith("blob:")) URL.revokeObjectURL(a.previewUrl);
+          }
+        } else if (taken.length) {
+          setAttachments((list) => [...taken, ...list.filter((item) => !ids.has(item.id))]);
+        }
+      },
+    };
+  }, []);
 
   const dropZoneProps = useMemo<ImageAttachments["dropZoneProps"]>(
     () => ({
@@ -217,8 +264,8 @@ export function useImageAttachments({
   // One stable object per change, so a composer's send callback can list it
   // as a dependency without being rebuilt on every render.
   return useMemo(
-    () => ({ attachments, dragging, fileRef, addFiles, chooseFiles, remove, clear, images, notice, dropZoneProps }),
-    [attachments, dragging, addFiles, chooseFiles, remove, clear, images, notice, dropZoneProps],
+    () => ({ attachments, dragging, fileRef, addFiles, chooseFiles, remove, clear, setAside, images, notice, dropZoneProps }),
+    [attachments, dragging, addFiles, chooseFiles, remove, clear, setAside, images, notice, dropZoneProps],
   );
 }
 

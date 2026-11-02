@@ -16,6 +16,29 @@
   to **Needs you**. A required review, a closed pull request and other stops
   that wait on someone else stay at **Needs you** until they are checked again.
   (#725)
+- A conflict resolver that stops before committing its merge no longer leaves
+  the checkout half merged. Every file the base brought in used to show as the
+  branch's own uncommitted work: 23 files in Changes, and "23 uncommitted files
+  would be lost" when removing the workspace, though 22 came unchanged from
+  `main`. The resolver now commits the merge as soon as the conflicts are
+  resolved and amends any fix its checks call for into that one commit. When
+  its turn ends with nothing pushed, TerminalX aborts the unfinished merge it
+  asked for, and says so in the record. A pull request merged or closed while
+  the resolver works now ends the pipeline at once, and the resolver is told to
+  stop. A merge is left as it is when a person interrupted the resolver or
+  stopped the pipeline. (#736)
+
+### Changes panel
+
+- A merge left in progress in a local checkout is shown for what it is: what
+  is being merged, and the uncommitted files split into unresolved conflicts,
+  files changed here, and files exactly as Git merged them from the base.
+  **Commit merge** (once nothing is conflicted) and **Abort merge** (after a
+  confirmation) act on that merge only. The warning before removing a
+  workspace counts only what changed while merging as lost. The Repo panel's
+  **Commit** waits until conflicts are resolved, since it would otherwise
+  commit the conflict markers. (#736)
+
 ### Sessions and tabs
 
 - Open the session you click. A session with no tabs open was swapped for
@@ -51,8 +74,18 @@
 - Select several conversations in the sidebar (⌘-click, Shift-click, or
   Select in a row's menu), then archive, unarchive or delete them together.
   (#718)
+
 ### Chat
 
+- Show a sent message at once. Pressing Send puts the message in the chat,
+  marked as sending, and clears the composer for the next one; it is marked
+  as sent once the runtime has it. A message that could not be sent goes back
+  to the composer with the error, ahead of anything typed since, images and
+  all. (#727)
+- Keep long conversations quick. The chat is built on as events arrive instead
+  of being rebuilt for each one, and only the turns in and near the view are
+  drawn, so a message in a conversation of thousands of events appears as fast
+  as in a short one. (#727)
 - Never type a message into an agent's input box that already holds text. The
   app used to clear the box with Ctrl+U, which deletes only the row the cursor
   is on: when Claude Code had put a dropped prompt back in its box, the prompt
@@ -65,12 +98,41 @@
   input box stays the one message. A message the agent received inside a longer
   prompt is shown once, as received, with what was sent behind it, and its
   queued bubble clears. (#722)
+- Read the input box of an agent started by hand in a shell tab too, before
+  typing into it; it had no check and no Ctrl+U, so a half-typed line or a
+  prompt put back in the box went out glued to the next message. Every
+  message waiting behind a full input box says so, not only the first. Stop
+  withdraws a message still waiting on the box, marked as not sent with Send
+  again, instead of typing it whenever the box next empties. A model or effort
+  change made while the box holds text is refused with the reason rather than
+  typed later. Queued messages the agent receives as one prompt all clear, and
+  a message sent from the chat with a dropped prompt's words is shown as its
+  own. A prompt an idle agent recorded shorter or edited is shown once, as
+  changed, and a waiting note left behind when the app quit mid-wait is
+  cleared on load. (#722)
 - Cut more credentials from the redacted detail line that a refused sign-in or
   an agent that exits early shows in the chat: `key: value` and JSON forms,
   escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's
   secret-looking value, including one that runs on over lines. Errors such as
   `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
   readable. (#717)
+
+### Background sessions
+
+- Never hold a send behind slow work. Merged-workspace cleanup, Settings →
+  Storage (scanning, sizing and removal), workspace and session removal,
+  `terminalx worktrees delete` and stopping an idle agent no longer hold the
+  lock every send takes; each closes only the sessions it changes, and a send
+  to any other tab goes through at once. Checking the worktree's tree before a
+  prompt, which reads the whole checkout, now happens before the send waits
+  for anything. A send to a session that is being removed or moved is refused
+  with the reason, and one to an agent being stopped for sitting idle waits
+  for that stop and starts it again. (#727)
+- Time every send. Each tab's diagnostics note when Send was pressed, when the
+  runtime received the send and how long it waited, when the agent took the
+  prompt, and when the window showed it, so a slow send can be traced to the
+  step that took the time. (#727)
+
 ### Command line
 
 - `terminalx worktrees delete` no longer deletes sessions it never named. Without

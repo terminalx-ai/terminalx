@@ -93,15 +93,15 @@ impl Sessions {
     }
 
     pub fn usage_snapshot(&self) -> Result<crate::status::usage::UsageSnapshot> {
-        self.quick("runtime.session.usage", json!({}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.quick("runtime.session.usage", json!({}))?)
     }
 
     pub fn refresh_usage(&self, manual: bool) -> Result<crate::status::usage::UsageSnapshot> {
-        self.call("runtime.session.refreshUsage", json!({"manual":manual}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.refreshUsage", json!({"manual":manual}))?)
     }
 
     pub fn reset_codex_usage(&self) -> Result<crate::status::usage::UsageSnapshot> {
-        self.call("runtime.session.resetCodexUsage", json!({}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.resetCodexUsage", json!({}))?)
     }
 
     pub fn activity_summary(&self) -> Result<crate::store::activity::Summary> {
@@ -175,7 +175,18 @@ impl Sessions {
     }
 
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        self.tab("send", session, tab, json!({"text":text,"images":images}))
+        self.send_pressed(session, tab, text, images, None)
+    }
+
+    /// A composer's send, with when Send was pressed (`SessionManager::send_pressed`).
+    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>) -> Result<SendOutcome> {
+        self.tab("send", session, tab, json!({"text":text,"images":images,"pressedAt":pressed_at}))
+    }
+
+    /// The window drew a sent message (`SessionManager::note_shown`).
+    pub fn note_shown(&self, session: &str, tab: &str, seq: u64, timings: &crate::session::SendShown) -> Result<()> {
+        self.quick_tab("sendShown", session, tab, json!({"seq":seq,"timings":{
+            "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
     }
 
     pub fn send_confirmed(&self, session: &str, tab: &str, text: String) -> Result<SendOutcome> {

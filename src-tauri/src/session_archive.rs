@@ -228,8 +228,11 @@ pub fn kept(session: &SessionEntry, sweep: &Sweep) -> Option<Kept> {
 }
 
 /// Archive every session [`kept`] lets go. Returns them, archived, after
-/// telling the windows. Each one is looked at again under the index's lock
-/// before it goes, so a message that landed meanwhile keeps it.
+/// telling the windows. The look takes no admission: git and the pipelines
+/// are slow, and no prompt may wait on them (#727). The decision does: under
+/// it no prompt is admitted, the runtime is asked again whether a tab took
+/// something up since the look, and each session is looked at again under
+/// the index's lock before it goes, so a message that landed meanwhile keeps it.
 pub fn sweep(sink: &dyn EventSink, sweep: &Sweep) -> Result<Vec<SessionEntry>> {
     let sessions = index::load()?;
     let due: Vec<String> = sessions
@@ -238,6 +241,22 @@ pub fn sweep(sink: &dyn EventSink, sweep: &Sweep) -> Result<Vec<SessionEntry>> {
         .filter(|session| match kept(session, sweep) {
             Some(why) => {
                 log::trace!("archive: {} kept ({why:?})", session.id);
+                false
+            }
+            None => true,
+        })
+        .map(|session| session.id.clone())
+        .collect();
+    if due.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _admission = crate::issue_pipeline::admission::lock();
+    let due: Vec<String> = sessions
+        .iter()
+        .filter(|session| due.contains(&session.id))
+        .filter(|session| match (sweep.busy)(session) {
+            Some(why) => {
+                log::trace!("archive: {} kept ({why:?}) since the look", session.id);
                 false
             }
             None => true,

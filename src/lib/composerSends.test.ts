@@ -1,25 +1,20 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { beginComposerSend, clearComposerSendError, composerSendScope, finishComposerSend, useComposerSend } from "./composerSends";
-import { setDraft } from "./drafts";
 
 afterEach(cleanup);
 
 it("retains request ownership without subscribers, isolates scopes and ignores stale settlement", () => {
   const key = "store-owner";
-  setDraft("store-tab", "P");
-  const first = beginComposerSend(key, "store-tab")!;
-  expect(beginComposerSend(key, "store-tab")).toBeNull();
-  const other = beginComposerSend("other-owner", "other-tab")!;
-  setDraft("store-tab", "P");
-  expect(first.ownsDraft()).toBe(false);
-  expect(other.ownsDraft()).toBe(true);
+  const first = beginComposerSend(key)!;
+  expect(beginComposerSend(key)).toBeNull();
+  const other = beginComposerSend("other-owner")!;
   const failure = new Error("disconnected");
   finishComposerSend(key, first, failure);
   const view = renderHook(() => useComposerSend(key));
   expect(view.result.current.error).toBe(failure);
   let second!: NonNullable<ReturnType<typeof beginComposerSend>>;
-  act(() => { second = beginComposerSend(key, "store-tab")!; });
+  act(() => { second = beginComposerSend(key)!; });
   expect(view.result.current.error).toBeNull();
   act(() => finishComposerSend(key, first, failure));
   expect(view.result.current.pending).toBe(second);
@@ -29,7 +24,7 @@ it("retains request ownership without subscribers, isolates scopes and ignores s
 });
 
 it("keeps failure for remount and clears it on explicit recovery", () => {
-  const request = beginComposerSend("recovery-owner", "recovery-tab")!;
+  const request = beginComposerSend("recovery-owner")!;
   finishComposerSend("recovery-owner", request, new Error("disconnected"));
   const first = renderHook(() => useComposerSend("recovery-owner"));
   expect(first.result.current.error).toBeInstanceOf(Error);
@@ -43,10 +38,10 @@ it("keeps failure for remount and clears it on explicit recovery", () => {
 it("keeps the same mailbox owner through generations while fencing distinct destinations", () => {
   const backend = { kind: "cloud", key: "cloud:scope-org:scope-ws:scope-session", logSessionId: "scope-session", generation: "g1" };
   const key = composerSendScope(backend, "scope-tab");
-  const operation = beginComposerSend(key, "scope-tab")!;
+  const operation = beginComposerSend(key)!;
   const reconnected = { ...backend, generation: "g2" };
   expect(composerSendScope(reconnected, "scope-tab")).toBe(key);
-  expect(beginComposerSend(composerSendScope(reconnected, "scope-tab"), "scope-tab")).toBeNull();
+  expect(beginComposerSend(composerSendScope(reconnected, "scope-tab"))).toBeNull();
   const destinations = [
     { backend: { ...backend, kind: "local" }, tab: "scope-tab" },
     { backend: { ...backend, key: "cloud:other-org:scope-ws:scope-session" }, tab: "scope-tab" },
@@ -58,7 +53,7 @@ it("keeps the same mailbox owner through generations while fencing distinct dest
   for (const destination of destinations) {
     const distinct = composerSendScope(destination.backend, destination.tab);
     expect(distinct).not.toBe(key);
-    const other = beginComposerSend(distinct, destination.tab)!;
+    const other = beginComposerSend(distinct)!;
     expect(other).not.toBeNull();
     finishComposerSend(distinct, other);
   }

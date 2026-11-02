@@ -100,8 +100,9 @@ fn restart_reaches(seen: Option<&str>, attached: Option<&str>, unresponsive: boo
     unresponsive && attached.is_none_or(|attached| seen == Some(attached))
 }
 
-/// One restart at a time, for every window.
-static RESTART: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// One restart at a time, for every window, and for replacing an older
+/// runtime (`replace.rs`).
+pub(super) static RESTART: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Presentation-only observer installed once per window process. Scheduling and
 /// activity accounting remain in the owner; reopening does not replay usage.
@@ -134,7 +135,8 @@ fn status(app: &AppHandle, window: &str) -> ConnectionState {
     let runtime = state.runtime();
     let unattached = state.runtime_error.lock().unwrap().clone();
     let status = state.runtime_supervisor.status(window, runtime.as_deref(), &unattached);
-    judged(status, state.runtime_health.unresponsive(), runtime.as_ref().map(|runtime| runtime.epoch()))
+    let status = judged(status, state.runtime_health.unresponsive(), runtime.as_ref().map(|runtime| runtime.epoch()));
+    super::replace::shown(&state.runtime_replacement, status)
 }
 
 /// What a window is told: the supervisor's status, unless the runtime
@@ -192,6 +194,20 @@ pub async fn local_runtime_restart(app: AppHandle, window: tauri::WebviewWindow,
         // made now, starts a fresh runtime.
         if let Some(previous) = attached { previous.disconnect(); }
         state.runtime_supervisor.retry_now();
+        Ok(status(&app, window.label()))
+    }).await.map_err(|error| error.to_string())?
+}
+
+/// "Restart now" for a runtime older than this app (#730): replace runtime
+/// `epoch` with the one bundled with the app without waiting for its agents'
+/// turns, which stop with it. Each agent picks up its conversation again when
+/// its tab next starts. A runtime another window already replaced, or one
+/// that is not older, is left alone.
+#[tauri::command]
+pub async fn local_runtime_replace(app: AppHandle, window: tauri::WebviewWindow, epoch: String) -> Result<ConnectionState, String> {
+    let _restart = RESTART.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        super::replace::switch(&app.state::<AppState>().runtime_replacement, &super::replace::AppHost(&app), &epoch, true)?;
         Ok(status(&app, window.label()))
     }).await.map_err(|error| error.to_string())?
 }
@@ -263,7 +279,7 @@ mod tests {
 
     #[test]
     fn a_runtime_found_not_responding_is_said_so_in_place_of_connected_or_reconnecting() {
-        let connected = || ConnectionState::Connected { epoch: "wedged".into(), generation: 1, view: 0 };
+        let connected = || ConnectionState::Connected { epoch: "wedged".into(), generation: 1, view: 0, outdated: None };
         let connecting = || ConnectionState::Connecting { terminal: false, attempt: 3, retry_in_ms: 500, down_ms: 20_000,
             message: "Could not reconnect to the background runtime".into() };
         let finding = || Some("The TerminalX runtime did not answer runtime.liveness within 15 seconds.".to_string());

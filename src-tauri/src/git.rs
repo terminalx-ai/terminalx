@@ -250,6 +250,56 @@ fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// What Git makes by itself of merging `theirs` into `ours`
+/// (`merge-tree --write-tree`): the tree, and whether it holds conflicts.
+/// No checkout or index is touched; the objects it writes are unreferenced.
+pub fn merge_tree(cwd: &Path, ours: &str, theirs: &str) -> Result<(String, bool)> {
+    let out = git().current_dir(cwd).args(["merge-tree", "--write-tree", ours, theirs]).output().context("git merge-tree")?;
+    // Exit 1 is "merged, with conflicts": the tree is still printed first.
+    let conflicted = match out.status.code() {
+        Some(0) => false,
+        Some(1) => true,
+        _ => bail!("git merge-tree: {}", String::from_utf8_lossy(&out.stderr).trim()),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let tree = stdout.lines().next().map(str::trim).filter(|tree| is_tree_id(tree)).context("git merge-tree printed no tree")?;
+    Ok((tree.to_string(), conflicted))
+}
+
+/// The Git operation under way in the checkout, if one is: a merge, a
+/// rebase, a cherry-pick, a revert or a bisect left part way.
+pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
+    let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
+    let dir = Path::new(dir.trim());
+    let marks = [
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("BISECT_LOG", "bisect"),
+        ("sequencer", "cherry-pick or revert"),
+    ];
+    Ok(marks.into_iter().find(|(mark, _)| std::fs::symlink_metadata(dir.join(mark)).is_ok()).map(|(_, what)| what))
+}
+
+/// The paths `git status --porcelain -z` lists as unmerged.
+fn unmerged_in(porcelain: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut entries = porcelain.split('\0').filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        let (Some(flags), Some(path)) = (entry.get(..2), entry.get(3..)) else { continue };
+        // A rename or copy is followed by the path it came from.
+        if flags.starts_with(['R', 'C']) {
+            entries.next();
+        }
+        if matches!(flags, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU") {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
 pub fn is_repo(cwd: &Path) -> bool {
     run_ok(cwd, &["rev-parse", "--is-inside-work-tree"])
 }
@@ -510,6 +560,12 @@ pub struct WorkStatus {
     /// Commits on this branch that `origin/<default>` doesn't have.
     pub ahead_of_base: Option<u32>,
     pub head: Option<String>,
+    /// A merge, rebase, cherry-pick, revert or bisect left in progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Paths with unresolved conflicts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicted: Vec<String>,
 }
 
 pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
@@ -533,7 +589,9 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
         return WorkStatus::default();
     }
     let branch = current_branch(cwd);
-    let dirty = run(cwd, &["status", "--porcelain", "--untracked-files=normal", "--"]).map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let porcelain = run(cwd, &["status", "--porcelain", "-z", "--untracked-files=normal", "--"]).ok();
+    let dirty = porcelain.as_deref().is_some_and(|s| !s.is_empty());
+    let conflicted = porcelain.as_deref().map(unmerged_in).unwrap_or_default();
     let upstream = run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).ok().map(|s| s.trim().to_string());
     let (ahead, behind) = upstream_counts(cwd);
     let default = default_branch(cwd);
@@ -545,7 +603,8 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
         };
         run(cwd, &["rev-list", "--count", &format!("{base}..HEAD")]).ok().and_then(|s| s.trim().parse().ok())
     });
-    WorkStatus { is_repo: true, dirty, branch, upstream, ahead, behind, default_branch: default, ahead_of_base, head: head_commit(cwd) }
+    let operation = operation_in_progress(cwd).ok().flatten().map(String::from);
+    WorkStatus { is_repo: true, dirty, branch, upstream, ahead, behind, default_branch: default, ahead_of_base, head: head_commit(cwd), operation, conflicted }
 }
 
 // ---------------------------------------------------------------- worktrees

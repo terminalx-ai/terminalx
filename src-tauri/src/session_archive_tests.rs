@@ -174,6 +174,36 @@ fn the_sweep_archives_what_nothing_keeps_and_tells_the_windows() {
     assert_eq!(archived, ["quiet", "already"]);
 }
 
+/// The look runs without admission (#727), so a tab can take up a message
+/// between it and the decision; the decision asks the runtime again.
+#[test]
+fn a_tab_that_took_something_up_since_the_look_keeps_its_session() {
+    let _home = store::temp_home();
+    let now = Utc::now();
+    index::save(&[session("quiet", Some(10), now)]).unwrap();
+    let sink = BroadcastSink::new(16);
+    let asked = std::cell::Cell::new(0);
+    // Idle when looked at, holding a queued message by the decision.
+    let busy = |_: &SessionEntry| {
+        asked.set(asked.get() + 1);
+        (asked.get() > 1).then_some(Kept::Queued)
+    };
+    let none = HashSet::new();
+    let archived = sweep(&sink, &Sweep {
+        limit: Duration::days(7),
+        now,
+        shown: &none,
+        busy: &busy,
+        in_pipelines: &none,
+        local_work: &|_| false,
+        logs_written: &|_| None,
+    })
+    .unwrap();
+    assert!(archived.is_empty());
+    assert_eq!(asked.get(), 2, "asked at the look and again at the decision");
+    assert!(!index::get("quiet").unwrap().archived);
+}
+
 /// What the app's menus, the bulk bar and the CLI all run.
 #[test]
 fn several_sessions_are_archived_together_or_not_at_all_and_a_person_makes_a_swept_one_theirs() {

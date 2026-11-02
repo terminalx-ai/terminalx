@@ -6,11 +6,13 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use super::{parse_claude_window, parse_scoped_claude_window, upsert_window, UsageWindow};
+use super::{claude_used_percent, parse_claude_window, parse_scoped_claude_window, upsert_window, UsageWindow};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// The rolling windows every account has, whether or not one is running.
+const ACCOUNT_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 #[cfg(target_os = "macos")]
@@ -64,6 +66,17 @@ pub(super) fn parse_response(payload: &Value, updated_at: i64) -> Vec<UsageWindo
                 .flatten()
         }) {
             upsert_window(&mut windows, window);
+        }
+    }
+    // An account window with no running instance comes back as `null`, or
+    // with neither a percentage nor a deadline: one not yet started (#729).
+    // Dropping it left an expired window on screen for hours.
+    for key in ACCOUNT_WINDOWS {
+        let idle = response.get(key).is_some_and(|raw| {
+            raw.is_null() || (claude_used_percent(raw).is_none() && raw.get("resets_at").is_none_or(Value::is_null))
+        });
+        if idle && !windows.iter().any(|window| window.key == key) {
+            windows.extend(parse_claude_window(key, &json!({"utilization": 0}), updated_at));
         }
     }
     for window in &mut windows { window.source = "oauth".into(); }
