@@ -117,7 +117,10 @@ pub trait Host: Send + Sync {
         Ok([Some(&pipeline.author), pipeline.reviewer.as_ref(), pipeline.resolver.as_ref()].into_iter().flatten().all(|who|
             self.session(&who.session_id).is_ok_and(|session| session.tab(&who.tab_id).is_some_and(|tab| matches!(tab.status, crate::store::index::TabStatus::Idle | crate::store::index::TabStatus::Completed)))))
     }
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _behind: bool) -> Result<Option<super::Resolution>> { Ok(None) }
+    /// The base pinned for a merge into the branch, if one is due: where git
+    /// finds a conflict, or wherever `required`, GitHub asking for the merge
+    /// whatever git finds. `None` once the branch contains its base.
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _required: bool) -> Result<Option<super::Resolution>> { Ok(None) }
     fn open_resolver(&self, _pipeline: &Pipeline, _author: &SessionEntry) -> Result<SessionRef> { bail!("Conflict resolution is not available on this host") }
     fn verify_resolution(&self, _cwd: &Path, _resolution: &super::Resolution, _head: &str, _branch: &str) -> Result<()> { bail!("Resolution verification is not available on this host") }
     /// `git merge --abort`, only while HEAD is `head` and the merge in
@@ -900,13 +903,19 @@ impl Step<'_> {
         if self.p.state == State::NeedsYou && !matches!(self.p.reason, Some(StopReason::Conflicts | StopReason::Behind)) { return Ok(false); }
         let workspace = self.host.workspace(&self.cwd)?;
         if workspace.branch.as_deref() != Some(self.p.branch.as_str()) || workspace.ahead_of_base == 0 { return Ok(false); }
-        let (base, behind, remote) = if let Some(link) = &self.p.pr {
+        // `required`: whether a merge of the base is due whatever git finds here.
+        let (base, required, remote) = if let Some(link) = &self.p.pr {
             let pr = self.host.pull_request(&self.cwd, link.number)?;
             if pr.state != "OPEN" { self.notice_outcome()?; return Ok(true); }
             let conflict = pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY";
             let behind = pr.merge_state == "BEHIND";
             if !conflict && !behind { return Ok(false); }
-            (pr.base, behind, Some(pr.head_sha))
+            // GitHub's conflict is the one the gate stops on, so it is the one
+            // resolved, even where git merges cleanly here. With criss-crossed
+            // history (two merge bases) git merges the bases first and GitHub
+            // does not. Merging the base in leaves one merge base, and GitHub
+            // then agrees.
+            (pr.base, true, Some(pr.head_sha))
         } else {
             let Some(base) = workspace.default_branch else { return Ok(false) };
             (base, false, None)
@@ -920,7 +929,7 @@ impl Step<'_> {
             self.needs_you(StopReason::UncommittedChanges { files: workspace.dirty });
             return Ok(true);
         }
-        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, behind)? else { return Ok(false) };
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, required)? else { return Ok(false) };
         if remote.as_ref().is_some_and(|head| !same_commit(head, &resolution.head)) {
             self.needs_you(StopReason::HeadMoved { reviewed: resolution.head, head: remote.unwrap() });
             return Ok(true);
@@ -1352,16 +1361,20 @@ impl Step<'_> {
     /// the merge gate would refuse.
     fn leave_resolution(&mut self) -> Result<()> {
         let link = self.p.pr.clone().context("There is no pull request yet.")?;
-        if self.clean_workspace()?.is_none() {
+        let Some(workspace) = self.clean_workspace()? else {
             return Ok(());
-        }
+        };
         self.doing = "Reading the pull request";
         let pr = self.host.pull_request(&self.cwd, link.number)?;
         if pr.state != "OPEN" {
             return self.evaluate_snapshot(pr, Merger::Pipeline);
         }
         self.doing = "Comparing the branch with its base";
-        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, false)? else {
+        // GitHub's conflict is the gate's, so it decides as it does in
+        // `watch_conflicts` (#748), but only while it is about this head: a
+        // merge made here and not pushed yet is git's to judge.
+        let required = same_commit(&workspace.head, &pr.head_sha) && (pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY");
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, required)? else {
             return self.push_and_review();
         };
         if !store::get(&self.p.id)?.resolve_conflicts {
