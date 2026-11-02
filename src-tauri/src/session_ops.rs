@@ -11,6 +11,7 @@ use crate::sink::EventSink;
 use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, SessionKind, TabEntry, TabStatus};
 use crate::store::projects;
 use crate::{git, names, store};
+use crate::issue_pipeline::admission;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -69,6 +70,8 @@ pub(crate) fn notify_sessions_deleted(sink: &dyn EventSink, removed: &[SessionEn
 pub struct NewTab {
     pub harness: String,
     #[serde(default)]
+    pub transport: index::AgentTransport,
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
@@ -107,9 +110,43 @@ pub struct NewSession {
 }
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
+    if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
     if !req.use_worktree && requested_worktree && !req.on_main {
         return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
+    }
+    Ok(())
+}
+
+/// Settings → Experimental → Native Codex (#644): a Codex conversation a
+/// person starts goes through Codex's app server instead of its terminal,
+/// where the app server can serve it. Not an issue's or an automation's,
+/// which run on the terminal engine, nor one in Ask every time, which the app
+/// server cannot represent. A Codex older than its minimum is caught at the
+/// tab's first launch (`SessionManager::codex_stdio_falls_back`).
+pub(crate) fn prefer_native_codex(tab: &mut NewTab, background: bool) {
+    if crate::store::settings::load().experimental.native_codex { native_codex(tab, background) }
+}
+
+/// The rules alone, for a request that carries the preference itself: a cloud
+/// workspace's `session.create` / `session.addTab` from the desktop.
+pub(crate) fn native_codex(tab: &mut NewTab, background: bool) {
+    let mode = index::permission_mode_or_default(tab.permission_mode.as_deref());
+    if tab.harness == "codex" && !background && crate::harness::codex::stdio::Stdio::validate_mode(&mode).is_ok() {
+        tab.transport = index::AgentTransport::ExperimentalCodexStdio;
+    }
+}
+
+/// [`prefer_native_codex`] for a session's first tab.
+pub(crate) fn prefer_native_codex_session(req: &mut NewSession) {
+    let background = req.issue.is_some() || req.automation.is_some();
+    if let Some(tab) = &mut req.tab { prefer_native_codex(tab, background) }
+}
+
+fn validate_transport(tab: &NewTab) -> Result<()> {
+    if tab.transport == index::AgentTransport::ExperimentalCodexStdio {
+        if tab.harness != "codex" { return Err("Experimental stdio is available only for new Codex sessions.".into()); }
+        crate::harness::codex::stdio::Stdio::validate_mode(&index::permission_mode_or_default(tab.permission_mode.as_deref())).map_err(err)?;
     }
     Ok(())
 }
@@ -151,6 +188,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
     TabEntry {
         id: uuid::Uuid::now_v7().to_string(),
         harness: t.harness.clone(),
+        transport: t.transport,
         title: None,
         model: t.model.clone(),
         effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None,
@@ -162,6 +200,8 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         context_used: None,
         context_max: None,
         fork_from: None,
+        continuation: None,
+        parked: false,
         follow: Default::default(),
         unknown: BTreeMap::new(),
     }
@@ -310,6 +350,7 @@ pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat
 }
 
 pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry> {
+    if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let id = uuid::Uuid::now_v7().to_string();
     let scratch = store::quick::create(&id).map_err(err)?;
     let created = (|| {
@@ -435,6 +476,8 @@ pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str
         return Ok(entry);
     }
     let scratch = store::quick::is_scratch(&entry.id, &target);
+    // Nothing starts in the old folder between the stop and the move.
+    let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
     carry_conversations(&entry, &target);
     let branch = if scratch { None } else { git::current_branch(Path::new(&target)) };
@@ -471,6 +514,7 @@ pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_
     let entry = quick_chat(session_id)?;
     let project = projects::add(project_path).map_err(err)?.path;
     projects::refuse_mirror(&project).map_err(err)?;
+    let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
     carry_conversations(&entry, &project);
     let branch = git::current_branch(Path::new(&project));
@@ -525,7 +569,15 @@ pub(crate) fn sweep_idle_quick_chats_fallible(sink: &dyn EventSink, days: u32, b
         let last = chrono::DateTime::parse_from_rfc3339(&session.modified).ok();
         session.is_quick() && !session.pinned && !session.archived && !working && last.is_some_and(|last| last < cutoff)
     };
-    let doomed: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
+    let candidates: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Looked at again behind a fence: a prompt sent since the first look has
+    // opened its turn by now, and keeps its chat; none can be sent after.
+    let _deleting = admission::fence(admission::Kind::Refuse(admission::SESSION_DELETED), candidates.iter().map(|session| admission::Scope::Session(session.id.clone())));
+    let chosen: std::collections::HashSet<&str> = candidates.iter().map(|session| session.id.as_str()).collect();
+    let doomed: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| chosen.contains(session.id.as_str()) && idle(session) && !busy(session)).collect();
     for session in &doomed {
         stop(session)?;
     }
@@ -762,6 +814,9 @@ pub(crate) struct WorkspaceRemoved {
     /// that they have moved to the project root.
     pub sessions: Vec<SessionEntry>,
     pub removal: git::WorktreeRemoval,
+    /// Processes found still working in it once its sessions were stopped:
+    /// leftover builds were stopped, anything else listed (`stray_processes`).
+    pub strays: Vec<crate::stray_processes::Stray>,
 }
 
 /// How an error from [`remove_workspace`] starts when the workspace was left
@@ -832,6 +887,10 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     if !permitted(&before, &request.confirmation) {
         return Err(needs_confirmation(&before, &request.confirmation, "Nothing was removed."));
     }
+    // From the stop to the end nothing starts in the workspace: a prompt to
+    // one of its sessions is refused, and every other session's is admitted
+    // as usual while the folder goes (#727). The fetch above was outside it.
+    let _removing = admission::fence(admission::Kind::Refuse(admission::WORKSPACE_REMOVED), [admission::Scope::checkout(&target)]);
     for session in &affected {
         stop(session)?;
     }
@@ -855,6 +914,13 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
         guard()?;
     }
     let on_disk = std::fs::symlink_metadata(&target).is_ok();
+    // What the sessions' tools let go of would run on from a deleted directory.
+    let strays = if on_disk { crate::stray_processes::stop_in(&target) } else { Vec::new() };
+    if !strays.is_empty() {
+        // Programs only: an argument can carry a token or a password.
+        let listed: Vec<String> = strays.iter().map(|stray| format!("{} {} ({})", stray.pid, stray.program, if stray.stopped { "stopped" } else { "left running" })).collect();
+        log::info!("removing workspace {}: processes still working in it: {}", target.display(), listed.join("; "));
+    }
     let removal = if on_disk {
         let verified_head = if after.safe { after.head.as_deref() } else { None };
         let options = crate::workspaces::DeleteOptions { delete_branch: request.delete_branch, direct: request.direct, verified_head };
@@ -878,7 +944,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
             moved
         }
     };
-    Ok(WorkspaceRemoved { sessions, removal })
+    Ok(WorkspaceRemoved { sessions, removal, strays })
 }
 
 /// Record that the workspace these sessions ran in is gone: they keep their
@@ -1010,6 +1076,7 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
 
 /// Add an agent tab to a session and make it the active one.
 pub(crate) fn add_tab_entry(session_id: &str, tab: &NewTab) -> Result<TabEntry> {
+    validate_transport(tab)?;
     let t = new_tab_entry(tab);
     let out = t.clone();
     index::update_session(session_id, |s| {
@@ -1073,6 +1140,7 @@ pub(crate) fn delete_session_blocking(sink: &dyn EventSink, session_id: &str, st
 /// A stop error leaves the workspace and conversation records intact.
 pub(crate) fn delete_session_blocking_fallible(sink: &dyn EventSink, session_id: &str, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<SessionEntry> {
     let entry = index::get(session_id).map_err(err)?;
+    let _deleting = admission::fence(admission::Kind::Refuse(admission::SESSION_DELETED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
     remove_session_entries(std::slice::from_ref(&entry))?;
     notify_sessions_deleted(sink, std::slice::from_ref(&entry));
@@ -1098,6 +1166,33 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_codex_is_for_codex_conversations_a_person_starts_in_a_mode_it_can_serve() {
+        let tab = |harness: &str, mode: Option<&str>| NewTab { transport: Default::default(), harness: harness.into(), model: String::new(), effort: None, permission_mode: mode.map(Into::into) };
+        let chosen = |mut tab: NewTab, background: bool| { native_codex(&mut tab, background); tab.transport };
+        for mode in [None, Some("auto"), Some("plan"), Some("acceptEdits"), Some("bypassPermissions")] {
+            assert_eq!(chosen(tab("codex", mode), false), index::AgentTransport::ExperimentalCodexStdio, "{mode:?}");
+        }
+        assert_eq!(chosen(tab("codex", Some("manual")), false), index::AgentTransport::Pty, "Ask every time stays on the terminal");
+        assert_eq!(chosen(tab("codex", None), true), index::AgentTransport::Pty, "issues and automations stay on the terminal");
+        assert_eq!(chosen(tab("claude", None), false), index::AgentTransport::Pty);
+
+        let _home = store::temp_home();
+        let mut off = tab("codex", None);
+        prefer_native_codex(&mut off, false);
+        assert_eq!(off.transport, index::AgentTransport::Pty, "off unless turned on");
+        let mut settings = store::settings::load();
+        settings.experimental.native_codex = true;
+        store::settings::save(&settings).unwrap();
+        let mut issue = NewSession { project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
+        prefer_native_codex_session(&mut issue);
+        assert_eq!(issue.tab.as_ref().unwrap().transport, index::AgentTransport::ExperimentalCodexStdio);
+        issue.tab = Some(tab("codex", None));
+        issue.issue = Some(IssueRef { provider: "github".into(), id: "1".into(), identifier: "#1".into(), title: "t".into(), url: "u".into() });
+        prefer_native_codex_session(&mut issue);
+        assert_eq!(issue.tab.unwrap().transport, index::AgentTransport::Pty);
+    }
 
     /// A quick chat is kept while the reader has a shell open in it. The
     /// shell that takes an exited agent's place is in the tab's own pane,
@@ -1145,7 +1240,7 @@ mod tests {
             issue: None,
             automation: None,
             cwd: None,
-            tab: Some(NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            tab: Some(NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
         })
         .unwrap()
     }
@@ -1511,7 +1606,7 @@ mod tests {
         create_quick_chat_entry(NewQuickChat {
             title: None,
             cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
-            tab: Some(NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            tab: Some(NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
         })
         .unwrap()
     }
@@ -1526,7 +1621,7 @@ mod tests {
         assert!(projects::list().unwrap().0.is_empty());
         let sink = sink();
         let mut events = sink.subscribe();
-        let first = create_quick_chat_blocking(&sink, NewQuickChat { title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
+        let first = create_quick_chat_blocking(&sink, NewQuickChat { title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
         assert_eq!(&*events.try_recv().unwrap().event, "session_created");
 
         assert_eq!(first.kind, SessionKind::Quick);
@@ -1960,7 +2055,7 @@ mod tests {
             let claude = claude_transcript(&session, CONVERSATION);
             let codex_session = session_in(dir.path(), &session.cwd, "Codex companion");
             let codex_id = "22222222-2222-4222-8222-222222222222";
-            let codex_tab = add_tab_entry(&codex_session.id, &NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }).unwrap();
+            let codex_tab = add_tab_entry(&codex_session.id, &NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }).unwrap();
             index::update_tab(&codex_session.id, &codex_tab.id, |tab| {
                 tab.provider_session_id = Some(codex_id.into());
                 Ok(())

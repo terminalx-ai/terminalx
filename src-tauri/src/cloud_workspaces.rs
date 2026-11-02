@@ -3143,6 +3143,9 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_repository_ref_not_found"
             | "cloud_workspace_repository_verification_unavailable"
             | "cloud_workspace_agent_credential_required"
+            // The provider no longer accepts the organization's login for an
+            // agent: someone has to sign it in again (terminalx-saas #241).
+            | "cloud_agent_credential_reauth_required"
             | "cloud_workspace_device_auth_unavailable"
             | "cloud_workspace_operation_in_progress"
             | "cloud_workspace_active_work"
@@ -4787,6 +4790,23 @@ mod tests {
         let error = service.providers().unwrap_err();
         request.join().unwrap();
         assert_eq!(error.code, "cloud_provider_permission_denied");
+    }
+
+    /// terminalx-saas #241: a login the provider no longer accepts is one
+    /// code the page turns into "Sign in again", and its list row says so.
+    #[test]
+    fn a_login_the_provider_refused_reaches_the_page_as_sign_in_required() {
+        let (base, _, request) = serve_once(response("409 Conflict", r#"{"error":"cloud_agent_credential_reauth_required"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.providers().unwrap_err().code, "cloud_agent_credential_reauth_required");
+        request.join().unwrap();
+
+        let body = r#"{"credentials":[{"id":"c1","provider":"codex","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","displayIdentity":"ada@example.com","version":3,"updatedAt":5,"state":"sign-in-required","sharedUse":"organization"}]}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.agent_logins(None).unwrap();
+        request.join().unwrap();
+        assert_eq!(serde_json::to_value(&listed).unwrap()["credentials"][0]["state"], "sign-in-required");
     }
 
     #[test]

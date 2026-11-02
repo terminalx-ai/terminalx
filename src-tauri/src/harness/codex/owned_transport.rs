@@ -181,7 +181,7 @@ impl Sink for BoundSink {
 /// Selected notification fields from rust-v0.164.0 v2 item/turn/notification
 /// schemas. This is not a full JSON-RPC dispatcher or validation of provider
 /// emission semantics. Unknown/malformed input produces no positive evidence.
-fn decode(line: &str, thread_id: &str) -> Option<Observation> {
+pub(super) fn decode(line: &str, thread_id: &str) -> Option<Observation> {
     let value: Value = serde_json::from_str(line).ok()?;
     // Requests (even id:null) and responses are never lifecycle notifications.
     if value.get("id").is_some() { return None; }

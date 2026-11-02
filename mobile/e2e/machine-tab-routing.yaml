@@ -1,0 +1,41 @@
+# Run on an already paired, connected iPhone simulator. Do not clear app data
+# or launch/relaunch: this regression must preserve the existing connection.
+# HOST_ID is the selected Mac's non-secret ID from machine-row-<id> in the UI.
+appId: com.terminalx.next.mobile
+name: Connected machine opens the Sessions tab (#653)
+---
+- tapOn:
+    id: machines-tab
+- assertVisible:
+    id: machines-tab
+    selected: true
+- assertVisible:
+    id: machine-row-${HOST_ID}
+    text: "(?s).*Connected.*"
+# First visit must work even if Sessions has never been selected this launch.
+- tapOn:
+    id: machine-row-${HOST_ID}
+- assertVisible:
+    id: sessions-tab
+    selected: true
+- assertVisible: "Live · end-to-end encrypted"
+- assertVisible: "Search sessions"
+# Repeat after visiting Sessions, matching the reported reproduction.
+- repeat:
+    times: 2
+    commands:
+      - tapOn:
+          id: machines-tab
+      - assertVisible:
+          id: machines-tab
+          selected: true
+      - assertVisible:
+          id: machine-row-${HOST_ID}
+          text: "(?s).*Connected.*"
+      - tapOn:
+          id: machine-row-${HOST_ID}
+      - assertVisible:
+          id: sessions-tab
+          selected: true
+      - assertVisible: "Live · end-to-end encrypted"
+      - assertVisible: "Search sessions"

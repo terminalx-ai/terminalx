@@ -82,10 +82,12 @@ mod media;
 mod media_types;
 mod git;
 mod github;
+mod unfinished_merge;
 mod pr_associations;
 mod github_identity;
 mod harness;
 pub mod hooks;
+mod idle_agents;
 #[cfg(feature = "desktop")]
 mod issue_control;
 #[cfg(feature = "desktop")]
@@ -115,6 +117,7 @@ mod relay_e2ee;
 pub mod remote;
 mod session;
 mod session_ops;
+mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
@@ -131,6 +134,7 @@ mod terminal_perf;
 mod work_claims;
 mod workspaces;
 mod worktree_cleanup;
+mod worktree_control;
 
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
@@ -165,6 +169,12 @@ pub struct AppState {
     manager: std::sync::Mutex<Option<session::SessionManager>>,
     runtime: std::sync::Mutex<Option<Arc<local_runtime::desktop::Desktop>>>,
     runtime_error: std::sync::Mutex<String>,
+    /// Re-establishes `runtime` after a loss, without reloading a window.
+    runtime_supervisor: local_runtime::supervisor::Supervisor,
+    /// Whether the attached runtime still answers (#661).
+    runtime_health: local_runtime::ui::Health,
+    /// Whether the attached runtime is older than this app, and replacing it (#730).
+    runtime_replacement: local_runtime::replace::Replacement,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
 }
 
@@ -185,16 +195,36 @@ impl AppState {
 
 }
 
+/// Quitting fences the runtime's sharing and paired devices, on the main
+/// thread. A runtime that has stopped answering is let go first, so those
+/// fences fail at once instead of each waiting out a timeout (#661).
+#[cfg(feature = "desktop")]
+fn let_go_of_unresponsive_runtime(state: &AppState) {
+    if state.runtime_health.unresponsive().is_some() {
+        if let Some(runtime) = state.runtime() { runtime.disconnect(); }
+    }
+}
+
+/// The desktop's log file, `desktop.log` beside the runtime's (#716), kept
+/// from setup on: the app's stderr goes nowhere once it is opened normally.
+#[cfg(all(feature = "desktop", unix))]
+static DESKTOP_LOG: std::sync::OnceLock<std::sync::Mutex<local_runtime::log_file::Log>> = std::sync::OnceLock::new();
+
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    #[cfg(unix)]
+    logger.target(env_logger::Target::Pipe(Box::new(local_runtime::log_file::Tee::new(&DESKTOP_LOG))))
+        .write_style(env_logger::WriteStyle::Never);
+    logger.init();
     let host = Arc::new(harness::host::Host::new());
     let codex_models = Arc::new(harness::codex::models::Cache::default());
     let terminals = Arc::new(pty::Terminals::new());
     let status_state = Arc::new(status::StatusState::default());
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    pairing.attach_models(codex_models.clone());
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     let paired = pairing.clone();
     let work_claims = Arc::new(work_claims::WorkClaims::new(account.clone(), move || paired.host_id()));
@@ -235,6 +265,9 @@ pub fn run() {
         manager: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(None),
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
+        runtime_supervisor: Default::default(),
+        runtime_health: Default::default(),
+        runtime_replacement: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
 
@@ -263,6 +296,13 @@ pub fn run() {
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .setup(move |app| {
+            #[cfg(unix)]
+            match app.path().app_log_dir() {
+                Ok(dir) => if let Err(error) = local_runtime::log_file::keep(&DESKTOP_LOG, &dir.join("desktop.log")) {
+                    log::warn!("the desktop log is not kept in a file: {error}");
+                },
+                Err(error) => log::warn!("the desktop log is not kept in a file: {error}"),
+            }
             // A Codex sign-in home left by an app that crashed or was force-quit (PRO-79).
             #[cfg(feature = "desktop")]
             std::thread::spawn(|| codex_device_login::sweep_stale(&codex_device_login::homes_parent()));
@@ -334,16 +374,27 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
-            if let Err(error) = local_runtime::ui::connect(app.handle()) {
-                *app.state::<AppState>().runtime_error.lock().unwrap() = format!("{error:#}");
-                log::error!("attach background runtime: {error:#}");
+            let state = app.state::<AppState>();
+            state.runtime_supervisor.start(app.handle())?;
+            match local_runtime::supervisor::attach(app.handle()) {
+                Ok(generation) => state.runtime_supervisor.attached(generation),
+                Err(error) => {
+                    *state.runtime_error.lock().unwrap() = format!("{error:#}");
+                    log::error!("attach background runtime: {error:#}");
+                    state.runtime_health.attach_failed(&error);
+                    state.runtime_supervisor.unattached(&error);
+                }
             }
+            local_runtime::ui::watch(app.handle());
+            local_runtime::replace::watch(app.handle());
             work_claims.start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
+            local_runtime::ui::local_runtime_restart,
+            local_runtime::ui::local_runtime_replace,
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
@@ -477,7 +528,8 @@ pub fn run() {
             commands::session_guest_leave,
             commands::pairing_generate,
             commands::pairing_revoke,
-            commands::pairing_set_host_name,
+            commands::machine_name,
+            commands::set_machine_name,
             commands::add_project,
             commands::chats_dir,
             commands::remove_project,
@@ -526,6 +578,7 @@ pub fn run() {
             commands::set_active_tab,
             commands::delete_session,
             commands::list_harnesses,
+            commands::check_agent_readiness,
             commands::list_skills,
             commands::skill_detail,
             commands::work_status,
@@ -543,9 +596,14 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::report_send_shown,
+            commands::resend_unsent,
+            commands::resend_message,
+            commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
             commands::tab_handoff,
+            commands::tab_to_terminal,
             commands::ensure_tab_started,
             commands::tab_pane,
             commands::cancel_queued,
@@ -582,6 +640,9 @@ pub fn run() {
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
+            commands::unfinished_merge,
+            commands::commit_merge,
+            commands::abort_merge,
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,
@@ -659,6 +720,10 @@ pub fn run() {
             commands::work_claims_set_cloud,
             commands::work_status_settings,
             commands::set_work_status_settings,
+            commands::agent_settings,
+            commands::set_agent_idle_stop_minutes,
+            commands::experimental_settings,
+            commands::set_experimental_settings,
             commands::organization_work_status,
             commands::set_organization_work_status,
             commands::session_link_issue,
@@ -775,6 +840,9 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
+                        // The app goes with it: nothing may attach again.
+                        state.runtime_supervisor.halt();
+                        let_go_of_unresponsive_runtime(&state);
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                         if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
@@ -811,6 +879,8 @@ pub fn run() {
                 // destroying the window first; the computer-use helper must
                 // not outlive the app on either path.
                 state.computer.shutdown();
+                state.runtime_supervisor.halt();
+                let_go_of_unresponsive_runtime(&state);
                 state.pairing.stop();
                 if let Some(runtime) = state.runtime() { runtime.disconnect(); }
                 state.browser.shutdown();

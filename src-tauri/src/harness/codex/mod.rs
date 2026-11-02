@@ -21,6 +21,7 @@ pub(crate) mod owned_transport;
 pub(crate) mod lifecycle_admission;
 pub mod pty;
 pub mod rollout;
+pub mod stdio;
 
 /// Our permission modes onto Codex's two knobs.
 ///

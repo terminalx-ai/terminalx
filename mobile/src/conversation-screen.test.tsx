@@ -6,6 +6,8 @@ import * as DocumentPicker from "expo-document-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
+import { forgetConversationState } from "@mobile/state/conversation-state";
+import { RelayOuterError } from "./transport/relay-client";
 
 const mocks = vi.hoisted(() => ({
   params: { sessionId: "worktree", tabId: "claude", hostId: "mac" },
@@ -16,14 +18,16 @@ const mocks = vi.hoisted(() => ({
   sessionListeners: new Map<string, (event: unknown) => void>(),
   sessionReady: new Map<string, () => void>(),
   terminalListeners: new Map<string, (event: unknown) => void>(),
+  featureListeners: new Set<() => void>(),
   listProps: {} as any,
   scrollToOffset: vi.fn(),
   initialBatchOnly: false,
+  uuids: 0,
 }));
 vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
-vi.mock("expo-crypto", () => ({ randomUUID: () => "test" }));
+vi.mock("expo-crypto", () => ({ randomUUID: () => `uuid-${++mocks.uuids}` }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("expo-document-picker", () => ({ getDocumentAsync: vi.fn() }));
 vi.mock("expo-file-system", () => ({ File: class {} }));
@@ -33,7 +37,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
   removeItem: vi.fn(async (key: string) => { mocks.storage.delete(key); }),
 } }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Plus", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "link" ? "link" : undefined}>{children}</div>;
   return {
@@ -80,19 +84,26 @@ beforeEach(() => {
   mocks.sessionListeners.clear();
   mocks.sessionReady.clear();
   mocks.terminalListeners.clear();
+  mocks.featureListeners.clear();
   mocks.push.mockClear();
   mocks.scrollToOffset.mockClear();
   mocks.initialBatchOnly = false;
+  mocks.uuids = 0;
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
-    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
+    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected", connectionAttempt: 0,
     sessions: [{ id: "worktree", title: "Create a new issue", project: "TerminalX", worktree: "issue-132", modified: "today", tabs: [
       { id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" },
     ] }],
-    connection: { onEvent: () => () => {}, reportError: vi.fn() },
+    connection: { onEvent: () => () => {}, reportError: vi.fn(), retryNow: vi.fn() },
     api: {
       features: async () => ({}),
+      onFeaturesChanged: (listener: () => void) => { mocks.featureListeners.add(listener); return () => { mocks.featureListeners.delete(listener); }; },
+      // An older Mac: no session controls; `session-controls.test.tsx` covers them.
+      sessionControls: async () => false,
+      transport: () => "relay",
+      reassemblesFragments: async () => false,
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),
       listNotes: vi.fn(async () => []),
       subscribeSession: vi.fn((tab, listener, ready) => { mocks.sessionListeners.set(tab, listener); if (ready) mocks.sessionReady.set(tab, ready); return () => { mocks.sessionListeners.delete(tab); mocks.sessionReady.delete(tab); }; }),
@@ -241,7 +252,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
 
   it("sends a text message straight to the agent and shows it once, as the prompt", async () => {
     await render(); await type("Run the tests"); await click("Send");
-    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Run the tests", []);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Run the tests", [], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Sent to the agent.");
     await publish("Run the tests");
@@ -251,7 +262,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
   it("sends the text and its attachments in one message", async () => {
     vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [{ uri: "file:///brief.pdf", name: "brief.pdf", mimeType: "application/pdf", size: 3, base64: "cGRm", lastModified: 1 }] } as any);
     await render(); await click("Attach file"); await type("See the brief"); await click("Send");
-    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "See the brief", [{ mediaType: "application/pdf", data: "cGRm", name: "brief.pdf" }]);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "See the brief", [{ mediaType: "application/pdf", data: "cGRm", name: "brief.pdf" }], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await publish("See the brief");
     expect(shown("See the brief")).toHaveLength(1);
@@ -259,7 +270,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
 
   it("adds a worktree note once and sends nothing to the agent", async () => {
     await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
-    expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "Deploying at 5");
+    expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "Deploying at 5", expect.any(String));
     expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Note added.");
     expect(shown("Deploying at 5")).toEqual([expect.objectContaining({ kind: "note" })]);
@@ -279,10 +290,68 @@ describe("messages for the agent and worktree notes (#541)", () => {
     await click("Send");
     expect(container.textContent).toContain("Sent to the agent.");
     expect(input().value).toBe("");
-    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "Retry me", []], ["claude", "Retry me", []], ["claude", "Retry me", []]]);
+    // Every try of one draft goes under one id, so a Mac that already has it does not take it again (#675).
+    const [first] = mocks.app.api.sendSession.mock.calls[0].slice(3);
+    expect(first).toEqual(expect.any(String));
+    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "Retry me", [], first], ["claude", "Retry me", [], first], ["claude", "Retry me", [], first]]);
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await publish("Retry me");
     expect(shown("Retry me")).toHaveLength(1);
+  });
+
+  it("says a send failed with the connection in plain words, keeps the draft, and offers Send again once connected (#670)", async () => {
+    const lost = new RelayOuterError(1001, "Stream end encountered", false);
+    mocks.app.api.sendSession.mockRejectedValueOnce(lost);
+    await render(); await type("How is it going?"); await click("Send");
+    expect(container.textContent).toContain("Not sent: the connection to your Mac dropped. Your message is still in the box.");
+    expect(container.textContent).not.toContain("relay_outer");
+    expect(input().value).toBe("How is it going?");
+    expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", lost);
+    mocks.app = { ...mocks.app, connectionStage: "reconnecting" }; await render();
+    expect(button("Send again").disabled).toBe(true);
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
+    expect(button("Send again").disabled).toBe(false);
+    await click("Send again");
+    // Send again goes under the same id as the first try (#675).
+    const [sendId] = mocks.app.api.sendSession.mock.calls[0].slice(3);
+    expect(sendId).toEqual(expect.any(String));
+    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "How is it going?", [], sendId], ["claude", "How is it going?", [], sendId]]);
+    expect(container.textContent).toContain("Sent to the agent.");
+    expect(input().value).toBe("");
+    expect(() => button("Send again")).toThrow();
+  });
+
+  it("does not call a send the Mac never answered 'not sent', nor offer to send it again", async () => {
+    const timedOut = new Error("RPC timed out: session.send");
+    mocks.app.api.sendSession.mockRejectedValueOnce(timedOut);
+    await render(); await type("Run the migration"); await click("Send");
+    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the message may have reached the agent. Check the conversation before sending it again.");
+    expect(container.textContent).not.toContain("Not sent");
+    expect(container.textContent).not.toContain("RPC timed out");
+    expect(() => button("Send again")).toThrow();
+    expect(input().value).toBe("Run the migration");
+    expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", timedOut);
+  });
+
+  it("says a worktree note the Mac never answered may have been added, not that it reached the agent", async () => {
+    mocks.app.api.postNote.mockRejectedValueOnce(new Error("RPC timed out: chat.post"));
+    await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
+    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the note may have been added. Check the notes before adding it again.");
+    expect(container.textContent).not.toContain("agent. Check");
+    expect(() => button("Send again")).toThrow();
+    expect(input().value).toBe("Deploying at 5");
+  });
+
+  it("does not offer Send again when the relay refuses the pairing, and keeps the Mac's own refusals as they are", async () => {
+    mocks.app.api.sendSession
+      .mockRejectedValueOnce(new RelayOuterError(4401, "", false))
+      .mockResolvedValueOnce({ sent: false, message: "The agent is busy" });
+    await render(); await type("Ship it"); await click("Send");
+    expect(container.textContent).toContain("Not sent: this phone is no longer paired with your Mac; pair it again from Machines. Your message is still in the box.");
+    expect(() => button("Send again")).toThrow();
+    await click("Send");
+    expect(container.textContent).toContain("Message not sent: The agent is busy");
+    expect(() => button("Send again")).toThrow();
   });
 
   it("shows a promoted note and its user message as a single row, and the note in other tabs", async () => {
@@ -318,6 +387,73 @@ describe("messages for the agent and worktree notes (#541)", () => {
       expect.objectContaining({ kind: "note", note: expect.objectContaining({ id: "by-hand" }) }),
       expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) }),
     ]);
+  });
+});
+
+describe("sending a draft again after a lost reply (#675)", () => {
+  const sendIds = () => mocks.app.api.sendSession.mock.calls.map((call: unknown[]) => call[3]);
+  const dropped = () => new Error("Connection closed");
+
+  it("sends a draft again under its id, an edited one under a new id, and retires the id once sent", async () => {
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped()).mockRejectedValueOnce(dropped()).mockRejectedValueOnce(dropped());
+    await render(); await type("Ship it");
+    await click("Send"); await click("Send");
+    expect(sendIds()[0]).toEqual(expect.any(String));
+    expect(sendIds()[1]).toBe(sendIds()[0]);
+    // Space around the text is not sent, so it is the same message.
+    await type("  Ship it "); await click("Send");
+    expect(sendIds()[2]).toBe(sendIds()[0]);
+
+    await type("Ship it now"); await click("Send");
+    expect(sendIds()[3]).not.toBe(sendIds()[0]);
+    expect(container.textContent).toContain("Sent to the agent.");
+    expect(input().value).toBe("");
+    // The same text sent after that is meant as a second message.
+    await type("Ship it now"); await click("Send");
+    expect(sendIds()[4]).not.toBe(sendIds()[3]);
+  });
+
+  it("starts a new id when an attachment is added or removed", async () => {
+    vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [{ uri: "file:///brief.pdf", name: "brief.pdf", mimeType: "application/pdf", size: 3, base64: "cGRm", lastModified: 1 }] } as any);
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped()).mockRejectedValueOnce(dropped());
+    await render(); await type("See the brief");
+    await click("Send");
+    await click("Attach file"); await click("Send");
+    await click("Remove brief.pdf"); await click("Send");
+    const [plain, attached, removed] = sendIds();
+    expect(attached).not.toBe(plain);
+    expect(removed).not.toBe(attached);
+  });
+
+  it("posts a note again under its id, and the same text for the agent is another message", async () => {
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped());
+    mocks.app.api.postNote.mockRejectedValueOnce(dropped());
+    await render(); await type("Deploying at 5");
+    await click("Send");
+    await click("Add worktree note"); await click("Send"); await click("Send");
+    const [[, , first], [, , again]] = mocks.app.api.postNote.mock.calls;
+    expect(again).toBe(first);
+    expect(first).not.toBe(sendIds()[0]);
+    expect(container.textContent).toContain("Note added.");
+    expect(input().value).toBe("");
+  });
+
+  it("keeps a failed draft's id when the app is closed and opened again", async () => {
+    mocks.app.api.sendSession.mockRejectedValueOnce(dropped());
+    await render(); await type("Survive a restart"); await click("Send");
+    expect(container.textContent).toContain("Message not sent: Connection closed");
+
+    // Closed: only what the phone saved is left.
+    await act(async () => root.unmount());
+    forgetConversationState("");
+    root = createRoot(container);
+    await render();
+    expect(input().value).toBe("Survive a restart");
+    await click("Send");
+    expect(sendIds()[1]).toBe(sendIds()[0]);
+    expect(container.textContent).toContain("Sent to the agent.");
+    // Sent: neither the draft nor its id waits for the next launch.
+    expect([...mocks.storage.keys()].filter((key) => key.startsWith("terminalx:draft"))).toEqual([]);
   });
 });
 
@@ -379,7 +515,7 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).not.toContain("claude transcript");
     await type("Codex draft");
     await click("Send");
-    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("codex", "Codex draft", []);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("codex", "Codex draft", [], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await select("claude");
     expect(input().value).toBe("Claude draft");
@@ -491,22 +627,87 @@ describe("mobile conversation navigation", () => {
     expect(input().value).toBe("Keep my draft");
   });
 
-  it("shows a recoverable offline error when the connection drops during the initial load", async () => {
+  it("says the phone is reconnecting when the connection drops during the initial load, and Retry reconnects at once (#670)", async () => {
     let reject!: (reason: Error) => void;
     mocks.app.api.tail.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    mocks.app.connectionEpoch = 1;
     await render();
     expect(container.textContent).toContain("Loading transcript");
-    mocks.app.connectionStage = "cant-connect";
+    mocks.app.connectionStage = "reconnecting";
     await render();
-    await act(async () => reject(new Error("Connection closed")));
-    expect(container.textContent).toContain("Reconnect to your Mac");
+    await act(async () => reject(new RelayOuterError(1001, "Stream end encountered", false)));
+    expect(container.textContent).toContain("Reconnecting to your Mac…");
+    expect(container.textContent).toContain("The transcript loads once the phone is connected.");
+    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(container.textContent).not.toContain("relay_outer");
     expect(container.textContent).not.toContain("No transcript yet");
     expect(container.textContent).not.toContain("Loading transcript");
-    expect(button("Retry loading transcript").disabled).toBe(true);
-    mocks.app.connectionStage = "connected";
+    expect(button("Retry loading transcript").disabled).toBe(false);
+    await click("Retry loading transcript");
+    expect(mocks.app.connection.retryNow).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(1);
+    // Four failed attempts still read as reconnecting; the fifth says the Mac isn't reachable.
+    mocks.app = { ...mocks.app, connectionStage: "cant-connect", connectionAttempt: 4 };
+    await render();
+    expect(container.textContent).toContain("Reconnecting to your Mac…");
+    expect(container.textContent).not.toContain("Your Mac isn't reachable");
+    mocks.app = { ...mocks.app, connectionAttempt: 5 };
+    await render();
+    expect(container.textContent).toContain("Your Mac isn't reachable");
+    expect(container.textContent).not.toContain("Reconnecting to your Mac…");
+    expect(button("Retry loading transcript").disabled).toBe(false);
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionAttempt: 0, connectionEpoch: 2 };
     await render();
     expect(container.textContent).toContain("claude transcript");
-    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(container.textContent).not.toContain("Your Mac isn't reachable");
+    expect(() => button("Retry loading transcript")).toThrow();
+  });
+
+  it("keeps the saved transcript on screen while reconnecting, and says so (#670)", async () => {
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    mocks.app.connectionStage = "connecting"; mocks.app.connectionEpoch = 1;
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).toContain("Reconnecting to your Mac…");
+    expect(container.textContent).toContain("Showing the transcript saved on this phone.");
+    // At the latest edge, where the reader is, not above history they would have to scroll to.
+    expect(container.querySelector('[data-testid="list-footer"]')?.textContent).not.toContain("Reconnecting");
+  });
+
+  it("says in plain words when a sync fails with the connection, and logs the code (#670)", async () => {
+    const lost = new RelayOuterError(4408, "", false);
+    mocks.app.api.tail.mockRejectedValueOnce(lost);
+    await render();
+    expect(container.textContent).toContain("Could not load transcript");
+    expect(container.textContent).toContain("The connection to your Mac dropped.");
+    expect(container.textContent).not.toContain("relay_outer");
+    expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Transcript sync failed", lost);
+  });
+
+  it("stops asking for a page that keeps dropping the connection over Relay, until Retry (#670)", async () => {
+    mocks.app.api.features = async () => ({ transcript: 1 });
+    mocks.app.api.syncTranscript = vi.fn().mockRejectedValue(new RelayOuterError(1001, "Stream end encountered", false));
+    await render();
+    // The connection drops, the phone reconnects and asks again, and it drops again.
+    mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 2 }; await render();
+    expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("This conversation is too large to load over Relay; open it on the same Wi-Fi as your Mac.");
+    expect(container.textContent).not.toContain("relay_outer");
+    // The next reconnect does not ask for it again, so the connection stays up for notes and sends.
+    mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 3 }; await render();
+    expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("too large to load over Relay");
+    // Retry asks once more.
+    mocks.app.api.syncTranscript.mockResolvedValueOnce({ events: [event("claude", "loaded at last", 10)], reset: true, cursor: { offset: 10, digest: "a".repeat(64) }, hasMore: false, hasEarlier: false });
+    await click("Retry loading transcript");
+    expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(3);
+    expect(container.textContent).toContain("loaded at last");
+    expect(container.textContent).not.toContain("too large to load over Relay");
   });
 
   it("only shows empty-history copy for a successfully loaded empty transcript", async () => {
@@ -714,5 +915,135 @@ describe("mobile latest conversation edge", () => {
       expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 80);
       expect(mocks.listProps.data).toHaveLength(41);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("the phone's terminal view, as on the desktop", () => {
+  const terminalMac = () => {
+    mocks.app.api.features = async () => ({ terminal: 1 });
+    mocks.app.api.openTerminal = vi.fn(async () => ({ opened: true }));
+    mocks.app.api.queueInput = vi.fn(async () => ({ accepted: true }));
+  };
+  const show = async (packet: unknown) => { await act(async () => { mocks.terminalListeners.get("claude")!(packet); }); };
+  const sent = () => mocks.app.api.queueInput.mock.calls.map(([, , text]: string[]) => text);
+  const openTerminalView = async () => {
+    await render();
+    await click("Terminal");
+    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+  };
+
+  it("opens the tab's terminal on the Mac before watching it, and draws the agent's screen", async () => {
+    terminalMac();
+    await openTerminalView();
+    expect(mocks.app.api.openTerminal).toHaveBeenCalledWith("worktree", "claude");
+    expect(mocks.app.api.openTerminal.mock.invocationCallOrder[0]).toBeLessThan(mocks.app.api.subscribeTerminal.mock.invocationCallOrder[0]);
+    // The chat's transcript requests stop: only the terminal is shown.
+    await show({ type: "scrollback", serialized: "\x1b[?1049h\x1b[2J\x1b[1;1H\x1b[1mCodex\x1b[0m ready\x1b[3;1H› ", cols: 40, rows: 4 });
+    await vi.waitFor(() => expect(container.textContent).toContain("Codex ready"));
+    expect(container.textContent).not.toContain("\x1b[");
+    await show({ type: "resized", cols: 60, rows: 6 });
+    await show({ type: "data", chunk: "\x1b[2J\x1b[1;1Hredrawn at 60 columns" });
+    await vi.waitFor(() => expect(container.textContent).toContain("redrawn at 60 columns"));
+    expect(container.textContent).not.toContain("Codex ready");
+  });
+
+  it("types keys as the desktop terminal sends them, in the program's modes", async () => {
+    terminalMac();
+    await openTerminalView();
+    await show({ type: "scrollback", serialized: "$ ", cols: 40, rows: 4 });
+    await vi.waitFor(() => expect(button("Escape").disabled).toBe(false));
+    await type("l");
+    await click("Escape");
+    await click("Up");
+    await click("Control"); await type("c");
+    // A full-screen program turns on application cursor keys and bracketed paste.
+    await show({ type: "data", chunk: "\x1b[?1h\x1b[?2004h" });
+    await vi.waitFor(async () => { await click("Up"); expect(sent().at(-1)).toBe("\x1bOA"); });
+    // Sent whole as a paste (line breaks to Enter is `pasteSequence`'s, in keys.test.ts).
+    await click("Buffered");
+    await type("git status");
+    await click("Send terminal input");
+    expect(sent().slice(0, 4)).toEqual(["l", "\x1b", "\x1b[A", "\x03"]);
+    expect(sent().at(-1)).toBe("\x1b[200~git status\x1b[201~");
+  });
+
+  it("says why the terminal cannot open, and opens it again on request", async () => {
+    terminalMac();
+    mocks.app.api.openTerminal.mockResolvedValueOnce({ opened: false, message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." });
+    await render();
+    await click("Terminal");
+    await vi.waitFor(() => expect(container.textContent).toContain("Wait for Codex to finish this turn"));
+    expect(mocks.app.api.subscribeTerminal).not.toHaveBeenCalled();
+    expect(button("Escape").disabled).toBe(true);
+    await click("Try again");
+    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+    expect(mocks.app.api.openTerminal).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the Mac's reason when typing is refused, and keeps the keys for another try", async () => {
+    terminalMac();
+    mocks.app.api.queueInput.mockResolvedValueOnce({ accepted: false, message: "Another mobile client or terminal instance owns this driver lease." });
+    await openTerminalView();
+    await show({ type: "scrollback", serialized: "$ ", cols: 40, rows: 4 });
+    await vi.waitFor(() => expect(button("Escape").disabled).toBe(false));
+    await click("Escape");
+    expect(container.textContent).toContain("owns this driver lease");
+    await click("Tab");
+    expect(sent()).toEqual(["\x1b", "\t"]);
+    expect(container.textContent).not.toContain("owns this driver lease");
+  });
+
+  it("releases the tab's driver lease when the view goes away", async () => {
+    terminalMac();
+    await openTerminalView();
+    await click("Chat");
+    expect(mocks.app.api.releaseInput).toHaveBeenCalledWith("worktree", "claude");
+    expect(mocks.terminalListeners.has("claude")).toBe(false);
+  });
+
+  // #730: a Mac whose runtime is older than its app names no terminal until the runtime is replaced.
+  it("offers the Terminal view as soon as the Mac's runtime serves it, without reconnecting", async () => {
+    terminalMac();
+    mocks.app.api.features = async () => ({});
+    await render();
+    const labels = () => [...container.querySelectorAll("button")].map((item) => item.textContent);
+    expect(labels()).not.toContain("Terminal");
+    mocks.app.api.features = async () => ({ terminal: 1 });
+    await act(async () => { for (const listener of mocks.featureListeners) listener(); });
+    await vi.waitFor(() => expect(labels()).toContain("Terminal"));
+    await click("Terminal");
+    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+    // And it goes again with a runtime that does not serve it: the chat is shown.
+    mocks.app.api.features = async () => ({});
+    await act(async () => { for (const listener of mocks.featureListeners) listener(); });
+    await vi.waitFor(() => expect(labels()).not.toContain("Terminal"));
+    await vi.waitFor(() => expect(container.textContent).toContain("claude transcript"));
+    expect(mocks.terminalListeners.has("claude")).toBe(false);
+  });
+
+  it("says the Mac needs updating when it refuses to open the terminal, and the chat keeps working", async () => {
+    terminalMac();
+    // As the transport reads a runtime's refusal of an operation it does not know (`refusal.ts`).
+    mocks.app.api.openTerminal.mockResolvedValue({ opened: false, message: "TerminalX on your Mac needs updating or restarting to do this." });
+    await render();
+    await click("Terminal");
+    await vi.waitFor(() => expect(container.textContent).toContain("The terminal isn't available"));
+    expect(container.textContent).toContain("TerminalX on your Mac needs updating or restarting to do this.");
+    expect(container.textContent).not.toContain("Unsupported paired-device owner operation");
+    await click("Chat");
+    await vi.waitFor(() => expect(container.textContent).toContain("claude transcript"));
+    await type("still here");
+    await click("Send");
+    await vi.waitFor(() => expect(mocks.app.api.sendSession).toHaveBeenCalled());
+  });
+});
+
+describe("new sessions from the sessions list (#730)", () => {
+  it("offers New session once the Mac's runtime starts sessions for a phone", async () => {
+    await render(true);
+    expect(container.querySelector("[aria-label='New session']")).toBeNull();
+    mocks.app.api.features = async () => ({ sessionCreate: 1 });
+    await act(async () => { for (const listener of mocks.featureListeners) listener(); });
+    await vi.waitFor(() => expect(container.querySelector("[aria-label='New session']")).not.toBeNull());
   });
 });

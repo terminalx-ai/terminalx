@@ -658,7 +658,7 @@ fn title_of(run: &Run) -> String {
 
 /// The tab a run starts: the schedule's agent, model, effort and mode.
 pub(crate) fn new_tab(run: &Run) -> crate::session_ops::NewTab {
-    crate::session_ops::NewTab {
+    crate::session_ops::NewTab { transport: Default::default(),
         harness: run.agent.clone(),
         model: run.model.clone().unwrap_or_default(),
         effort: run.effort.clone(),

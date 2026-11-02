@@ -108,9 +108,10 @@ it.each(["success", "rejection"] as const)("binds deferred A %s to A while pendi
     expect(learnCalls()).toHaveLength(1);
     expect(learnCalls()[0][1]).toMatchObject({ before: "open paraquet files", after: "open Parakeet files" });
   } else expect(learnCalls()).toHaveLength(0);
-  // #637 preserves B's visible draft; #439 separately retains B's learning
-  // candidate. A's success still learns A even after it loses draft ownership.
-  expect(box().value).toBe("open parcel files");
+  // B's visible draft is kept; a rejected A comes back above it (#727). #439
+  // separately retains B's learning candidate either way, and A's success
+  // still learns A even after it loses draft ownership.
+  expect(box().value).toBe(outcome === "success" ? "open parcel files" : "open Parakeet files\n\nopen parcel files");
   expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
   edit("open package files");
   await send();

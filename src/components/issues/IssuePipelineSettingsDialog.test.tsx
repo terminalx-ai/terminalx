@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import type { Project, ProjectPatch } from "@/types/session";
+import type { CloudProject } from "@/types/target";
 
 const { updateProject } = vi.hoisted(() => ({ updateProject: vi.fn() }));
 
@@ -12,12 +13,16 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@/lib/notify", () => ({ notePipelineState: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({ updateProject }));
 
-const { IssuePipelineSettingsDialog } = await import("./IssuePipelineSettingsDialog");
+const { CloudIssuePipelineSettingsDialog, IssuePipelineSettingsDialog } = await import("./IssuePipelineSettingsDialog");
+const { getPrefs, setPrefs } = await import("@/lib/prefs");
 
+// As the app fills in a project that set nothing: no choice made for the launch switches.
 const defaults: IssuePipelineSettings = {
-  enabled: true, autoMerge: false, resolveConflicts: false, maxResolutions: 3, requirePerson: false, maxRounds: 3, mergeMethod: "merge",
+  enabled: true, maxResolutions: 3, requirePerson: false, maxRounds: 3, mergeMethod: "merge",
   protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [],
 };
+/** Which choice a launch switch's default shows. */
+const shown = (name: string) => within(screen.getByRole("radiogroup", { name })).getAllByRole("radio").find((radio) => radio.getAttribute("aria-checked") === "true")?.textContent;
 const project = (issuePipeline?: IssuePipelineSettings): Project => ({ path: "/repo", name: "Widgets", issuePipeline });
 /** What was last sent to be saved. */
 const saved = () => (updateProject.mock.calls.at(-1) as [string, ProjectPatch])[1].issuePipeline;
@@ -56,7 +61,8 @@ describe("a project's issue pipeline settings", () => {
     render(<IssuePipelineSettingsDialog project={project()} open onOpenChange={() => {}} />);
     expect(screen.getByRole("dialog", { name: "Issue pipeline · Widgets" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "Open a pull request and review it" }).getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByRole("switch", { name: "Merge automatically by default" }).getAttribute("aria-checked")).toBe("false");
+    expect(shown("Merge automatically by default")).toBe("From issues");
+    expect(shown("Resolve conflicts automatically by default")).toBe("From issues");
     expect(within(screen.getByRole("radiogroup", { name: "Review rounds" })).getByRole("radio", { name: "3" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("radio", { name: "Merge commit" }).getAttribute("aria-checked")).toBe("true");
 
@@ -79,10 +85,41 @@ describe("a project's issue pipeline settings", () => {
     await waitFor(() => expect(within(screen.getByRole("radiogroup", { name: "Review rounds" })).getByRole("radio", { name: "5" }).getAttribute("aria-checked")).toBe("true"));
   });
 
-  it("holds the default off, and says nothing can merge, where a person does the merge", () => {
-    render(<IssuePipelineSettingsDialog project={project({ ...defaults, autoMerge: true, requirePerson: true })} open onOpenChange={() => {}} />);
-    expect(screen.getByRole("switch", { name: "Merge automatically by default" }).hasAttribute("disabled")).toBe(true);
+  it.each([["left to its default", undefined], ["turned on", true]])("holds the default off, and says nothing can merge, where a person does the merge, with the switch %s", (_, autoMerge) => {
+    render(<IssuePipelineSettingsDialog project={project({ ...defaults, autoMerge, requirePerson: true })} open onOpenChange={() => {}} />);
+    expect(screen.getByRole("radiogroup", { name: "Merge automatically by default" }).getAttribute("aria-disabled")).toBe("true");
+    expect(shown("Merge automatically by default")).toBe("Off");
     expect(screen.getByRole("switch", { name: "A person does the merge" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  // #700: left alone, issue sessions start with both on; a project can keep them off, or on for every session.
+  it.each([
+    ["Off", false],
+    ["All sessions", true],
+  ] as const)("stores %s as the project's own choice, and From issues as none", async (label, choice) => {
+    // As in the app: a save comes back as the project the dialog is then shown for.
+    let show: (next: Project) => void = () => {};
+    function Shown() {
+      const [current, setCurrent] = useState(project());
+      show = setCurrent;
+      return <IssuePipelineSettingsDialog project={current} open onOpenChange={() => {}} />;
+    }
+    updateProject.mockImplementation(async (path: string, patch: ProjectPatch) => {
+      const next = { ...project(), path, ...patch };
+      act(() => show(next));
+      return next;
+    });
+    render(<Shown />);
+    const choose = async (name: string, option: string) => {
+      fireEvent.click(within(screen.getByRole("radiogroup", { name })).getByRole("radio", { name: option }));
+      await waitFor(() => expect(shown(name)).toBe(option));
+    };
+    await choose("Merge automatically by default", label);
+    await choose("Resolve conflicts automatically by default", label);
+    expect(saved()).toEqual({ ...defaults, autoMerge: choice, resolveConflicts: choice });
+    await choose("Merge automatically by default", "From issues");
+    expect(saved()?.autoMerge).toBeUndefined();
+    expect(saved()?.resolveConflicts).toBe(choice);
   });
 
   it("greys out the pipeline's settings but its own switch when the pipeline is off", () => {
@@ -142,5 +179,23 @@ describe("a project's issue pipeline settings", () => {
     fireEvent.click(screen.getByRole("switch", { name: "A person does the merge" }));
     expect(await screen.findByText("projects.json is read-only")).toBeTruthy();
     expect(screen.getByRole("switch", { name: "A person does the merge" }).getAttribute("aria-checked")).toBe("false");
+  });
+});
+
+describe("a cloud project's issue pipeline settings", () => {
+  const cloud: CloudProject = { key: "cloud:org-1:github.com/acme/api", orgId: "org-1", identity: "github.com/acme/api", fullName: "acme/api", selected: true, pinned: false, blank: false, workspaces: [] };
+  beforeEach(() => setPrefs({ cloudIssuePipelines: {} }));
+
+  it("starts issue sessions resolving conflicts until the project turns it off, and keeps that choice", async () => {
+    render(<CloudIssuePipelineSettingsDialog project={cloud} open onOpenChange={() => {}} />);
+    expect(shown("Resolve conflicts automatically by default")).toBe("From issues");
+    // A cloud workspace never merges by itself: there is nothing to choose for that.
+    expect(screen.queryByRole("radiogroup", { name: "Merge automatically by default" })).toBeNull();
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Resolve conflicts automatically by default" })).getByRole("radio", { name: "Off" }));
+    await waitFor(() => expect(shown("Resolve conflicts automatically by default")).toBe("Off"));
+    expect(getPrefs().cloudIssuePipelines[cloud.key].resolveConflicts).toBe(false);
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Resolve conflicts automatically by default" })).getByRole("radio", { name: "From issues" }));
+    await waitFor(() => expect(shown("Resolve conflicts automatically by default")).toBe("From issues"));
+    expect(getPrefs().cloudIssuePipelines[cloud.key].resolveConflicts).toBeUndefined();
   });
 });

@@ -277,7 +277,7 @@ mod tests {
     const CONV_C: &str = "33333333-3333-4333-8333-333333333333";
 
     fn tab(harness: &str, conversation: Option<&str>) -> TabEntry {
-        TabEntry {
+        TabEntry { transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: harness.into(),
             title: None,
@@ -290,7 +290,7 @@ mod tests {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None,
+            fork_from: None, continuation: None, parked: false,
             follow: Default::default(),
             unknown: BTreeMap::new(),
         }

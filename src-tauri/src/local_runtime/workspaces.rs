@@ -22,7 +22,8 @@ fn host<R>(manager: &SessionManager, f: impl FnOnce(&cleanup::Host<'_>) -> Resul
             .map(|tab| (session.id.clone(), tab.id.clone()))).collect();
         live
     };
-    f(&cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh })
+    let stop_agents = |entry: &SessionEntry| manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}"));
+    f(&cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents) })
 }
 
 #[derive(Deserialize)]
@@ -47,7 +48,10 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
         if !prefix.is_empty() { cleanup::Jobs::removals().cancel(prefix); }
         return Ok(Value::Null);
     }
-    let _admission = crate::issue_pipeline::admission::lock();
+    // No admission for the whole call (#727): a sweep asks GitHub, sizing
+    // walks folders and removal deletes them, and a prompt for any tab must
+    // not wait on that. What stops sessions and changes their place fences
+    // just those sessions or that checkout while it does (`admission::fence`).
     manager.accepting_work()?;
     let stop = |entry: &SessionEntry| manager.stop_session_confirmed(entry).map_err(|error| format!("{error:#}"));
     match method {
@@ -77,7 +81,7 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
                 expected_sessions: Some(&params.expected_sessions), direct, fetch: crate::landed::Fetch::Fresh, guard: None,
             };
             let removed = crate::session_ops::remove_workspace_fallible(sink,&request,&stop).map_err(anyhow::Error::msg)?;
-            Ok(json!({"sessions":removed.sessions,"keptBranch":removed.removal.kept_branch,"rescuedBranch":removed.removal.rescued_branch}))
+            Ok(json!({"sessions":removed.sessions,"keptBranch":removed.removal.kept_branch,"rescuedBranch":removed.removal.rescued_branch,"strayProcesses":removed.strays}))
         }
         "mergedSweep" => host(manager, |host| {
             let settings = crate::store::settings::load().merged_cleanup;
@@ -85,7 +89,11 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
                 projects: host.projects.iter().filter(|project| settings.enabled_for(&project.path)).map(|project| project.path.clone()).collect(),
                 delete_sessions: settings.delete_conversations, grace_seconds: u64::from(settings.grace_minutes)*60,
             };
-            let pull_requests = |cwd: &Path, branches: &[String]| crate::github::branch_prs(cwd,branches);
+            let pull_requests = |cwd: &Path, branches: &[String]| {
+                #[cfg(test)]
+                if let Some(answer) = &*PULL_REQUESTS.lock().unwrap_or_else(|error| error.into_inner()) { return answer(cwd, branches); }
+                crate::github::branch_prs(cwd,branches)
+            };
             let run = crate::merged_cleanup::FallibleSweep { host, sink, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
             Ok(serde_json::to_value(crate::merged_cleanup::sweep_fallible(&run,&scope)?)?)
         }),
@@ -106,6 +114,8 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
             let id = text(&params,"sessionId")?;
             let entry = crate::store::index::get(id)?;
             if entry.worktree_name.is_none() { bail!("session has no worktree"); }
+            use crate::issue_pipeline::admission::{fence, Kind, Scope, SESSION_MOVED};
+            let _moving = fence(Kind::Refuse(SESSION_MOVED), [Scope::Session(entry.id.clone())]);
             manager.stop_agents_confirmed(&entry)?;
             let branch = crate::git::current_branch(Path::new(&entry.project_path));
             let updated = crate::store::index::update_session(id, |entry| {
@@ -134,6 +144,11 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
         _ => bail!("unsupported owner workspace operation"),
     }
 }
+
+/// GitHub's answer to a sweep, in a test: where one holds a sweep mid-run (#727).
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(crate) static PULL_REQUESTS: std::sync::Mutex<Option<Box<dyn Fn(&Path, &[String]) -> Result<std::collections::HashMap<String, crate::github::BranchPr>> + Send>>> = std::sync::Mutex::new(None);
 
 /// Retention is a background-owner duty, but the sleeping timer is not work
 /// that keeps an otherwise idle owner alive. An active sweep holds a request.

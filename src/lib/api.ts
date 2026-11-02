@@ -26,6 +26,7 @@ import type {
   WorkspaceDisposition,
   TabEntry,
   TabStatus,
+  UnfinishedMerge,
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
@@ -35,7 +36,7 @@ import type {
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
-import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -521,7 +522,10 @@ export const api = {
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
-  pairingSetHostName: (displayName: string) => invoke<PairingStatus>("pairing_set_host_name", { displayName }),
+  /** This Mac's name as the user's other devices show it (#686). */
+  machineName: () => invoke<MachineName>("machine_name"),
+  /** Name this Mac; null lets it follow the computer's own name again. */
+  setMachineName: (name: string | null) => invoke<MachineName>("set_machine_name", { name }),
 
   // projects
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
@@ -1503,6 +1507,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_repository_ref_not_found"
   | "cloud_workspace_repository_verification_unavailable"
   | "cloud_workspace_agent_credential_required"
+  | "cloud_agent_credential_reauth_required"
   | "cloud_workspace_device_auth_unavailable"
   | "cloud_workspace_operation_in_progress"
   | "cloud_workspace_active_work"
@@ -1664,11 +1669,40 @@ export interface UsageWindow {
   source?: string;
 }
 
+/** Why a received window did not replace the one shown under its key. */
+export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline";
+
+/** A manual refresh that did not reach the provider, and when the button will. */
+export interface UsageRefreshSkip {
+  at: number;
+  reason: "inFlight" | "retryPending" | "recent" | "resetInFlight";
+  nextAt: number | null;
+}
+
+/** Live usage from a Claude turn that was not used, newer than any that was. */
+export interface LiveUsageRefused {
+  at: number;
+  reason: "unidentified" | "launchMismatch" | "statuslineMismatch";
+}
+
+// The fields marked optional below are absent from a background runtime older than #729.
 export interface UsageSnapshot {
   revision?: number;
   claudeAccount?: string | null;
-  claude?: { retryAt: number | null; revalidateAt: number | null; error: string | null; lastSuccessAt?: number | null };
-  codexRefresh?: { retryAt: number | null; error: string | null; lastSuccessAt: number | null };
+  claude?: {
+    retryAt: number | null;
+    revalidateAt: number | null;
+    error: string | null;
+    /** When the provider last answered. */
+    lastSuccessAt?: number | null;
+    /** When an answer last replaced a shown window; older than `lastSuccessAt` when the latest changed nothing. */
+    lastUpdatedAt?: number | null;
+    /** Windows in the latest answer that did not replace the shown ones. */
+    refused?: Array<{ key: string; label: string; reason: UsageRefusal }>;
+    skipped?: UsageRefreshSkip | null;
+    liveRefused?: LiveUsageRefused | null;
+  };
+  codexRefresh?: { retryAt: number | null; error: string | null; lastSuccessAt: number | null; skipped?: UsageRefreshSkip | null };
   windows: UsageWindow[];
   codex?: {
     credits?: {
@@ -1706,7 +1740,8 @@ export interface ProcSample {
   cpuPercent: number | null;
   rssBytes: number | null;
   childCount: number | null;
-  killRule: "none" | "idle" | "confirm";
+  /** `stop`: a tab's idle agent, stopped (its conversation kept) once confirmed. */
+  killRule: "none" | "idle" | "confirm" | "stop";
 }
 
 export interface AppSample {
@@ -1738,10 +1773,37 @@ export interface KillResult {
   confirmation: string | null;
 }
 
+/**
+ * One window's live connection to the local runtime (`supervisor.rs`). A new
+ * `generation` is a new attachment; a new `view` is a new connection for this
+ * window's terminal output alone. Either way the window attaches again.
+ */
 export type LocalRuntimeState =
   | { state: "inProcess" }
-  | { state: "connected"; epoch: string; runningAgents: number; terminals: number }
-  | { state: "unavailable"; message: string };
+  /** `outdated`: the runtime is older than this app, and is replaced with the app's own once none of its agents is mid-turn (#730). */
+  | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated }
+  /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
+  | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
+  /** Retrying cannot help until something outside this window changes. */
+  | { state: "unavailable"; message: string }
+  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). */
+  | { state: "unresponsive"; message: string; epoch: string | null }
+  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. */
+  | { state: "updating"; from: string | null; to: string };
+
+/** A runtime older than this app, while its replacement waits until nothing it runs would be cut short (#730). */
+export interface LocalRuntimeOutdated {
+  /** Its version, when it said. */
+  running: string | null;
+  /** This app's, which the runtime that replaces it shares. */
+  app: string;
+  /** What restarting it now would cut short (agents mid-turn or with prompts waiting, terminals, processes), which the switch waits for; null until read. */
+  work: string[] | null;
+  /** Why that could not be read, or why the last switch failed. */
+  problem: string | null;
+  /** The last switch failed: it is tried again only when asked (Restart now). */
+  failed: boolean;
+}
 
 export type QuitBehavior = "keepRunning" | "stopAll";
 export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
@@ -1749,6 +1811,10 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
+  /** Stop the runtime without asking it, with its agents and terminals; the desktop attaches a fresh one. */
+  restart: (epoch: string | null) => invoke<LocalRuntimeState>("local_runtime_restart", { epoch }),
+  /** Replace runtime `epoch`, older than this app, with the app's own now, stopping its agents and terminals (#730). */
+  replace: (epoch: string) => invoke<LocalRuntimeState>("local_runtime_replace", { epoch }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
 };
@@ -1783,24 +1849,35 @@ export interface QueuedMessage {
 export interface SendOutcome {
   queued: boolean;
   events: AgentEvent[];
+  /** A continuation the agent has not taken, sitting in its input: one Enter sends it (#662). */
+  inInput?: boolean;
 }
 
-export interface ModelInfo {
-  id: string;
-  label: string;
-  harness: string;
-  efforts: string[];
-  defaultEffort: string | null;
-  acceptsImages: boolean;
-  isDefault: boolean;
-  /** The model that replaces this one when the provider is retiring it. */
-  upgrade: string | null;
-  description: string | null;
-  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
-  alias?: boolean;
-  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
-  resolved?: string | null;
+/**
+ * Where a continuation's delivery has got to, as the tab tells it (#662):
+ * waiting on an input box that holds something else (input_occupied, #722),
+ * typed, its Enter written, written again (nudged), held back because the
+ * agent is not reading its input (stalled), and taken (delivered).
+ */
+export type DeliveryStage = "input_occupied" | "body_written" | "submit_written" | "nudged" | "stalled" | "delivered";
+
+/**
+ * Follow the deliveries of continuations into one tab. Resolves to the
+ * function that stops listening.
+ */
+export async function onPromptDelivery(sessionId: string, tabId: string, onStage: (stage: DeliveryStage, seq: number) => void): Promise<() => void> {
+  try {
+    return await listen<{ sessionId: string; tabId: string; seq: number; stage: DeliveryStage }>("prompt_delivery", ({ payload }) => {
+      if (payload.sessionId === sessionId && payload.tabId === tabId) onStage(payload.stage, payload.seq);
+    });
+  } catch {
+    // Outside a webview there is no event stream; the send still answers.
+    return () => {};
+  }
 }
+
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
+export type { ModelInfo };
 
 export interface HandoffInfo {
   command: string;
@@ -1824,13 +1901,28 @@ export interface TabPtyEvent {
 export const agent = {
   prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
+  /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }) }),
+  /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
+  reportSendShown: (sessionId: string, tabId: string, seq: number, timings: { pressedAt?: number; drawnAt?: number; answeredAt?: number; shownAt: number }) =>
+    invoke<void>("report_send_shown", { sessionId, tabId, seq, timings }),
+  /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
+  resendUnsent: (sessionId: string, tabId: string) => invoke<SendOutcome>("resend_unsent", { sessionId, tabId }),
+  resendMessage: (sessionId: string, tabId: string, seq: number) => invoke<SendOutcome>("resend_message", { sessionId, tabId, seq }),
+  /** Press Enter in the tab's agent for the continuation `seq` left in its input. False when it is no longer waiting there. */
+  submitWaiting: (sessionId: string, tabId: string, seq: number) => invoke<boolean>("submit_waiting_prompt", { sessionId, tabId, seq }),
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
   interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
+  tabToTerminal: (sessionId: string, tabId: string) => invoke<void>("tab_to_terminal", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
+  /**
+   * The tab was shown: its CLI starts as `ensureStarted` starts it, unless nobody is about to use it — its session is
+   * archived or its workspace was removed, or its agent was stopped for sitting idle. Its next message starts it then (#696).
+   */
+  startOnOpen: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId, opened: true }),
   /** The pane a tab's CLI is running in, for a window that missed the event. */
   tabPane: (sessionId: string, tabId: string) => invoke<TabPtyEvent | null>("tab_pane", { sessionId, tabId }),
   /** Start a tab's agent again on one of the tab's own conversations: the one it holds, or one it held before (#437). */
@@ -1916,6 +2008,12 @@ export const git = {
   discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string) => invoke<[string, ChangedFile[]]>("working_changes", { cwd }),
+  /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
+  unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
+  /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
+  commitMerge: (cwd: string, head: string, mergeHead: string) => invoke<string>("commit_merge", { cwd, head, mergeHead }),
+  /** `git merge --abort` of the merge that was read, and no other. */
+  abortMerge: (cwd: string, head: string, mergeHead: string) => invoke<void>("abort_merge", { cwd, head, mergeHead }),
 };
 
 export type PrScope = { kind: "local"; cwd: string } | { kind: "cloud"; workspace: string; repo: string };
@@ -2265,10 +2363,45 @@ export interface WorkCloudSession {
   modified: string;
 }
 
+/** When an agent nobody is using is stopped (#696). */
+export interface AgentSettings {
+  /** Minutes an agent may sit idle before it is stopped; 0 is never. */
+  idleStopMinutes: number;
+}
+
+/** The idle limits Settings → Agents offers, as the Rust side accepts them; 0 is never. */
+export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
+
+export const agentSettings = {
+  get: () => invoke<AgentSettings>("agent_settings"),
+  setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
+};
+
 export interface WorkStatusSettings {
   /** Teammates in an organization that connected the repository see what this person works on. */
   shareWithTeam: boolean;
 }
+
+/** Settings → Experimental: features that are on only when turned on. */
+export interface ExperimentalSettings {
+  /** New Codex sessions connect to Codex's app server instead of its terminal, where it can serve them (#644). */
+  nativeCodex: boolean;
+}
+
+/** Read when a tab is made: a change applies to new sessions, not to existing ones. */
+export const experimental = {
+  settings: () => invoke<ExperimentalSettings>("experimental_settings"),
+  setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
+  /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
+  nativeCodexFor: async (agent: string): Promise<boolean> => {
+    if (agent !== "codex") return false;
+    try {
+      return (await invoke<ExperimentalSettings>("experimental_settings"))?.nativeCodex === true;
+    } catch {
+      return false;
+    }
+  },
+};
 
 export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;

@@ -108,10 +108,15 @@ export interface SessionBackend {
    * message starts nothing. A workspace that is not running refuses it and
    * nothing is kept, so the caller can ask the person and send again.
    */
-  send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean }): Promise<SendResult>;
+  /** `pressedAt`: when Send was pressed, which a local runtime notes with its own timings of the send (#727). */
+  send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean; pressedAt?: number }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
   /** Local only: send a message queued behind the running turn now, interrupting the turn. `seq` is the message's event. */
   sendQueuedNow?(tabId: string, seq: number): Promise<void>;
+  /** Local only: send the last prompt the agent never received again, as it was sent (#663). */
+  resendUnsent?(tabId: string): Promise<SendResult>;
+  /** Local only: send the message at `seq`, which the agent dropped unanswered, again as a new message (#722). */
+  resendMessage?(tabId: string, seq: number): Promise<SendResult>;
   /**
    * Escape, as the agent's own screen takes it (#427): the running turn is
    * interrupted and the agent's process stays. Nothing is queued or dropped
@@ -161,6 +166,12 @@ export interface SessionBackend {
   /** Cloud only: what a tab's terminal view attaches to. */
   agentTerminal?: AgentTerminalTarget;
   /**
+   * Cloud only (#644): move a native Codex tab to Codex's own terminal on the
+   * same thread, for good, and start it, as opening its terminal view does on
+   * a Mac. Refused mid-turn and to anyone who may not start its terminal.
+   */
+  toTerminal?(tabId: string): Promise<void>;
+  /**
    * Cloud only (PRO-22): the slash commands the composer of `tab` offers,
    * from the runtime, which lists a plain driver only what it will accept
    * from them (PRO-88). Null when nothing can list them (a view-only reader,
@@ -207,9 +218,11 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     openTab: (tabId, onError) => {
       void loadTab(sessionId, tabId).catch(onError);
     },
-    send: (tabId, text, images) => agent.send(sessionId, tabId, text, images),
+    send: (tabId, text, images, options) => agent.send(sessionId, tabId, text, images, false, options?.pressedAt),
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
     sendQueuedNow: (tabId, seq) => agent.sendQueuedNow(sessionId, tabId, seq),
+    resendUnsent: (tabId) => agent.resendUnsent(sessionId, tabId),
+    resendMessage: (tabId, seq) => agent.resendMessage(sessionId, tabId, seq),
     interrupt: (tabId) => agent.interrupt(sessionId, tabId).then(() => undefined),
     stop: (tabId) => agent.stop(sessionId, tabId),
     respondPermission: (tabId, requestId, optionId) => agent.respondPermission(sessionId, tabId, requestId, optionId),
@@ -423,6 +436,11 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     stop: async (tabId) => {
       guard();
       await stopCloudAgent(scope, tabId, client);
+    },
+    toTerminal: async (tabId) => {
+      guard();
+      if (!client) throw new Error("A tab moves to its terminal once the workspace is connected.");
+      await client.moveAgentTabToTerminal(ctx.sessionId, tabId);
     },
     respondPermission: (tabId, requestId, optionId) => {
       if (approveBlockedReason) return Promise.reject(new Error(approveBlockedReason));

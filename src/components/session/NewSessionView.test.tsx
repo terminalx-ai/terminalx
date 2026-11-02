@@ -52,6 +52,7 @@ vi.mock("@/lib/sessions", () => ({
   createQuickChat,
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
+  linkSessionIssue: vi.fn(async () => {}),
   selectProject: vi.fn(),
   selectProjectInSidebar: vi.fn(),
   selectSession,
@@ -96,6 +97,49 @@ function renderView(onCreated = vi.fn()) {
 }
 
 describe("new session attachments", () => {
+  it("retains the draft and attachment when fresh login preflight refuses creation, then sends once after login", async () => {
+    let signedIn = false;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_agent_readiness") return { state: signedIn ? "ready" : "signed_out", checkedAt: "2026-10-26T14:00:00Z", version: "1.0.0" };
+      if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
+      if (cmd === "create_session") return created;
+      if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    openDialog.mockResolvedValue(["/tmp/shot.png"]);
+    const { onCreated } = renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this task" } });
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    await screen.findByAltText("shot.png");
+    const start = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(start);
+    await screen.findByText(/Your draft is kept and no session has been created/);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this task");
+    expect(screen.getByAltText("shot.png")).toBeTruthy();
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(0);
+    expect(onCreated).not.toHaveBeenCalled();
+    signedIn = true;
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(1);
+  });
+
+  it("also preserves a quick-chat draft when login is required", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_agent_readiness") return { state: "signed_out", checkedAt: null, version: null };
+    });
+    render(<NewSessionView quick />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this question" } });
+    const ask = screen.getByRole("button", { name: "Ask" });
+    await waitFor(() => expect(ask.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(ask);
+    await screen.findByText(/Your draft is kept and no session has been created/);
+    expect(createQuickChat).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this question");
+  });
+
   it("sends an image picked from the attach button with the first prompt", async () => {
     openDialog.mockResolvedValue(["/tmp/shot.png"]);
     const { onCreated } = renderView();
@@ -200,8 +244,9 @@ describe("starting a quick chat", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("quick-1", "quick-tab", "What is a monad?\nIn one paragraph.", []));
     expect(createQuickChat).toHaveBeenCalledWith({ title: "What is a monad?", cwd: null, tab: { harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" } });
     expect(selectSession).toHaveBeenCalledWith("quick-1");
-    // Only local transcription preferences were read; no project or git commands.
-    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
+    // Only local transcription preferences and agent readiness were read; no
+    // project session was made, and no git was read.
+    expect(invoke.mock.calls.map(([command]) => command).sort()).toEqual(["check_agent_readiness", "check_agent_readiness", "transcription_personalization_load"]);
   });
 
   it("can be pointed at a folder first, which is passed as the working directory and not added as a project", async () => {
@@ -282,4 +327,39 @@ it("launches a non-issue branch with project automation defaults and the handoff
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true }));
   expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
   expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", "Improve the parser\n\nHANDOFF BRIEF", []);
+});
+
+it("starts a branch with both switches off, and one started from an issue picked here with both on", async () => {
+  const issue = {
+    provider: "github", id: "700", identifier: "#700", number: 700, title: "Merge issue sessions when green",
+    url: "https://example.test/issues/700", state: "OPEN", stateType: "open", labels: [], updatedAt: "2026-11-01T00:00:00Z", body: "Turn both on.",
+  };
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "preview_workspace_name") return "700-merge-issue-sessions";
+    if (command === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
+    if (command === "issues_list") return [issue];
+    if (command === "issue_comments") return { comments: [], nextCursor: null };
+    if (command === "create_session") return created;
+    if (command === "issue_pipeline_start") return { pipeline: { id: "p1", resolveConflicts: false }, authorBrief: "HANDOFF BRIEF" };
+    if (command === "issue_pipeline_set_resolve_conflicts") return { id: "p1", resolveConflicts: true };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  render(<NewSessionView onCreated={vi.fn()} />);
+  const switches = () => {
+    if (!screen.queryByRole("switch", { name: "Merge when green" })) fireEvent.click(screen.getByRole("button", { name: "Session options" }));
+    return [screen.getByRole("switch", { name: "Resolve conflicts automatically" }), screen.getByRole("switch", { name: "Merge when green" })].map((toggle) => toggle.getAttribute("aria-checked"));
+  };
+  const closeOptions = () => fireEvent.keyDown(screen.getByRole("switch", { name: "Merge when green" }), { key: "Escape" });
+  expect(switches()).toEqual(["false", "false"]);
+  closeOptions();
+
+  fireEvent.click(screen.getByRole("button", { name: "Start from an issue" }));
+  fireEvent.click(await screen.findByText("Merge issue sessions when green"));
+  await screen.findByTestId("picked-issue");
+  expect(switches()).toEqual(["true", "true"]);
+  closeOptions();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true }));
+  expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
 });

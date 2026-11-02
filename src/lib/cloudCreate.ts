@@ -117,7 +117,7 @@ export async function preflightCreate(api: Pick<CreateApi, "cloudWorkspacePrefli
   // create, which says nothing about the organization's logins.
   const failed = preflight.checks.find((check) => check.status === "failed" && (check.kind !== "agent-credential" || (agent !== null && check.agent === agent)));
   if (!failed) return;
-  if (failed.kind === "agent-credential") throw new CreateRefused("cloud_workspace_agent_credential_required", agent);
+  if (failed.kind === "agent-credential") throw new CreateRefused(failed.errorCode === REAUTH_REQUIRED ? REAUTH_REQUIRED : "cloud_workspace_agent_credential_required", agent);
   throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
 }
 
@@ -457,9 +457,18 @@ export function mentionsAgentLogins(message: string | null | undefined): boolean
   return !!message && message.includes(AGENT_LOGIN_PLACE);
 }
 
+/** The service's code for a stored login its provider no longer accepts (terminalx-saas #241). */
+export const REAUTH_REQUIRED = "cloud_agent_credential_reauth_required";
+
 /** `manages`: whether the reader is an owner or admin of the organization; null when not known. */
 export function createErrorMessage(code: string, detail: string | null = null, manages: boolean | null = null): string {
   if (code === "cloud_workspace_form_invalid") return detail ?? "Check the form.";
+  if (code === REAUTH_REQUIRED) {
+    const agent = detail ? cloudAgentLabel(detail) : "The agent";
+    return manages
+      ? `${agent} sign-in for this organization was revoked or expired, so it can't run a first prompt. Sign in again in ${AGENT_LOGIN_PLACE}, or create the workspace without a prompt.`
+      : `${agent} sign-in for this organization was revoked or expired, so it can't run a first prompt. An owner or admin can sign it in again in ${AGENT_LOGIN_PLACE}. Or create the workspace without a prompt.`;
+  }
   // The service refuses the same way when no login is stored and when the stored one is limited to
   // owners' and admins' workspaces. That limit never holds back an owner or admin, so for them it is the first.
   if (code === "cloud_workspace_agent_credential_required") {

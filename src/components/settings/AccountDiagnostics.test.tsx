@@ -12,12 +12,12 @@ vi.mock("@/lib/account", () => ({
   useAccount: () => ({ ready: true, busy: false, status: mocks.status }),
 }));
 vi.mock("@/lib/pairing", () => ({
-  setPairingHostName: vi.fn(),
   usePairing: () => ({ ready: true, busy: false, status: { host: null, devices: [] } }),
 }));
 vi.mock("@/lib/api", () => ({ api: mocks.api, errorMessage: String }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn() }));
 vi.mock("./OrganizationOnboarding", () => ({ OrganizationOnboarding: () => null }));
+vi.mock("./MachineNameSettings", () => ({ MachineNameSettings: () => null }));
 vi.mock("./OrganizationMembers", () => ({ OrganizationMembers: () => null }));
 vi.mock("./OrganizationCompute", () => ({ OrganizationCompute: () => null }));
 vi.mock("./OrganizationGithubApp", () => ({ OrganizationGithubApp: () => null }));

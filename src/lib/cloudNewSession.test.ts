@@ -422,6 +422,19 @@ describe("blank projects", () => {
     expect(runtimes.get("scratch-ws")!.created[0]).not.toHaveProperty("repository");
   });
 
+  it("asks the workspace for native Codex only for a Codex tab, and only when Settings → Experimental says so (#644)", async () => {
+    await place([item("native-ws", { name: "notes", repositories: [] })]);
+    const node = project("blank/notes");
+    const sent = () => runtimes.get("native-ws")!.connection.client.createAgentTab.mock.calls.map((call) => (call[0] as { nativeCodex?: boolean }).nativeCodex);
+    let on = false;
+    mocks.invoke.mockImplementation(async (command: string) => (command === "experimental_settings" ? { nativeCodex: on } : undefined));
+    await flow.startInWorkspace(flow.planCloudStart(node) as never, { ...request, agent: "codex", model: "" });
+    on = true;
+    await flow.startInWorkspace(flow.planCloudStart(node) as never, { ...request, agent: "codex", model: "" });
+    await flow.startInWorkspace(flow.planCloudStart(node) as never, request);
+    expect(sent()).toEqual([undefined, true, undefined]);
+  });
+
   it("falls back to working in the folder when the runtime cannot cut a worktree there", async () => {
     await place([item("old-blank", { name: "notes", repositories: [] })]);
     const node = project("blank/notes");

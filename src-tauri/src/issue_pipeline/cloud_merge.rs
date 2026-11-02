@@ -99,6 +99,8 @@ pub fn merge(github: &dyn Github, pipeline: &Pipeline, repository: &str, setting
         protected: &[],
         ignored_checks: &settings.ignored_checks,
         allow_no_ci: settings.allow_no_ci,
+        // A person is merging: theirs is the judgement a review by reading alone waits for.
+        checks_vouched: true,
     }, settings.local_checks_only && local_passed);
     let not_merged = |reason: StopReason| Ok(CloudMerge::NotMerged { reason: reason.describe() });
     match decision {
@@ -184,11 +186,13 @@ mod tests {
             state: State::ReadyToMerge,
             reason: Some(StopReason::CloudWorkspace),
             note: None,
+            answered: None,
             pr: Some(PrLink { number: 7, url: "https://github.com/acme/widgets/pull/7".into(), base: "main".into() }),
             round: 1,
             max_rounds: 3,
             review_commit: Some(HEAD.into()),
             review_requested_at: None,
+            review_pending_since: None,
             findings_sent_round: 0,
             verdict: Some(merge_verdict(HEAD)),
             failed_local_checks: Vec::new(),
@@ -201,6 +205,7 @@ mod tests {
             merge_requested: None,
             merge_refused: None,
             merged: None,
+            releasing: Vec::new(),
             events: Vec::new(),
             created: "2026-10-18T00:00:00Z".into(),
             modified: "2026-10-18T00:00:00Z".into(),

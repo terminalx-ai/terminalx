@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { pipelineSettings, continuePipeline, startPipeline, setPipelineResolveConflicts } from "@/lib/issuePipeline";
+import { pipelineSettings, pipelineLaunchDefaults, continuePipeline, startPipeline, setPipelineResolveConflicts } from "@/lib/issuePipeline";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 
 export interface PipelineLaunch {
@@ -7,9 +7,17 @@ export interface PipelineLaunch {
   resolveConflicts: boolean;
 }
 
-export function usePipelineLaunch(projectPath: string | null, settings: IssuePipelineSettings, unavailable?: string, mergeUnavailable?: string) {
+/**
+ * Where the launch switches start until someone changes them: the project's
+ * defaults for a session started from an issue (both on unless the project
+ * turned them off, `pipelineLaunchDefaults`) or for any other session, or the
+ * switches a pipeline the launch carries on already holds.
+ */
+export type PipelineLaunchStart = "issue" | "session" | PipelineLaunch;
+
+export function usePipelineLaunch(projectPath: string | null, settings: IssuePipelineSettings, unavailable?: string, mergeUnavailable?: string, start: PipelineLaunchStart = "session") {
   const [choice, setChoice] = useState<{ projectPath: string | null; value: PipelineLaunch } | null>(null);
-  const value = choice?.projectPath === projectPath ? choice.value : { autoMerge: settings.autoMerge, resolveConflicts: settings.resolveConflicts ?? false };
+  const value = choice?.projectPath === projectPath ? choice.value : typeof start === "string" ? pipelineLaunchDefaults(settings, start === "issue") : start;
   return {
     projectPath, settings, unavailable, mergeUnavailable,
     reset: () => setChoice(null),

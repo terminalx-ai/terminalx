@@ -162,7 +162,9 @@ export function applyEvent(ev: AgentEvent) {
   }
   log.events.push(ev);
   if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
-  const urgent = p.type === "recovery" || p.type === "permission_requested" || p.type === "questions_asked" || p.type === "turn_completed";
+  // A reader's message is drawn in the frame it arrives in: the composer's own
+  // stops being drawn as sending as soon as the runtime answers (#727).
+  const urgent = p.type === "recovery" || p.type === "permission_requested" || p.type === "questions_asked" || p.type === "turn_completed" || p.type === "user_message";
   touch(k, urgent);
 }
 
@@ -277,7 +279,8 @@ export function useTabLog(sessionId: string, tabId: string): TabLog {
 let subscribed = false;
 let reconciling = false;
 
-/** Read saved history again after suspension; never send input or restart work. */
+/** Read saved history again after suspension or a new live connection; never
+ * send input or restart work. */
 export async function reconcileAgentEvents() {
   if (reconciling) return;
   reconciling = true;
@@ -327,6 +330,8 @@ export async function subscribeAgentEvents() {
   subscribed = true;
   onAppResume(() => void reconcileAgentEvents());
   try {
+    // Events published while the live connection was down never arrived.
+    await listen("local_runtime_reattached", () => void reconcileAgentEvents());
     const liveTab = (sessionId: string, tabId: string) => getSessions().sessions.some((session) => session.id === sessionId && session.tabs.some((tab) => tab.id === tabId));
     await listen<AgentEvent>("agent_event", ({ payload }) => {
       if (liveTab(payload.sessionId, payload.tabId)) applyEvent(payload);

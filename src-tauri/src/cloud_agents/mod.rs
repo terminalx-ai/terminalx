@@ -68,6 +68,10 @@ pub struct AgentTabInfo {
     pub tab_id: String,
     pub title: Option<String>,
     pub harness: String,
+    /// How the runtime reaches the agent: absent for its CLI in the tab's
+    /// terminal; native Codex (#644) moves there when the terminal is opened.
+    #[serde(skip_serializing_if = "crate::store::index::AgentTransport::is_default")]
+    pub transport: crate::store::index::AgentTransport,
     pub model: String,
     pub effort: Option<String>,
     /// A model or effort asked for that the agent is not running yet
@@ -248,6 +252,7 @@ impl AgentOps for ManagerOps {
                     tab_id: tab.id.clone(),
                     title: tab_title(entry.tabs.first().is_some_and(|first| first.id == tab.id), tab.title.as_deref(), &entry.title),
                     harness: tab.harness.clone(),
+                    transport: tab.transport,
                     model: tab.model.clone(),
                     effort: tab.effort.clone(),
                     requested_model: tab.requested_model.clone(),

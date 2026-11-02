@@ -13,7 +13,7 @@ vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("@mobile/ui/PairingScanner", () => ({ PairingScanner: () => null }));
 vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: mocks.navigate, dismissTo: mocks.dismissTo, push: vi.fn() }) }));
 vi.mock("expo-camera", () => ({ useCameraPermissions: () => [{ granted: true }, vi.fn()], CameraView: () => null }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X", "Search", "MoreVertical"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X", "Search", "MoreVertical", "Plus"].map((name) => [name, () => null])));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
 vi.mock("@mobile/data/conversations", () => ({ conversationRows: () => [], statusLabel: () => "" }));
 vi.mock("react-native", () => {
@@ -79,6 +79,7 @@ beforeEach(() => {
     connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingMachines: false, loadingSessions: false, error: null,
     connection: { restart: vi.fn() }, clearError: vi.fn(), refreshMachines: vi.fn(), refreshSessions: vi.fn(), connectHost: vi.fn(async () => true),
     renameHost: vi.fn(async () => undefined), reconnectHost: vi.fn(async () => true), forgetHost: vi.fn(async () => undefined),
+    api: { features: async () => ({}), onFeaturesChanged: () => () => {} },
   };
   container = document.createElement("div");
   document.body.append(container);
@@ -162,14 +163,15 @@ it("returns to the device list after removing from the sessions screen", async (
   expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)");
 });
 
-it("opens the session list when a Mac is tapped, dismissing any previous conversation (#388)", async () => {
+it.each([false, true])("selects Sessions when a Mac is tapped (signed in: %s)", async (signedIn) => {
+  if (!signedIn) mocks.app.session = null;
   await show(<MachinesScreen />);
   const row = [...container.querySelectorAll("button")].find((node) => node.textContent?.includes("Paresh’s Mac mini"));
   expect(row).toBeDefined();
   await act(async () => row!.click());
   expect(mocks.app.connectHost).toHaveBeenCalledWith(mocks.app.hosts[0]);
-  expect(mocks.dismissTo).toHaveBeenCalledWith("/(tabs)/sessions");
-  expect(mocks.navigate).not.toHaveBeenCalled();
+  expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)/sessions");
+  expect(mocks.dismissTo).not.toHaveBeenCalled();
 });
 
 it("keeps the fallback for a desktop that never sent its name, and tells two same-named computers apart", async () => {
@@ -206,4 +208,5 @@ it.each([false, true])("does not open sessions when selection fails (signed in: 
   await act(async () => row.click());
   expect(mocks.app.connectHost).toHaveBeenCalledWith(mocks.app.hosts[0]);
   expect(mocks.dismissTo).not.toHaveBeenCalled();
+  expect(mocks.navigate).not.toHaveBeenCalled();
 });

@@ -285,8 +285,13 @@ pub enum Payload {
         /// Tree id of the checkout when the turn closed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head: Option<String>,
+        /// The agent's provider refused its sign-in (#667).
         #[serde(default)]
         auth_failed: bool,
+        /// A failed turn's last words from the agent itself, when it exited
+        /// before it ever worked: bounded and redacted (`recovery::detail`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     SettingsChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +329,43 @@ pub enum Payload {
     /// Codex as a steer. From here on it is a message the agent has, at this
     /// point in the turn, and no longer one waiting behind it.
     PromptAbsorbed {
+        prompt_seq: u64,
+    },
+    /// The `user_message` at `prompt_seq` has not been typed, because the
+    /// agent's input box already holds something (#722): what the reader
+    /// typed in the terminal, or a prompt the agent put back there. It goes
+    /// in once the box is empty; `occupied: false` says the wait is over.
+    InputOccupied {
+        prompt_seq: u64,
+        occupied: bool,
+    },
+    /// The agent dropped the turn of the `user_message` at `prompt_seq`
+    /// before answering it, and took another prompt in its place (#722):
+    /// Claude Code recorded a later prompt as following the same point in
+    /// the conversation. The message was never answered.
+    PromptReplaced {
+        prompt_seq: u64,
+    },
+    /// What the agent recorded for the `user_message` at `prompt_seq` is
+    /// `text`, not what was sent (#722): the message reached the agent inside
+    /// a longer prompt, or changed on the way. The chat shows `text`, once,
+    /// as what the agent received.
+    PromptChanged {
+        prompt_seq: u64,
+        text: String,
+    },
+    /// The agent received the `user_message` at `prompt_seq` inside the
+    /// prompt it recorded for the message at `into_seq`, which shows it
+    /// (#722): typed into an input box that held that one, or held with it.
+    /// Its own bubble goes; what was sent stays with the message it joined.
+    PromptJoined {
+        prompt_seq: u64,
+        into_seq: u64,
+    },
+    /// The reader stopped the turn while the `user_message` at `prompt_seq`
+    /// was waiting on what the agent's input box held (#722): it was never
+    /// typed, and will not be. It can be sent again.
+    PromptWithdrawn {
         prompt_seq: u64,
     },
     AssistantText {
@@ -479,6 +521,10 @@ pub enum Payload {
         message: String,
         #[serde(default)]
         fatal: bool,
+        /// What a launch that was refused said: bounded and redacted
+        /// (`recovery::detail`), shown under the allowlisted message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     Unknown {
         kind: String,

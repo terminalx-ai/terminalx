@@ -167,20 +167,40 @@ fn run_gh(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The spellings of a GitHub remote, up to the `owner/repo` part.
+const GITHUB_REMOTE_PREFIXES: [&str; 5] = ["git@github.com:", "ssh://git@github.com/", "https://github.com/", "http://github.com/", "github.com/"];
+
 /// `owner/repo` from a GitHub remote URL, in either the SSH or HTTPS spelling.
 pub fn github_repo_from_url(url: &str) -> Option<String> {
     let url = url.trim().trim_end_matches('/');
-    let rest = url
-        .strip_prefix("git@github.com:")
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| url.strip_prefix("https://github.com/"))
-        .or_else(|| url.strip_prefix("http://github.com/"))
-        .or_else(|| url.strip_prefix("github.com/"))?;
+    let rest = GITHUB_REMOTE_PREFIXES.iter().find_map(|prefix| url.strip_prefix(prefix))?;
     let rest = rest.trim_end_matches(".git");
     let mut parts = rest.split('/');
     let owner = parts.next().filter(|s| !s.is_empty())?;
     let repo = parts.next().filter(|s| !s.is_empty())?;
     Some(format!("{owner}/{repo}"))
+}
+
+/// `owner/name` and nothing else, in the characters GitHub allows.
+pub fn is_github_repo(repo: &str) -> bool {
+    let valid = |part: &str| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')) && part != "." && part != "..";
+    matches!(repo.split('/').collect::<Vec<_>>()[..], [owner, name] if valid(owner) && valid(name))
+}
+
+/// A GitHub remote URL pointed at the repository `repo` (`owner/name`), in
+/// the same spelling: SSH stays SSH, and a `.git` ending stays. Only the
+/// spelling is kept from `url`, so nothing else in it can reach the answer.
+/// `None` for a URL [`github_repo_from_url`] doesn't read, or a name that
+/// isn't one.
+pub fn github_remote_url_for(url: &str, repo: &str) -> Option<String> {
+    github_repo_from_url(url)?;
+    if !is_github_repo(repo) {
+        return None;
+    }
+    let url = url.trim().trim_end_matches('/');
+    let prefix = GITHUB_REMOTE_PREFIXES.iter().find(|prefix| url.starts_with(**prefix))?;
+    let ending = if url.ends_with(".git") { ".git" } else { "" };
+    Some(format!("{prefix}{repo}{ending}"))
 }
 
 /// An issue as someone names it on a command line: `#433` or `433` for
@@ -233,10 +253,8 @@ pub fn github_repo(cwd: &Path) -> Option<String> {
 /// project (no repository) included.
 pub fn cloud_project_repo(project: &Path) -> Option<String> {
     let (_, identity) = project.to_str()?.strip_prefix("cloud:")?.rsplit_once(':')?;
-    let mut parts = identity.strip_prefix("github.com/")?.split('/');
-    let (owner, name) = (parts.next()?, parts.next()?);
-    let valid = |part: &str| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')) && part != "." && part != "..";
-    (parts.next().is_none() && valid(owner) && valid(name)).then(|| format!("{owner}/{name}"))
+    let repo = identity.strip_prefix("github.com/")?;
+    is_github_repo(repo).then(|| repo.to_string())
 }
 
 /// Where `gh` runs for a project: in its checkout, which tells `gh` the
@@ -899,6 +917,27 @@ mod tests {
         assert_eq!(github_repo_from_url("https://github.com/acme/widgets.git/").as_deref(), Some("acme/widgets"));
         assert_eq!(github_repo_from_url("ssh://git@github.com/acme/widgets.git").as_deref(), Some("acme/widgets"));
         assert_eq!(github_repo_from_url("https://gitlab.com/acme/widgets"), None);
+    }
+
+    #[test]
+    fn a_remote_is_pointed_at_a_renamed_repository_in_its_own_spelling() {
+        for (url, pointed) in [
+            ("git@github.com:acme/gadgets.git", "git@github.com:acme/widgets.git"),
+            ("ssh://git@github.com/acme/gadgets.git", "ssh://git@github.com/acme/widgets.git"),
+            ("https://github.com/acme/gadgets", "https://github.com/acme/widgets"),
+            ("https://github.com/acme/gadgets.git/", "https://github.com/acme/widgets.git"),
+            (" http://github.com/acme/gadgets.git\n", "http://github.com/acme/widgets.git"),
+        ] {
+            assert_eq!(github_remote_url_for(url, "acme/widgets").as_deref(), Some(pointed), "{url}");
+        }
+        // Not a GitHub remote, or not a repository name: no URL.
+        assert_eq!(github_remote_url_for("https://gitlab.com/acme/gadgets", "acme/widgets"), None);
+        assert_eq!(github_remote_url_for("https://user:secret@github.com/acme/gadgets", "acme/widgets"), None);
+        for not_a_name in ["acme", "acme/widgets/extra", "acme/../x", "acme/wid gets", "acme/widgets;rm", "", "/widgets"] {
+            assert_eq!(github_remote_url_for("git@github.com:acme/gadgets.git", not_a_name), None, "{not_a_name}");
+            assert!(!is_github_repo(not_a_name), "{not_a_name}");
+        }
+        assert!(is_github_repo("terminal-x/widgets_2.js"));
     }
 
     #[test]

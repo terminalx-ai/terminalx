@@ -1,9 +1,9 @@
-import { useState } from "react";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
 import { openChatLink, type ChatLinkContext } from "@/lib/chatLinks";
 import { fileName, shortPath } from "@/lib/paths";
 import type { TurnFileChange } from "@/lib/turnChanges";
 import { File } from "@/icons";
+import { useDisclosure } from "./disclosures";
 
 /** Chips shown before the rest fold into "+N more"; a list one longer than this shows whole. */
 const SHOWN = 2;
@@ -14,7 +14,7 @@ const SHOWN = 2;
  * shows them. A file's chip opens it. A setting turns the row off.
  */
 export function TurnChanges({ changes, cwd, linkContext }: { changes: TurnFileChange[]; cwd?: string; linkContext?: ChatLinkContext }) {
-  const [all, setAll] = useState(false);
+  const [all, setAll] = useDisclosure("changes");
   if (!changes.length) return null;
   const folded = !all && changes.length > SHOWN + 1;
   const shown = folded ? changes.slice(0, SHOWN) : changes;

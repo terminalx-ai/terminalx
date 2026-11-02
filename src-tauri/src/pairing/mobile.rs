@@ -18,6 +18,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::model::{AccountMirror, DeviceProvenance};
+use super::send_ids::{Reply, SendIds, SendKey, ID_REUSED, STILL_SENDING};
+use crate::local_runtime::mobile::Repeat;
+use super::wire::{megabytes, ReplyLimits, Transport, Wire};
 use super::{DeviceEntry, DeviceScope, PairingManager};
 use crate::events::{AgentEvent, Payload};
 use crate::store::index::{self, SessionEntry, TabEntry};
@@ -31,10 +34,28 @@ const ATTACHMENT_BYTES_LIMIT: usize = 5 * 1024 * 1024;
 const ATTACHMENT_COUNT_LIMIT: usize = 8;
 const NOTIFICATION_LIMIT: usize = 512;
 const TAIL_EVENT_LIMIT: usize = 5_000;
-// Reserve 2 MiB of the wire limit for encryption (nonce, tag and header),
-// WebSocket framing and buffered control frames, then undo base64's 4/3 expansion.
-// This caps the entire serialized RPC response at 6 MiB, including its envelope.
-const TAIL_RESPONSE_BYTES_LIMIT: usize = (super::PAIRING_MESSAGE_BYTES_LIMIT - 2 * 1024 * 1024) / 4 * 3;
+// What one encrypted text frame carries on a direct connection: 6 MiB for the
+// entire serialized RPC response, including its envelope. No transcript reply
+// is larger on any transport; on Relay a page is held to one Relay frame.
+const TAIL_RESPONSE_BYTES_LIMIT: usize = Transport::Direct.text_plaintext_limit();
+/// How long a connection waits for the runtime to register or check it.
+const RUNTIME_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Runtime calls block on a local socket for up to two minutes. They run on
+/// the blocking pool, so a stalled runtime cannot hold the async workers that
+/// Relay's control channel also runs on (#666, #661).
+pub(super) async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(work).await.context("a paired-device runtime call stopped")?
+}
+
+/// `off_runtime` for a call that may be abandoned: one that changes nothing,
+/// or whose result undoes itself when dropped, as a `MobileConnection` does.
+async fn off_runtime_within<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::time::timeout(RUNTIME_CALL_TIMEOUT, off_runtime(work)).await.map_err(|_| {
+        anyhow!(super::diagnostics::Category::LocalRuntime)
+            .context(format!("The local runtime did not answer within {} s.", RUNTIME_CALL_TIMEOUT.as_secs()))
+    })?
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +82,12 @@ pub(super) struct MobileRuntime {
     notification_epoch: String,
     notification_seq: std::sync::atomic::AtomicU64,
     notes: Mutex<()>,
+    /// Shared by every connection: the retry of a send whose reply was lost
+    /// comes over the connection that replaced the one that dropped (#675).
+    send_ids: SendIds,
+    /// The desktop's own Codex model list, so a phone choosing a model for a
+    /// new session sees what the new-session view offers.
+    codex_models: OnceLock<Arc<crate::harness::codex::models::Cache>>,
 }
 
 impl MobileRuntime {
@@ -72,7 +99,13 @@ impl MobileRuntime {
             notification_epoch: Uuid::new_v4().to_string(),
             notification_seq: std::sync::atomic::AtomicU64::new(0),
             notes: Mutex::new(()),
+            send_ids: SendIds::new(),
+            codex_models: OnceLock::new(),
         }
+    }
+
+    pub(super) fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
+        let _ = self.codex_models.set(cache);
     }
 
     pub(super) fn configure(&self, sink: Arc<dyn EventSink>) -> Result<()> {
@@ -103,6 +136,15 @@ impl MobileRuntime {
 
     pub(super) fn broadcast_sessions_changed(&self) {
         self.broadcast(json!({ "method": "sessions.changed" }));
+    }
+
+    /// The desktop attached to a runtime: what each phone may be offered
+    /// comes from it (#730). A connection admitted by the attachment it
+    /// replaced checks that attachment before it sends this, finds it gone
+    /// and closes, so its phone connects again and asks afresh; one admitted
+    /// by this attachment passes it on, and its phone asks again.
+    pub(super) fn broadcast_capabilities_changed(&self) {
+        self.broadcast(json!({ "method": "sync.capabilitiesChanged" }));
     }
 
     pub(super) fn capture_agent_event(&self, manager: &PairingManager, payload: &str) {
@@ -157,6 +199,7 @@ pub(super) struct MobileConnection {
     actor: crate::local_runtime::mobile::Actor,
     runtime: Arc<MobileRuntime>,
     outbound: mpsc::Sender<Value>,
+    wire: Wire,
     subscriptions: Mutex<HashMap<String, ListenerId>>,
     terminal_subscriptions: Mutex<HashMap<String,String>>,
     polling: std::sync::atomic::AtomicBool,
@@ -165,7 +208,13 @@ pub(super) struct MobileConnection {
 }
 
 impl MobileConnection {
-    pub(super) fn new(manager: &PairingManager, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>) -> Result<Self> {
+    /// `new`, with the runtime's `register` round trip off the async workers.
+    pub(super) async fn open(manager: &Arc<PairingManager>, device: &DeviceEntry, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
+        let (manager, device) = (manager.clone(), device.clone());
+        off_runtime_within(move || Self::new(&manager, &device, manager.mobile.clone(), outbound, transport)).await
+    }
+
+    fn new(manager: &PairingManager, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
         let id = Uuid::new_v4().to_string();
         let owner = manager.runtime.lock().unwrap().clone().context("The local runtime is unavailable.")?;
         let attachment = owner.attachment()?;
@@ -181,11 +230,16 @@ impl MobileConnection {
             id, owner, actor, overflowed,
             runtime,
             outbound,
+            wire: Wire::new(transport),
             subscriptions: Mutex::new(HashMap::new()),
             terminal_subscriptions: Mutex::new(HashMap::new()),
             polling: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub(super) fn wire(&self) -> &Wire {
+        &self.wire
     }
 
     pub(super) fn check_buffer(&self) -> Result<()> {
@@ -196,17 +250,29 @@ impl MobileConnection {
     }
 
     pub(super) fn check(&self, manager: &PairingManager) -> Result<()> {
+        self.check_current(manager)?;
+        self.call("check", json!({}))?;
+        Ok(())
+    }
+
+    /// `check`, with the runtime round trip off the async workers.
+    pub(super) async fn check_off_runtime(self: &Arc<Self>, manager: &PairingManager) -> Result<()> {
+        self.check_current(manager)?;
+        let connection = self.clone();
+        off_runtime_within(move || connection.call("check", json!({})).map(drop)).await
+    }
+
+    fn check_current(&self, manager: &PairingManager) -> Result<()> {
         self.check_buffer()?;
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.actor.generation != manager.account.current_generation() {
             bail!("The paired-device connection or account changed.");
         }
-        self.call("check", json!({}))?;
         Ok(())
     }
 
     fn call(&self, method: &str, mut params: Value) -> Result<Value> {
         params.as_object_mut().context("Mobile parameters must be an object.")?.insert("connection".into(), json!(self.id));
-        self.owner.mobile(&self.actor, method, params)
+        self.owner.mobile(&self.actor, method, params).map_err(outdated)
     }
 
     pub(super) fn close(&self, _manager: &PairingManager) { self.finish(); }
@@ -224,12 +290,29 @@ impl MobileConnection {
             }
         }
         self.runtime.unregister_client(&self.id);
-        if self.call("close", json!({})).is_err() { self.owner.disconnect(); }
+        let (owner, actor, id) = (self.owner.clone(), self.actor.clone(), self.id.clone());
+        let close = move || {
+            if owner.mobile(&actor, "close", json!({"connection": id})).is_err() { owner.disconnect(); }
+        };
+        // Closing runs on async workers and in Drop: keep the round trip off them (#666).
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => { runtime.spawn_blocking(close); }
+            Err(_) => close(),
+        }
     }
 
     fn stream(&self, request_id: &str, result: Value) {
         if !self.closed.load(std::sync::atomic::Ordering::SeqCst)
             && self.outbound.try_send(success_response(request_id, result)).is_err() { self.finish(); }
+    }
+
+    /// A live event, cut down when this connection cannot carry it whole: a
+    /// reply it cannot carry would end the subscription (#669).
+    fn stream_event(&self, request_id: &str, event: &AgentEvent) -> Result<()> {
+        let envelope = serde_json::to_vec(&success_response(request_id, json!({ "event": null })))?.len();
+        let event = fit_event(event, self.wire.message_limit().saturating_sub(envelope))?;
+        self.stream(request_id, json!({ "event": event }));
+        Ok(())
     }
 
     fn insert_subscription(&self, subscription_id: String, event_id: ListenerId) {
@@ -262,7 +345,12 @@ impl MobileConnection {
                             let request = connection.terminal_subscriptions.lock().unwrap()
                                 .get(packet["subscriptionId"].as_str().unwrap_or_default()).cloned();
                             if let Some(request) = request {
-                                connection.stream(&request,json!({"type":"data","chunk":packet["text"]}));
+                                if packet.get("cols").is_some() {
+                                    connection.stream(&request,json!({"type":"resized","cols":packet["cols"],"rows":packet["rows"]}));
+                                }
+                                if packet["text"].as_str().is_some_and(|text| !text.is_empty()) {
+                                    connection.stream(&request,json!({"type":"data","chunk":packet["text"]}));
+                                }
                             }
                         }
                     }
@@ -290,7 +378,8 @@ impl Drop for MobileConnection {
     fn drop(&mut self) { self.finish(); }
 }
 
-pub(super) async fn dispatch(
+/// Synchronous throughout: callers run it with `off_runtime`.
+pub(super) fn dispatch(
     manager: &PairingManager,
     connection: &Arc<MobileConnection>,
     request: &Value,
@@ -301,7 +390,8 @@ pub(super) async fn dispatch(
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let sink = manager.sink.get().cloned();
     let result = match method {
-        "sync.capabilities" => no_params(&params).map(|_| json!({ "transcript": 1, "conditionalLists": 1 })),
+        "sync.capabilities" => no_params(&params).map(|_| capabilities(connection.owner.build())),
+        "transport.negotiate" => parse_params(params).map(|params| negotiate(connection, params)),
         "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
         "session.tail" => parse_params(params).and_then(|params| session_tail(connection, request_id(request), params)),
@@ -313,22 +403,47 @@ pub(super) async fn dispatch(
             parse_params(params).and_then(|params: UnsubscribeParams| Ok(json!({ "removed": connection.unsubscribe(&params.subscription_id)? })))
         }
         "session.send" => {
-            require_driver(device).and_then(|_| parse_params(params).and_then(|params| send_session(connection, params)))
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| send_session(manager, connection, params)))
         }
         "permission.respond" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_permission(connection, params)))
         }
+        // Session controls (`sessionControls`): the desktop's own operations,
+        // which the runtime checks against this device's grant again.
+        "session.tab" => parse_params(params).and_then(|params: TabControlParams| connection.call("tab", params.into_call())),
+        "models.list" => parse_params(params).and_then(|params: ModelsParams| connection.call("models", json!({"refresh": params.refresh}))),
+        "session.prepareContinuation" => parse_params(params).and_then(|params: TabControlParams| connection.call("prepareContinuation", params.into_call())),
+        "session.stop" | "session.interrupt" | "session.resendUnsent" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: TabControlParams| {
+            connection.call(method.trim_start_matches("session."), params.into_call())
+        })),
+        "session.setModel" | "session.setEffort" | "session.setMode" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: TabSettingParams| {
+            connection.call(method.trim_start_matches("session."), params.into_call(method))
+        })),
+        "session.continue" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: ContinueParams| {
+            connection.call("continue", json!({"sessionId": params.session_id, "tabId": params.tab_id, "tab": params.tab, "prompt": params.prompt}))
+        })),
         "chat.list" => parse_params(params).and_then(|params| list_notes(manager, params)),
         "chat.post" => parse_params(params).and_then(|params| post_note(manager, device, params)),
         "chat.promoteToAgent" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| promote_notes(manager, connection, params)))
         }
         "terminal.read" => parse_params(params).and_then(|params| read_terminal(connection, params)),
+        "terminal.open" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| open_terminal(connection, params)))
+        }
         "terminal.subscribe" => parse_params(params).and_then(|params| subscribe_terminal(connection, request_id(request), params)),
         "steerLease.queueInput" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(connection, params)))
         }
         "steerLease.release" => parse_params(params).and_then(|params| release_input(connection, params)),
+        "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager)),
+        "sessions.create" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| create_session(manager, connection, params)))
+        }
+        "mac.settings" => no_params(&params).and_then(|_| connection.call("settings", json!({}))),
+        "mac.setSettings" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params: MacSettingsPatch| connection.call("setSettings", json!({"nativeCodex": params.native_codex}))))
+        }
         "notifications.missedSince" => parse_params(params).map(|params| missed_notifications(manager, params)),
         "notifications.subscribe" => sink
             .as_ref()
@@ -337,6 +452,109 @@ pub(super) async fn dispatch(
         _ => return None,
     };
     Some(result)
+}
+
+/// What this Mac understands beyond the first phone protocol, through
+/// `runtime`, the runtime the phone's connection was admitted by. A phone
+/// sends a field only to a Mac that names it here: every params type refuses
+/// fields it does not know. And it offers a feature only when it is named:
+/// one that the app knows and its runtime does not would be offered and then
+/// refused (#730), so those are named only as far as the runtime serves them
+/// (`local_runtime::mobile::features`).
+fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
+    // `transcript` and `conditionalLists` are this app's own.
+    let mut named = json!({ "transcript": 1, "conditionalLists": 1 });
+    // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
+    // `sessionControls`: stop, interrupt, recovery, settings and continuing in
+    // a new tab, as the desktop offers them.
+    // `sessionCreate`: `sessions.options` and `sessions.create` start a session
+    // as the desktop does. `macSettings`: `mac.settings` and `mac.setSettings`.
+    // `terminal`: `terminal.open`, and terminal observations that carry the
+    // pane's size, so the phone can emulate the screen and drive it.
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1)] {
+        if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
+            named[feature] = json!(level);
+        }
+    }
+    named
+}
+
+/// What a phone is told when the runtime refuses an operation it does not
+/// know: a feature this Mac named and its runtime cannot serve after all.
+pub(super) const OUTDATED: &str = "TerminalX on your Mac needs updating or restarting to do this.";
+
+/// The runtime's refusal of an operation it does not know, said so a person
+/// knows what to do (#730). Any other error is left as it is.
+fn outdated(error: anyhow::Error) -> anyhow::Error {
+    let unknown = error.chain().any(|cause| cause.downcast_ref::<crate::local_runtime::client::Refused>()
+        .is_some_and(|refused| refused.message == crate::local_runtime::mobile::UNSUPPORTED));
+    if unknown { anyhow!(OUTDATED) } else { error }
+}
+
+/// One tab, for a control that takes nothing else.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TabControlParams {
+    session_id: String,
+    tab_id: String,
+}
+impl TabControlParams {
+    fn into_call(self) -> Value { json!({"sessionId": self.session_id, "tabId": self.tab_id}) }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelsParams {
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// A model, an effort (none for the agent's own default) or a permission mode.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TabSettingParams {
+    session_id: String,
+    tab_id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+impl TabSettingParams {
+    fn into_call(self, method: &str) -> Value {
+        let mut call = json!({"sessionId": self.session_id, "tabId": self.tab_id});
+        match method {
+            "session.setModel" => call["model"] = json!(self.model.unwrap_or_default()),
+            "session.setEffort" => call["effort"] = json!(self.effort),
+            _ => call["mode"] = json!(self.mode.unwrap_or_default()),
+        }
+        call
+    }
+}
+
+/// "Continue in new session": the source tab, the new tab's agent and
+/// settings, and the prompt built from the prepared context.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContinueParams {
+    session_id: String,
+    tab_id: String,
+    tab: ContinueTab,
+    prompt: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContinueTab {
+    harness: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    permission_mode: Option<String>,
 }
 
 fn request_id(request: &Value) -> &str {
@@ -418,6 +636,23 @@ fn session_summaries() -> Result<Value> {
     Ok(json!({ "sessions": sessions }))
 }
 
+/// What the phone's end of the connection can do (#669). Unknown fields are
+/// ignored: a phone newer than this desktop may offer more than it knows.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NegotiateParams {
+    #[serde(default)]
+    fragments: Option<u64>,
+}
+
+fn negotiate(connection: &MobileConnection, params: NegotiateParams) -> Value {
+    if connection.wire.negotiate(params.fragments) {
+        json!({ "fragments": super::wire::FRAGMENTS_VERSION })
+    } else {
+        json!({})
+    }
+}
+
 fn file_name(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -473,10 +708,11 @@ fn session_sync(connection: &MobileConnection, request_id: &str, params: Session
     // Reconciliation publishes to the log. Read canonical file order again:
     // another publisher may have appended between the first read and publish.
     let events: Vec<AgentEvent> = store::read_lines(&path)?;
-    sync_page(&events, params.cursor.as_ref(), &params.session_id, &params.tab_id, request_id)
+    let limits = connection.wire.reply_limits(TAIL_RESPONSE_BYTES_LIMIT);
+    sync_page(&events, params.cursor.as_ref(), &params.session_id, &params.tab_id, request_id, limits)
 }
 
-fn sync_page(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str) -> Result<Value> {
+fn sync_page(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<Value> {
     // Hash canonical records with explicit boundaries, including conversation
     // identity and protocol generation. Stable across desktop restarts.
     let mut hash = Sha256::new();
@@ -504,13 +740,15 @@ fn sync_page(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, 
         "events": [], "reset": false, "hasMore": false, "hasEarlier": false,
         "cursor": SyncCursor { offset: events.len(), digest: "0".repeat(64) },
     }));
-    let budget = TAIL_RESPONSE_BYTES_LIMIT.checked_sub(serde_json::to_vec(&envelope)?.len())
-        .context("transcript request envelope is too large")?;
+    let envelope = serde_json::to_vec(&envelope)?.len();
+    let budget = limits.page.checked_sub(envelope).context("transcript request envelope is too large")?;
+    let single = limits.single.checked_sub(envelope).context("transcript request envelope is too large")?;
     let end = if valid {
         start + sync_event_count(events[start..].iter().take(SYNC_PAGE_EVENTS), budget)?
     } else {
         // A reset is a recent contiguous suffix; forward pages are prefixes of
-        // the remaining records. Neither direction can skip an oversized event.
+        // the remaining records. Neither direction can skip an oversized event:
+        // it is sent alone, and cut down to fit if it must be.
         start = events.len() - sync_event_count(events[start..].iter().rev(), budget)?;
         events.len()
     };
@@ -526,28 +764,109 @@ fn sync_page(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, 
         hash.update(serde_json::to_vec(event)?);
         hash.update(b"\n");
     }
+    let page = events[start..end].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
     Ok(json!({
-        "events": &events[start..end], "reset": !valid,
+        "events": page, "reset": !valid,
         "cursor": SyncCursor { offset: end, digest: format!("{:x}", hash.finalize()) },
         "hasMore": end < events.len(), "hasEarlier": start > 0,
     }))
 }
 
+/// How many of `events` fill a page. The first is always taken: one larger
+/// than a page on its own is the whole page.
 fn sync_event_count<'a>(events: impl Iterator<Item = &'a AgentEvent>, budget: usize) -> Result<usize> {
     let mut count = 0;
     let mut bytes = 0;
     for event in events {
         let size = serde_json::to_vec(event)?.len() + usize::from(count > 0);
-        if bytes + size > budget {
-            if count == 0 {
-                bail!("Transcript event {} is too large to load on mobile. Open this conversation on your Mac.", event.seq);
-            }
+        if count > 0 && bytes + size > budget {
             break;
         }
         bytes += size;
         count += 1;
     }
     Ok(count)
+}
+
+/// The note that ends a string cut short to fit.
+fn cut_note(omitted: usize) -> String {
+    format!("\n\n[Too large to show on mobile: {} not shown. Open this conversation on your Mac to see all of it.]", megabytes(omitted))
+}
+
+/// An event as JSON of at most `budget` bytes (#669). In one that is larger,
+/// the longest strings are cut short, longest first, each ending in a note of
+/// what is missing. Everything else about the event is kept, so the phone
+/// still pairs a tool's result with its call. One made of many small parts
+/// becomes a status line saying it is too large.
+fn fit_event(event: &AgentEvent, budget: usize) -> Result<Value> {
+    let mut value = serde_json::to_value(event)?;
+    let size = serde_json::to_vec(&value)?.len();
+    if size <= budget {
+        return Ok(value);
+    }
+    // No cut omits more than the whole event, so no note is longer than this.
+    let note = json_escaped_len(&cut_note(size));
+    let mut excess = size - budget;
+    {
+        let mut strings = Vec::new();
+        if let Some(payload) = value.get_mut("payload") {
+            strings_mut(payload, &mut strings);
+        }
+        let mut strings: Vec<_> = strings.into_iter().map(|text| (json_escaped_len(text), text)).collect();
+        strings.sort_by_key(|(length, _)| std::cmp::Reverse(*length));
+        for (length, text) in strings {
+            if excess == 0 || length <= note {
+                break;
+            }
+            let keep = length.saturating_sub(excess + note);
+            excess = excess.saturating_sub(length - keep - note);
+            let end = escaped_prefix_end(text, keep);
+            let omitted = text.len() - end;
+            text.truncate(end);
+            text.push_str(&cut_note(omitted));
+        }
+    }
+    if excess > 0 || serde_json::to_vec(&value)?.len() > budget {
+        value["payload"] = json!({
+            "type": "status",
+            "text": format!("This item is too large to show on mobile ({}). Open this conversation on your Mac to see it.", megabytes(size)),
+        });
+    }
+    Ok(value)
+}
+
+fn strings_mut<'a>(value: &'a mut Value, found: &mut Vec<&'a mut String>) {
+    match value {
+        Value::String(text) => found.push(text),
+        Value::Array(items) => items.iter_mut().for_each(|item| strings_mut(item, found)),
+        Value::Object(fields) => fields.values_mut().for_each(|item| strings_mut(item, found)),
+        _ => {}
+    }
+}
+
+/// The bytes `c` takes inside a JSON string, as serde_json writes it.
+fn escaped_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{8}' | '\t' | '\n' | '\u{c}' | '\r' => 2,
+        '\0'..='\u{1f}' => 6,
+        c => c.len_utf8(),
+    }
+}
+
+fn json_escaped_len(text: &str) -> usize {
+    text.chars().map(escaped_len).sum()
+}
+
+/// Where the longest prefix of `text` that escapes to at most `limit` bytes ends.
+fn escaped_prefix_end(text: &str, limit: usize) -> usize {
+    let mut used = 0;
+    for (index, c) in text.char_indices() {
+        used += escaped_len(c);
+        if used > limit {
+            return index;
+        }
+    }
+    text.len()
 }
 
 #[derive(Deserialize)]
@@ -566,18 +885,21 @@ fn session_tail(connection: &MobileConnection, request_id: &str, params: Session
         bail!("tail limit must be between 1 and 20 turns");
     }
     let path = store::log_path(&params.session_id, &params.tab_id)?;
-    let byte_limit = tail_event_byte_limit(request_id)?;
+    let limits = connection.wire.reply_limits(TAIL_RESPONSE_BYTES_LIMIT);
+    let byte_limit = tail_event_byte_limit(request_id, limits.page)?;
+    let single = tail_event_byte_limit(request_id, limits.single)?;
     if params.before.is_none() {
         connection.call("reconcile", json!({"sessionId":params.session_id,"tabId":params.tab_id}))?;
     }
     let (events, has_more) = read_event_tail(&path, params.before, params.limit, byte_limit)?;
+    let events = events.iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
     Ok(json!({ "events": events, "hasMore": has_more }))
 }
 
-fn tail_event_byte_limit(request_id: &str) -> Result<usize> {
+fn tail_event_byte_limit(request_id: &str, response_limit: usize) -> Result<usize> {
     // `false` is longer than `true`; count the request id after JSON escaping too.
     let envelope = success_response(request_id, json!({ "events": [], "hasMore": false }));
-    TAIL_RESPONSE_BYTES_LIMIT.checked_sub(serde_json::to_vec(&envelope)?.len())
+    response_limit.checked_sub(serde_json::to_vec(&envelope)?.len())
         .context("transcript request envelope is too large")
 }
 
@@ -592,7 +914,8 @@ fn read_event_tail(path: &Path, before: Option<u64>, turn_limit: usize, byte_lim
 
 /// Read newest first and return a contiguous suffix in sequence order. Limits may split a turn;
 /// the first returned sequence remains the exclusive `before` cursor for the
-/// next page. Never skip or truncate an event to make a page fit.
+/// next page. Never skip an event to make a page fit: one larger than a page
+/// on its own is the whole page, for the caller to cut down if it must.
 fn select_event_tail(
     source: impl IntoIterator<Item = Result<AgentEvent>>,
     before: Option<u64>,
@@ -613,10 +936,7 @@ fn select_event_tail(
             break;
         }
         let event_bytes = serde_json::to_vec(&event)?.len() + usize::from(!events.is_empty());
-        if bytes + event_bytes > byte_limit {
-            if events.is_empty() {
-                bail!("Transcript event {} is too large to load on mobile. Open this conversation on your Mac.", event.seq);
-            }
+        if !events.is_empty() && bytes + event_bytes > byte_limit {
             has_more = true;
             break;
         }
@@ -664,7 +984,7 @@ fn subscribe_session(
             let Ok(event) = serde_json::from_str::<AgentEvent>(payload) else { return };
             if event.session_id == session_id && event.tab_id == tab_id {
                 if let Some(stream) = stream.upgrade() {
-                    stream.stream(&response_id, json!({ "event": event }));
+                    let _ = stream.stream_event(&response_id, &event);
                 }
             }
         }),
@@ -695,12 +1015,191 @@ struct SessionSendParams {
     text: String,
     #[serde(default)]
     attachments: Vec<RemoteAttachmentInput>,
+    /// The phone's id for this draft; sent only to a Mac with `sendIds` (#675).
+    #[serde(default)]
+    client_message_id: Option<String>,
 }
 
-fn send_session(connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
-    let (session, _) = find_tab(&params.tab_id)?;
-    let outcome = send_attributed(connection, &session.id, &params.tab_id, &params.text, params.attachments)?;
-    Ok(json!({ "status": "sent", "queued": outcome.queued }))
+fn send_session(manager: &PairingManager, connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
+    send_once(&manager.mobile.send_ids, params, |tab_id, text, attachments, message| {
+        let (session, _) = find_tab(tab_id)?;
+        send_attributed(connection, &session.id, tab_id, text, attachments, message)
+    })
+}
+
+/// A phone's send, once per message id (#675). `owner_send` is the
+/// runtime's send, given the id too: a queued send is answered by the
+/// runtime on every repeat, since only it knows where that copy is.
+fn send_once(
+    ids: &SendIds,
+    params: SessionSendParams,
+    owner_send: impl FnOnce(&str, &str, Vec<RemoteAttachmentInput>, Option<&str>) -> Result<OwnerSend>,
+) -> Result<Value> {
+    let SessionSendParams { tab_id, text, attachments, client_message_id } = params;
+    let Some(id) = checked_message_id(client_message_id)? else {
+        return Ok(settle(owner_send(&tab_id, &text, attachments, None)?)?.into_value());
+    };
+    let digest = send_digest(&text, &attachments);
+    let key = SendKey { tab_id: tab_id.clone(), client_message_id: id.clone() };
+    ids.once(key, digest, || settle(owner_send(&tab_id, &text, attachments, Some(&id))?))
+}
+
+/// The phone's reply to what the runtime made of a send.
+fn settle(sent: OwnerSend) -> Result<Reply> {
+    // The first copy is being typed to the agent right now. The draft keeps
+    // its id, so the next try learns whether it arrived.
+    if sent.repeat == Some(Repeat::Delivering) {
+        bail!(STILL_SENDING);
+    }
+    let reply = json!({ "status": "sent", "queued": sent.outcome.queued });
+    // A queued copy is dropped if the connection it came over closes before
+    // the agent's turn ends, and that is the connection whose drop lost this
+    // reply. So a queued reply answers no repeat: each goes to the runtime,
+    // which delivers, re-queues or reports that copy instead of adding one.
+    Ok(if sent.outcome.queued { Reply::Unsettled(reply) } else { Reply::Settled(reply) })
+}
+
+/// The runtime's answer to a send: its outcome and, for a phone message sent
+/// again, what it found of the first copy (#675). An older runtime ignores the
+/// id and never reports `repeat`; its outcome reads as it always has.
+#[derive(Deserialize)]
+struct OwnerSend {
+    #[serde(flatten)]
+    outcome: crate::session::SendOutcome,
+    #[serde(default)]
+    repeat: Option<Repeat>,
+}
+
+/// The id a phone gave a message (#675): a UUID, held to what fits a key.
+fn checked_message_id(id: Option<String>) -> Result<Option<String>> {
+    match id {
+        Some(id) if !(8..=128).contains(&id.len()) || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') => {
+            bail!("invalid client message id")
+        }
+        id => Ok(id),
+    }
+}
+
+/// What a send carries, as the agent gets it: trimmed text and every
+/// attachment whole. Equal for a repeat, different for any edit.
+fn send_digest(text: &str, attachments: &[RemoteAttachmentInput]) -> String {
+    let attachments: Vec<_> = attachments
+        .iter()
+        .map(|attachment| json!([attachment.media_type, attachment.name, attachment.data]))
+        .collect();
+    let canonical = serde_json::to_vec(&json!([text.trim(), attachments])).expect("a JSON value serializes");
+    format!("{:x}", Sha256::digest(canonical))
+}
+
+/// What the desktop's new-session view lets a person choose, for a phone to
+/// choose the same: projects (by an id that is not their path), the agents
+/// with their models and efforts, and the permission modes.
+fn new_session_options(manager: &PairingManager) -> Result<Value> {
+    let projects = phone_projects()?;
+    let codex = manager.mobile.codex_models.get().map(|cache| cache.get(false)).unwrap_or_default();
+    let models = crate::models::offered(crate::harness::claude::models::get(false), codex);
+    let agents: Vec<Value> = crate::harness::offered().into_iter().map(|agent| {
+        let models: Vec<Value> = models.iter().filter(|model| model.harness == agent.id).map(|model| json!({
+            "id": model.id, "label": model.label, "isDefault": model.is_default,
+            "efforts": model.efforts, "defaultEffort": model.default_effort,
+        })).collect();
+        json!({"id": agent.id, "name": agent.name, "available": agent.available, "installHint": agent.install_hint,
+            "effort": agent.caps.effort, "permissionModes": agent.caps.permission_modes, "models": models})
+    }).collect();
+    // As the desktop labels them (`PERMISSION_MODES`).
+    let modes = json!([
+        {"id": "plan", "label": "Plan"}, {"id": "manual", "label": "Ask every time"}, {"id": "auto", "label": "Auto"},
+        {"id": "acceptEdits", "label": "Accept edits"}, {"id": "bypassPermissions", "label": "Bypass permissions"},
+    ]);
+    Ok(json!({"projects": projects, "agents": agents, "modes": modes, "defaultMode": index::DEFAULT_PERMISSION_MODE,
+        "nativeCodex": store::settings::load().experimental.native_codex}))
+}
+
+/// The projects a phone may start a session in: not archived, named, and
+/// known by an id that is not their path.
+fn phone_projects() -> Result<Vec<Value>> {
+    let (projects, last) = store::projects::list()?;
+    Ok(projects.iter().filter(|project| !project.archived).map(|project| json!({
+        "id": store::projects::public_id(&project.path),
+        "name": project.name,
+        "git": project.kind == store::projects::ProjectKind::Git,
+        "lastUsed": last.as_deref() == Some(project.path.as_str()),
+    })).collect())
+}
+
+/// Where a new session's id is remembered for a repeat (#675): never a tab's.
+const NEW_SESSION_KEY: &str = "new-session";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionCreateParams {
+    #[serde(default)]
+    quick: bool,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    use_worktree: bool,
+    agent: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    /// The first message, sent to the new session as the phone sends any.
+    text: String,
+    #[serde(default)]
+    attachments: Vec<RemoteAttachmentInput>,
+    #[serde(default)]
+    client_message_id: Option<String>,
+}
+
+/// Start a session from the phone, then send it the first message through
+/// the phone's own send. With a `clientMessageId`, a repeat after a lost reply
+/// finds the session the first try made instead of making another, and its
+/// message is answered once as any send is. A first message that could not be
+/// sent leaves the session, and says why, for the phone to open and retry.
+fn create_session(manager: &PairingManager, connection: &MobileConnection, params: SessionCreateParams) -> Result<Value> {
+    if params.text.trim().is_empty() && params.attachments.is_empty() {
+        bail!("A new session needs a first message.");
+    }
+    let message = checked_message_id(params.client_message_id.clone())?;
+    let request = json!({"quick": params.quick, "projectId": params.project_id, "useWorktree": params.use_worktree,
+        "agent": params.agent, "model": params.model, "effort": params.effort, "mode": params.mode,
+        "title": params.title, "prompt": params.text});
+    let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!([&request, send_digest(&params.text, &params.attachments)]))?));
+    let created = create_once(&manager.mobile.send_ids, message.as_deref(), digest, || connection.call("create", request.clone()))?;
+    let session_id = created["sessionId"].as_str().context("The Mac did not say which session it started.")?.to_string();
+    let tab_id = created["tabId"].as_str().context("The Mac did not say which session it started.")?.to_string();
+    let first = SessionSendParams { tab_id: tab_id.clone(), text: params.text, attachments: params.attachments, client_message_id: message };
+    let sent = match send_session(manager, connection, first) {
+        Ok(reply) => json!({"sent": reply}),
+        Err(error) => json!({"sendError": format!("{error:#}")}),
+    };
+    let mut reply = json!({"sessionId": session_id, "tabId": tab_id, "title": created["title"], "native": created["native"]});
+    reply.as_object_mut().expect("an object").extend(sent.as_object().expect("an object").clone());
+    Ok(reply)
+}
+
+/// The session a phone's create made, made once per message id (#675): a
+/// repeat of the same request gets the first session, and the id with another
+/// request is refused. Without an id, each request makes one.
+fn create_once(ids: &SendIds, message: Option<&str>, digest: String, create: impl FnOnce() -> Result<Value>) -> Result<Value> {
+    match message {
+        None => create(),
+        Some(id) => {
+            let key = SendKey { tab_id: NEW_SESSION_KEY.into(), client_message_id: id.into() };
+            ids.once(key, digest, || Ok(Reply::Settled(create()?)))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MacSettingsPatch {
+    native_codex: bool,
 }
 
 #[derive(Deserialize)]
@@ -729,6 +1228,10 @@ struct ChatNote {
     /// leaves the note out of that tab's conversation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     promoted_to: Vec<NotePromotion>,
+    /// The phone's id for the draft this note was posted from (#675). The
+    /// same draft posted again finds this note instead of adding another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -781,11 +1284,15 @@ fn list_notes(manager: &PairingManager, params: ChatListParams) -> Result<Value>
 struct ChatPostParams {
     worktree_id: String,
     body: String,
+    /// The phone's id for this draft; sent only to a Mac with `sendIds` (#675).
+    #[serde(default)]
+    client_message_id: Option<String>,
 }
 
 fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostParams) -> Result<Value> {
     index::get(&params.worktree_id)?;
     let body = validate_note(&params.body)?;
+    let client_message_id = checked_message_id(params.client_message_id)?;
     let author = effective_user(device)?;
     let note = ChatNote {
         id: Uuid::now_v7().to_string(),
@@ -793,22 +1300,48 @@ fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostPar
         created_at: Utc::now().timestamp_millis(),
         author,
         promoted_to: Vec::new(),
+        client_message_id,
     };
-    {
-        let _guard = manager.mobile.notes.lock().unwrap();
-        let mut file = load_notes()?;
-        let notes = file.sessions.entry(params.worktree_id.clone()).or_default();
-        notes.push(note.clone());
-        if notes.len() > NOTES_LIMIT {
-            notes.drain(..notes.len() - NOTES_LIMIT);
-        }
-        save_notes(&file)?;
+    let (note, added) = add_note(&manager.mobile.notes, &params.worktree_id, note)?;
+    if added {
+        manager.mobile.broadcast(json!({
+            "method": "chat.changed",
+            "params": { "worktreeId": params.worktree_id },
+        }));
     }
-    manager.mobile.broadcast(json!({
-        "method": "chat.changed",
-        "params": { "worktreeId": params.worktree_id },
-    }));
     Ok(json!({ "status": "sent", "message": note }))
+}
+
+/// Add `note` to its worktree's notes, unless its draft was already posted
+/// (#675): then that note, and false. Looked up under the same lock that
+/// adds notes, so two tries of one draft cannot both miss each other.
+fn add_note(lock: &Mutex<()>, worktree_id: &str, note: ChatNote) -> Result<(ChatNote, bool)> {
+    let _guard = lock.lock().unwrap();
+    let mut file = load_notes()?;
+    let notes = file.sessions.entry(worktree_id.to_string()).or_default();
+    if let Some(earlier) = posted_before(notes, &note)? {
+        return Ok((earlier.clone(), false));
+    }
+    notes.push(note.clone());
+    if notes.len() > NOTES_LIMIT {
+        notes.drain(..notes.len() - NOTES_LIMIT);
+    }
+    save_notes(&file)?;
+    Ok((note, true))
+}
+
+/// The note this draft was already posted as, if it was (#675): returned as
+/// it is now, promotions included, as if the first reply had arrived. The id
+/// with other text is refused rather than answered with the wrong note.
+fn posted_before<'a>(notes: &'a [ChatNote], note: &ChatNote) -> Result<Option<&'a ChatNote>> {
+    let Some(id) = &note.client_message_id else { return Ok(None) };
+    let Some(earlier) = notes.iter().find(|earlier| earlier.client_message_id.as_ref() == Some(id)) else {
+        return Ok(None);
+    };
+    if earlier.body != note.body {
+        bail!(ID_REUSED);
+    }
+    Ok(Some(earlier))
 }
 
 #[derive(Deserialize)]
@@ -840,7 +1373,7 @@ fn promote_notes(manager: &PairingManager, connection: &MobileConnection, params
         text.push(note.body.clone());
     }
     drop(_guard);
-    let outcome = send_attributed(connection, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)?;
+    let outcome = send_attributed(connection, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments, None)?.outcome;
     let message = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. }));
     if let Some(message) = message {
         let promotion = NotePromotion { tab_id: params.tab_id.clone(), seq: message.seq };
@@ -888,7 +1421,8 @@ fn send_attributed(
     tab_id: &str,
     text: &str,
     attachments: Vec<RemoteAttachmentInput>,
-) -> Result<crate::session::SendOutcome> {
+    message: Option<&str>,
+) -> Result<OwnerSend> {
     validate_session_tab(session_id, tab_id)?;
     let text = text.trim();
     if text.is_empty() && attachments.is_empty() {
@@ -906,8 +1440,11 @@ fn send_attributed(
         prompt.push('@');
         prompt.push_str(&path);
     }
-    serde_json::from_value(connection.call("send", json!({"sessionId":session_id,"tabId":tab_id,
-        "text":text,"prompt":prompt,"images":images}))?).context("Invalid owner send result")
+    let mut params = json!({"sessionId":session_id,"tabId":tab_id,"text":text,"prompt":prompt,"images":images});
+    if let Some(message) = message {
+        params["clientMessageId"] = json!(message);
+    }
+    serde_json::from_value(connection.call("send", params)?).context("Invalid owner send result")
 }
 
 fn prepare_attachments(session_id: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<(Vec<crate::session::ImageInput>, Vec<String>)> {
@@ -1027,6 +1564,13 @@ struct TerminalParams {
 
 fn read_terminal(connection: &MobileConnection, params: TerminalParams) -> Result<Value> {
     connection.call("terminalRead", json!({"sessionId":params.worktree_id,"tabId":params.tab_id}))
+}
+
+/// Opening a tab's terminal view from the phone, as the desktop's terminal
+/// toggle does: the tab's agent is started in its terminal if it is not
+/// running, and a native Codex tab moves to Codex's own terminal for good.
+fn open_terminal(connection: &MobileConnection, params: TerminalParams) -> Result<Value> {
+    connection.call("openTerminal", json!({"sessionId":params.worktree_id,"tabId":params.tab_id}))
 }
 
 #[derive(Deserialize)]
@@ -1173,6 +1717,18 @@ mod tests {
         }
     }
 
+    fn direct() -> ReplyLimits {
+        Wire::new(Transport::Direct).reply_limits(TAIL_RESPONSE_BYTES_LIMIT)
+    }
+
+    fn relay(fragments: bool) -> ReplyLimits {
+        let wire = Wire::new(Transport::Relay);
+        if fragments {
+            wire.negotiate(Some(super::super::wire::FRAGMENTS_VERSION.into()));
+        }
+        wire.reply_limits(TAIL_RESPONSE_BYTES_LIMIT)
+    }
+
     fn cursor(page: &Value) -> SyncCursor {
         serde_json::from_value(page["cursor"].clone()).unwrap()
     }
@@ -1180,17 +1736,17 @@ mod tests {
     #[test]
     fn sync_cold_unchanged_and_large_gap_are_contiguous() {
         let mut events: Vec<_> = (1..=100).map(prompt).collect();
-        let cold = sync_page(&events, None, "session", "tab", "test").unwrap();
+        let cold = sync_page(&events, None, "session", "tab", "test", direct()).unwrap();
         assert_eq!(cold["events"].as_array().unwrap().len(), 20);
         assert_eq!(cold["reset"], true);
         let mut checkpoint = cursor(&cold);
-        let warm = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap();
+        let warm = sync_page(&events, Some(&checkpoint), "session", "tab", "test", direct()).unwrap();
         assert_eq!(warm["events"], json!([]));
         assert_eq!(warm["reset"], false);
         events.extend((101..=6200).map(prompt));
         let mut received = Vec::new();
         loop {
-            let page = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap();
+            let page = sync_page(&events, Some(&checkpoint), "session", "tab", "test", direct()).unwrap();
             assert_eq!(page["reset"], false);
             received.extend(page["events"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()));
             checkpoint = cursor(&page);
@@ -1202,15 +1758,15 @@ mod tests {
     #[test]
     fn sync_rewrites_truncations_and_wrong_generation_reset_boundedly() {
         let mut events: Vec<_> = (1..=600).map(prompt).collect();
-        let checkpoint = cursor(&sync_page(&events, None, "session", "tab", "test").unwrap());
+        let checkpoint = cursor(&sync_page(&events, None, "session", "tab", "test", direct()).unwrap());
         // Same seq/id and length, different content: max-seq cursors miss this.
         events[599].ts = "changed".into();
         for (history, session) in [(&events[..], "session"), (&events[..10], "session"), (&events[..], "other")] {
-            let reset = sync_page(history, Some(&checkpoint), session, "tab", "test").unwrap();
+            let reset = sync_page(history, Some(&checkpoint), session, "tab", "test", direct()).unwrap();
             assert_eq!(reset["reset"], true);
             assert!(reset["events"].as_array().unwrap().len() <= SYNC_PAGE_EVENTS);
         }
-        let empty = sync_page(&[], Some(&checkpoint), "session", "tab", "test").unwrap();
+        let empty = sync_page(&[], Some(&checkpoint), "session", "tab", "test", direct()).unwrap();
         assert_eq!(empty["events"], json!([]));
         assert_eq!(empty["reset"], true);
     }
@@ -1221,17 +1777,17 @@ mod tests {
             .chain((2..=17).map(|seq| output(seq, "🦝\n\"".repeat(128 * 1024))))
             .collect();
         let request_id = "\"\n🦝".repeat(20);
-        let cold = sync_page(&events, None, "session", "tab", &request_id).unwrap();
+        let cold = sync_page(&events, None, "session", "tab", &request_id, direct()).unwrap();
         assert_eq!(cold["reset"], true);
         assert_eq!(cold["hasEarlier"], true);
         assert_eq!(cold["events"].as_array().unwrap().last().unwrap()["seq"], 17);
         assert!(success_response(&request_id, cold).to_string().len() <= TAIL_RESPONSE_BYTES_LIMIT);
 
-        let mut checkpoint = cursor(&sync_page(&[], None, "session", "tab", &request_id).unwrap());
+        let mut checkpoint = cursor(&sync_page(&[], None, "session", "tab", &request_id, direct()).unwrap());
         let mut received = Vec::new();
         let mut pages = 0;
         loop {
-            let page = sync_page(&events, Some(&checkpoint), "session", "tab", &request_id).unwrap();
+            let page = sync_page(&events, Some(&checkpoint), "session", "tab", &request_id, direct()).unwrap();
             assert_eq!(page["reset"], false);
             assert!(success_response(&request_id, page.clone()).to_string().len() <= TAIL_RESPONSE_BYTES_LIMIT);
             let rows = page["events"].as_array().unwrap();
@@ -1248,18 +1804,129 @@ mod tests {
     }
 
     #[test]
-    fn sync_refuses_an_oversized_event_without_advancing_past_it() {
-        let initial = cursor(&sync_page(&[], None, "session", "tab", "test").unwrap());
+    fn sync_sends_an_oversized_event_alone_cut_down_and_advances_past_it() {
+        let initial = cursor(&sync_page(&[], None, "session", "tab", "test", direct()).unwrap());
         let events = vec![prompt(1), output(2, "x".repeat(TAIL_RESPONSE_BYTES_LIMIT)), prompt(3)];
-        let first = sync_page(&events, Some(&initial), "session", "tab", "test").unwrap();
+        let first = sync_page(&events, Some(&initial), "session", "tab", "test", direct()).unwrap();
         assert_eq!(first["events"].as_array().unwrap().len(), 1);
         assert_eq!(first["hasMore"], true);
         let checkpoint = cursor(&first);
         assert_eq!(checkpoint.offset, 1);
-        let message = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap_err().to_string();
-        assert!(message.contains("event 2 is too large"));
-        assert!(message.contains("Open this conversation on your Mac"));
-        assert!(sync_page(&events[..2], None, "session", "tab", "test").is_err());
+        let second = sync_page(&events, Some(&checkpoint), "session", "tab", "test", direct()).unwrap();
+        assert!(success_response("test", second.clone()).to_string().len() <= TAIL_RESPONSE_BYTES_LIMIT);
+        let rows = second["events"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["seq"], 2);
+        assert_eq!(rows[0]["payload"]["callId"], "call-2");
+        let text = rows[0]["payload"]["result"]["text"].as_str().unwrap();
+        assert!(text.starts_with("xxxx"));
+        assert!(text.ends_with("not shown. Open this conversation on your Mac to see all of it.]"));
+        // The cursor covers the whole event: the next page starts after it.
+        let third = sync_page(&events, Some(&cursor(&second)), "session", "tab", "test", direct()).unwrap();
+        assert_eq!(third["events"][0]["seq"], 3);
+        assert_eq!(third["hasMore"], false);
+        let reset = sync_page(&events[..2], None, "session", "tab", "test", direct()).unwrap();
+        assert_eq!(reset["events"][0]["seq"], 2);
+        assert_eq!(reset["hasEarlier"], true);
+    }
+
+    /// The conversation from #669: 500 recent events, about 0.8 MiB of JSON,
+    /// on a phone with nothing cached. On Relay every reply must fit one
+    /// 1 MiB cell message, and the history still loads in full.
+    #[test]
+    fn a_long_conversation_loads_over_relay_one_frame_at_a_time() {
+        let events: Vec<_> = (1..=600).map(|seq| {
+            if seq % 25 == 1 { prompt(seq) } else { output(seq, "🦝 tool output \"line\"\n".repeat(80)) }
+        }).collect();
+        assert!(serde_json::to_vec(&events[100..]).unwrap().len() > 1024 * 1024);
+        let request_id = "mobile-1761756316000-42";
+        for limits in [relay(false), relay(true)] {
+            assert!(limits.page < 1024 * 1024 / 4 * 3);
+            let cold = sync_page(&events, None, "session", "tab", request_id, limits).unwrap();
+            assert!(success_response(request_id, cold.clone()).to_string().len() <= limits.page);
+            assert_eq!(cold["reset"], true);
+            assert_eq!(cold["hasEarlier"], true);
+            assert_eq!(cold["events"].as_array().unwrap().last().unwrap()["seq"], 600);
+            // Load earlier pages back to the first event, each one frame.
+            let mut seen: Vec<u64> = cold["events"].as_array().unwrap().iter().map(|event| event["seq"].as_u64().unwrap()).collect();
+            let byte_limit = tail_event_byte_limit(request_id, limits.page).unwrap();
+            let mut before = Some(seen[0]);
+            let source = tail_log(&events);
+            loop {
+                let (page, more) = read_event_tail(source.path(), before, 20, byte_limit).unwrap();
+                let response = success_response(request_id, json!({ "events": page, "hasMore": more })).to_string();
+                assert!(response.len() <= limits.page);
+                before = Some(page[0].seq);
+                seen.splice(0..0, page.iter().map(|event| event.seq));
+                if !more { break; }
+            }
+            assert_eq!(seen, (1..=600).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn over_relay_an_event_larger_than_a_page_is_whole_only_when_it_can_be_fragmented() {
+        let large = output(2, "y".repeat(2 * 1024 * 1024));
+        let events = vec![prompt(1), large.clone()];
+        let legacy = sync_page(&events, None, "session", "tab", "test", relay(false)).unwrap();
+        assert!(success_response("test", legacy.clone()).to_string().len() <= relay(false).page);
+        assert_eq!(legacy["events"].as_array().unwrap().len(), 1);
+        assert!(legacy["events"][0]["payload"]["result"]["text"].as_str().unwrap().contains("Too large to show on mobile"));
+        let fragmented = sync_page(&events, None, "session", "tab", "test", relay(true)).unwrap();
+        assert_eq!(fragmented["events"].as_array().unwrap().len(), 1);
+        assert_eq!(fragmented["events"][0], serde_json::to_value(&large).unwrap());
+        assert_eq!(fragmented["hasEarlier"], true);
+    }
+
+    #[test]
+    fn fit_event_cuts_the_longest_strings_on_character_boundaries() {
+        let large = event(7, Payload::ToolCallStarted {
+            call_id: "call-7".into(),
+            name: "Write".into(),
+            tool_type: crate::events::ToolType::Other,
+            input: json!({ "path": "notes.md", "content": "🦝\"\\\n\u{1}".repeat(40_000), "old": "z".repeat(30_000) }),
+            title: Some("Write notes.md".into()),
+        });
+        let whole = serde_json::to_vec(&large).unwrap().len();
+        for budget in [whole, whole - 1, whole / 2, 40_000, 2_000] {
+            let fitted = fit_event(&large, budget).unwrap();
+            let size = serde_json::to_vec(&fitted).unwrap().len();
+            assert!(size <= budget, "{size} > {budget}");
+            assert_eq!(fitted["seq"], 7);
+            assert_eq!(fitted["id"], "event-7");
+            assert_eq!(fitted["payload"]["type"], "tool_call_started");
+            assert_eq!(fitted["payload"]["callId"], "call-7");
+            assert_eq!(fitted["payload"]["input"]["path"], "notes.md");
+            let content = fitted["payload"]["input"]["content"].as_str().unwrap();
+            if budget == whole {
+                assert_eq!(fitted, serde_json::to_value(&large).unwrap());
+            } else {
+                assert!(content.ends_with("to see all of it.]"));
+                // What is kept is a prefix of the original, cut between characters.
+                let kept = &content[..content.find("\n\n[Too large").unwrap()];
+                assert!("🦝\"\\\n\u{1}".repeat(40_000).starts_with(kept));
+            }
+        }
+        // The longest string goes first; a small excess leaves the rest alone.
+        let fitted = fit_event(&large, whole - 1).unwrap();
+        assert_eq!(fitted["payload"]["input"]["old"], "z".repeat(30_000));
+    }
+
+    #[test]
+    fn fit_event_falls_back_to_a_status_line_when_no_string_is_large() {
+        let many = event(9, Payload::ToolCallCompleted {
+            call_id: "call-9".into(),
+            result: crate::events::ToolResult {
+                structured: Some(json!((0..20_000).collect::<Vec<_>>())),
+                ..Default::default()
+            },
+        });
+        let fitted = fit_event(&many, 4_096).unwrap();
+        assert!(serde_json::to_vec(&fitted).unwrap().len() <= 4_096);
+        assert_eq!(fitted["seq"], 9);
+        assert_eq!(fitted["payload"]["type"], "status");
+        assert!(fitted["payload"]["text"].as_str().unwrap().starts_with("This item is too large to show on mobile"));
+        assert!(serde_json::from_value::<AgentEvent>(fitted).is_ok());
     }
 
     #[test]
@@ -1278,13 +1945,13 @@ mod tests {
             if seq % 6 == 1 { prompt(seq) }
             else { event(seq, Payload::AssistantText { text: "x".repeat(512), block: None }) }
         }).collect();
-        let cold = sync_page(&events, None, "session", "tab", "test").unwrap();
+        let cold = sync_page(&events, None, "session", "tab", "test", direct()).unwrap();
         let checkpoint = cursor(&cold);
-        let warm = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap();
+        let warm = sync_page(&events, Some(&checkpoint), "session", "tab", "test", direct()).unwrap();
         let mut changed = events.clone();
         changed.push(prompt(12001));
-        let delta = sync_page(&changed, Some(&checkpoint), "session", "tab", "test").unwrap();
-        let (tail, more) = select_event_tail(events.into_iter().rev().map(Ok), None, 20, tail_event_byte_limit("test").unwrap()).unwrap();
+        let delta = sync_page(&changed, Some(&checkpoint), "session", "tab", "test", direct()).unwrap();
+        let (tail, more) = select_event_tail(events.into_iter().rev().map(Ok), None, 20, tail_event_byte_limit("test", TAIL_RESPONSE_BYTES_LIMIT).unwrap()).unwrap();
         let legacy = json!({ "events": tail, "hasMore": more });
         let bytes = |v: &Value| serde_json::to_vec(v).unwrap().len();
         let request = |method: &str, params: Value| bytes(&json!({ "method": method, "params": params }));
@@ -1328,13 +1995,13 @@ mod tests {
     fn paged_tail_keeps_whole_turns_in_sequence_order() {
         let events = vec![
             prompt(1),
-            event(2, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }),
+            event(2, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }),
             prompt(3),
-            event(4, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }),
+            event(4, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }),
             prompt(5),
-            event(6, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }),
+            event(6, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }),
         ];
-        let (tail, has_more) = select_event_tail(events.into_iter().rev().map(Ok), None, 2, tail_event_byte_limit("test").unwrap()).unwrap();
+        let (tail, has_more) = select_event_tail(events.into_iter().rev().map(Ok), None, 2, tail_event_byte_limit("test", TAIL_RESPONSE_BYTES_LIMIT).unwrap()).unwrap();
         assert!(has_more);
         assert_eq!(tail.iter().map(|event| event.seq).collect::<Vec<_>>(), vec![3, 4, 5, 6]);
     }
@@ -1375,31 +2042,37 @@ mod tests {
     #[test]
     fn tail_budget_includes_the_complete_rpc_envelope() {
         let id = "\"\n🦝".repeat(20);
-        let budget = tail_event_byte_limit(&id).unwrap();
+        let budget = tail_event_byte_limit(&id, TAIL_RESPONSE_BYTES_LIMIT).unwrap();
         let overhead = serde_json::to_vec(&output(1, String::new())).unwrap().len();
         let file = tail_log(&[output(1, "x".repeat(budget - overhead))]);
         let (page, more) = read_event_tail(file.path(), None, 20, budget).unwrap();
         assert!(!more);
         assert_eq!(success_response(&id, json!({ "events": page, "hasMore": more })).to_string().len(), TAIL_RESPONSE_BYTES_LIMIT);
-        assert!(read_event_tail(file.path(), None, 20, budget - 1).is_err());
+        // One byte over: still the whole page, for the caller to cut down.
+        let (page, more) = read_event_tail(file.path(), None, 20, budget - 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(!more);
+        let fitted = fit_event(&page[0], budget - 1).unwrap();
+        assert!(serde_json::to_vec(&fitted).unwrap().len() < budget);
     }
 
     #[test]
-    fn tail_refuses_a_single_oversized_event_without_skipping_it() {
-        let events = vec![prompt(1), output(2, "large private tool result".repeat(100)), prompt(3)];
+    fn tail_sends_a_single_oversized_event_alone_without_skipping_it() {
+        let events = vec![prompt(1), output(2, "large tool result".repeat(100)), prompt(3)];
         let file = tail_log(&events);
         let (page, more) = read_event_tail(file.path(), None, 20, 1024).unwrap();
-        assert_eq!(page[0].seq, 3);
+        assert_eq!(page.iter().map(|event| event.seq).collect::<Vec<_>>(), vec![3]);
         assert!(more);
-        let error = read_event_tail(file.path(), Some(3), 20, 1024).unwrap_err().to_string();
-        assert!(error.contains("event 2 is too large"));
-        assert!(error.contains("Open this conversation on your Mac"));
-        assert!(!error.contains("private tool result"));
+        let (page, more) = read_event_tail(file.path(), Some(3), 20, 1024).unwrap();
+        assert_eq!(page, vec![events[1].clone()]);
+        assert!(more);
         let (page, more) = read_event_tail(file.path(), Some(2), 20, 1024).unwrap();
         assert_eq!(page[0].seq, 1);
         assert!(!more);
         let file = tail_log(&events[..2]);
-        assert!(read_event_tail(file.path(), None, 20, 1024).is_err());
+        let (page, more) = read_event_tail(file.path(), None, 20, 1024).unwrap();
+        assert_eq!(page[0].seq, 2);
+        assert!(more);
     }
 
     #[test]
@@ -1408,7 +2081,7 @@ mod tests {
             .chain((2..=TAIL_EVENT_LIMIT as u64 + 1).map(|seq| output(seq, String::new())))
             .collect();
         let file = tail_log(&events);
-        let budget = tail_event_byte_limit("test").unwrap();
+        let budget = tail_event_byte_limit("test", TAIL_RESPONSE_BYTES_LIMIT).unwrap();
         let (page, more) = read_event_tail(file.path(), None, 20, budget).unwrap();
         assert_eq!(page.len(), TAIL_EVENT_LIMIT);
         assert_eq!(page[0].seq, 2);
@@ -1463,7 +2136,7 @@ mod tests {
             .collect();
         let file = tail_log(&events);
         let id = "\"\n🦝".repeat(20);
-        let budget = tail_event_byte_limit(&id).unwrap();
+        let budget = tail_event_byte_limit(&id, TAIL_RESPONSE_BYTES_LIMIT).unwrap();
         let key = HostKeypair::from_secret([7; 32]);
         let handshake = E2eeClientHandshake::new(&key.public_key_b64(), "direct", None).unwrap();
         let (ready, mut host) = begin_e2ee_session(&key, handshake.hello().clone(), "direct", None).unwrap();
@@ -1500,6 +2173,62 @@ mod tests {
         sent.unwrap();
         let text = received.unwrap().unwrap().into_text().unwrap();
         assert_eq!(phone.open(&general_purpose::STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap(), response.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn over_relay_no_frame_exceeds_the_cell_and_an_oversized_reply_fails_alone() {
+        use super::super::{crypto::{begin_e2ee_session, E2eeClientHandshake, HostKeypair, PayloadKind}, pairing_websocket_config, send_message, wire::{Reassembly, RELAY_MESSAGE_BYTES_LIMIT}};
+        use futures_util::StreamExt;
+        use tokio_tungstenite::{tungstenite::{protocol::Role, Message}, WebSocketStream};
+
+        let key = HostKeypair::from_secret([7; 32]);
+        let handshake = E2eeClientHandshake::new(&key.public_key_b64(), "direct", None).unwrap();
+        let (ready, mut host) = begin_e2ee_session(&key, handshake.hello().clone(), "direct", None).unwrap();
+        let mut phone = handshake.accept_ready(&serde_json::to_string(&ready).unwrap()).unwrap();
+        let (host_io, phone_io) = tokio::io::duplex(64 * 1024);
+        let mut host_socket = WebSocketStream::from_raw_socket(host_io, Role::Server, Some(pairing_websocket_config())).await;
+        let mut phone_socket = WebSocketStream::from_raw_socket(phone_io, Role::Client, Some(pairing_websocket_config())).await;
+        let wire = Wire::new(Transport::Relay);
+        let reply = success_response("request-1", json!({ "events": [], "blob": "🦝 \"x\"\n".repeat(400_000) }));
+        let notification = json!({ "method": "session.event", "params": { "blob": "y".repeat(2 * 1024 * 1024) } });
+        let small = success_response("request-2", json!({ "ready": true }));
+
+        // A phone that does not reassemble fragments: the reply becomes that
+        // request's error, the notification is not sent, and the next message
+        // opens in counter order.
+        for message in [&reply, &notification, &small] {
+            send_message(&mut host_socket, &mut host, message, &wire).await.unwrap();
+        }
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let text = phone_socket.next().await.unwrap().unwrap().into_text().unwrap();
+            assert!(text.len() <= RELAY_MESSAGE_BYTES_LIMIT);
+            let opened = phone.open(&general_purpose::STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap();
+            texts.push(serde_json::from_slice::<Value>(&opened).unwrap());
+        }
+        assert_eq!(texts[0]["id"], "request-1");
+        assert_eq!(texts[0]["error"]["code"], "message_too_large");
+        assert_eq!(texts[1], small);
+
+        // Once it does, the same reply crosses whole, in binary fragments.
+        assert!(wire.negotiate(Some(super::super::wire::FRAGMENTS_VERSION.into())));
+        let receive = async {
+            let mut reassembly = Reassembly::default();
+            loop {
+                let Message::Binary(frame) = phone_socket.next().await.unwrap().unwrap() else { panic!("expected a fragment") };
+                assert!(frame.len() <= RELAY_MESSAGE_BYTES_LIMIT);
+                if let Some(message) = reassembly.push(&phone.open(&frame, PayloadKind::Binary).unwrap()).unwrap() {
+                    return message;
+                }
+            }
+        };
+        let (sent, received) = tokio::join!(send_message(&mut host_socket, &mut host, &reply, &wire), receive);
+        sent.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&received).unwrap(), reply);
+        let (sent, received) = tokio::join!(send_message(&mut host_socket, &mut host, &small, &wire), phone_socket.next());
+        sent.unwrap();
+        let text = received.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&phone.open(&general_purpose::STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap(), small);
     }
 
     #[test]
@@ -1570,6 +2299,280 @@ mod tests {
         assert!(validate_attachment_payloads(&with_attachment.attachments).is_ok());
     }
 
+    /// A runtime of this build, as the desktop reads it when attaching.
+    fn current_runtime() -> crate::local_runtime::client::Build {
+        runtime_of(Some(env!("CARGO_PKG_VERSION")), Some(crate::local_runtime::mobile::features()))
+    }
+
+    fn runtime_of(version: Option<&str>, named: Option<Value>) -> crate::local_runtime::client::Build {
+        let version = version.map(|version| semver::Version::parse(version).unwrap());
+        let mobile = named.unwrap_or_else(|| crate::local_runtime::mobile::released_features(version.as_ref()));
+        crate::local_runtime::client::Build { version, mobile: mobile.as_object().unwrap().clone() }
+    }
+
+    /// #730: the phone is told what the runtime its connection reaches can
+    /// serve, not what this app could serve through a runtime of its own build.
+    #[test]
+    fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
+        let every = json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
+        assert_eq!(capabilities(&current_runtime()), every);
+        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), every, "0.2.22 serves them all, without naming them");
+        let app_only = json!({ "transcript": 1, "conditionalLists": 1 });
+        assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
+            "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
+        assert_eq!(capabilities(&runtime_of(None, None)), app_only, "nor from one that would not say its version");
+        // A runtime that names features is taken at its word, at the level this app knows.
+        let named = capabilities(&runtime_of(Some("9.0.0"), Some(json!({ "terminal": 2, "sendIds": 0, "sessionCreate": "1", "futureThing": 1 }))));
+        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "terminal": 1 }));
+    }
+
+    /// #730: an operation the runtime does not know reads as what to do about it.
+    #[test]
+    fn a_runtime_refusing_an_unknown_operation_says_the_mac_needs_updating() {
+        use crate::local_runtime::client::Refused;
+        let refused = |message: &str| anyhow::Error::from(Refused { code: "internal".into(), message: message.into() });
+        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED)).to_string(), OUTDATED);
+        assert_eq!(outdated(refused(crate::local_runtime::mobile::UNSUPPORTED).context("open the terminal")).to_string(), OUTDATED);
+        assert_eq!(outdated(refused("The tab is not running.")).to_string(), "internal: The tab is not running.", "any other refusal is left as it is");
+        assert_eq!(outdated(anyhow!("timed out")).to_string(), "timed out");
+    }
+
+    #[test]
+    fn the_terminal_view_is_offered_with_the_requests_it_needs() {
+        // A phone shows its Terminal view only to a Mac that names this.
+        assert_eq!(capabilities(&current_runtime())["terminal"], 1);
+        let open: TerminalParams = serde_json::from_value(json!({ "worktreeId": "worktree", "tabId": "tab" })).unwrap();
+        assert_eq!((open.worktree_id.as_str(), open.tab_id.as_str()), ("worktree", "tab"));
+        assert!(serde_json::from_value::<TerminalParams>(json!({ "worktreeId": "worktree", "tabId": "tab", "force": true })).is_err());
+    }
+
+    #[test]
+    fn session_controls_are_named_and_take_only_their_own_fields() {
+        // A phone offers the controls only to a Mac that names them.
+        assert_eq!(capabilities(&current_runtime())["sessionControls"], 1);
+        let tab: TabControlParams = serde_json::from_value(json!({ "sessionId": "s", "tabId": "t" })).unwrap();
+        assert_eq!(tab.into_call(), json!({ "sessionId": "s", "tabId": "t" }));
+        assert!(serde_json::from_value::<TabControlParams>(json!({ "sessionId": "s", "tabId": "t", "force": true })).is_err());
+        let call = |method, value: Value| serde_json::from_value::<TabSettingParams>(value).unwrap().into_call(method);
+        assert_eq!(call("session.setModel", json!({ "sessionId": "s", "tabId": "t", "model": "opus" }))["model"], "opus");
+        assert_eq!(call("session.setEffort", json!({ "sessionId": "s", "tabId": "t", "effort": null }))["effort"], Value::Null);
+        assert_eq!(call("session.setMode", json!({ "sessionId": "s", "tabId": "t", "mode": "plan" }))["mode"], "plan");
+        let handoff: ContinueParams = serde_json::from_value(json!({ "sessionId": "s", "tabId": "t", "prompt": "carry on",
+            "tab": { "harness": "codex", "model": "", "permissionMode": "auto" } })).unwrap();
+        assert_eq!(serde_json::to_value(&handoff.tab).unwrap(), json!({ "harness": "codex", "model": "", "effort": null, "permissionMode": "auto" }));
+        assert!(serde_json::from_value::<ContinueParams>(json!({ "sessionId": "s", "tabId": "t", "prompt": "p",
+            "tab": { "harness": "codex", "transport": "experimentalCodexStdio" } })).is_err(), "a phone cannot choose a transport");
+    }
+
+    #[test]
+    fn sends_and_notes_take_a_message_id_only_this_mac_reports_it_understands() {
+        // A phone sends the id only after `sync.capabilities` names it (#675).
+        assert_eq!(capabilities(&current_runtime())["sendIds"], 1);
+        let id = "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11";
+        let send: SessionSendParams = serde_json::from_value(json!({ "tabId": "tab", "text": "hello", "clientMessageId": id })).unwrap();
+        assert_eq!(send.client_message_id.as_deref(), Some(id));
+        let post: ChatPostParams = serde_json::from_value(json!({ "worktreeId": "worktree", "body": "hello", "clientMessageId": id })).unwrap();
+        assert_eq!(post.client_message_id.as_deref(), Some(id));
+        // Older phones send neither; other unknown fields are still refused.
+        let old: ChatPostParams = serde_json::from_value(json!({ "worktreeId": "worktree", "body": "hello" })).unwrap();
+        assert_eq!(old.client_message_id, None);
+        assert!(serde_json::from_value::<SessionSendParams>(json!({ "tabId": "tab", "text": "hello", "messageId": id })).is_err());
+
+        assert_eq!(checked_message_id(Some(id.into())).unwrap().as_deref(), Some(id));
+        assert_eq!(checked_message_id(None).unwrap(), None);
+        for bad in ["short", &"x".repeat(129), "has space in it", "../../etc/passwd"] {
+            assert!(checked_message_id(Some(bad.into())).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_send_digest_matches_a_repeat_and_changes_with_any_edit() {
+        let attachment = |name: &str, data: &[u8]| RemoteAttachmentInput {
+            media_type: "image/png".into(),
+            data: general_purpose::STANDARD.encode(data),
+            name: Some(name.into()),
+        };
+        let first = send_digest("Run the tests", &[attachment("a.png", &[1])]);
+        // The agent gets trimmed text: surrounding space is the same message.
+        assert_eq!(first, send_digest("  Run the tests\n", &[attachment("a.png", &[1])]));
+        for edited in [
+            send_digest("Run the tests again", &[attachment("a.png", &[1])]),
+            send_digest("Run the tests", &[]),
+            send_digest("Run the tests", &[attachment("a.png", &[2])]),
+            send_digest("Run the tests", &[attachment("b.png", &[1])]),
+            send_digest("Run the tests", &[attachment("a.png", &[1]), attachment("a.png", &[1])]),
+        ] {
+            assert_ne!(first, edited);
+        }
+    }
+
+    /// What the runtime was asked to send: tab, text, attachment count and id.
+    type OwnerCalls = std::cell::RefCell<Vec<(String, String, usize, Option<String>)>>;
+
+    /// A phone send through `send_once`, against a runtime answering
+    /// `answer` as its JSON would read. Records what the runtime was asked.
+    fn sends(ids: &SendIds, calls: &OwnerCalls, text: &str, id: Option<&str>, answer: Value) -> Result<Value> {
+        let params: SessionSendParams = serde_json::from_value(json!({
+            "tabId": "tab", "text": text, "clientMessageId": id,
+            "attachments": [{ "mediaType": "image/png", "data": general_purpose::STANDARD.encode([1]), "name": "a.png" }],
+        })).unwrap();
+        send_once(ids, params, |tab_id, text, attachments, message| {
+            calls.borrow_mut().push((tab_id.into(), text.into(), attachments.len(), message.map(str::to_owned)));
+            Ok(serde_json::from_value(answer)?)
+        })
+    }
+
+    #[test]
+    fn a_phone_starting_a_session_again_after_a_lost_reply_gets_the_first_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = SendIds::at(dir.path().join("sends.json"));
+        let made = std::cell::Cell::new(0);
+        let create = || { made.set(made.get() + 1); Ok(json!({ "sessionId": format!("session-{}", made.get()), "tabId": "tab" })) };
+        let first = create_once(&ids, Some("draft-0001"), "request".into(), create).unwrap();
+        assert_eq!(create_once(&ids, Some("draft-0001"), "request".into(), create).unwrap(), first);
+        assert_eq!(made.get(), 1);
+        // The id with another request is refused, and makes nothing.
+        assert_eq!(create_once(&ids, Some("draft-0001"), "another request".into(), create).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(made.get(), 1);
+        // A create that failed made nothing to answer with: the next try makes one.
+        assert!(create_once(&ids, Some("draft-0002"), "request".into(), || bail!("Codex is not installed on this Mac.")).is_err());
+        assert_eq!(create_once(&ids, Some("draft-0002"), "request".into(), create).unwrap()["sessionId"], "session-2");
+        // An id never names a tab's send: the same draft id's message to the new tab is its own.
+        assert!(ids.once(SendKey { tab_id: "tab".into(), client_message_id: "draft-0001".into() }, "message".into(), || Ok(Reply::Settled(json!({"status":"sent"})))).is_ok());
+        // Without an id every request makes a session.
+        create_once(&ids, None, "request".into(), create).unwrap();
+        create_once(&ids, None, "request".into(), create).unwrap();
+        assert_eq!(made.get(), 4);
+    }
+
+    #[test]
+    fn a_phone_names_projects_by_id_and_never_sends_a_path() {
+        let named = capabilities(&current_runtime());
+        assert_eq!((named["sessionCreate"].clone(), named["macSettings"].clone()), (json!(1), json!(1)));
+        let create: SessionCreateParams = serde_json::from_value(json!({ "projectId": "abc", "useWorktree": true, "agent": "codex", "model": "gpt-5", "effort": "high", "mode": "auto", "title": "Fix it", "text": "Fix the login", "clientMessageId": "0b8f6a52-0c1f-4c35-9d0e-1d5d5a7d1c11" })).unwrap();
+        assert_eq!((create.project_id.as_deref(), create.use_worktree, create.agent.as_str()), (Some("abc"), true, "codex"));
+        for path in [json!({ "projectPath": "/Users/me/repo" }), json!({ "cwd": "/tmp" }), json!({ "baseRef": "main" })] {
+            let mut params = json!({ "quick": true, "agent": "codex", "text": "hi" });
+            params.as_object_mut().unwrap().extend(path.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<SessionCreateParams>(params).is_err(), "a phone cannot name a folder");
+        }
+        assert!(serde_json::from_value::<MacSettingsPatch>(json!({ "nativeCodex": true, "linearApiKey": "lin_secret" })).is_err());
+
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        for name in ["repo", "old"] { std::fs::create_dir_all(root.join(name)).unwrap(); }
+        let repo = store::projects::add(root.join("repo").to_str().unwrap()).unwrap();
+        let old = store::projects::add(root.join("old").to_str().unwrap()).unwrap();
+        store::projects::update(&old.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
+        let projects = phone_projects().unwrap();
+        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "lastUsed": false })]);
+        assert!(!serde_json::to_string(&projects).unwrap().contains(&root.to_string_lossy().into_owned()));
+        assert_eq!(store::projects::by_public_id(projects[0]["id"].as_str().unwrap()).unwrap().path, repo.path);
+    }
+
+    #[test]
+    fn a_send_the_agent_has_is_answered_again_without_sending() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = SendIds::at(dir.path().join("sends.json"));
+        let calls = std::cell::RefCell::new(Vec::new());
+        let sent = json!({ "status": "sent", "queued": false });
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap(), sent);
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap(), sent);
+        assert_eq!(*calls.borrow(), vec![("tab".into(), "Ship it".into(), 1, Some("draft-0001".into()))]);
+        // The same id with another message is refused before the runtime sees it.
+        assert_eq!(sends(&ids, &calls, "Ship it now", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap_err().to_string(), ID_REUSED);
+        // Without an id (an older phone) every send goes through.
+        sends(&ids, &calls, "Ship it", None, json!({ "queued": false, "events": [] })).unwrap();
+        sends(&ids, &calls, "Ship it", None, json!({ "queued": false, "events": [] })).unwrap();
+        assert_eq!(calls.borrow()[1..], [("tab".into(), "Ship it".into(), 1, None), ("tab".into(), "Ship it".into(), 1, None)]);
+    }
+
+    #[test]
+    fn a_queued_send_goes_to_the_runtime_on_every_repeat_until_it_is_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = SendIds::at(dir.path().join("sends.json"));
+        let calls = std::cell::RefCell::new(Vec::new());
+        let queued = json!({ "status": "sent", "queued": true });
+        // The agent's turn is open, and the reply saying so is lost.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [] })).unwrap(), queued);
+        // Not answered from here: the runtime is asked, with the id, and finds
+        // the copy queued under the dropped connection.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [], "repeat": "requeued" })).unwrap(), queued);
+        // An older runtime knows no ids, and queues it again: as on a Mac
+        // before #675, never lost.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [] })).unwrap(), queued);
+        // Being typed to the agent right now: not known yet, so not sent.
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": true, "events": [], "repeat": "delivering" })).unwrap_err().to_string(), STILL_SENDING);
+        // Delivered: that settles it, and later repeats are answered here.
+        let sent = json!({ "status": "sent", "queued": false });
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [], "repeat": "delivered" })).unwrap(), sent);
+        assert_eq!(sends(&ids, &calls, "Ship it", Some("draft-0001"), json!({ "queued": false, "events": [] })).unwrap(), sent);
+        assert_eq!(calls.borrow().len(), 5);
+        assert!(calls.borrow().iter().all(|call| *call == ("tab".into(), "Ship it".into(), 1, Some("draft-0001".into()))));
+    }
+
+    #[test]
+    fn a_note_posted_again_adds_nothing_and_returns_the_first() {
+        let _home = store::temp_home();
+        let lock = Mutex::new(());
+        let note = |id: &str, body: &str, client: Option<&str>| ChatNote {
+            id: id.into(),
+            body: body.into(),
+            created_at: 1,
+            author: NoteAuthor { user_id: "user-1".into(), display_name: "Paresh".into() },
+            promoted_to: Vec::new(),
+            client_message_id: client.map(str::to_owned),
+        };
+        let saved = || load_notes().unwrap().sessions.remove("worktree").unwrap_or_default().into_iter().map(|note| note.id).collect::<Vec<_>>();
+
+        let (first, added) = add_note(&lock, "worktree", note("note-1", "Deploying at 5", Some("draft-1"))).unwrap();
+        assert!(added);
+        let (again, added) = add_note(&lock, "worktree", note("note-2", "Deploying at 5", Some("draft-1"))).unwrap();
+        assert!(!added);
+        assert_eq!(again.id, first.id);
+        assert_eq!(saved(), vec!["note-1"]);
+
+        // Another draft, a phone that sends no id, or another worktree: added.
+        assert!(add_note(&lock, "worktree", note("note-3", "Deploying at 5", Some("draft-2"))).unwrap().1);
+        assert!(add_note(&lock, "worktree", note("note-4", "Deploying at 5", None)).unwrap().1);
+        assert!(add_note(&lock, "worktree", note("note-5", "Deploying at 5", None)).unwrap().1);
+        assert!(add_note(&lock, "elsewhere", note("note-6", "Deploying at 5", Some("draft-1"))).unwrap().1);
+        // The id with other text: refused, and nothing written.
+        assert_eq!(add_note(&lock, "worktree", note("note-7", "Deploying at 6", Some("draft-1"))).unwrap_err().to_string(), ID_REUSED);
+        assert_eq!(saved(), vec!["note-1", "note-3", "note-4", "note-5"]);
+    }
+
+    #[test]
+    fn a_note_posted_again_is_found_with_its_promotions_and_not_added_twice() {
+        let note = |id: &str, body: &str, client: Option<&str>| ChatNote {
+            id: id.into(),
+            body: body.into(),
+            created_at: 1,
+            author: NoteAuthor { user_id: "user-1".into(), display_name: "Paresh".into() },
+            promoted_to: Vec::new(),
+            client_message_id: client.map(str::to_owned),
+        };
+        let mut first = note("note-1", "Deploying at 5", Some("draft-1"));
+        first.promoted_to.push(NotePromotion { tab_id: "claude".into(), seq: 4 });
+        let notes = vec![note("note-0", "Deploying at 5", None), first];
+
+        let repeat = note("note-2", "Deploying at 5", Some("draft-1"));
+        let found = posted_before(&notes, &repeat).unwrap().expect("the note posted first");
+        assert_eq!(found.id, "note-1");
+        assert_eq!(found.promoted_to, vec![NotePromotion { tab_id: "claude".into(), seq: 4 }]);
+
+        // A new draft, or a phone that sends no id, adds a note as before.
+        assert!(posted_before(&notes, &note("note-3", "Deploying at 5", Some("draft-2"))).unwrap().is_none());
+        assert!(posted_before(&notes, &note("note-4", "Deploying at 5", None)).unwrap().is_none());
+        // The same id with other text is refused, not answered with this note.
+        let error = posted_before(&notes, &note("note-5", "Deploying at 6", Some("draft-1"))).unwrap_err();
+        assert_eq!(error.to_string(), ID_REUSED);
+
+        // Older phones list notes too; one posted without an id carries no new key.
+        assert_eq!(serde_json::to_value(&notes[0]).unwrap().get("clientMessageId"), None);
+        assert_eq!(serde_json::to_value(&notes[1]).unwrap()["clientMessageId"], "draft-1");
+    }
+
     #[test]
     fn notes_saved_before_promotions_were_recorded_still_load_and_list_unchanged() {
         let saved: NotesFile = serde_json::from_value(json!({ "sessions": { "worktree": [{
@@ -1593,6 +2596,7 @@ mod tests {
             created_at: 1,
             author: NoteAuthor { user_id: "user-1".into(), display_name: "Paresh".into() },
             promoted_to: Vec::new(),
+            client_message_id: None,
         };
         let mut notes = vec![note("a"), note("b"), note("c")];
         let (a, c, gone) = ("a".to_string(), "c".to_string(), "gone".to_string());

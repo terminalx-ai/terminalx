@@ -22,7 +22,7 @@ pub(crate) fn enabled() -> bool { LOCAL_OWNER.load(Ordering::Acquire) }
 
 /// CAS keeps the original acquire/release ordering on supported Rust versions,
 /// without the now-deprecated fetch_update API or an increment past the bound.
-pub(super) fn increment_bounded(counter: &AtomicUsize, limit: usize) -> bool {
+pub(crate) fn increment_bounded(counter: &AtomicUsize, limit: usize) -> bool {
     let mut value = counter.load(Ordering::Acquire);
     loop {
         if value >= limit { return false; }

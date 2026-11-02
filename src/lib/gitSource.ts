@@ -2,13 +2,13 @@ import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
-import type { BranchInfo, ChangedFile, CommitInfo, WorkStatus } from "@/types/session";
+import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
-/** A workspace's Git status, plus what only a cloud repository reports so far. */
+/** A workspace's Git status, with what is left in progress in it. */
 export interface SourceStatus extends WorkStatus {
   /** Paths with unresolved merge conflicts. */
   conflicted?: string[];
-  /** A merge, rebase or cherry-pick left in progress. */
+  /** A merge, rebase, cherry-pick or revert left in progress. */
   operation?: string | null;
 }
 
@@ -41,6 +41,11 @@ export interface GitSource {
   fetch?(): Promise<string | null>;
   /** Local only: discarding in a cloud workspace is left to its terminal. */
   discard?(path: string): Promise<void>;
+  /** Local only: a merge left in progress, told apart file by file (#736). */
+  unfinishedMerge?(): Promise<UnfinishedMerge | null>;
+  /** Local only, with `unfinishedMerge`: commit or abort exactly the merge that was read. */
+  commitMerge?(merge: UnfinishedMerge): Promise<void>;
+  abortMerge?(merge: UnfinishedMerge): Promise<void>;
   ghAvailable(): Promise<boolean>;
   prs(branch: string): Promise<PullRequest[]>;
   /** Durable transport locator, separate from the repository/PR URL identity. */
@@ -78,6 +83,9 @@ export function localGitSource(cwd: string): GitSource {
     push: () => git.push(cwd).then(() => null),
     pull: () => git.pull(cwd).then(() => null),
     discard: (path) => git.discard(cwd, path),
+    unfinishedMerge: () => git.unfinishedMerge(cwd),
+    commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
+    abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
     prs: (branch) => gh.list(cwd, branch),
     prScope: { kind: "local", cwd },

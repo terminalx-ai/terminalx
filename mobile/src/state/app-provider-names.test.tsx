@@ -32,6 +32,7 @@ vi.mock("expo-secure-store", () => ({
   setItemAsync: async (key: string, value: string) => void fake.storage.set(`secure:${key}`, value),
   deleteItemAsync: async (key: string) => void fake.storage.delete(`secure:${key}`),
 }));
+vi.mock("@react-native-community/netinfo", () => ({ default: { addEventListener: () => () => undefined } }));
 vi.mock("react-native", () => ({
   AppState: { addEventListener: () => ({ remove: () => undefined }) },
   Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
@@ -56,6 +57,7 @@ vi.mock("../transport/connection", () => ({
     start = fake.start;
     stop = fake.stop;
     restart = fake.restart;
+    networkChanged() {}
     onStage(listener: (stage: string, attempt: number) => void) { fake.stage = listener; return () => undefined; }
     onLog() { return () => undefined; }
     onEvent() { return () => undefined; }

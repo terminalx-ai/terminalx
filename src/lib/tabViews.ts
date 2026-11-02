@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { agent, errorMessage, type HandoffInfo, type TabPtyEvent } from "@/lib/api";
 import { defaultTabView, tabPaneId, tabViewIn, type TabViewMode } from "@/lib/tabFront";
 import { adoptPane, closeTerminal, followShellToTab, openTerminal } from "@/lib/terminal";
+import { getSessionStore } from "@/lib/sessions";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -62,6 +63,51 @@ export function useTabViews(): State {
   );
 }
 
+// Only active work/cache entries have a lifetime. Removal deletes the entry,
+// rather than keeping an ever-growing set of closed tab IDs. A reopened tab
+// receives a different token, so its predecessor cannot overwrite its state.
+const lifetimes = new Map<string, object>();
+function lifetime(tabId: string) {
+  let token = lifetimes.get(tabId);
+  if (!token) lifetimes.set(tabId, token = {});
+  return token;
+}
+const current = (tabId: string, token: object) => lifetimes.get(tabId) === token;
+
+// Tabs this window saw leave the session index: a late event or reply for one
+// is stale and must not put its metadata back. A tab the window has not seen
+// yet is not stale. The backend announces the pane of an agent started by hand
+// in a shell before the session update that lists its tab (#437). A reopened
+// tab keeps its ID and counts again once the index lists it. Only recent
+// removals are kept: stale replies arrive within moments, and a long session
+// should not collect the ID of every tab it closed.
+const REMEMBERED_REMOVALS = 256;
+const removedTabs = new Set<string>();
+function removedHere(tabId: string) {
+  if (!removedTabs.has(tabId)) return false;
+  if (!getSessionStore().sessions.some((session) => session.tabs.some((tab) => tab.id === tabId))) return true;
+  removedTabs.delete(tabId);
+  return false;
+}
+
+/** Active tabs disappeared from the index; their on-disk history is untouched. */
+export function forgetClosedTabViews(tabIds: readonly string[]) {
+  const views = { ...state.views }, info = { ...state.info };
+  const errors = { ...state.errors }, switching = { ...state.switching };
+  for (const id of tabIds) {
+    removedTabs.delete(id);
+    removedTabs.add(id);
+    lifetimes.delete(id);
+    starting.delete(id);
+    delete views[id]; delete info[id]; delete errors[id]; delete switching[id];
+  }
+  for (const oldest of removedTabs) {
+    if (removedTabs.size <= REMEMBERED_REMOVALS) break;
+    removedTabs.delete(oldest);
+  }
+  set({ views, info, errors, switching });
+}
+
 /** The pane a tab's terminal view shows: its own, or the shell's it took over. */
 export function terminalPaneId(tab: Pick<TabEntry, "id" | "pane">): string {
   return tabPaneId(tab);
@@ -101,9 +147,11 @@ async function registerTabPty() {
   try {
     await listen<TabPtyEvent>("tab_pty", (e) => {
       const { sessionId, tabId, paneId, command, harness } = e.payload;
+      if (removedHere(tabId)) return;
+      const token = lifetime(tabId);
       // A shell an agent was started in is that agent's tab from here on, not a shell tab beside it.
       followShellToTab(sessionId, paneId, tabId);
-      void adoptPane({ id: paneId, sessionId, title: "Agent", hidden: true, owned: true });
+      void adoptPane({ id: paneId, sessionId, title: "Agent", hidden: true, owned: true }, () => current(tabId, token));
       set({ info: { ...state.info, [tabId]: { command, harness } } });
     });
   } catch {
@@ -121,65 +169,98 @@ async function registerTabPty() {
  * then. In-flight calls are shared, because two starts racing is exactly how a
  * tab ended up with two CLIs fighting over one conversation.
  */
-const starting = new Map<string, Promise<void>>();
+const starting = new Map<string, { run: Promise<void>; opened: boolean }>();
 
-export async function startTabAgent(session: SessionEntry, tab: TabEntry) {
-  if (!isPtyFirst(tab.harness)) return;
-  const key = `${session.id}/${tab.id}`;
+/**
+ * `opened`: the tab is only being shown, in its chat. An agent nobody is about to use is then left for its next message
+ * to start (`agent.startOnOpen`, #696); the terminal view, a restart and "New shell" start it whatever it is.
+ */
+export async function startTabAgent(session: SessionEntry, tab: TabEntry, how: { opened?: boolean } = {}) {
+  if (!isPtyFirst(tab.harness) || removedHere(tab.id)) return;
+  const opened = how.opened === true;
+  const key = tab.id;
+  const token = lifetime(tab.id);
   const inflight = starting.get(key);
-  if (inflight) return inflight;
+  // One under way answers for another like it, and for a mere showing. A start asked for while only a showing is under
+  // way goes after it: the showing may have left the agent stopped.
+  if (inflight && (opened || !inflight.opened)) return inflight.run;
+  const before = inflight?.run;
   const run = (async () => {
+    await before;
     await subscribeTabPty();
+    if (!current(tab.id, token)) return;
     try {
-      await agent.ensureStarted(session.id, tab.id);
-      await adoptTabPane(session.id, tab.id);
-      clearTabViewError(tab.id);
+      await (opened ? agent.startOnOpen(session.id, tab.id) : agent.ensureStarted(session.id, tab.id));
+      if (!current(tab.id, token)) return;
+      await adoptTabPane(session.id, tab.id, token);
+      if (current(tab.id, token)) clearTabViewError(tab.id);
     } catch (e) {
-      set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
+      if (current(tab.id, token)) set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
     }
-  })().finally(() => starting.delete(key));
-  starting.set(key, run);
+  })().finally(() => { if (starting.get(key)?.run === run) starting.delete(key); });
+  starting.set(key, { run, opened });
   return run;
 }
 
 /** Take over the pane a tab's CLI is already running in, if there is one. */
-async function adoptTabPane(sessionId: string, tabId: string) {
+async function adoptTabPane(sessionId: string, tabId: string, token: object) {
   const pane = await agent.tabPane(sessionId, tabId);
-  if (!pane) return;
+  if (!pane || !current(tabId, token)) return;
   followShellToTab(sessionId, pane.paneId, tabId);
-  await adoptPane({ id: pane.paneId, sessionId, title: "Agent", hidden: true, owned: true });
+  await adoptPane({ id: pane.paneId, sessionId, title: "Agent", hidden: true, owned: true }, () => current(tabId, token));
+  if (!current(tabId, token)) return;
   set({ info: { ...state.info, [tabId]: { command: pane.command, harness: pane.harness } } });
 }
 
 /** Where a tab's terminal view lives: on this computer, or `remote` in a cloud workspace. */
 export interface TabViewPlace {
   remote?: boolean;
+  /** Remote: what moves a native Codex tab to its terminal there (the backend's `toTerminal`). */
+  toTerminal?: (tabId: string) => Promise<void>;
 }
 
 /** Show the tab's CLI. For a headless agent this stops it and resumes it there. */
 export async function enterTerminalView(session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
   if (state.switching[tab.id] || tabViewOf(tab) === "terminal") return;
   if (place.remote) {
+    // A native Codex tab has no terminal until it moves there, as on a Mac; the runtime decides who may move it.
+    if (tab.transport === "experimentalCodexStdio" && place.toTerminal) {
+      set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
+      try {
+        await place.toTerminal(tab.id);
+      } catch (e) {
+        set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
+        return;
+      } finally {
+        set({ switching: { ...state.switching, [tab.id]: false } });
+      }
+    }
     set({ views: { ...state.views, [tab.id]: "terminal" }, errors: { ...state.errors, [tab.id]: null } });
     return;
   }
+  if (removedHere(tab.id)) return;
+  const token = lifetime(tab.id);
   set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
   try {
     if (isPtyFirst(tab.harness)) {
+      // Only here, never when the tab is merely shown: the move is for good.
+      if (tab.transport === "experimentalCodexStdio") await agent.tabToTerminal(session.id, tab.id);
       await startTabAgent(session, tab);
       // The toggle can be the first thing that happens to a tab in this
       // window, so the pane may still need claiming.
-      await adoptTabPane(session.id, tab.id);
+      if (!current(tab.id, token)) return;
+      await adoptTabPane(session.id, tab.id, token);
     } else {
       const info = await agent.tabHandoff(session.id, tab.id);
+      if (!current(tab.id, token)) return;
       await openTerminal(session.id, session.cwd, 100, 24, { id: terminalPaneId(tab), title: tab.title ?? tab.harness, command: info.command, hidden: true });
-      set({ info: { ...state.info, [tab.id]: info } });
+      if (current(tab.id, token)) set({ info: { ...state.info, [tab.id]: info } });
     }
-    set({ views: { ...state.views, [tab.id]: "terminal" } });
+    if (current(tab.id, token)) set({ views: { ...state.views, [tab.id]: "terminal" } });
   } catch (e) {
-    set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
+    if (current(tab.id, token)) set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
   } finally {
-    set({ switching: { ...state.switching, [tab.id]: false } });
+    if (current(tab.id, token)) set({ switching: { ...state.switching, [tab.id]: false } });
   }
 }
 
@@ -197,14 +278,17 @@ export async function leaveTerminalView(_session: SessionEntry, tab: TabEntry, p
     set({ views: shown() });
     return;
   }
+  const token = lifetime(tab.id);
   set({ switching: { ...state.switching, [tab.id]: true } });
   try {
     if (!isPtyFirst(tab.harness)) await closeTerminal(terminalPaneId(tab));
   } finally {
-    const views = shown();
-    const info = { ...state.info };
-    if (!isPtyFirst(tab.harness)) delete info[tab.id];
-    set({ views, info, switching: { ...state.switching, [tab.id]: false } });
+    if (current(tab.id, token)) {
+      const views = shown();
+      const info = { ...state.info };
+      if (!isPtyFirst(tab.harness)) delete info[tab.id];
+      set({ views, info, switching: { ...state.switching, [tab.id]: false } });
+    }
   }
 }
 
@@ -215,6 +299,9 @@ export async function toggleTabView(session: SessionEntry, tab: TabEntry, place:
 
 /** Tests only. */
 export function resetTabViews() {
+  lifetimes.clear();
+  removedTabs.clear();
+  starting.clear();
   set({ views: {}, info: {}, errors: {}, switching: {} });
 }
 

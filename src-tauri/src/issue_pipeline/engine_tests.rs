@@ -2,7 +2,7 @@
 //! and the sessions would. Every way it can stop short of a merge is here,
 //! and the one way it merges.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -13,7 +13,7 @@ use crate::github::{PinnedMerge, PrCheck, PrSnapshot};
 use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
-use super::engine::{self, act, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, Diff, Host, Workspace};
+use super::engine::{self, act, answered, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, AgentStop, Diff, Host, Workspace};
 use super::gate::StopReason;
 use super::verdict::Severity;
 use super::engine::set_resolve_conflicts;
@@ -23,6 +23,8 @@ const C1: &str = "1111111111111111111111111111111111111111";
 const C2: &str = "2222222222222222222222222222222222222222";
 const C3: &str = "3333333333333333333333333333333333333333";
 const C4: &str = "4444444444444444444444444444444444444444";
+/// The base commit a conflict resolver is pinned to.
+const BASE: &str = "5555555555555555555555555555555555555555";
 
 type Hook = Box<dyn FnOnce() + Send>;
 
@@ -50,6 +52,10 @@ struct World {
     local_error: bool,
     during_local: Option<Hook>,
     resolution_error: Option<String>,
+    /// Merges TerminalX aborted: `(head, merge_head)`.
+    aborts: Vec<(String, String)>,
+    /// What git says when asked to abort a merge it will not.
+    abort_error: Option<String>,
     reviewer_tabs: bool,
     announced: u32,
     issue_body: Option<String>,
@@ -70,6 +76,12 @@ struct World {
     cloud: bool,
     /// Each session's last finished turn, as its transcript has it.
     replies: BTreeMap<String, (DateTime<Utc>, String)>,
+    /// Conversations whose agent process is running, by [`key`].
+    running: BTreeSet<String>,
+    /// Of those, the ones in a turn or with a prompt waiting.
+    busy: BTreeSet<String>,
+    /// Agents TerminalX stopped, with the note left in each transcript.
+    stopped_agents: Vec<(String, String)>,
 }
 
 struct FakeHost(Mutex<World>);
@@ -102,7 +114,7 @@ impl FakeHost {
             now: DateTime::parse_from_rfc3339("2026-10-12T10:00:00Z").unwrap().with_timezone(&Utc),
             sessions: BTreeMap::from([("author".to_string(), session("author", Some(issue)))]),
             settings: IssuePipelineSettings::default(),
-            workspace: Workspace { head: C1.into(), branch: Some("raccoon/433-open-a-pull-request".into()), default_branch: Some("main".into()), dirty: Vec::new(), ahead_of_base: 2 },
+            workspace: Workspace { head: C1.into(), branch: Some("raccoon/433-open-a-pull-request".into()), default_branch: Some("main".into()), dirty: Vec::new(), ahead_of_base: 2, merging: Vec::new() },
             diff: Diff { paths: vec!["src/lib/format.ts".into()], patch: "+++ b/src/lib/format.ts\n+export const pad = (n: number) => String(n).padStart(2);\n".into() },
             pr: None,
             checks: vec![check("build", "success")],
@@ -120,6 +132,8 @@ impl FakeHost {
             local_error: false,
             during_local: None,
             resolution_error: None,
+            aborts: Vec::new(),
+            abort_error: None,
             reviewer_tabs: false,
             announced: 0,
             issue_body: Some("Sessions stop at code.".into()),
@@ -135,6 +149,9 @@ impl FakeHost {
             merge_hold: None,
             cloud: false,
             replies: BTreeMap::new(),
+            running: BTreeSet::new(),
+            busy: BTreeSet::new(),
+            stopped_agents: Vec::new(),
         }))
     }
 
@@ -151,6 +168,33 @@ impl FakeHost {
         self.world().sent.iter().filter(|(to, _)| to == session_id).map(|(_, prompt)| prompt.clone()).collect()
     }
 
+    /// A conversation's agent is running; `busy` while it is in a turn.
+    fn agent(&self, who: &SessionRef, busy: bool) {
+        let mut world = self.world();
+        world.running.insert(key(who));
+        if busy {
+            world.busy.insert(key(who));
+        } else {
+            world.busy.remove(&key(who));
+        }
+    }
+
+    fn stopped_agents(&self) -> Vec<String> {
+        self.world().stopped_agents.iter().map(|(who, _)| who.clone()).collect()
+    }
+
+    /// The resolver has run `git merge --no-ff --no-commit` of the pinned base
+    /// and not committed: every file the base brought in is uncommitted.
+    fn half_merge(&self) {
+        let mut world = self.world();
+        world.workspace.merging = vec![BASE.into()];
+        world.workspace.dirty = vec!["CHANGELOG.md".into(), "src/a.rs".into(), "src/b.rs".into()];
+    }
+
+    fn aborts(&self) -> Vec<(String, String)> {
+        self.world().aborts.clone()
+    }
+
 }
 
 impl Host for FakeHost {
@@ -164,6 +208,23 @@ impl Host for FakeHost {
 
     fn last_reply(&self, session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
         self.world().replies.get(&session.session_id).cloned()
+    }
+
+    fn agent_busy(&self, who: &SessionRef) -> bool {
+        self.world().busy.contains(&key(who))
+    }
+
+    fn stop_agent(&self, who: &SessionRef, note: &str) -> Result<AgentStop> {
+        let mut world = self.world();
+        if !world.running.contains(&key(who)) {
+            return Ok(AgentStop::NotRunning);
+        }
+        if world.busy.contains(&key(who)) {
+            return Ok(AgentStop::Busy);
+        }
+        world.running.remove(&key(who));
+        world.stopped_agents.push((key(who), note.to_string()));
+        Ok(AgentStop::Stopped)
     }
 
     fn session(&self, session_id: &str) -> Result<SessionEntry> {
@@ -223,7 +284,7 @@ impl Host for FakeHost {
 
     fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
         let world = self.world();
-        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: "base-moved".into(), return_stage: Stage::Work }))
+        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work }))
     }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let mut resolver = session("resolver", None);
@@ -236,6 +297,21 @@ impl Host for FakeHost {
         if let Some(error) = &world.resolution_error { bail!("{error}"); }
         if resolution.remote_head != world.pr.as_ref().map(|pr| pr.head_sha.clone()) { bail!("Someone pushed during resolution"); }
         if head == resolution.head { bail!("No merge commit was made"); }
+        Ok(())
+    }
+
+    fn abort_merge(&self, _cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
+        let mut world = self.world();
+        if let Some(error) = world.abort_error.take() {
+            bail!("{error}");
+        }
+        // `unfinished_merge::abort`'s own check.
+        if world.workspace.head != head || world.workspace.merging != [merge_head] {
+            bail!("The checkout no longer holds that merge.");
+        }
+        world.aborts.push((head.into(), merge_head.into()));
+        world.workspace.merging.clear();
+        world.workspace.dirty.clear();
         Ok(())
     }
 
@@ -387,7 +463,25 @@ fn reviewed(commit: &str, verdict: &str, findings: &str) -> String {
 }
 
 fn reviewed_with(commit: &str, verdict: &str, findings: &str, security: &str) -> String {
-    format!("Read it.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"{verdict}\", \"securityPass\": \"{security}\", \"findings\": {findings}}}\n```")
+    format!("Read it.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"{verdict}\", \"securityPass\": \"{security}\", \"checks\": \"passed\", \"findings\": {findings}}}\n```")
+}
+
+/// A verdict that says what the reviewer's own checks came to.
+fn reviewed_checks(commit: &str, verdict: &str, checks: &str, note: &str) -> String {
+    format!("Read it.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"{verdict}\", \"securityPass\": \"not_needed\", \"checks\": \"{checks}\", \"checksNote\": \"{note}\", \"findings\": []}}\n```")
+}
+
+/// The reviewer ends its turn to wait for checks it started.
+fn pending_review(commit: &str, reason: &str) -> String {
+    format!("The tests are still running.\n\n```terminalx-review\n{{\"commit\": \"{commit}\", \"verdict\": \"pending\", \"reason\": \"{reason}\"}}\n```")
+}
+
+fn key(who: &SessionRef) -> String {
+    format!("{}/{}", who.session_id, who.tab_id)
+}
+
+fn author_tab() -> SessionRef {
+    SessionRef { session_id: "author".into(), tab_id: "t1".into() }
 }
 
 const HIGH: &str = r#"[{"severity": "high", "title": "Off by one", "file": "src/lib/format.ts", "line": 3}]"#;
@@ -1359,7 +1453,7 @@ fn a_pipeline_starts_for_any_session_on_a_branch_of_its_own() {
     let _home = crate::store::temp_home();
     let host = FakeHost::new(&github_issue());
     // The project's default for the switch is what an issue starts at.
-    host.world().settings.auto_merge = true;
+    host.world().settings.auto_merge = Some(true);
     host.world().settings.max_rounds = 5;
     let pipeline = start(&host, "author", "t1", None, None).unwrap();
     assert!(pipeline.auto_merge);
@@ -1381,6 +1475,51 @@ fn a_pipeline_starts_for_any_session_on_a_branch_of_its_own() {
     host.world().settings.enabled = false;
     assert!(start(&host, "main", "t1", None, None).unwrap_err().to_string().contains("turned off for this project"));
     assert_eq!(store::list().unwrap().len(), 2);
+}
+
+/// What `terminalx sessions create --issue` with no merge flag, and an issue
+/// started from the palette, get: the switches as the project leaves them (#700).
+#[test]
+fn a_session_from_an_issue_starts_set_to_resolve_and_merge_unless_the_project_says_otherwise() {
+    /// The issue session "author"'s new pipeline, in a store of its own.
+    fn started(host: &FakeHost, auto_merge: Option<bool>) -> Pipeline {
+        let _home = crate::store::temp_home();
+        start(host, "author", "t1", auto_merge, None).unwrap()
+    }
+    let kinds = |pipeline: &Pipeline| pipeline.events.iter().map(|event| event.kind.clone()).collect::<Vec<_>>();
+    for issue in [github_issue(), linear_issue()] {
+        let _home = crate::store::temp_home();
+        let host = FakeHost::new(&issue);
+        host.world().sessions.insert("plain".into(), session("plain", None));
+        let pipeline = start(&host, "author", "t1", None, None).unwrap();
+        assert!(pipeline.auto_merge && pipeline.resolve_conflicts, "{}", issue.provider);
+        assert_eq!(kinds(&pipeline), ["started", "autoMerge"]);
+        // A session not started from an issue is as it was: both off.
+        let plain = start(&host, "plain", "t1", None, None).unwrap();
+        assert!(!plain.auto_merge && !plain.resolve_conflicts);
+    }
+
+    // `--no-auto-merge` turns off the merge for that session only; resolving stays.
+    let pipeline = started(&FakeHost::new(&github_issue()), Some(false));
+    assert!(!pipeline.auto_merge && pipeline.resolve_conflicts);
+
+    // A project that turned them off keeps them off.
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.auto_merge = Some(false);
+    host.world().settings.resolve_conflicts = Some(false);
+    let pipeline = started(&host, None);
+    assert!(!pipeline.auto_merge && !pipeline.resolve_conflicts);
+
+    // Where a person does the merge it is never set to merge by itself.
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.require_person = true;
+    let pipeline = started(&host, None);
+    assert!(!pipeline.auto_merge && pipeline.resolve_conflicts);
+    assert_eq!(kinds(&pipeline), ["started"]);
+
+    // Nor in a cloud workspace, which never merges.
+    let pipeline = started(&cloud_host(&linear_issue()), None);
+    assert!(!pipeline.auto_merge && pipeline.resolve_conflicts);
 }
 
 #[test]
@@ -1531,7 +1670,11 @@ fn only_the_pipelines_own_branch_is_ever_pushed() {
 
 #[test]
 fn a_pull_request_that_still_shows_the_old_head_after_a_push_is_given_a_moment() {
-    let run = Run::start(&github_issue(), true);
+    // The review's own reads are counted: the conflict watcher, which reads the
+    // pull request too, is off as the project turned it off.
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.resolve_conflicts = Some(false);
+    let run = Run::start_in(host, true);
     run.to_review();
     run.reviewer(&reviewed(C1, "changes", HIGH));
     run.host.commit(C2);
@@ -2397,4 +2540,757 @@ fn refused_continuation_still_revokes_explicit_off_permissions() {
         assert!(!run.pipeline().auto_merge && !run.pipeline().resolve_conflicts);
         assert!(run.merges().is_empty());
     }
+}
+
+// ---- the end of a pipeline, for the conversations in it (#689) ----------------------
+
+#[test]
+fn a_merge_made_elsewhere_stops_the_idle_reviewer_and_author_and_a_later_reply_changes_nothing() {
+    // The reviewer gave its verdict with its tests still running in the background, and went on waking up after the merge.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("desktop-platforms (ubuntu-latest)", "failure")];
+    let run = Run::start_in(host, true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    let stopped = run.reviewer(&reviewed_checks(C1, "merge", "not_run", "the tests are still compiling"));
+    assert_eq!(stopped.reason, Some(StopReason::ChecksFailed { names: vec!["desktop-platforms (ubuntu-latest)".into()] }));
+    // Both agents sit idle between turns, the reviewer with a watch that will wake it.
+    run.host.agent(&reviewer, false);
+    run.host.agent(&author_tab(), false);
+
+    // A person merges the pull request on GitHub.
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged);
+    assert_eq!(run.host.stopped_agents(), [key(&author_tab()), key(&reviewer)]);
+    assert!(run.host.world().stopped_agents[1].1.starts_with("Pull request #7 was merged at 1111111111, so this pipeline is finished. TerminalX stopped this tab's agent"));
+    let released = merged.events.last().unwrap();
+    assert_eq!(released.kind, "participantsReleased");
+    assert_eq!(released.message, "Pull request #7 was merged at 1111111111, so this pipeline is finished. Stopped the agents of the author and the reviewer, which sat idle; their conversations can be resumed.");
+    // Nothing was typed into them: an idle agent would only read it when it woke.
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    assert!(run.host.prompts_to("author").is_empty());
+    assert!(merged.releasing.is_empty());
+    // Looked at again, nothing is released twice.
+    assert_eq!(run.poll().events.len(), merged.events.len());
+
+    // Woken anyway, by a person typing into it, the reviewer revises its verdict: noted once, and nothing moves.
+    let late = run.reviewer(&reviewed(C1, "changes", HIGH));
+    assert_eq!(late.state, State::Merged);
+    assert_eq!(late.events.last().unwrap().message, "The reviewer replied after the merge; its reply was ignored.");
+    assert_eq!(late.events.last().unwrap().session_id.as_deref(), Some(reviewer.session_id.as_str()));
+    assert_eq!(run.reviewer("Still waiting on the tests.").events.len(), late.events.len());
+    assert_eq!(run.host.world().comments.len(), 1);
+    // The author's conversation is a person's own again: its turns are not the pipeline's to note.
+    assert_eq!(run.author("Thanks, all done.").events.len(), late.events.len());
+    assert!(run.host.prompts_to("author").is_empty());
+}
+
+#[test]
+fn a_conversation_still_in_a_turn_when_the_pipeline_ends_is_told_and_stopped_once_the_turn_ends() {
+    let run = Run::start(&github_issue(), false);
+    let reviewer = run.to_review().reviewer.unwrap();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    // The reviewer is in a turn when the merge lands.
+    run.host.agent(&reviewer, true);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert_eq!(merged.releasing, std::slice::from_ref(&reviewer));
+    assert!(run.host.stopped_agents().is_empty(), "a turn is never cut off");
+    let told = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(told.len(), 2);
+    assert!(told[1].starts_with("Pull request #7 was merged at 1111111111, so this pipeline is finished. TerminalX will not use another report or verdict"), "{}", told[1]);
+    assert!(told[1].contains("Stop any background commands and watches you started for this pipeline"));
+    assert!(merged.events.last().unwrap().message.ends_with("Told the reviewer, still in a turn, to stop what it started for the pipeline; its agent is stopped when that turn ends."));
+
+    // That turn ends with the notice still waiting for it: left for the turn that reads it.
+    let waiting = run.reviewer("Checking the tests once more.");
+    assert_eq!(waiting.releasing, std::slice::from_ref(&reviewer));
+    assert!(run.host.stopped_agents().is_empty());
+    // The next ends idle: its agent is stopped, and the reply noted.
+    run.host.agent(&reviewer, false);
+    let done = run.reviewer("Understood. Stopped the watch.");
+    assert!(done.releasing.is_empty());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+    assert_eq!(done.events.last().unwrap().message, "The reviewer replied after the merge; its reply was ignored. TerminalX stopped its agent.");
+    assert_eq!(done.state, State::Merged);
+}
+
+#[test]
+fn stopping_a_pipeline_releases_its_reviewer_and_leaves_the_authors_work_alone() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    run.host.agent(&author_tab(), true);
+    run.host.agent(&reviewer, true);
+    let stopped = act(&run.host, &run.id, Action::Stop).unwrap();
+    // The author's work goes on, only without the pipeline; the reviewer is told its review is off.
+    assert!(run.host.prompts_to("author").is_empty());
+    assert_eq!(stopped.releasing, std::slice::from_ref(&reviewer));
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].starts_with("This pipeline was stopped. TerminalX will not use another report or verdict"));
+    run.host.agent(&reviewer, false);
+    let ignored = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert!(ignored.verdict.is_none() && run.merges().is_empty() && run.host.world().comments.is_empty());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+    assert_eq!(ignored.events.last().unwrap().message, "The reviewer replied after the pipeline was stopped; its reply was ignored. TerminalX stopped its agent.");
+    // A turn of the author's while it is stopped is still nobody's business.
+    assert_eq!(run.author(&done("Done.")).events.len(), ignored.events.len());
+
+    // Resumed, the same reviewer is asked again: the prompt resumes its conversation.
+    let resumed = act(&run.host, &run.id, Action::Resume).unwrap();
+    assert_eq!((resumed.stage, resumed.state, resumed.round), (Stage::Review, State::Working, 2));
+    assert!(resumed.releasing.is_empty());
+    assert_eq!(run.host.world().reviewers, 1);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
+}
+
+#[test]
+fn a_pull_request_closed_without_merging_releases_its_conversations_once() {
+    let run = Run::start(&github_issue(), false);
+    let reviewer = run.to_review().reviewer.unwrap();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    run.host.agent(&author_tab(), false);
+    run.host.agent(&reviewer, false);
+    run.host.world().pr.as_mut().unwrap().state = "CLOSED".into();
+    let closed = run.poll();
+    assert_eq!(closed.reason, Some(StopReason::PullRequestClosed));
+    assert_eq!(run.host.stopped_agents(), [key(&author_tab()), key(&reviewer)]);
+    assert_eq!(closed.events.last().unwrap().message, "Pull request #7 was closed without merging, so this pipeline is finished. Stopped the agents of the author and the reviewer, which sat idle; their conversations can be resumed.");
+    assert_eq!(run.poll().events.len(), closed.events.len());
+    // Its turns after that are noted, not acted on.
+    assert_eq!(run.reviewer("One more thought.").events.last().unwrap().message, "The reviewer replied after the pull request was closed; its reply was ignored.");
+}
+
+// ---- a reviewer whose own checks are still running (#689) ---------------------------
+
+#[test]
+fn a_reviewer_still_running_its_checks_is_waited_for_and_then_asked_once_for_its_verdict() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    // It ends its turn to wait for the tests it started.
+    let pending = run.reviewer(&pending_review(C1, "cargo test is still compiling"));
+    assert_eq!((pending.stage, pending.state, pending.reminded), (Stage::Review, State::Working, false));
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1, "not reminded of a verdict it is working towards");
+    assert!(pending.verdict.is_none() && run.host.world().comments.is_empty());
+    assert_eq!(pending.note.as_deref(), Some("The reviewer is running its checks on 1111111111; its verdict is due within 20 minutes."));
+    let said = pending.events.last().unwrap();
+    assert_eq!((said.kind.as_str(), said.message.as_str()), ("reviewPending", "The reviewer is still running its checks on 1111111111: cargo test is still compiling. Its verdict is waited for up to 20 minutes."));
+    // A watch wakes it with the tests still running: the same wait, not a new one.
+    let still = run.reviewer(&pending_review(C1, "still compiling"));
+    assert_eq!((still.events.len(), still.review_pending_since.clone()), (pending.events.len(), pending.review_pending_since.clone()));
+    // Looked at within its time, nothing is sent.
+    run.poll();
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+
+    // Past it, the idle reviewer is asked once for its verdict on what it has.
+    run.host.world().now += TimeDelta::minutes(5);
+    let asked = run.poll();
+    assert!(asked.reminded);
+    let prompts = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("have been running for 20 minutes") && prompts[1].contains("do not reply pending again"), "{}", prompts[1]);
+    assert_eq!(asked.events.last().unwrap().kind, "reminder");
+    run.poll();
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 2, "asked once");
+
+    // It says its checks never finished: taken, and shown as a review by reading.
+    let merged = run.reviewer(&reviewed_checks(C1, "merge", "not_run", "the build waits on a file lock"));
+    assert_eq!(merged.state, State::Merged, "CI ran the tests: {:?}", merged.note);
+    assert!(merged.review_pending_since.is_none());
+    let verdict = merged.events.iter().find(|event| event.kind == "verdict").unwrap();
+    assert!(verdict.message.ends_with("Reviewed by reading only, tests not run: the build waits on a file lock."), "{}", verdict.message);
+    assert!(run.host.world().comments[0].contains("Reviewed by reading only, tests not run: the build waits on a file lock."));
+}
+
+#[test]
+fn a_reviewer_that_still_gives_no_verdict_once_its_time_ran_out_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    run.reviewer(&pending_review(C1, "tests running"));
+    // Back at work when its time runs out: not interrupted.
+    run.host.agent(&reviewer, true);
+    run.host.world().now += TimeDelta::minutes(30);
+    run.poll();
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    // That turn ends saying pending again: asked for its verdict now, once.
+    run.host.agent(&reviewer, false);
+    let asked = run.reviewer(&pending_review(C1, "tests running"));
+    assert!(asked.reminded);
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].contains("do not reply pending again"));
+    // Pending once more is a person's.
+    let stopped = run.reviewer(&pending_review(C1, "tests running"));
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert_eq!(stopped.reason, Some(StopReason::NoVerdict { detail: "Its checks were still running after 20 minutes, and it gave no verdict.".into() }));
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_reviewer_reminded_of_its_verdict_may_answer_that_its_checks_are_still_running() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    let asked = run.reviewer("The tests are still compiling. I'll give the verdict when the run reports back.");
+    assert!(asked.reminded);
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].contains("If checks you started are still running, say so with a pending block"));
+    let pending = run.reviewer(&pending_review(C1, "cargo test"));
+    assert_eq!((pending.state, pending.reminded), (State::Working, false));
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
+}
+
+#[test]
+fn a_reviewer_waiting_on_its_own_checks_holds_a_cloud_workspace_awake() {
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_review();
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+    run.reviewer(&pending_review(C1, "tests"));
+    assert_eq!(engine::holding_at(run.host.now()), 1);
+    run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+}
+
+// ---- what the reviewer's checks came to (#689) ---------------------------------------
+
+#[test]
+fn a_review_by_reading_alone_does_not_merge_a_project_without_ci_by_itself() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = Vec::new();
+    host.world().settings.allow_no_ci = true;
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().validation = Some(Vec::new());
+    let ready = run.reviewer(&reviewed_checks(C1, "merge", "not_run", "no time to build"));
+    assert_eq!((ready.state, ready.reason.clone()), (State::ReadyToMerge, Some(StopReason::ReviewChecksNotRun)));
+    assert!(run.merges().is_empty());
+    // The person it waits for presses Merge.
+    assert_eq!(act(&run.host, &run.id, Action::Merge).unwrap().state, State::Merged);
+    assert_eq!(run.merges(), [("merge".to_string(), C1.to_string())]);
+    // Reviewed with its checks run, the same project merges by itself.
+    drop(run);
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = Vec::new();
+    host.world().settings.allow_no_ci = true;
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().validation = Some(Vec::new());
+    assert_eq!(run.reviewer(&reviewed_checks(C1, "merge", "passed", "cargo test")).state, State::Merged);
+}
+
+#[test]
+fn checks_that_failed_for_the_reviewer_are_a_persons_to_judge_whatever_its_verdict() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    let stopped = run.reviewer(&reviewed_checks(C1, "merge", "failed", "status::usage tests fail"));
+    assert_eq!((stopped.stage, stopped.state), (Stage::Merge, State::NeedsYou));
+    assert_eq!(stopped.reason, Some(StopReason::ReviewChecksFailed { note: Some("status::usage tests fail".into()) }));
+    assert!(run.merges().is_empty());
+    assert!(run.host.world().comments[0].contains("The reviewer's checks failed: status::usage tests fail."));
+}
+
+#[test]
+fn an_author_in_a_turn_when_its_pull_request_merges_is_left_to_finish_and_never_told_to_stop() {
+    let run = Run::start(&github_issue(), false);
+    let reviewer = run.to_review().reviewer.unwrap();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    // A person is using the author's tab for a follow-up of their own when the merge lands.
+    run.host.agent(&author_tab(), true);
+    run.host.agent(&reviewer, false);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert!(run.host.prompts_to("author").is_empty(), "nothing is typed into a person's turn");
+    assert!(merged.releasing.is_empty());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+    assert_eq!(merged.events.last().unwrap().message, "Pull request #7 was merged at 1111111111, so this pipeline is finished. Stopped the reviewer's agent, which sat idle; its conversation can be resumed. Left the author's agent running: it is in a turn.");
+    // That turn ends: the conversation is the person's, and its agent is not stopped for it.
+    run.host.agent(&author_tab(), false);
+    let after = run.author("Changelog updated.");
+    assert_eq!(after.events.len(), merged.events.len());
+    assert_eq!(run.host.stopped_agents(), [key(&reviewer)]);
+}
+
+#[test]
+fn an_overdue_verdict_that_cannot_be_asked_for_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    run.reviewer(&pending_review(C1, "tests running"));
+    // Its tab cannot take the request when the poller asks.
+    run.host.world().send_error = Some("the agent could not be started".into());
+    run.host.world().now += TimeDelta::minutes(30);
+    let stopped = run.poll();
+    assert_eq!((stopped.stage, stopped.state), (Stage::Review, State::NeedsYou));
+    assert_eq!(stopped.reason, Some(StopReason::Failed { step: "Asking the session again".into(), message: "the agent could not be started".into() }));
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    // From there a person asks for the review again.
+    assert_eq!(act(&run.host, &run.id, Action::Advance).unwrap().stage, Stage::Review);
+}
+
+// ---- a person answering the author (#725) -------------------------------------------
+
+/// The author's last message of a turn in which it is not done.
+fn not_done(reason: &str) -> String {
+    format!("Stuck.\n\n```terminalx-status\n{{\"status\": \"blocked\", \"checks\": \"none\", \"reason\": \"{reason}\"}}\n```")
+}
+
+const ANSWERED: &str = "Answered; waiting for the author session to report.";
+
+/// GitHub finds the pull request in conflict with its base.
+fn conflict(run: &Run) {
+    let mut world = run.host.world();
+    let pr = world.pr.as_mut().unwrap();
+    pr.mergeable = "CONFLICTING".into();
+    pr.merge_state = "DIRTY".into();
+}
+
+impl Run {
+    /// A person sends the author a message, and its agent takes it: what
+    /// the session manager tells the pipeline once the tab has it.
+    fn answer(&self) -> Pipeline {
+        self.host.agent(&author_tab(), true);
+        answered(&self.host, "author", "t1");
+        self.pipeline()
+    }
+
+    /// The turn the answer started ends with `message`.
+    fn answered_turn(&self, message: &str) -> Pipeline {
+        self.host.agent(&author_tab(), false);
+        self.author(message)
+    }
+}
+
+/// Stopped because the author is not done, then answered: working again at
+/// once, announced, and carried on from there when that turn ends done.
+fn an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(issue: &IssueRef) {
+    let run = Run::start(issue, false);
+    let blocked = run.author(&not_done("Which table holds the plans?"));
+    assert_eq!((blocked.stage, blocked.state), (Stage::Work, State::NeedsYou));
+    let announced = run.host.world().announced;
+
+    let working = run.answer();
+    assert_eq!((working.stage, working.state, working.reason.clone()), (Stage::Work, State::Working, None), "{}", issue.identifier);
+    assert_eq!(working.note.as_deref(), Some(ANSWERED));
+    assert_eq!(working.answered, Some(StopReason::AuthorNotDone { detail: "Which table holds the plans?".into() }));
+    // Announced as it happens: the Issues list hears it when the session's sidebar does, not when the turn ends.
+    assert_eq!(run.host.world().announced, announced + 1);
+    let line = working.events.last().unwrap();
+    assert_eq!((line.kind.as_str(), line.session_id.as_deref()), ("answered", Some("author")));
+    // Nothing is pushed or opened on an answer: only the turn's end decides that.
+    assert!(run.host.world().pushes.is_empty() && run.host.world().pr.is_none());
+
+    let reviewing = run.answered_turn(&done("The plans are in billing_plans."));
+    assert_eq!((reviewing.stage, reviewing.state, reviewing.answered), (Stage::Review, State::Working, None));
+}
+
+#[test]
+fn a_message_to_an_author_that_is_not_done_puts_a_github_issues_pipeline_to_work_at_once() {
+    an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(&github_issue());
+}
+
+#[test]
+fn a_message_to_an_author_that_is_not_done_puts_a_linear_issues_pipeline_to_work_at_once() {
+    an_answer_to_an_author_that_is_not_done_is_working_before_its_turn_ends(&linear_issue());
+}
+
+#[test]
+fn an_answered_turn_that_ends_not_done_stops_for_a_person_again() {
+    let run = Run::start(&github_issue(), false);
+    run.author(&not_done("Which table holds the plans?"));
+    assert_eq!(run.answer().state, State::Working);
+    let again = run.answered_turn(&not_done("The plans table has no owner column."));
+    assert_eq!((again.stage, again.state, again.answered.clone()), (Stage::Work, State::NeedsYou, None));
+    assert_eq!(again.reason, Some(StopReason::AuthorNotDone { detail: "The plans table has no owner column.".into() }));
+    assert!(run.host.world().pushes.is_empty());
+    // And it can be answered again, as many times as it takes.
+    assert_eq!(run.answer().state, State::Working);
+    assert_eq!(run.answered_turn(&done("Added the column.")).stage, Stage::Review);
+}
+
+#[test]
+fn a_message_to_the_author_does_not_clear_a_required_review() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.merge_state = "BLOCKED".into();
+        pr.review_decision = Some("REVIEW_REQUIRED".into());
+    }
+    let required = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((required.state, required.reason.clone()), (State::NeedsYou, Some(StopReason::ReviewRequired)));
+    let announced = run.host.world().announced;
+    // GitHub wants an approval, which nothing the author does gives.
+    assert_eq!(run.answer(), required);
+    assert_eq!(run.host.world().announced, announced, "nothing changed, so nothing is announced");
+    // Its turn ends: the gate is asked again, and says the same.
+    assert_eq!(run.answered_turn(&done("Nothing to change.")).reason, Some(StopReason::ReviewRequired));
+    // Once approved, a look at it again carries it on.
+    run.host.world().pr.as_mut().unwrap().review_decision = Some("APPROVED".into());
+    run.host.world().pr.as_mut().unwrap().merge_state = "CLEAN".into();
+    assert_eq!(run.poll().state, State::Merged);
+}
+
+#[test]
+fn only_the_authors_answer_to_a_stop_of_its_own_puts_the_pipeline_back_to_work() {
+    let run = Run::start(&github_issue(), false);
+    let blocked = run.author(&not_done("Which table holds the plans?"));
+    // A message that never reached a running agent (the tab refused it, the agent is gone) is no answer.
+    answered(&run.host, "author", "t1");
+    assert_eq!(run.pipeline(), blocked);
+    // Nor is one stopped by a person: nothing happens until it is resumed.
+    act(&run.host, &run.id, Action::Stop).unwrap();
+    let stopped = run.answer();
+    assert_eq!(stopped.state, State::Stopped);
+    // Resumed, it waits for the author's report as before; answering a working pipeline changes nothing.
+    run.host.agent(&author_tab(), false);
+    let resumed = act(&run.host, &run.id, Action::Resume).unwrap();
+    assert_eq!(run.answer(), resumed);
+    drop(run);
+
+    // The reviewer, answered while the pipeline is stopped on it, is not the author.
+    let run = Run::start(&github_issue(), true);
+    let reviewer = run.to_review().reviewer.unwrap();
+    let no_verdict = run.reviewer("Looks fine to me.");
+    assert!(no_verdict.reminded);
+    let stopped = run.reviewer("Still fine.");
+    assert!(matches!(stopped.reason, Some(StopReason::NoVerdict { .. })), "{:?}", stopped.reason);
+    run.host.agent(&reviewer, true);
+    answered(&run.host, &reviewer.session_id, &reviewer.tab_id);
+    assert_eq!(run.pipeline(), stopped);
+    // And the author's answer does not clear a stop on the reviewer's verdict either.
+    assert_eq!(run.answer(), stopped);
+    drop(run);
+
+    // A pull request closed without merging ended the pipeline.
+    let run = Run::start(&github_issue(), false);
+    run.to_gate();
+    run.host.world().pr.as_mut().unwrap().state = "CLOSED".into();
+    let closed = run.poll();
+    assert_eq!(closed.reason, Some(StopReason::PullRequestClosed));
+    assert_eq!(run.answer(), closed);
+}
+
+#[test]
+fn a_pull_request_that_could_not_be_opened_is_working_once_its_author_is_answered() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().workspace.dirty = vec!["notes.txt".into()];
+    let dirty = run.author(&done("Done."));
+    assert_eq!((dirty.stage, dirty.state), (Stage::PullRequest, State::NeedsYou));
+    let working = run.answer();
+    assert_eq!((working.stage, working.state, working.note.as_deref()), (Stage::PullRequest, State::Working, Some(ANSWERED)));
+    // The author asks which file: the turn settles nothing, and the stop is back as it was.
+    let again = run.answered_turn("Which file do you mean?");
+    assert_eq!((again.stage, again.state), (Stage::PullRequest, State::NeedsYou));
+    assert_eq!(again.reason, Some(StopReason::UncommittedChanges { files: vec!["notes.txt".into()] }));
+    assert!(run.host.prompts_to("author").is_empty(), "it is not nagged for the block");
+    // Answered again, it commits the file and reports done: the pull request opens.
+    run.answer();
+    run.host.world().workspace.dirty.clear();
+    assert_eq!(run.answered_turn(&done("Committed the notes too.")).stage, Stage::Review);
+    assert_eq!(run.host.world().created.len(), 1);
+    drop(run);
+
+    // A refused push, likewise.
+    let run = Run::start(&github_issue(), true);
+    run.host.world().push_error = Some("remote: Permission to acme/widgets denied".into());
+    assert!(matches!(run.author(&done("Done.")).reason, Some(StopReason::Failed { .. })));
+    assert_eq!(run.answer().state, State::Working);
+    assert_eq!(run.answered_turn(&done("The remote is fixed.")).stage, Stage::Review);
+}
+
+#[test]
+fn conflicts_answered_by_a_person_are_left_to_the_authors_turn_not_put_back_by_the_poller() {
+    let run = Run::start(&github_issue(), false);
+    run.to_review();
+    let conflicting = |conflict: bool| {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.mergeable = if conflict { "CONFLICTING" } else { "MERGEABLE" }.into();
+        pr.merge_state = if conflict { "DIRTY" } else { "CLEAN" }.into();
+    };
+    conflicting(true);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
+    let working = run.answer();
+    assert_eq!((working.stage, working.state, working.answered.clone()), (Stage::Merge, State::Working, Some(StopReason::Conflicts)));
+    // GitHub still shows the conflict while the author works on it: the poller leaves it to the turn.
+    let polled = run.poll();
+    assert_eq!((polled.state, polled.note.as_deref()), (State::Working, Some(ANSWERED)));
+    // The turn ends with the conflict still there: stopped for it again.
+    assert_eq!(run.answered_turn(&done("Merged main.")).reason, Some(StopReason::Conflicts));
+    // Answered again; by the end of this turn GitHub has it resolved.
+    run.answer();
+    conflicting(false);
+    let ready = run.answered_turn(&done("Merged main again."));
+    assert_eq!((ready.state, ready.answered), (State::ReadyToMerge, None));
+    drop(run);
+
+    // A merge made elsewhere while the author works on an answer is still noticed.
+    let run = Run::start(&github_issue(), false);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "failure")];
+    let failed = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert!(matches!(failed.reason, Some(StopReason::ChecksFailed { .. })), "{:?}", failed.reason);
+    assert_eq!(run.answer().state, State::Working);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    assert_eq!(run.poll().state, State::Merged);
+}
+
+#[test]
+fn a_message_sent_while_the_author_works_answers_the_stop_its_turn_ends_on() {
+    let run = Run::start(&github_issue(), false);
+    // A person sends a message while the author works; it waits for the turn's end.
+    run.host.agent(&author_tab(), true);
+    answered(&run.host, "author", "t1");
+    assert_eq!((run.pipeline().state, run.pipeline().answered), (State::Working, None));
+    // The turn ends not done, and the next one starts on that message at once.
+    let working = run.author(&not_done("Which table holds the plans?"));
+    assert_eq!((working.state, working.note.as_deref()), (State::Working, Some(ANSWERED)));
+    assert_eq!(working.answered, Some(StopReason::AuthorNotDone { detail: "Which table holds the plans?".into() }));
+    assert!(run.kinds().ends_with(&["needsYou".to_string(), "answered".to_string()]), "{:?}", run.kinds());
+    assert_eq!(run.answered_turn(&done("Found it.")).stage, Stage::Review);
+}
+
+#[test]
+fn an_answered_turn_cut_short_or_lost_to_a_restart_is_a_persons_again() {
+    let interrupted = StopReason::SessionStopped { role: "author".into(), detail: "Its turn was interrupted.".into() };
+    let closed = StopReason::SessionStopped { role: "author".into(), detail: "TerminalX was closed before it finished.".into() };
+    // Answered at a stage that does not wait on the author, its turn is interrupted.
+    let run = Run::start(&github_issue(), true);
+    run.host.world().workspace.dirty = vec!["notes.txt".into()];
+    run.author(&done("Done."));
+    run.answer();
+    turn_failed(&run.host, "author", "t1", "Its turn was interrupted.");
+    let stopped = run.pipeline();
+    assert_eq!((stopped.stage, stopped.state, stopped.reason.clone(), stopped.answered), (Stage::PullRequest, State::NeedsYou, Some(interrupted), None));
+    // Answered again, and TerminalX closes during that turn.
+    assert_eq!(run.answer().state, State::Working);
+    recover(&run.host);
+    assert_eq!((run.pipeline().state, run.pipeline().reason), (State::NeedsYou, Some(closed.clone())));
+    drop(run);
+
+    // At the merge stage too, where a working pipeline is otherwise the poller's.
+    let run = Run::start(&github_issue(), false);
+    run.to_review();
+    conflict(&run);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
+    run.answer();
+    recover(&run.host);
+    let recovered = run.pipeline();
+    assert_eq!((recovered.stage, recovered.state, recovered.reason), (Stage::Merge, State::NeedsYou, Some(closed)));
+    drop(run);
+
+    // A cloud workspace's runtime that restarts during the answered turn says so when it wakes.
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_review();
+    conflict(&run);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
+    run.answer();
+    // Another tab's turn ended with it: the author is still at work on the answer.
+    resume(&run.host, &[("someone".into(), "else".into())]);
+    assert_eq!(run.pipeline().state, State::Working);
+    resume(&run.host, &[("author".into(), "t1".into())]);
+    let woke = run.pipeline();
+    assert_eq!(woke.state, State::NeedsYou);
+    assert!(matches!(&woke.reason, Some(StopReason::SessionStopped { role, detail }) if role == "author" && detail.contains("restarted")), "{:?}", woke.reason);
+}
+
+// ---- a conflict resolver's unfinished merge (#736) ---------------------------
+
+fn resolver_tab() -> SessionRef {
+    SessionRef { session_id: "resolver".into(), tab_id: "t1".into() }
+}
+
+/// A resolver's report that it could not finish.
+fn resolver_blocked(reason: &str) -> String {
+    format!("Stopping.\n\n```terminalx-status\n{{\"status\": \"blocked\", \"checks\": \"none\", \"reason\": \"{reason}\"}}\n```")
+}
+
+/// The pull request conflicts with its base, and the resolver has merged the
+/// pinned base without committing it yet.
+fn resolving(run: &Run) -> Pipeline {
+    run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    run.host.world().conflict = true;
+    conflict(run);
+    let resolving = run.poll();
+    assert_eq!((resolving.stage, resolving.state), (Stage::Resolve, State::Working), "{:?}", resolving.note);
+    run.host.half_merge();
+    resolving
+}
+
+const ABORTED: &str = "Aborted the conflict resolver's unfinished merge of main at 5555555555; the checkout is back at 1111111111.";
+
+#[test]
+fn a_resolver_that_stops_short_of_its_merge_commit_has_its_unfinished_merge_aborted() {
+    let failed = |message: &str| StopReason::Failed { step: "Resolving conflicts".into(), message: message.into() };
+    let checks_failed = "Red.\n\n```terminalx-status\n{\"status\": \"done\", \"checks\": \"failed\", \"summary\": \"cargo test fails\"}\n```".to_string();
+    for (report, reason) in [
+        (resolver_blocked("The remote moved while the checks ran"), failed("The remote moved while the checks ran")),
+        (checks_failed, StopReason::LocalChecksFailed),
+        ("I could not settle the changelog.".to_string(), failed("The resolver ended without a status block.")),
+        // Said done, never committed: not "uncommitted changes in" the base's files.
+        (done("Merged the base."), failed("The resolver reported its merge done without committing it.")),
+    ] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        turn_completed(&run.host, "resolver", "t1", Some(&report));
+        let stopped = run.pipeline();
+        assert_eq!((stopped.state, stopped.reason.clone()), (State::NeedsYou, Some(reason.clone())));
+        assert!(stopped.resolution.is_none(), "the checkout is released");
+        assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())], "{reason:?}");
+        assert!(run.host.world().workspace.merging.is_empty() && run.host.world().workspace.dirty.is_empty());
+        // Said after why it stopped, with the commit it went back to.
+        let kinds = run.kinds();
+        assert_eq!(kinds[kinds.len() - 2..], ["needsYou", "mergeAborted"]);
+        let aborted = stopped.events.last().unwrap();
+        assert_eq!((aborted.message.as_str(), aborted.commit.as_deref()), (ABORTED, Some(C1)));
+        assert_eq!(run.host.world().pushes, [C1], "nothing of the resolution was pushed");
+    }
+}
+
+#[test]
+fn a_merge_the_pipeline_did_not_ask_for_is_left_as_it_is() {
+    for moved in ["head", "merging"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        if moved == "head" {
+            run.host.commit(C2);
+        } else {
+            run.host.world().workspace.merging = vec![C3.into()];
+        }
+        turn_completed(&run.host, "resolver", "t1", Some(&resolver_blocked("Intent is ambiguous")));
+        assert!(run.host.aborts().is_empty(), "{moved}");
+        assert!(!run.host.world().workspace.merging.is_empty());
+        let left = run.pipeline().events.last().unwrap().clone();
+        assert_eq!(left.kind, "mergeLeft");
+        let expected = if moved == "head" { "The checkout is at 2222222222 merging 5555555555" } else { "The checkout is at 1111111111 merging 3333333333" };
+        assert!(left.message.starts_with(expected) && left.message.ends_with("which is not the merge of main at 5555555555 the pipeline asked for. It is left as it is."), "{}", left.message);
+    }
+}
+
+#[test]
+fn a_merge_a_person_may_be_looking_at_or_git_will_not_undo_is_left_as_it_is() {
+    for case in ["interrupted", "stopped", "in use", "refused"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        let report = resolver_blocked("Tests fail");
+        match case {
+            "interrupted" => turn_failed(&run.host, "resolver", "t1", engine::turn_failure(true)),
+            "stopped" => {
+                act(&run.host, &run.id, Action::Stop).unwrap();
+                turn_completed(&run.host, "resolver", "t1", Some(&report));
+            }
+            "in use" => {
+                run.host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+                turn_completed(&run.host, "resolver", "t1", Some(&report));
+            }
+            _ => {
+                run.host.world().abort_error = Some("git merge --abort: error: Entry 'src/a.rs' not uptodate. Cannot merge.".into());
+                turn_completed(&run.host, "resolver", "t1", Some(&report));
+            }
+        }
+        let pipeline = run.pipeline();
+        assert!(run.host.aborts().is_empty(), "{case}");
+        assert_eq!(run.host.world().workspace.merging, [BASE], "{case}");
+        assert!(pipeline.resolution.is_none(), "{case}: its turn is over either way");
+        let left = pipeline.events.iter().rev().find(|event| event.kind == "mergeLeft").unwrap_or_else(|| panic!("{case}: {:?}", run.kinds()));
+        let expected = match case {
+            "interrupted" | "stopped" => "The conflict resolver's merge of main at 5555555555 is unfinished. It is left as it is for you to inspect: commit or abort it from the Changes panel.",
+            "in use" => "The conflict resolver's merge of main at 5555555555 is unfinished, and another conversation is at work in the checkout. It is left as it is.",
+            _ => "The conflict resolver's unfinished merge of main at 5555555555 could not be aborted, so it is left as it is: git merge --abort: error: Entry 'src/a.rs' not uptodate. Cannot merge.",
+        };
+        assert_eq!(left.message, expected, "{case}");
+    }
+}
+
+#[test]
+fn a_resolver_whose_agent_went_mid_merge_has_the_merge_aborted() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    turn_failed(&run.host, "resolver", "t1", engine::turn_failure(false));
+    let stopped = run.pipeline();
+    assert_eq!(stopped.reason, Some(StopReason::SessionStopped { role: "conflict resolver".into(), detail: "Its agent ended before the turn finished.".into() }));
+    assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())]);
+    assert_eq!(stopped.events.last().unwrap().message, ABORTED);
+}
+
+#[test]
+fn a_pull_request_merged_or_closed_while_the_resolver_works_stops_it_at_once_and_its_merge_is_aborted_when_its_turn_ends() {
+    for outcome in ["MERGED", "CLOSED"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        // At work on the checks; the switch turned off since does not stop the watch.
+        run.host.agent(&resolver_tab(), true);
+        set_resolve_conflicts(&run.host, &run.id, false).unwrap();
+        run.host.world().pr.as_mut().unwrap().state = outcome.into();
+        let ended = run.poll();
+        if outcome == "MERGED" {
+            assert_eq!(ended.state, State::Merged);
+        } else {
+            assert_eq!(ended.reason, Some(StopReason::PullRequestClosed));
+        }
+        let told = run.host.prompts_to("resolver");
+        assert_eq!(told.len(), 2, "{outcome}");
+        assert!(told[1].contains("The merge you are resolving can no longer land") && told[1].contains("do not commit, amend, push or abort the merge"), "{}", told[1]);
+        // Never undone under a running turn: the checkout stays reserved for it.
+        assert!(run.host.aborts().is_empty());
+        assert!(ended.resolution.is_some());
+        assert_eq!(ended.releasing, [resolver_tab()]);
+
+        // That turn ends with the notice still waiting for it: reserved until the turn that reads it ends.
+        turn_completed(&run.host, "resolver", "t1", Some("Checking once more."));
+        assert!(run.pipeline().resolution.is_some() && run.host.aborts().is_empty());
+        // It ends idle: its agent stopped, the checkout released, and its merge undone.
+        run.host.agent(&resolver_tab(), false);
+        turn_completed(&run.host, "resolver", "t1", Some("Stopped the checks."));
+        let after = run.pipeline();
+        assert!(after.resolution.is_none() && after.releasing.is_empty());
+        assert_eq!(run.host.stopped_agents(), [key(&resolver_tab())]);
+        assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())]);
+        assert_eq!((after.state, after.reason.clone()), (ended.state, ended.reason.clone()), "it stays as it ended");
+        let kinds = run.kinds();
+        assert_eq!(kinds[kinds.len() - 2..], ["lateReply", "mergeAborted"]);
+        assert!(super::admission::check("author", "t1").is_ok());
+        assert!(run.merges().is_empty());
+    }
+}
+
+#[test]
+fn a_resolver_found_idle_when_its_pull_request_merges_has_its_merge_aborted_at_once() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    // Out of its turn, with the checkout still reserved: that turn's end was never heard.
+    run.host.agent(&resolver_tab(), false);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged);
+    assert!(merged.resolution.is_none());
+    assert_eq!(run.host.stopped_agents(), [key(&resolver_tab())]);
+    assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())]);
+    assert_eq!(merged.events.last().unwrap().message, ABORTED);
+    assert_eq!(run.host.prompts_to("resolver").len(), 1, "an idle agent is not typed to");
+}
+
+#[test]
+fn a_resolver_turn_cut_short_after_the_merge_leaves_the_pipeline_merged() {
+    for interrupted in [true, false] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        run.host.agent(&resolver_tab(), true);
+        run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+        assert_eq!(run.poll().state, State::Merged);
+        turn_failed(&run.host, "resolver", "t1", engine::turn_failure(interrupted));
+        let after = run.pipeline();
+        assert_eq!(after.state, State::Merged, "not Needs you for a pull request that merged");
+        assert!(after.resolution.is_none());
+        assert!(after.events.iter().any(|event| event.kind == "lateReply" && event.message.starts_with("The conflict resolver's turn ended after the merge: ")));
+        // A person who interrupted it has the merge as it was; an agent that went leaves it to the pipeline.
+        assert_eq!(run.host.aborts().is_empty(), interrupted);
+        assert_eq!(after.events.last().unwrap().kind, if interrupted { "mergeLeft" } else { "mergeAborted" });
+    }
+}
+
+#[test]
+fn a_poll_while_the_resolver_works_on_an_open_pull_request_changes_nothing() {
+    let run = Run::start(&github_issue(), false);
+    let resolving = resolving(&run);
+    run.host.agent(&resolver_tab(), true);
+    let looked = run.poll();
+    assert_eq!((looked.stage, looked.state, looked.events.len()), (Stage::Resolve, State::Working, resolving.events.len()));
+    assert!(looked.resolution.is_some() && run.host.aborts().is_empty());
+    assert_eq!(run.host.prompts_to("resolver").len(), 1);
 }

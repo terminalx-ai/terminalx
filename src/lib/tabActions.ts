@@ -5,9 +5,10 @@ import { getDraft } from "@/lib/drafts";
 import { MODE_SET_IN_TERMINAL } from "@/lib/models";
 import { getPrefs } from "@/lib/prefs";
 import { addTab, getSessionStore, openWelcome, reopenTab, selectSession } from "@/lib/sessions";
-import { activatePeer, endPeer, isShellPeer, noteClosed, openPeer, peerIsLive, peerPaneId, peerShell, peerStatus, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { activatePeer, agentTabsOf, endPeer, isShellPeer, noteClosed, offerUndoFor, offersUndo, openPeer, peerIsLive, peerPaneId, peerShell, peerStatus, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { forgetCloseUndoFor } from "@/lib/closeUndo";
 import { isByHand } from "@/lib/tabFront";
-import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveKey, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
+import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveKey, refreshTabState, rememberClosed, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
 import { startTabAgent } from "@/lib/tabViews";
 import { openTerminal, type SelectedSessionTab } from "@/lib/terminal";
 
@@ -259,6 +260,8 @@ export async function closeTabs(row: TabRow, closing: readonly PeerTab[], select
   if (shown >= 0 && gone.has(row.tabs[shown].key)) {
     next = row.tabs.slice(shown + 1).find(stays) ?? row.tabs.slice(0, shown).reverse().find(stays);
   }
+  // Read before they close: the sessions whose last running agent this stops.
+  const undo = offersUndo(agentTabsOf(closing));
   noteClosed(row.session.id, closing);
   // What takes the view is chosen before anything closes, so no tab that is about to go is shown on the way.
   if (next) openPeer(row.session.id, next);
@@ -267,6 +270,7 @@ export async function closeTabs(row: TabRow, closing: readonly PeerTab[], select
   for (const tab of ordered) {
     await endPeer(row.session.id, tab).catch((error) => console.error("closing a tab failed", error));
   }
+  offerUndoFor(undo);
   if (getSessionStore().selectedSessionId === row.session.id && !fresh(row).tabs.length) openWelcome(row.session.id);
 }
 
@@ -309,21 +313,41 @@ function restorePlace(row: TabRow, key: string, was: ClosedHere | undefined) {
   );
 }
 
+/**
+ * Reopen one closed agent tab in its own session, on the same conversation,
+ * and show it: in its place in the row, with its pin, mute and title, when
+ * this window closed it. `row` is the row it is reopened into; its session's
+ * own when not given.
+ */
+export async function reopenClosedAgentTab(sessionId: string, tabId: string, row?: TabRow): Promise<void> {
+  const key = tabKey("agent", tabId);
+  const was = getTabState().closedHere.find((record) => record.key === key);
+  // Not offered again while the backend brings it back.
+  dropClosedTab(sessionId, tabId);
+  forgetClosed(key);
+  try {
+    await reopenTab(sessionId, tabId);
+  } catch (error) {
+    // Still closed, or gone: the list says what the backend has, and the tab keeps where it stood for the next try.
+    if (was) rememberClosed(was);
+    await refreshTabState();
+    throw error;
+  }
+  // Back by whichever way: an Undo still offered for it has nothing left to undo.
+  forgetCloseUndoFor(sessionId, tabId);
+  if (getSessionStore().selectedSessionId !== sessionId) selectSession(sessionId);
+  const session = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  const into = row ?? (session ? workspaceRow(session) : null);
+  if (into) restorePlace(into, key, was);
+}
+
 /** Reopen the last closed tab of the row: an agent tab with its conversation, or a page at its address. False when there is none. */
 export async function reopenClosedTab(row: TabRow): Promise<boolean> {
   const tabs = getTabState();
   const last = lastClosed(row, tabs);
   if (!last) return false;
   if ("agent" in last) {
-    const { sessionId, tabId } = last.agent;
-    const key = tabKey("agent", tabId);
-    const was = tabs.closedHere.find((record) => record.key === key);
-    // Not offered again while the backend brings it back.
-    dropClosedTab(sessionId, tabId);
-    forgetClosed(key);
-    await reopenTab(sessionId, tabId);
-    if (getSessionStore().selectedSessionId !== sessionId) selectSession(sessionId);
-    restorePlace(row, key, was);
+    await reopenClosedAgentTab(last.agent.sessionId, last.agent.tabId, row);
     return true;
   }
   const was = last.page;

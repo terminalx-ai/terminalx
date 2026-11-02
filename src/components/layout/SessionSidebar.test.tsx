@@ -322,6 +322,28 @@ describe("the conversation list", () => {
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+  });
+
+  // #721: a session whose tabs were all closed has nothing in the branch's row of tabs to click; it was unreachable here.
+  it("keeps a row of its own for a session of the branch with no tab open, which opens that session", async () => {
+    prefs.setPrefs({ branchSessions: "tabs" });
+    const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+    // m1, the newest, had its last tab closed; m2 and m3 have tabs.
+    await boot([session("m1", "/repos/web", at(9), { tabs: [], activeTab: null }), session("m2", "/repos/web", at(8)), session("m3", "/repos/web", at(7))]);
+    mount();
+    const web = screen.getByRole("group", { name: "web" });
+    // The branch's row stands for the sessions whose tabs are in its row of tabs.
+    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
+    const bare = within(web).getByRole("button", { name: /^Session m1/ });
+    fireEvent.click(bare);
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBe("true");
+    expect(main.getAttribute("aria-current")).toBeNull();
+    // The branch's row opens a session with tabs: the latest of them.
+    fireEvent.click(within(web).getByRole("button", { name: "main, 2 sessions" }));
+    expect(store.getSessionStore().selectedSessionId).toBe("m2");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBeNull();
   });
 
   it("invites a first chat when there is none, and no project to show", async () => {
@@ -477,12 +499,41 @@ it("keeps removed-workspace provenance separate from a live checkout on the same
     session("live", "/repos/web", new Date().toISOString(), { branch: "topic", worktreeName: "live", cwd: "/repos/web/.raccoon/worktrees/live" }),
   ]);
   mount();
+  // Set apart under its fold, and not among the live work (#696).
+  expect(screen.queryByRole("button", { name: "topic (workspace removed), Talk old" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const kept = screen.getByRole("button", { name: "topic (workspace removed), Talk old" });
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
   expect(screen.getByRole("button", { name: "topic, Talk live" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
 });
 
+
+/** #696: "Review #590", its workspace gone on Oct 24, sat among the live work for good. */
+it("sets removed workspaces apart under a fold, which opens while it holds the open conversation", async () => {
+  const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+  const gone = (name: string) => ({ branch: "main", worktreeRemoved: true, removedWorkspace: { name, path: `/repos/web/.raccoon/worktrees/${name}`, branch: name } });
+  await boot([
+    session("live", "/repos/web", at(3), { branch: "feature", worktreeName: "feature", cwd: "/repos/web/.raccoon/worktrees/feature" }),
+    session("review", "/repos/web", at(2), gone("review-590")),
+    session("other", "/repos/web", at(1), gone("other")),
+  ]);
+  mount();
+  const fold = screen.getByRole("button", { name: "Removed workspaces (2)" });
+  expect(fold.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByRole("button", { name: "feature, Talk live" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Talk review/ })).toBeNull();
+  // Not counted among the few a project shows before "View all".
+  expect(screen.queryByRole("button", { name: "View all" })).toBeNull();
+
+  fireEvent.click(fold);
+  expect(prefs.getPrefs().sidebarSections["removed-workspaces:/repos/web"]).toBe("expanded");
+  fireEvent.click(screen.getByRole("button", { name: "review-590 (workspace removed), Talk review" }));
+  // Folded again, it stays open while it holds the open conversation.
+  fireEvent.click(fold);
+  expect(fold.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByRole("button", { name: "review-590 (workspace removed), Talk review" })).toBeTruthy();
+});
 
 it("marks a collapsed group of kept conversations as a removed workspace", async () => {
   const removed = { branch: "main", worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } };
@@ -491,6 +542,7 @@ it("marks a collapsed group of kept conversations as a removed workspace", async
     session("old2", "/repos/web", new Date().toISOString(), removed),
   ]);
   mount();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const group = screen.getByTitle("topic (workspace removed)");
   expect(group.getAttribute("aria-expanded")).toBe("false");
   fireEvent.click(group);
