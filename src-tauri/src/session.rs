@@ -847,6 +847,10 @@ pub struct TabRuntime {
     /// A continuation sent to experimental Codex, answered once Codex takes
     /// its turn or the connection ends before it does.
     stdio_receipt: Option<(u64, DeliveryReceipt)>,
+    /// The native Codex launch being let go after a turn refused for its
+    /// sign-in (`retire_codex_stdio`): until it is gone the tab is busy to
+    /// the cloud mailbox, and it keeps showing the refusal.
+    stdio_retiring: Option<Arc<()>>,
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
@@ -1637,6 +1641,7 @@ impl SessionManager {
                 source_timestamp: None,
                 message_times: HashMap::new(),
                 compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None,
+                stdio_retiring: None,
                 turn_started_at: None,
                 turn_by_command: false,
                 signed_out_in_turn: false,
@@ -2004,6 +2009,19 @@ impl SessionManager {
             runtime.child.is_some()
                 || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id))
         })
+    }
+
+    /// Whether the tab is `waiting` on nothing but a recovery it shows: an
+    /// agent with no terminal (native Codex, ACP, OpenCode) whose turn ended
+    /// on a failure, a refused sign-in say, with its connection still up, no
+    /// turn and no ask. A send goes straight in and clears the recovery, as
+    /// the desktop's own does (#644). A CLI's `waiting` can be its own prompt
+    /// on screen, which nothing is typed into.
+    pub fn waits_only_on_recovery(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return false };
+        let rt = runtime.lock().unwrap();
+        rt.status == TabStatus::Waiting && rt.recovery.is_some() && !rt.turn_open && rt.pending.is_empty() && !rt.stopping && rt.stdio_retiring.is_none()
+            && matches!(rt.engine, Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_))
     }
 
     pub fn running_tabs(&self) -> Vec<RunningTab> {

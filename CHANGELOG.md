@@ -202,6 +202,28 @@
   prompt, and when the window showed it, so a slow send can be traced to the
   step that took the time. (#727)
 
+### Cloud workspaces
+
+- Deliver a message sent from the command line, a phone or another member to a
+  native Codex tab whose last turn failed, for example on a revoked sign-in.
+  The workspace said it was sent, but the message sat in the queue for good:
+  the tab was taken as busy while it showed the failure, and no turn was left
+  to end and send it. It now goes straight in and clears the failure, as a
+  message sent from the desktop does, and a message queued while that turn
+  ran goes once it ends. ACP and OpenCode tabs get the same fix. A Claude Code
+  or Codex terminal tab that is waiting still holds the message, since its
+  CLI may be showing a prompt of its own. (#644)
+- Let a native Codex tab work again once its sign-in is restored. Codex reads
+  its sign-in only when it starts, so after a turn refused for a revoked login
+  every later turn was refused as well, even after the login was granted
+  again. Codex now stops after such a turn, and the tab keeps saying it is
+  signed out. The next message starts Codex again on the same conversation
+  with the sign-in in place then, and nothing is sent twice. This applies on a
+  Mac too. (#644)
+- Leave the workspace user's own `~/.codex` as it is. Checking the Codex version
+  before a native Codex tab starts made Codex write temporary files there; the
+  check now runs in the tab's own Codex home. (#644)
+
 ### Command line
 
 - `terminalx worktrees delete` no longer deletes sessions it never named. Without
