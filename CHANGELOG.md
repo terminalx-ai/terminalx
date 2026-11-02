@@ -107,6 +107,13 @@
   Codex's reasoning summary does the same. What streamed of a reply that never
   finished, because the turn was interrupted, failed or stopped, or the
   connection was lost, is kept as it was shown. (#644)
+- Draw a streaming reply as it grows. The desktop chat showed the first piece
+  of a streamed reply and then nothing new until the reply was complete, in
+  local and cloud tabs alike, for every agent that streams previews (ACP
+  agents, OpenCode and native Codex). Streaming thoughts, a tool call's input
+  as it is written, and the end of a thought had the same problem. Each now
+  redraws at the next frame. The phone shows replies once they are complete,
+  as before. (#644)
 
 ### Background sessions
 

@@ -95,6 +95,15 @@ function sameBlock(a: BlockRef, b: BlockRef) {
   return a.messageId === b.messageId && a.index === b.index;
 }
 
+/**
+ * A preview changes by replacement, never in place: a new stream with a new
+ * block, so the memoised turn drawing it (and anything memoised under it)
+ * sees new props and draws the new text at the next frame.
+ */
+function setStreamBlock(log: TabLog, old: StreamBlock | undefined, next: StreamBlock) {
+  log.stream = old ? log.stream.map((s) => (s === old ? next : s)) : [...log.stream, next];
+}
+
 export function applyEvent(ev: AgentEvent) {
   const k = key(ev.sessionId, ev.tabId);
   const log = getLog(k);
@@ -107,29 +116,31 @@ export function applyEvent(ev: AgentEvent) {
   }
   if (p.type === "delta") {
     if (ev.subagent) return; // one preview per tab; subagent output is drawn from committed events
-    let b = log.stream.find((s) => sameBlock(s.ref, p.block));
+    const b = log.stream.find((s) => sameBlock(s.ref, p.block));
+    const fresh = (kind: StreamBlock["kind"]): StreamBlock => b ?? { ref: p.block, kind, text: "", partialJson: "", done: false };
     switch (p.delta) {
       case "block_start": {
         const kind = p.blockType === "text" ? "text" : p.blockType === "thinking" ? "thinking" : p.blockType === "tool_use" ? "tool_use" : "other";
-        if (!b) log.stream.push({ ref: p.block, kind, text: "", partialJson: "", done: false });
-        else b.kind = kind;
+        setStreamBlock(log, b, { ...fresh(kind), kind });
         break;
       }
-      case "text_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "text", text: "", partialJson: "", done: false }));
-        b.ts ??= ev.messageTs;
-        b.text += p.text;
+      case "text_delta": {
+        const s = fresh("text");
+        setStreamBlock(log, b, { ...s, ts: s.ts ?? ev.messageTs, text: s.text + p.text });
         break;
-      case "thinking_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "thinking", text: "", partialJson: "", done: false }));
-        b.text += p.text;
+      }
+      case "thinking_delta": {
+        const s = fresh("thinking");
+        setStreamBlock(log, b, { ...s, text: s.text + p.text });
         break;
-      case "input_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "tool_use", text: "", partialJson: "", done: false }));
-        b.partialJson += p.partialJson;
+      }
+      case "input_delta": {
+        const s = fresh("tool_use");
+        setStreamBlock(log, b, { ...s, partialJson: s.partialJson + p.partialJson });
         break;
+      }
       case "block_stop":
-        if (b) b.done = true;
+        if (b) setStreamBlock(log, b, { ...b, done: true });
         break;
     }
     touch(k);
@@ -138,10 +149,7 @@ export function applyEvent(ev: AgentEvent) {
   if (p.type === "status" && p.text.startsWith("tool_pending:")) {
     const [, id, name] = p.text.split(":");
     const b = log.stream.find((s) => s.kind === "tool_use" && !s.toolId);
-    if (b) {
-      b.toolId = id;
-      b.toolName = name;
-    }
+    if (b) setStreamBlock(log, b, { ...b, toolId: id, toolName: name });
     touch(k);
     return;
   }
