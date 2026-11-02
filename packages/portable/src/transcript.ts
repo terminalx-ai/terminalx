@@ -886,6 +886,21 @@ export class ConversationView {
   }
 }
 
+/** The line a chat shows while a compaction runs (`Transcript.compacting`), on the desktop and the phone. */
+export const COMPACTING_LINE = "Compacting context…";
+
+/**
+ * What a compaction's row says, the same on the desktop and the phone
+ * (#644). Null while it runs: the chat's `COMPACTING_LINE` says so then.
+ */
+export function compactionStatus(item: Extract<WorkItem, { kind: "compaction" }>): string | null {
+  const lifecycle = item.lifecycle;
+  if (lifecycle?.state === "item_started") return null;
+  if (lifecycle?.state === "stopped") return `Compaction stopped: turn ${lifecycle.stoppedBy === "interrupted" ? "interrupted" : "failed"}`;
+  if (lifecycle?.state === "unknown") return item.uncertain ? "Compaction status unknown: could not save status" : "Compaction status unknown";
+  return "Context compacted";
+}
+
 /** Runs of two or more consecutive calls to one groupable tool fold into one row. */
 export function groupWork(items: WorkItem[]): WorkItem[] {
   const output: WorkItem[] = [];

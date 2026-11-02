@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import type { Transcript } from "@/lib/transcript";
+import { COMPACTING_LINE, type Transcript } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { SendingMessage, TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
@@ -355,7 +355,7 @@ export function Chat({
           <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
           {sending && <SendingMessage message={sending} cwd={cwd} />}
           {transcript.compacting && (
-            <div className="mb-3 px-1.5 text-[13px] text-shimmer">Compacting context…</div>
+            <div className="mb-3 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
           )}
           {transcript.retry && progressing && (
             <div className="mb-3 px-1.5 text-[13px] text-warning">

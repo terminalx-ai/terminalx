@@ -117,8 +117,26 @@
   Local tabs are unchanged. (#644)
 - A waiting native Codex tab no longer says to check the terminal, which it
   does not have until it moves there: it points to the conversation above, to
-  send a message or stop the session. Tabs whose agent runs in a terminal are
-  unchanged. (#644)
+  send a message or stop the session. Its recovery banner for an expired
+  permission request or an unconfirmed prompt no longer sends it there
+  either. Tabs whose agent runs in a terminal are unchanged. (#644)
+
+### Mobile
+
+- Show a compaction on the phone as on the desktop, in cloud workspace tabs
+  and in tabs on a paired Mac: **Compacting context…** while it runs, then
+  **Context compacted**, **Compaction stopped** or **Compaction status
+  unknown**. Every compaction used to read "Context compacted", even while it
+  ran or after the phone lost track of it. A compaction shows as running only
+  once the phone has read the conversation to its end over a live connection.
+  While disconnected, reconnecting or just back from the background, it shows
+  as unknown. A stopped workspace's saved conversation never shows one as
+  running. (#644)
+- A native Codex tab's recovery card on the phone no longer says to check the
+  terminal (an expired permission request, an unconfirmed prompt); it says
+  what to do in the chat instead, as the desktop now does too. The Mac tells
+  the phone which tabs run native Codex; an older Mac keeps the old wording.
+  (#644)
 
 ### Background sessions
 

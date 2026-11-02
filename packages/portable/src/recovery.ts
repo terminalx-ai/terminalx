@@ -13,6 +13,16 @@ export const RECOVERY_MESSAGES: Record<RecoveryKind, string> = {
   failed: "The agent encountered an error. Review the conversation before continuing.",
 };
 
+/**
+ * A native Codex tab (#644) has no terminal until it is moved to one: what
+ * the messages above send the reader to a terminal for, it says here instead.
+ */
+const NATIVE_RECOVERY_MESSAGES: Partial<Record<RecoveryKind, string>> = {
+  delivery_unconfirmed: "Prompt delivery could not be confirmed. Review the conversation above: if your message is not there, send it again.",
+  permission_expired: "The permission request expired. Send a message to carry on, or stop the session.",
+};
+const NATIVE_WAITING = "Review the conversation above, then send a message or stop the session.";
+
 /** Never echo arbitrary IPC/provider errors in recovery controls. */
 export function classifyRecovery(message: string): RecoveryKind {
   // The agents' own sign-in wording only, as `recovery.rs` reads it: another service's 401 is that tool's failure.
@@ -71,8 +81,8 @@ export function recoveryOffer(kind: RecoveryKind | null, { asks, limitReset = fa
   const open = asks === 0;
   return {
     title: asks ? "Waiting for input" : kind === "usage_limit" ? "Usage limit reached" : kind === "signed_out" ? "Signed out" : kind === "unsent" ? "Prompt not received" : kind ? "Needs attention" : "Waiting for input",
-    message: kind ? RECOVERY_MESSAGES[kind] : asks ? "Review the pending request to continue."
-      : native ? "Review the conversation above, then send a message or stop the session." : "Check the terminal for a pending decision, or stop the session.",
+    message: kind ? (native ? NATIVE_RECOVERY_MESSAGES[kind] : undefined) ?? RECOVERY_MESSAGES[kind]
+      : asks ? "Review the pending request to continue." : native ? NATIVE_WAITING : "Check the terminal for a pending decision, or stop the session.",
     signIn: kind === "signed_out" && canSignIn && open,
     resend: kind === "unsent" && canResend && open,
     retry: kind && kind !== "usage_limit" && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && kind !== "unsent" && open

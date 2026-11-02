@@ -1047,3 +1047,36 @@ describe("new sessions from the sessions list (#730)", () => {
     await vi.waitFor(() => expect(container.querySelector("[aria-label='New session']")).not.toBeNull());
   });
 });
+
+describe("a compaction on the paired Mac, as the desktop shows it (#644)", () => {
+  const scope = { sessionId: "worktree", tabId: "claude", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
+  const lifecycle = (seq: number, evidence: Record<string, unknown>) => ({ ...event("claude", "", seq), payload: { type: "context_compaction_lifecycle", persisted: true, confirmedStart: true, evidence: { scope, generation: 1, ...evidence } } });
+  const started = [event("claude", "/compact"), lifecycle(2, { type: "connection_opened" }), lifecycle(3, { type: "item_started", turnId: "turn", itemId: "item" })];
+
+  it("shows it running only once the conversation caught up with the Mac's, and its status unknown before that and while disconnected", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.app.api.tail.mockResolvedValue({ events: started, hasMore: false });
+      await render();
+      // Read, but before the Mac confirmed the subscription: its end may have gone unheard.
+      expect(container.textContent).toContain("Compaction status unknown");
+      expect(container.textContent).not.toContain("Compacting context…");
+      expect(container.textContent).not.toContain("Context compacted");
+      await act(async () => { mocks.sessionReady.get("claude")?.(); await vi.advanceTimersByTimeAsync(100); });
+      expect(container.textContent).toContain("Compacting context…");
+      expect(container.textContent).not.toContain("Compaction status unknown");
+      // The connection drops: what is shown is what was last seen.
+      mocks.app.connectionStage = "reconnecting";
+      await render();
+      expect(container.textContent).toContain("Compaction status unknown");
+      expect(container.textContent).not.toContain("Compacting context…");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("says compacted once it ended", async () => {
+    mocks.app.api.tail.mockResolvedValue({ events: [...started, lifecycle(4, { type: "item_completed", turnId: "turn", itemId: "item" })], hasMore: false });
+    await render();
+    await vi.waitFor(() => expect(container.textContent).toContain("Context compacted"));
+    expect(container.textContent).not.toContain("Compacting context…");
+  });
+});

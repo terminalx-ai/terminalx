@@ -115,6 +115,16 @@ describe("session controls on the phone", () => {
     expect(mocks.app.api.setMode).toHaveBeenCalledWith("s", "t", "bypassPermissions");
   });
 
+  it("never sends a native Codex tab to a terminal it does not have; a terminal tab is still sent there (#644)", async () => {
+    mocks.app.api.tabControls.mockResolvedValue({ harness: "codex", model: "gpt-5.6", effort: "medium", permissionMode: "auto", status: "waiting", transport: "experimentalCodexStdio" });
+    await render([recovery("permission_expired")]);
+    expect(container.textContent).toContain("The permission request expired. Send a message to carry on, or stop the session.");
+    expect(container.textContent).not.toMatch(/terminal/i);
+    mocks.app.api.tabControls.mockResolvedValue({ harness: "codex", model: "gpt-5.6", effort: "medium", permissionMode: "auto", status: "waiting", transport: "pty" });
+    await render([recovery("permission_expired"), { ...recovery("permission_expired"), id: "again", seq: 3 }]);
+    expect(container.textContent).toContain("Check the terminal for a new request or stop the session.");
+  });
+
   it("retries safely, continues here, and stops from the recovery banner", async () => {
     await render([recovery("failed")]);
     expect(container.textContent).toContain("Needs attention");

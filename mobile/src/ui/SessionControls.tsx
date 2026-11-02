@@ -52,7 +52,7 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
 
   if (!supported || !tab || !connected) return null;
   const view = settingsView(tab, models);
-  const { kind, offer } = recoveryState(events, asks);
+  const { kind, offer } = recoveryState(events, asks, tab);
   const busy = tab.status === "in_progress";
 
   /** One action at a time; its error, or its outcome when that is news, is said under the controls. */

@@ -13,7 +13,7 @@ import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
-import { PermissionCard, TurnCard } from "@mobile/ui/transcript";
+import { CompactingLine, PermissionCard, TurnCard } from "@mobile/ui/transcript";
 import { linkedText } from "@mobile/ui/LinkedText";
 
 /**
@@ -129,7 +129,9 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
   const wheel = leaseLine(lease, snapshot.collab.userId, snapshot.role, now, nameOf);
   const notes = snapshot.collab.notes[tabId] ?? [];
   const events = tab?.events;
-  const transcript = useMemo(() => buildTranscript(events ?? [], live), [events, live]);
+  // A compaction is shown as running only while the tab's live feed has caught up; otherwise its status is unknown (#644).
+  const continuous = tab?.continuous === true;
+  const transcript = useMemo(() => buildTranscript(events ?? [], live, { compactionContinuityKnown: continuous }), [events, live, continuous]);
   const outbox = snapshot.outbox.filter((entry) => entry.tabId === tabId);
   const pending = outbox.filter((entry) => entry.kind !== "permission-decision" && outboxLine(entry, listedState === "suspended", nameOf));
 
@@ -231,6 +233,7 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
       ListEmptyComponent={tab?.noKey ? <EmptyState title="Not readable on this phone yet" detail={codeText("no-key")!} /> : <EmptyState title="No conversation yet" detail={live ? "This tab has not published any turns." : "Nothing has been saved for this tab."} />}
       renderItem={({ item }) => <TurnCard turn={item} />}
       latest={<>
+        {transcript.compacting ? <CompactingLine /> : null}
         {transcript.pendingAsks.map((ask) => snapshot.canApprove
           ? <PermissionCard key={ask.requestId} ask={ask} connected={!stopped} answering={sending || session.outbox.isDeciding(ask.requestId)} onRespond={(optionId) => decide(ask, optionId)} />
           : <Text key={ask.requestId} style={[styles.notice, { color: palette.warning }]}>The agent is waiting for a permission ({ask.title ?? ask.toolName ?? "request"}). Waiting for someone who can approve.</Text>)}
