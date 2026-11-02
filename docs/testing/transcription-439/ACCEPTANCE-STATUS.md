@@ -87,3 +87,41 @@ Historical passing runs are not combined-head passes. All existing human,
 guest-consent, learning/removal/deletion, latency and publication gates remain;
 silence alone is deferred to #631, not passed. Adverse observations remain
 unchanged. No native or microphone acceptance is inferred from main's changes.
+
+## Main 051d8041 integration and combined PR (2026-11-02)
+
+The user approved merging main, rebuilding the test copy in this session, and
+one combined #439/#631 PR. The merge of main `051d8041` is `9df480c4`. Its
+conflicts were CHANGELOG (both Unreleased sections kept), the composer send and
+two test mocks. Main's #727 send clears the composer before the send resolves.
+Dictation now binds its correction before that clear and commits it only after
+the send is accepted, outside the `try`. The composer race test expects a
+rejected send to return above the newer draft. Main's tip failed tsc after
+#740 (transcript reducer); `fb00ba35` carries the same one-file fix as PR #747.
+
+Checks on `5ca33a14` (Rust sources identical to `9df480c4`, where Rust ran):
+`tsc --noEmit` pass; full Vitest 331 files / 3,978 tests pass; desktop
+`cargo clippy --locked --all-targets -D warnings` pass; plain `cargo test
+--locked` 2,766 library + 6 CLI + 2 serde = 2,774 passed, 22 ignored; serve
+build and serve Clippy pass.
+
+The earlier `/tmp` candidates and their files were emptied around 2026-11-02
+00:00 (directory skeletons left, 0 bytes), so the test copy was rebuilt under
+`~/tx439` with identity `com.terminalx.next.dev.dictation439.nov02`, its own
+store and keychain service. Whisper Small, Whisper Large v3 Turbo and the
+Silero detector were fetched from the catalog's pinned URLs, and their
+SHA-256 and sizes match `catalog.rs`. The four import files match their
+recorded hashes; DICTIONARY-ONLY and CODE-ONLY were rebuilt from OFF.json.
+
+The learning gate's earlier blocker (the fake-Claude script had no
+`initialize` reply) is replaced by the real Claude Code CLI 2.1.316 in the
+copy's fake home, talking to a local stand-in Messages API on 127.0.0.1 with a
+dummy key. Headless probes showed: `auth status` reports logged in; the
+stream-json mode the app probes returns a successful turn; the interactive
+CLI in a PTY shows no first-run screen with the pre-approved dummy key and
+records the stand-in's reply in its transcript. The app-level send and learned
+row are still the human step.
+
+No new human or microphone evidence exists. All human gates above remain open,
+and #631 keeps its silence assessment. One combined round
+(`~/tx439/HUMAN-STEPS.md`) covers both issues.
