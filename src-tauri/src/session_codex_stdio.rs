@@ -460,7 +460,11 @@ impl SessionManager {
                     let confirmed = matches!(evidence, CompactionObservation::ItemStarted { .. });
                     anyhow::ensure!(matches!(self.publish_compaction_locked(rt, &token, evidence, confirmed)?, compaction::Publication::Committed(_)), "Compaction publication uncertain");
                 }
-                StdioAction::Emit(payload) => self.apply(rt, payload, None),
+                StdioAction::Emit(payload) => {
+                    let turn_end = matches!(payload, Payload::TurnCompleted { .. });
+                    self.apply(rt, payload, None);
+                    if turn_end && !rt.turn_open && rt.recovery == Some(RecoveryKind::SignedOut) { self.retire_codex_stdio_later(rt); }
+                }
                 StdioAction::Accepted => {
                     if let Some((_, receipt)) = rt.stdio_receipt.take() { let _ = receipt.send(Ok(())); }
                 }
@@ -532,6 +536,71 @@ impl SessionManager {
     }
 
     pub(super) fn stop_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>, keep_unread: bool) -> Result<()> {
+        self.end_codex_stdio(rt_arc, keep_unread, false)
+    }
+
+    /// A turn ended refused for its sign-in, and the tab still has the
+    /// connection it ran on: that connection is let go between turns
+    /// ([`Self::retire_codex_stdio`]), off this thread, which is the reader
+    /// the exit is drained by. Until then the tab is busy to the cloud
+    /// mailbox, so what was queued behind the turn waits for a new one.
+    fn retire_codex_stdio_later(&self, rt: &mut TabRuntime) {
+        let Engine::CodexStdio(engine) = &rt.engine else { return };
+        if engine.exited || engine.blocked || rt.stopping || retiring(rt, &engine.launch) { return; }
+        let launch = engine.launch.clone();
+        rt.stdio_retiring = Some(launch.clone());
+        let (manager, runtime) = (self.clone(), rt.me.clone());
+        let spawned = std::thread::Builder::new().name("codex-stdio-retire".into()).spawn(move || {
+            if let Some(rt_arc) = runtime.upgrade() { manager.retire_codex_stdio(&rt_arc, &launch); }
+        });
+        if let Err(error) = spawned {
+            rt.stdio_retiring = None;
+            log::warn!("[{}] keep the Codex connection of a refused turn: {error}", rt.key());
+        }
+    }
+
+    /// Codex's app server reads its credential when it starts and never
+    /// again: after a turn refused for its sign-in, a sign-in given since
+    /// (a new grant in a cloud workspace, a login on a Mac) would not reach
+    /// it, and every later turn would be refused too (#644). So the
+    /// connection is stopped between turns, as for a new permission mode,
+    /// and the next message starts Codex again on the same thread with the
+    /// credential there then. Nothing is replayed, and the tab keeps showing
+    /// the refusal until that message. The tab is fenced meanwhile: a prompt
+    /// sent to it waits and then starts the new connection. One that got in
+    /// before the fence keeps this connection, and its turn's end decides
+    /// again.
+    fn retire_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>, launch: &Arc<()>) {
+        use crate::issue_pipeline::admission::{fence, Kind, Scope};
+        let (session, tab) = { let rt = rt_arc.lock().unwrap(); (rt.session_id.clone(), rt.tab_id.clone()) };
+        let fenced = fence(Kind::Hold, [Scope::Tab(session.clone(), tab.clone())]);
+        let forget = |rt: &mut TabRuntime| if retiring(rt, launch) { rt.stdio_retiring = None; };
+        let between_turns = {
+            let mut rt = rt_arc.lock().unwrap();
+            let between_turns = retiring(&rt, launch) && same_launch(&rt, launch) && !rt.turn_open && rt.pending.is_empty() && !rt.stopping && !rt.stop_in_flight;
+            if !between_turns { forget(&mut rt); }
+            between_turns
+        };
+        if !between_turns { return; }
+        let retired = self.end_codex_stdio(rt_arc, false, true);
+        let status = {
+            let mut rt = rt_arc.lock().unwrap();
+            forget(&mut rt);
+            rt.status
+        };
+        drop(fenced);
+        match retired {
+            // Its status is the same, but nothing runs behind it now: told
+            // again, so what waited on the connection (a queued cloud
+            // message) looks again.
+            Ok(()) => self.sink.emit("tab_status", &TabStatusEvent { session_id: session, tab_id: tab, status }),
+            Err(error) => log::warn!("[{}] let go of the Codex connection of a refused turn: {error:#}", key_of(&session, &tab)),
+        }
+    }
+
+    /// `retire`: the connection of a refused turn, let go with the tab left
+    /// as it is, still showing the refusal.
+    fn end_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>, keep_unread: bool, retire: bool) -> Result<()> {
         let (launch, unsent) = {
             let mut rt = rt_arc.lock().unwrap();
             anyhow::ensure!(!rt.stop_in_flight, "Stop is already in progress");
@@ -585,8 +654,9 @@ impl SessionManager {
         crate::cloud_grants::forget_launch(&rt.key());
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
+        if retiring(&rt, &launch) { rt.stdio_retiring = None; }
         if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent); }
-        else if !(keep_unread && rt.status == TabStatus::Completed) { self.set_status(&mut rt, TabStatus::Idle); }
+        else if !retire && !(keep_unread && rt.status == TabStatus::Completed) { self.set_status(&mut rt, TabStatus::Idle); }
         Ok(())
     }
 
@@ -720,13 +790,19 @@ impl Sink for StdioSink {
         // its thread was ready fails the turn with why (#667).
         else if rt.turn_open && starting && !rt.stopping { self.manager.fail_open_turn(&mut rt, &recovery::EarlyExit::said(&self.startup_stderr())); }
         else if rt.turn_open { self.manager.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
-        let status = if rt.recovery.is_some() && !rt.stopping { TabStatus::Waiting } else { TabStatus::Idle };
+        // A refused turn's connection, let go, leaves the refusal shown.
+        let status = if rt.recovery.is_some() && (!rt.stopping || retiring(&rt, &self.launch)) { TabStatus::Waiting } else { TabStatus::Idle };
         self.manager.set_status(&mut rt, status);
     }
 }
 
 fn same_launch(rt: &TabRuntime, launch: &Arc<()>) -> bool {
     matches!(&rt.engine, Engine::CodexStdio(engine) if Arc::ptr_eq(&engine.launch, launch))
+}
+
+/// Whether `launch` is the connection being let go after a refused turn.
+fn retiring(rt: &TabRuntime, launch: &Arc<()>) -> bool {
+    rt.stdio_retiring.as_ref().is_some_and(|retiring| Arc::ptr_eq(retiring, launch))
 }
 
 #[cfg(test)]

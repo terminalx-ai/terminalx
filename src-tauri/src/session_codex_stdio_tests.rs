@@ -685,18 +685,20 @@ fn first_launch_fixture(case: &str) {
 
 /// Stands in for native Codex whose provider refuses its sign-in for a turn:
 /// while a `refuse` file exists, the next turn fails with an `unauthorized`
-/// error, as on a revoked login, and the file goes. An `ask` file makes the
-/// next turn ask to run a command first, and goes too. While a `hold` file
-/// exists, a turn that has started does not end.
+/// error, as on a revoked login, and the file goes; a `limit` file fails it
+/// on a usage limit instead. An `ask` file makes the next turn ask to run a
+/// command first, and goes too. While a `hold` file exists, a turn that has
+/// started does not end. Each app server it starts is counted in `launches`.
 const SIGNED_OUT_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+echo "$$" >> "$here/launches"
 while read -r line; do
   printf '%s\n' "$line" >> "$here/received"
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
-    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"thread/start"'*|*'"method":"thread/resume"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
       printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
@@ -708,6 +710,9 @@ while read -r line; do
       if [ -f "$here/refuse" ]; then
         rm "$here/refuse"
         printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"failed","error":{"message":"unexpected status 401 Unauthorized","codexErrorInfo":"unauthorized"}}}}\n' "$id"
+      elif [ -f "$here/limit" ]; then
+        rm "$here/limit"
+        printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"failed","error":{"message":"You have hit your usage limit."}}}}\n' "$id"
       else
         printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-%s","itemId":"m%s","delta":"done"}}\n' "$id" "$id"
         printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id"
@@ -751,12 +756,13 @@ fn mailbox_send(agents: &crate::cloud_agents::CloudAgents, id: &str, text: &str)
     (receipt.outcome, serde_json::from_slice(&body).unwrap())
 }
 
-/// A message from the cloud mailbox to a tab whose turn failed on a refused
-/// sign-in (#644). A native tab keeps its connection and waits on that
-/// failure, which no turn end will lift: what was queued behind the failed
-/// turn goes once it has ended, and a message sent to the waiting tab goes
-/// straight in, as the desktop's own does. A terminal tab's waiting can be the
-/// CLI's own prompt on screen, so a message still waits for it.
+/// A message from the cloud mailbox to a tab whose turn failed (#644). A
+/// native tab waits on that failure, which no turn end will lift: what was
+/// queued behind the failed turn goes once it has ended, and a message sent
+/// to the waiting tab goes straight in, as the desktop's own does. A refused
+/// sign-in also lets go of the app server, which would never read a new one:
+/// the next message starts another on the same thread. A terminal tab's
+/// waiting can be the CLI's own prompt on screen, so a message still waits.
 fn mailbox_fixture(case: &str) {
     use std::os::unix::fs::PermissionsExt;
     let _home = store::temp_home();
@@ -814,11 +820,17 @@ fn mailbox_fixture(case: &str) {
             std::thread::sleep(Duration::from_millis(20));
         }
     };
+    // Each app server the tab ran, and how each took up the thread.
+    let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default().lines().count();
+    let threads = || frames().iter().filter(|frame| matches!(frame["method"].as_str(), Some("thread/start" | "thread/resume")))
+        .map(|frame| format!("{} {}", frame["method"].as_str().unwrap(), frame["params"]["threadId"].as_str().unwrap_or("-"))).collect::<Vec<_>>();
     const REFUSED: (TurnStatus, bool) = (TurnStatus::Error, true);
+    const LIMITED: (TurnStatus, bool) = (TurnStatus::Error, false);
     const ANSWERED: (TurnStatus, bool) = (TurnStatus::Ok, false);
 
-    // A message sent while a turn runs waits for it, and goes when that turn
-    // ends on the refused sign-in.
+    // A message sent while a turn runs waits for it. That turn's sign-in is
+    // refused: its app server, which never reads a new one, is let go, and
+    // the message starts another on the same thread.
     std::fs::write(bin.join("hold"), "").unwrap();
     std::fs::write(bin.join("refuse"), "").unwrap();
     assert_eq!(mailbox_send(&agents, "c1", "fix the build").1["queued"], false);
@@ -830,48 +842,88 @@ fn mailbox_fixture(case: &str) {
     assert_eq!(ended(), [REFUSED, ANSWERED]);
     assert_eq!(starts(), ["fix the build", "sent mid-turn"]);
     assert!(queued().is_empty());
+    assert_eq!(launches(), 2);
+    assert_eq!(threads(), ["thread/start -", "thread/resume thread-1"]);
 
-    // A message sent to a tab already waiting on a refused sign-in goes
-    // straight in, on the same connection, and lifts the recovery.
+    // Refused again while another tab's send holds admission, so the
+    // connection's stop waits at its fence. The tab is busy already, and a
+    // message sent now waits for the new connection rather than reaching
+    // this one.
     std::fs::write(bin.join("refuse"), "").unwrap();
+    std::fs::write(bin.join("hold"), "").unwrap();
     mailbox_send(&agents, "c3", "and the tests");
-    settled(3);
-    {
-        let rt = rt.lock().unwrap();
-        assert_eq!((rt.status, rt.recovery), (TabStatus::Waiting, Some(RecoveryKind::SignedOut)));
-        assert!(matches!(rt.engine, Engine::CodexStdio(_)) && rt.child.is_some(), "the connection stays up");
+    let until = Instant::now() + WAIT;
+    while starts().len() < 3 {
+        assert!(Instant::now() < until, "Codex did not take the turn");
+        std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(!agents.ops.busy("stdio-owner", "tab"));
-    let (outcome, receipt) = mailbox_send(&agents, "c4", "signed in again");
-    assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(false)));
-    assert!(queued().is_empty());
+    let admitted = crate::issue_pipeline::admission::lock();
+    std::fs::remove_file(bin.join("hold")).unwrap();
+    settled(3);
+    let retiring = rt.lock().unwrap();
+    assert!(retiring.stdio_retiring.is_some() && !retiring.stopping && matches!(retiring.engine, Engine::CodexStdio(_)), "its stop has not begun");
+    drop(retiring);
+    assert!(agents.ops.busy("stdio-owner", "tab"), "busy while the refused turn's connection goes");
+    let (outcome, receipt) = mailbox_send(&agents, "c4", "sent while it goes");
+    assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(true)));
+    drop(admitted);
+    let until = Instant::now() + WAIT;
+    while launches() < 3 {
+        assert!(Instant::now() < until, "no new connection after the refused turn's: queued {:?}", queued());
+        std::thread::sleep(Duration::from_millis(20));
+    }
     settled(4);
     assert_eq!(ended(), [REFUSED, ANSWERED, REFUSED, ANSWERED]);
-    assert_eq!(starts(), ["fix the build", "sent mid-turn", "and the tests", "signed in again"]);
+    assert_eq!(starts(), ["fix the build", "sent mid-turn", "and the tests", "sent while it goes"]);
+    assert!(queued().is_empty());
+
+    // Refused once more: the connection goes, and the tab shows the refusal
+    // until a message, after a new sign-in, starts Codex again and lifts it.
+    std::fs::write(bin.join("refuse"), "").unwrap();
+    mailbox_send(&agents, "c5", "and the docs");
+    settled(5);
+    let until = Instant::now() + WAIT;
+    while !matches!(rt.lock().unwrap().engine, Engine::None) {
+        assert!(Instant::now() < until, "the refused turn's connection was not let go");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let retired = rt.lock().unwrap();
+    assert_eq!((retired.status, retired.recovery, retired.child.is_none()), (TabStatus::Waiting, Some(RecoveryKind::SignedOut), true));
+    drop(retired);
+    assert!(!agents.ops.busy("stdio-owner", "tab"));
+    let (outcome, receipt) = mailbox_send(&agents, "c6", "signed in again");
+    assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(false)));
+    assert!(queued().is_empty());
+    settled(6);
+    assert_eq!(ended(), [REFUSED, ANSWERED, REFUSED, ANSWERED, REFUSED, ANSWERED]);
+    assert_eq!(starts(), ["fix the build", "sent mid-turn", "and the tests", "sent while it goes", "and the docs", "signed in again"], "nothing replayed");
+    assert_eq!(launches(), 4);
+    assert_eq!(threads(), ["thread/start -", "thread/resume thread-1", "thread/resume thread-1", "thread/resume thread-1"]);
     let after = rt.lock().unwrap();
     assert_eq!((after.status, after.recovery), (TabStatus::Completed, None));
     drop(after);
 
-    // A turn refused while it waited on an ask leaves the tab waiting, as it
-    // was: what was queued behind it goes all the same.
+    // A turn that fails some other way while it waits on an ask leaves the
+    // tab waiting, as it was, and keeps its connection: what was queued
+    // behind it goes all the same, on that connection.
     std::fs::write(bin.join("ask"), "").unwrap();
     std::fs::write(bin.join("hold"), "").unwrap();
-    std::fs::write(bin.join("refuse"), "").unwrap();
-    mailbox_send(&agents, "c5", "run the migration");
+    std::fs::write(bin.join("limit"), "").unwrap();
+    mailbox_send(&agents, "c7", "run the migration");
     let until = Instant::now() + WAIT;
     while rt.lock().unwrap().pending.is_empty() {
         assert!(Instant::now() < until, "Codex did not ask");
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(mailbox_send(&agents, "c6", "then deploy").1["queued"], true);
+    assert_eq!(mailbox_send(&agents, "c8", "then deploy").1["queued"], true);
     assert_eq!(agents.dispatch_follow_ups(), 0, "not while the turn waits on its ask");
     assert_eq!(rt.lock().unwrap().status, TabStatus::Waiting);
     std::fs::remove_file(bin.join("hold")).unwrap();
-    settled(6);
-    assert_eq!(ended()[4..], [REFUSED, ANSWERED]);
-    assert_eq!(starts()[4..], ["run the migration", "then deploy"]);
+    settled(8);
+    assert_eq!(ended()[6..], [LIMITED, ANSWERED]);
+    assert_eq!(starts()[6..], ["run the migration", "then deploy"]);
     assert!(queued().is_empty());
-    assert_eq!(frames().iter().filter(|frame| frame["method"] == "initialize").count(), 1, "one connection throughout");
+    assert_eq!(launches(), 4);
     manager.stop("stdio-owner", "tab").unwrap();
 }
 

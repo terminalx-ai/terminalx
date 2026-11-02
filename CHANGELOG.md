@@ -128,6 +128,13 @@
   ran goes once it ends. ACP and OpenCode tabs get the same fix. A Claude Code
   or Codex terminal tab that is waiting still holds the message, since its
   CLI may be showing a prompt of its own. (#644)
+- Let a native Codex tab work again once its sign-in is restored. Codex reads
+  its sign-in only when it starts, so after a turn refused for a revoked login
+  every later turn was refused as well, even after the login was granted
+  again. Codex now stops after such a turn, and the tab keeps saying it is
+  signed out. The next message starts Codex again on the same conversation
+  with the sign-in in place then, and nothing is sent twice. This applies on a
+  Mac too. (#644)
 - Leave the workspace user's own `~/.codex` as it is. Checking the Codex version
   before a native Codex tab starts made Codex write temporary files there; the
   check now runs in the tab's own Codex home. (#644)
