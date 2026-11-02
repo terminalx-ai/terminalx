@@ -10,11 +10,16 @@ import type { ContinueResult, HostApi, NewTabSettings, SendResult, TabControls }
  * operations, which the Mac checks against this phone's grant.
  */
 
-/** What stopped the tab and what can be done about it, as the desktop's banner says. */
-export function recoveryState(events: AgentEvent[], asks: number): { kind: RecoveryKind | null; offer: RecoveryOffer } {
+/**
+ * What stopped the tab and what can be done about it, as the desktop's banner
+ * says. `tab`: what the Mac says the tab runs; a native Codex tab (#644) is
+ * never sent to a terminal it does not have.
+ */
+export function recoveryState(events: AgentEvent[], asks: number, tab?: Pick<TabControls, "transport"> | null): { kind: RecoveryKind | null; offer: RecoveryOffer } {
   const kind = recoveryFromEvents(events);
+  const native = tab?.transport === "experimentalCodexStdio";
   // Signing an agent in is done in its terminal, which the phone does not open.
-  return { kind, offer: recoveryOffer(kind, { asks, canResend: true, canSendContinue: true, canSignIn: false }) };
+  return { kind, offer: recoveryOffer(kind, { asks, canResend: true, canSendContinue: true, canSignIn: false, native }) };
 }
 
 /** What the tab runs and the choices its pickers offer: the desktop composer's. */

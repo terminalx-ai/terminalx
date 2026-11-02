@@ -417,6 +417,29 @@ impl ControlService {
                 if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
                     return crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal);
                 }
+                // What stopping this runtime now would cut short, and a stop
+                // committed only when nothing would be: what a newer desktop
+                // replacing it by itself needs (#730).
+                if command == "runtime.work" {
+                    return Ok(json!({ "work": self.manager.retire_work() }));
+                }
+                if command == "runtime.stopAllIfIdle" {
+                    {
+                        // No turn, start or send is admitted between the check and the stop.
+                        let _admission = crate::issue_pipeline::admission::lock();
+                        lifetime.stop_all_if(&params, || {
+                            let work = self.manager.retire_work();
+                            if work.is_empty() { return Ok(()); }
+                            Err(ControlError::new("runtime_busy", format!("Stopping the runtime now would cut short {} piece(s) of work.", work.len()), None::<String>))
+                        })?;
+                        self.manager.begin_shutdown();
+                    }
+                    if let Err(error) = self.manager.stop_all_confirmed() {
+                        lifetime.stop_failed();
+                        return Err(ControlError::internal(error));
+                    }
+                    return Ok(json!({ "stopping": true }));
+                }
                 if command == "runtime.liveness" {
                     // What a desktop needs to find and watch this owner, and
                     // nothing that waits on a session, tab, terminal or share:
@@ -1052,9 +1075,11 @@ impl ControlService {
                 )),
             ));
         }
-        // Keep admission through confirmed exit and removal. A failed stop
+        // The removal fences the worktree from its stop to its end, so nothing
+        // starts there meanwhile, and no other tab's prompt waits for it
+        // (#727). The sessions named with `--sessions` are checked against
+        // the worktree again behind that fence, after the stop. A failed stop
         // cannot be discarded by a CLI caller either.
-        let _admission = crate::issue_pipeline::admission::lock();
         self.manager.accepting_work().map_err(ControlError::internal)?;
         let expected = match &named {
             Some(named) => Some(check_named(named, &held_now()?)?),

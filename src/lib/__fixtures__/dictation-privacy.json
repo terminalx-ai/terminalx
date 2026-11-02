@@ -1,0 +1,54 @@
+[
+  {
+    "text": "token=private-value",
+    "sensitive": true
+  },
+  {
+    "text": "Token : private-value",
+    "sensitive": true
+  },
+  {
+    "text": "Password:\n\n\n\n",
+    "sensitive": true
+  },
+  {
+    "text": "passphrase",
+    "sensitive": true
+  },
+  {
+    "text": "api_key",
+    "sensitive": true
+  },
+  {
+    "text": "https://example.test",
+    "sensitive": true
+  },
+  {
+    "text": "bearer example",
+    "sensitive": true
+  },
+  {
+    "text": "123456",
+    "sensitive": true
+  },
+  {
+    "text": "ABCDEFGHIJKLMNOPQRST1234",
+    "sensitive": true
+  },
+  {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sensitive": true
+  },
+  {
+    "text": "open parcel files",
+    "sensitive": false
+  },
+  {
+    "text": "review these changes",
+    "sensitive": false
+  },
+  {
+    "text": "src/TranscriptionTab.tsx",
+    "sensitive": false
+  }
+]

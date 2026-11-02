@@ -50,6 +50,9 @@ struct Fixture {
     asked: Mutex<Vec<Vec<String>>>,
     /// The sessions the removal path stopped.
     stopped: Mutex<Vec<String>>,
+    /// What happens after a pass first read the session index for a
+    /// workspace, while it fetches and weighs the grace period unfenced.
+    meanwhile: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     start: DateTime<Utc>,
 }
 
@@ -81,6 +84,7 @@ impl Fixture {
             prs: Mutex::new(Ok(HashMap::new())),
             asked: Mutex::new(Vec::new()),
             stopped: Mutex::new(Vec::new()),
+            meanwhile: Mutex::new(None),
             start: Utc::now().trunc_subsecs(0),
         };
         fixture.open(&path, "alpha");
@@ -200,7 +204,13 @@ impl Fixture {
     }
 
     fn with_host<R>(&self, f: impl FnOnce(&Host<'_>) -> R) -> R {
-        let live = |_: &[SessionEntry]| self.live.lock().unwrap().clone();
+        let live = |_: &[SessionEntry]| {
+            let live = self.live.lock().unwrap().clone();
+            if let Some(meanwhile) = self.meanwhile.lock().unwrap().take() {
+                meanwhile();
+            }
+            live
+        };
         f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None })
     }
 
@@ -700,6 +710,31 @@ fn work_in_its_sessions_restarts_the_grace_period() {
     assert_eq!((of(&waiting, &wt).phase, of(&waiting, &wt).due.clone()), (Phase::Scheduled, Some(stamp(f.at(18)))));
     assert!(wt.exists());
     assert_eq!(of(&f.sweep(19), &wt).phase, Phase::Removed);
+}
+
+#[test]
+fn a_turn_that_ends_while_the_sweep_fetches_restarts_the_grace_period() {
+    let f = Fixture::new();
+    let wt = f.worktree("used-during-the-fetch");
+    let session = f.session(&wt, TabStatus::Idle);
+    f.merge("used-during-the-fetch", 94);
+    assert_eq!(of(&f.sweep(1), &wt).due, Some(stamp(f.at(11))));
+    // Due at twelve minutes by what the pass first read. While it asks the
+    // remote, a prompt is sent there and its turn ends: nothing is running
+    // by the time the workspace is fenced, but it was just used (#727).
+    let id = session.id.clone();
+    let ended = f.at(12);
+    *f.meanwhile.lock().unwrap() = Some(Box::new(move || {
+        index::update(|sessions| {
+            sessions.iter_mut().find(|entry| entry.id == id).unwrap().modified = stamp(ended);
+            Ok(())
+        })
+        .unwrap();
+    }));
+    let after = f.sweep(12);
+    assert_eq!((of(&after, &wt).phase, of(&after, &wt).due.clone()), (Phase::Scheduled, Some(stamp(f.at(22)))));
+    assert!(wt.exists() && f.stopped.lock().unwrap().is_empty());
+    assert!(f.meanwhile.lock().unwrap().is_none(), "the pass never looked at what was live");
 }
 
 #[test]

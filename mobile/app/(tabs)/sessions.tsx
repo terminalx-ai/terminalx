@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
 import { ChevronRight, Plus, Search } from "lucide-react-native";
 import type { ColumnId } from "@terminalx/portable/dashboard";
 import { conversationRows, statusLabel, type ConversationRow } from "@mobile/data/conversations";
 import { useApp } from "@mobile/state/AppProvider";
+import { useHostFeatures } from "@mobile/state/host-features";
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { DeviceOptionsButton, useDeviceMenu } from "@mobile/ui/DeviceMenu";
 import { useTheme } from "@mobile/ui/theme";
@@ -19,14 +20,9 @@ export default function SessionsScreen() {
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
   const rows = useMemo(() => conversationRows(app.sessions, query), [app.sessions, query]);
-  // Offered only by a Mac that starts sessions for a phone.
-  const [canCreate, setCanCreate] = useState(false);
-  useEffect(() => {
-    let current = true;
-    if (app.connectionStage !== "connected") { setCanCreate(false); return; }
-    app.api.features().then((features) => { if (current) setCanCreate(features.sessionCreate === 1); }).catch(() => { if (current) setCanCreate(false); });
-    return () => { current = false; };
-  }, [app.api, app.connectionStage, app.activeHost?.id]);
+  // Offered only by a Mac that starts sessions for a phone, as soon as it does (#730).
+  const features = useHostFeatures(app.api, app.activeHost?.id);
+  const canCreate = app.connectionStage === "connected" && features?.sessionCreate === 1;
   const sections = useMemo(() => columns.map((column) => ({ title: column.title, id: column.id, data: rows.filter((row) => row.column === column.id) })).filter((section) => section.data.length > 0), [rows]);
 
   if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a Mac" detail="Connect to a paired Mac before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;

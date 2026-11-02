@@ -1,7 +1,7 @@
 import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents } from "@/lib/agentEvents";
+import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents, setFeedContinuity } from "@/lib/agentEvents";
 import type { ImageInput } from "@/lib/api";
 import { CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages } from "@/lib/cloudComposer";
 import type { CloudImageRef } from "@/lib/cloudAgentApi";
@@ -208,6 +208,7 @@ export function resetCloudAgents() {
     for (const tab of s.tabs.values()) if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
   }
   stores.clear();
+  caughtUp.clear();
   // After the stores are gone, so clearing a draft queues no save.
   const typed = new Set(draftTabs);
   draftTabs.clear();
@@ -649,6 +650,25 @@ export function watchLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient
 }
 
 /**
+ * The live feeds of each tab, by `sessionId/tabId`, that caught up from the
+ * runtime's own history over a connection that is still up. While one has,
+ * the tab's log is continuous with that history, and a compaction it shows
+ * running is running (#644). With none, the reader may have missed how it
+ * ended, and it is shown as unknown.
+ */
+const caughtUp = new Map<string, Set<object>>();
+
+function noteCaughtUp(sessionId: string, tabId: string, feed: object, on: boolean) {
+  const k = `${sessionId}/${tabId}`;
+  const feeds = caughtUp.get(k) ?? new Set<object>();
+  if (on) feeds.add(feed);
+  else feeds.delete(feed);
+  if (feeds.size) caughtUp.set(k, feeds);
+  else caughtUp.delete(k);
+  setFeedContinuity(sessionId, tabId, feeds.size > 0);
+}
+
+/**
  * Stream a tab live. Call only while the connection is up: reading never
  * wakes compute. Resumes after the cached cursor; overlapping replays are
  * merged by seq.
@@ -662,6 +682,21 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
   const sessionId = tab.info.sessionId;
   tab.live = true;
   publish(s);
+  // This feed has caught up once its replay is merged over a live connection,
+  // and has not from when that connection drops until the resume's replay.
+  const feed = {};
+  let ended = false;
+  const caught = (on: boolean) => {
+    if (!on || !ended) noteCaughtUp(sessionId, tabId, feed, on);
+  };
+  const offState = client.onState((state) => {
+    if (state.state !== "connected") caught(false);
+  });
+  const end = () => {
+    ended = true;
+    offState();
+    caught(false);
+  };
   const onEvent = (raw: unknown) => {
     const ev = raw as AgentEvent;
     if (!ev || typeof ev !== "object" || !ev.payload) return;
@@ -700,8 +735,10 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
         publish(s);
         scheduleSave(s, tabId);
       },
+      onReplayed: () => caught(client.connection.state === "connected"),
     });
   } catch (error) {
+    end();
     const current = s.tabs.get(tabId);
     if (current) current.live = false;
     publish(s);
@@ -715,6 +752,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
   }
   return () => {
     stop?.();
+    end();
     const current = s.tabs.get(tabId);
     if (current) current.live = false;
     publish(s);

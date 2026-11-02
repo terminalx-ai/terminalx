@@ -177,9 +177,35 @@ Stop-all acknowledges only after managed agents and all terminal process groups
 have actually exited. A failed stop leaves the owner available solely for an
 explicit authenticated stop retry; it never reports success or accepts new work.
 Resource sampling and termination rules are evaluated by the actual owner.
-Explicit session deletion also runs there: checkout admission remains held through
-process confirmation and history removal, failed confirmations retain history,
-and other sessions sharing the same checkout remain running.
+Explicit session deletion also runs there: the session stays fenced from new
+turns through process confirmation and history removal, failed confirmations
+retain history, and other sessions sharing the same checkout remain running.
+
+Checkout admission is one app-wide lock, so it is held only for short decisions:
+whether a prompt may start a turn, and whether a checkout may be reserved for
+local checks or conflict resolution (#727). Work that stops sessions and then
+changes what they run in takes a fence (`issue_pipeline::admission::fence`)
+over just those sessions, one tab, or a checkout path, and runs its slow part
+behind it: workspace and session removal, quick-chat moves and retention, merged
+cleanup's removals and restores, Settings → Storage removal, CLI worktree
+deletion, tab closing, the idle-agent stop, a guest's forced stop and an
+experimental Codex tab's move to its terminal. Taking a fence takes admission
+for a moment only, so a prompt admitted before it has finished (and its turn is
+visible to the work's last look) and one admitted after it meets the fence. A
+prompt for a fenced session is refused with the fence's reason; one for a tab
+whose agent is only being stopped (or moved) waits for that and is then
+admitted as usual, the host's and a guest's alike, and a guest's queued input
+for it stays queued until then. Merged cleanup weighs a workspace's grace period
+again behind its fence, so a turn that ended while the sweep asked GitHub or
+fetched keeps the workspace. Scans, sizing, merged-cleanup's GitHub calls and
+fetches, and the ledger take no fence at all. A prompt's baseline tree
+(`git add -A` into a scratch index) is read before it is admitted.
+
+Every composer send is timed in the tab's diagnostics as `send_timing` lines
+sharing its `seq`: `received` (the window's `pressed_at`, the runtime's
+`received_at`, `waited_ms`, `admitted_ms` and `answered_ms`), `delivered` (the
+agent took it) and `shown` (the window's `drawn_at`, `answered_at` and
+`shown_at`).
 
 ## Window features, updates and macOS
 
@@ -217,7 +243,41 @@ retained executable even after app bundle replacement. Never overwrite/delete a
 running version. New desktop versions negotiate compatibility with the running
 owner; incompatible upgrades must preserve work and explain incompatibility,
 not silently kill/restart it. Versioned helper retention ends only after its
-owner exits. Validate keychain access under the helper signing identity and
+owner exits.
+
+An update brings the runtime with it (#730). The runtime says its `version`
+in `runtime.liveness` (0.2.22 only in `status`, as `appVersion`), and a desktop
+that attaches to one older than itself replaces it with its bundled runtime
+(`local_runtime/replace.rs`). It does so by itself only once nothing the
+runtime runs would be cut short, by the runtime's own idle rule but for an
+agent's own helpers: only managed agents that have settled, running nothing
+their tools started, may be stopped without asking. An agent's MCP and
+language servers start again with it; a shell it started (how its tools run a
+command), and anything left in its process group outside it, is work
+(`idle::working`). A runtime of this build or later names everything else
+(`runtime.work`: agents mid-turn, prompts not yet delivered or held, agents
+started by hand, running terminals, commands agents left running, processes
+that outlived what started them, issue pipeline steps) and stops only when
+there is none,
+deciding under the admission lock (`runtime.stopAllIfIdle`, refused as
+`runtime_busy`). An older one is judged by what it shows (agents mid-turn in
+`runningTabs`, open terminals in `runtime.pty.shells`, what its agents' tools
+left running by the process table), read again just before it is stopped; a
+group whose leader has gone is invisible there. It cannot show the prompts
+it holds, nor can any runtime see a follow-up a CLI holds until its turn ends,
+so nothing may be found under way for 15 s first. Until then every window says
+the runtime is older than the app, lists what it waits for, and offers
+**Restart now**; after a switch that failed it says it will not try again by
+itself. Replacing stops the runtime as Stop All does (`launch::retire`, pinned
+to its epoch). Restart now stops one that will not stop as Restart runtime
+does; replacing it by itself does so only once it agreed to stop, and anything
+that goes wrong before then leaves it running and is waited out. The
+supervisor attaches the bundled runtime in its place; each
+agent picks up its conversation again when its tab next starts. A runtime of
+the app's version or newer is attached as before, so two builds sharing one
+home never take turns replacing each other's runtime. What a phone is offered
+follows the attached runtime, not the app ([MOBILE.md](./MOBILE.md), "What the
+phone is offered"). Validate keychain access under the helper signing identity and
 notification authorization on macOS; these are not established by a shell test.
 
 ## Integration release request and reviewable stages

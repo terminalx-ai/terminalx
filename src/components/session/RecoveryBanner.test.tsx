@@ -58,6 +58,15 @@ describe("session recovery UI smoke", () => {
     expect((screen.getByRole("button", { name: "Resend last prompt" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("never sends a waiting native Codex tab to a terminal it does not have, and still sends a terminal tab there (#644)", () => {
+    const { rerender } = render(<RecoveryBanner {...props()} waiting native />);
+    expect(screen.getByText("Waiting for input")).toBeTruthy();
+    expect(screen.getByText("Review the conversation above, then send a message or stop the session.")).toBeTruthy();
+    expect(screen.queryByText(/Check the terminal/)).toBeNull();
+    rerender(<RecoveryBanner {...props()} waiting />);
+    expect(screen.getByText("Check the terminal for a pending decision, or stop the session.")).toBeTruthy();
+  });
+
   it("keeps hook context through transcript replay and distinguishes the session directory from an explicit workdir", () => {
     // The real Codex PreToolUse event has Bash + command, not the original
     // exec_command arguments the previous UI-only fixture supplied.

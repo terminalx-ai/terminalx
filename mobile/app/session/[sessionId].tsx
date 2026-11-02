@@ -20,11 +20,12 @@ import { conversationKey } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
 import { ConversationPicker } from "@mobile/ui/ConversationPicker";
 import { LinkedText } from "@mobile/ui/LinkedText";
-import { PermissionCard, TranscriptRow } from "@mobile/ui/transcript";
+import { CompactingLine, PermissionCard, TranscriptRow } from "@mobile/ui/transcript";
 import { SessionControls } from "@mobile/ui/SessionControls";
 import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useConversationState } from "@mobile/state/conversation-state";
+import { useHostFeatures } from "@mobile/state/host-features";
 import { FOREGROUND as TERMINAL_FOREGROUND, TerminalScreen, type Row as ScreenRow } from "@mobile/terminal/screen";
 import { controlSequence, keySequence, pasteSequence, type TerminalKey } from "@mobile/terminal/keys";
 
@@ -51,14 +52,10 @@ export default function SessionScreen() {
   const summary = app.sessions.find((item) => item.id === sessionId);
   const tabId = params.tabId ?? summary?.tabs[0]?.id ?? "";
   const [view, setView] = useState<"chat" | "terminal">("chat");
-  // An older Mac neither sizes its terminal output nor opens a tab's terminal: it gets no Terminal view.
-  const [terminalOffered, setTerminalOffered] = useState(false);
-  useEffect(() => {
-    let active = true;
-    setTerminalOffered(false);
-    void app.api?.features().then((features) => { if (active) setTerminalOffered(features.terminal === 1); }).catch(() => undefined);
-    return () => { active = false; };
-  }, [app.api, app.activeHost?.id]);
+  // An older Mac, or one whose runtime is older than its app (#730), neither
+  // sizes its terminal output nor opens a tab's terminal: it gets no Terminal
+  // view. One that gains it while this is open offers it then.
+  const terminalOffered = useHostFeatures(app.api, app.activeHost?.id)?.terminal === 1;
   const terminal = terminalOffered && view === "terminal";
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
@@ -112,10 +109,15 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
   const draftEdited = useRef(false);
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
   const draftIdKey = `terminalx:draft-id:${hostId}:${sessionId}:${tabId}`;
-  const transcript = useMemo(() => buildTranscript(events, connected), [connected, events]);
+  // Whether this connection's watcher read the Mac's history to its end: only then is a compaction shown as running (#644).
+  const [caughtUp, setCaughtUp] = useState(false);
+  const continuous = connected && caughtUp;
+  const transcript = useMemo(() => buildTranscript(events, connected, { compactionContinuityKnown: continuous }), [connected, events, continuous]);
 
   useEffect(() => {
     let receivedPage = false;
+    // A new watcher (another connection, or none) has caught up with nothing yet.
+    setCaughtUp(false);
     setLoading(true);
     setLoadingEarlier(false);
     setEarlierError(null);
@@ -143,7 +145,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
       setLoading(false);
       setLoadError({ cause });
       app.connection.reportError("Transcript sync failed", cause);
-    });
+    }, setCaughtUp);
     return () => { stop(); earlierRequest.current = null; };
   }, [app.api, app.connection, connected, epoch, hostId, sessionId, tabId, retry, setEvents, setHasMore, setBefore]);
 
@@ -362,7 +364,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
       : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />);
 
   const sendDisabled = !connected || (!draft.trim() && !attachments.length) || sending;
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><TranscriptList data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{items.length ? noticeCard : null}{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 12 }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text>{sendFeedback.resend ? <Button label="Send again" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder="Message this session" placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
+  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><TranscriptList data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{items.length ? noticeCard : null}{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 12 }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text>{sendFeedback.resend ? <Button label="Send again" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder="Message this session" placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
 }
 
 /**

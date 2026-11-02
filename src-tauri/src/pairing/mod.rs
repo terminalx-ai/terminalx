@@ -193,6 +193,9 @@ impl PairingManager {
 
     pub(crate) fn attach_runtime(&self, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
         *self.runtime.lock().unwrap() = Some(runtime);
+        // What a phone may be offered is the attached runtime's (#730), and
+        // the connections the previous attachment admitted are done.
+        self.mobile.broadcast_capabilities_changed();
     }
 
     /// No desktop sharing mutex spans an RPC. Once attached, transport failure

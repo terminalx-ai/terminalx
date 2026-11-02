@@ -46,17 +46,26 @@ export function retryHaltedTranscript(host: string, session: string, tab: string
 /** Subscribe before reading; live delivery is an invalidation, never a checkpoint.
  * A single worker drains every forward page and persists each contiguous page.
  * Duplicate/out-of-order live notifications only request another conditional read.
+ *
+ * `caughtUp(true)`: a drain read the Mac's history to its end over this
+ * connection, with the subscription already in place, so the conversation
+ * shown is continuous with it (#644). `caughtUp(false)`: a read failed or was
+ * halted, and what is shown may be behind until a later drain finishes. A
+ * watcher starts not caught up, and one made while disconnected never is.
  */
 export function watchTranscript(
   api: HostApi, host: string, session: string, tab: string, connected: boolean,
   update: (cache: TranscriptCache, replace: boolean, source: "cache" | "live" | "page") => void,
   error: (cause: unknown) => void,
+  caughtUp: (known: boolean) => void = () => undefined,
 ): () => void {
   let active = true;
   const epoch = cacheEpoch(host);
   let state = emptyTranscript();
   let initialized = false;
   let incremental: boolean | undefined;
+  /** The Mac confirmed the subscription: from then on nothing it records goes unheard by this watcher. */
+  let subscribed = false;
   let legacyDuringRead: AgentEvent[] | null = null;
   let legacyPage: AgentEvent[] | undefined;
   let running = false;
@@ -113,11 +122,17 @@ export function watchTranscript(
             update(state, false, "live");
             void save().catch(error);
           }
-        }, invalidate);
+        }, () => {
+          subscribed = true;
+          invalidate();
+        });
       }
       let resets = 0;
+      // Whether the subscription was confirmed before the last read of this drain went out.
+      let heardSince = false;
       while (dirty && current()) {
         dirty = false;
+        heardSince = subscribed;
         if (!incremental) {
           legacyDuringRead = [];
           const page = await read("tail", () => api.tail(session, tab));
@@ -152,10 +167,16 @@ export function watchTranscript(
         await save();
         dirty ||= page.hasMore;
       }
+      // Read to the end of the Mac's history, with the subscription confirmed before that read: caught up. Not
+      // confirmed yet, the confirmation asks for another drain, which then is.
+      if (current() && heardSince) caughtUp(true);
     } catch (cause) {
       // Halted: the poll and live notifications stop asking until Retry starts a new watcher.
       if (cause instanceof TranscriptHaltedError) halted = true;
-      if (current()) error(cause);
+      if (current()) {
+        caughtUp(false);
+        error(cause);
+      }
       // The last persisted page stays valid. Retry without jumping to a tail.
     } finally { running = false; legacyDuringRead = null; }
   };

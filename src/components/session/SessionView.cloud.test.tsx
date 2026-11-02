@@ -466,6 +466,8 @@ describe("the same SessionView for local and cloud sessions", () => {
     guard.handlers.review_range = () => ({ target: "main", base: "base-tree", head: "live-tree" });
     guard.handlers.changes_between = () => [];
     guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 });
+    // No merge in progress, as the native side answers for a checkout without MERGE_HEAD.
+    guard.handlers.unfinished_merge = () => null;
     const local: SessionEntry = {
       id: "local-1",
       projectPath: "/Users/me/api",

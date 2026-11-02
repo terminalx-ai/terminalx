@@ -38,6 +38,13 @@ export interface CloudTab {
   truncated: boolean;
   /** A checkpoint exists but this phone holds no key for it. */
   noKey: boolean;
+  /**
+   * Its live feed has caught up from the runtime's own history over a
+   * connection that is still up (#644): a compaction it shows running is
+   * running. False from when the connection drops, or the tab is no longer
+   * looked at, until a feed's replay is in again; a checkpoint never makes it so.
+   */
+  continuous: boolean;
 }
 
 /** Who else is here, who drives each tab, and the notes people left (`collab/1`, docs/CLOUD-SHARING.md). */
@@ -303,6 +310,8 @@ export class CloudWorkspaceSession {
       if (entry.count > 0) return;
       entry.stop?.();
       this.viewing.delete(tabId);
+      // Nothing follows it now: what it shows next is what was last seen.
+      this.uncaught(tabId);
     };
   }
 
@@ -497,6 +506,8 @@ export class CloudWorkspaceSession {
 
   private async connectionChanged(state: WorkspaceConnectionState): Promise<void> {
     if (this.closed) return;
+    // Whatever is shown meanwhile (the quiet moment after a return), events can go unheard from here on.
+    if (state.state !== "connected") for (const tabId of this.tabs.keys()) this.uncaught(tabId);
     if (state.state === "connected") {
       this.held = null;
       if (this.heldTimer) clearTimeout(this.heldTimer);
@@ -668,15 +679,31 @@ export class CloudWorkspaceSession {
             current.status = change.status;
             this.publish();
           },
+          // The runtime's history after the cursor is all here (again after each resume): caught up, while still looked at and connected.
+          onReplayed: () => {
+            const current = this.tabs.get(tabId);
+            if (!current || this.viewing.get(tabId) !== entry || this.client.connection.state !== "connected" || current.continuous) return;
+            current.continuous = true;
+            this.publish();
+          },
         },
       );
       if (this.viewing.get(tabId) === entry) entry.stop = stop;
       else stop();
     } catch {
       entry.stop = null;
+      this.uncaught(tabId);
       // Not streaming: the checkpoint is what there is.
       void this.readCheckpoint(tabId);
     }
+  }
+
+  /** A tab's feed no longer holds (see `CloudTab.continuous`). */
+  private uncaught(tabId: string): void {
+    const tab = this.tabs.get(tabId);
+    if (!tab?.continuous) return;
+    tab.continuous = false;
+    this.publish();
   }
 
   /** Every tab the API has a checkpoint for, each opened from what is kept and then from the API. */
@@ -734,7 +761,7 @@ export class CloudWorkspaceSession {
   private tab(tabId: string): CloudTab {
     let tab = this.tabs.get(tabId);
     if (!tab) {
-      tab = { tabId, sessionId: null, title: null, status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false };
+      tab = { tabId, sessionId: null, title: null, status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false };
       this.tabs.set(tabId, tab);
     }
     return tab;

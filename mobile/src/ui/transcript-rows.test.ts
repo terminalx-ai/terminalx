@@ -110,5 +110,13 @@ describe("what became of a message on its way to the agent (#722)", () => {
     expect(deliveryNote({})).toBeUndefined();
     expect(deliveryNote({ inputOccupied: true, sent: "x" })).toMatch(/input box already has text in it/);
     expect(deliveryNote({ replaced: true, inputOccupied: true })).toMatch(/^Not answered/);
+    expect(deliveryNote({ withdrawn: true })).toMatch(/^Not sent/);
+  });
+
+  it("gives a running compaction no row (the conversation's running line stands for it), and every other one its row (#644)", () => {
+    const compaction = (state: "item_started" | "completed" | "unknown" | "stopped") =>
+      ({ kind: "compaction" as const, key: `k-${state}`, seq: 2, lifecycle: { turnId: "turn", itemId: state, state, generation: 1, retrying: false } });
+    const rows = turnRows({ ...turn, work: [compaction("item_started"), compaction("unknown"), compaction("completed"), compaction("stopped")] });
+    expect(rows.map((row) => row.key)).toEqual(["prompt:1:0", "k-unknown", "k-completed", "k-stopped"]);
   });
 });
