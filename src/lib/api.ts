@@ -1882,8 +1882,12 @@ export interface TabPtyEvent {
 export const agent = {
   prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
+  /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }) }),
+  /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
+  reportSendShown: (sessionId: string, tabId: string, seq: number, timings: { pressedAt?: number; drawnAt?: number; answeredAt?: number; shownAt: number }) =>
+    invoke<void>("report_send_shown", { sessionId, tabId, seq, timings }),
   /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
   resendUnsent: (sessionId: string, tabId: string) => invoke<SendOutcome>("resend_unsent", { sessionId, tabId }),
   resendMessage: (sessionId: string, tabId: string, seq: number) => invoke<SendOutcome>("resend_message", { sessionId, tabId, seq }),

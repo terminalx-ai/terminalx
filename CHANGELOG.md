@@ -38,6 +38,7 @@
   workspace counts only what changed while merging as lost. The Repo panel's
   **Commit** waits until conflicts are resolved, since it would otherwise
   commit the conflict markers. (#736)
+
 ### Sessions and tabs
 
 - Open the session you click. A session with no tabs open was swapped for
@@ -57,8 +58,18 @@
   hides its page until it is picked. (#721)
 - Offer Undo when closing a session's last running tab. The notice says its
   agent stopped, and Undo reopens the tab on the same conversation. (#721)
+
 ### Chat
 
+- Show a sent message at once. Pressing Send puts the message in the chat,
+  marked as sending, and clears the composer for the next one; it is marked
+  as sent once the runtime has it. A message that could not be sent goes back
+  to the composer with the error, ahead of anything typed since, images and
+  all. (#727)
+- Keep long conversations quick. The chat is built on as events arrive instead
+  of being rebuilt for each one, and only the turns in and near the view are
+  drawn, so a message in a conversation of thousands of events appears as fast
+  as in a short one. (#727)
 - Never type a message into an agent's input box that already holds text. The
   app used to clear the box with Ctrl+U, which deletes only the row the cursor
   is on: when Claude Code had put a dropped prompt back in its box, the prompt
@@ -77,6 +88,23 @@
   secret-looking value, including one that runs on over lines. Errors such as
   `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
   readable. (#717)
+
+### Background sessions
+
+- Never hold a send behind slow work. Merged-workspace cleanup, Settings →
+  Storage (scanning, sizing and removal), workspace and session removal,
+  `terminalx worktrees delete` and stopping an idle agent no longer hold the
+  lock every send takes; each closes only the sessions it changes, and a send
+  to any other tab goes through at once. Checking the worktree's tree before a
+  prompt, which reads the whole checkout, now happens before the send waits
+  for anything. A send to a session that is being removed or moved is refused
+  with the reason, and one to an agent being stopped for sitting idle waits
+  for that stop and starts it again. (#727)
+- Time every send. Each tab's diagnostics note when Send was pressed, when the
+  runtime received the send and how long it waited, when the agent took the
+  prompt, and when the window showed it, so a slow send can be traced to the
+  step that took the time. (#727)
+
 ### Command line
 
 - `terminalx worktrees delete` no longer deletes sessions it never named. Without

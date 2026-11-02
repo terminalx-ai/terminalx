@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::git;
 use crate::github::BranchPr;
+use crate::issue_pipeline::admission;
 use crate::landed::{self, Fetch, Landed};
 use crate::session_ops::{self, Confirmation, SessionsFate, WorkspaceRemoval};
 use crate::sink::EventSink;
@@ -446,14 +447,41 @@ impl Pass<'_> {
         // Quiet for the whole grace period: a turn that ended a minute ago
         // is someone still at work in it.
         let first_seen = parse(&seen.first_seen).unwrap_or(self.run.now);
-        let since = candidate.sessions.iter().filter_map(|session| parse(&session.modified)).fold(first_seen, Ord::max);
-        let due = since + chrono::Duration::seconds(i64::try_from(self.scope.grace_seconds).unwrap_or(LONGEST_GRACE).min(LONGEST_GRACE));
-        if self.run.now < due {
-            let status = self.status(repository, &key, &name, branch, Phase::Scheduled);
+        let grace = chrono::Duration::seconds(i64::try_from(self.scope.grace_seconds).unwrap_or(LONGEST_GRACE).min(LONGEST_GRACE));
+        let due_of = |candidate: &Candidate| candidate.sessions.iter().filter_map(|session| parse(&session.modified)).fold(first_seen, Ord::max) + grace;
+        let scheduled = |pass: &mut Self, due: DateTime<Utc>, ids: Vec<String>| {
+            let status = pass.status(repository, &key, &name, branch, Phase::Scheduled);
             (status.due, status.fresh, status.sessions) = (Some(stamp(due)), fresh, ids);
-            return;
+        };
+        let due = due_of(&candidate);
+        if self.run.now < due {
+            return scheduled(self, due, ids);
         }
 
+        // GitHub, the fetch and the grace period were weighed without a
+        // fence. From here nothing starts in the workspace (#727), so it is
+        // looked at once more, grace period and all: a prompt sent meanwhile
+        // opened a turn that this sees, or ended one, which made the
+        // workspace's sessions newer, and either way the workspace stays.
+        let _removing = admission::fence(admission::Kind::Refuse(admission::WORKSPACE_REMOVED), [admission::Scope::checkout(path)]);
+        let sessions = match index::load() {
+            Ok(sessions) => sessions,
+            Err(error) => return keep(self, ids, "the session index could not be read".into(), Some(format!("{error:#}"))),
+        };
+        let roots = Roots::of(self.run.host, &sessions);
+        let live = (self.run.host.live)(&sessions);
+        let candidate = cleanup::inspect(self.run.host, &roots, repository, entry, &sessions, &live, Activity::Engaged);
+        let ids: Vec<String> = candidate.sessions.iter().map(|session| session.id.clone()).collect();
+        if candidate.verdict != Verdict::Eligible {
+            return keep(self, ids, brief_of(&candidate), candidate.reason.clone());
+        }
+        if candidate.branch.as_deref() != Some(branch) {
+            return keep(self, ids, "its branch changed while it was being checked".into(), None);
+        }
+        let due = due_of(&candidate);
+        if self.run.now < due {
+            return scheduled(self, due, ids);
+        }
         match remove(self.run, self.scope, repository, entry, &candidate, &checked, &seen.pr) {
             Err((reason, detail)) => keep(self, ids, reason, detail),
             Ok(record) => {
@@ -728,7 +756,9 @@ pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Ut
     }
 
     // A session goes back only as it was left: one used since has gone on
-    // from the project, and its conversation is there now.
+    // from the project, and its conversation is there now. Nothing starts in
+    // them while that is decided and they are moved.
+    let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), record.sessions_kept.iter().map(|id| admission::Scope::Session(id.clone())));
     let removed_at = parse(&record.removed_at);
     let mut used_since = Vec::new();
     let moved = index::update(|sessions| {

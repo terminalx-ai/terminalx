@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { ChevronRight, FileCode2, FilePen, FolderSearch, Globe, Loader2, Puzzle, Terminal, Users, ListChecks, CircleAlert } from "@/icons";
 import { cn } from "@/lib/cn";
 import { callTarget, groupTargets, type ToolCall } from "@/lib/transcript";
@@ -6,6 +5,7 @@ import { fileName, shortPath } from "@/lib/paths";
 import { DiffBlock, UnifiedBlock } from "./DiffBlock";
 import { LinkedText } from "./LinkedText";
 import type { ChatLinkContext } from "@/lib/chatLinks";
+import { useDisclosure } from "./disclosures";
 
 function iconFor(toolType: string) {
   switch (toolType) {
@@ -72,7 +72,7 @@ function targetOf(call: ToolCall, cwd?: string): string {
 }
 
 export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: ToolCall; cwd?: string; defaultOpen?: boolean; linkContext?: ChatLinkContext }) {
-  const [open, setOpen] = useState(defaultOpen ?? false);
+  const [open, setOpen] = useDisclosure(`call:${call.callId}`, defaultOpen ?? false);
   const done = !!call.result || !!call.abandoned;
   const pending = !done;
   const failed = call.result?.isError;
@@ -161,7 +161,7 @@ function EditCounts({ edits }: { edits: { oldText?: string; newText?: string }[]
 }
 
 export function ToolGroupRow({ name, calls, cwd, linkContext }: { name: string; calls: ToolCall[]; cwd?: string; linkContext?: ChatLinkContext }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(`group:${calls[0].callId}`);
   const done = calls.every((c) => c.result || c.abandoned);
   const targets = groupTargets(calls);
   const noun = name === "Bash" ? "command" : "file";

@@ -1052,9 +1052,11 @@ impl ControlService {
                 )),
             ));
         }
-        // Keep admission through confirmed exit and removal. A failed stop
+        // The removal fences the worktree from its stop to its end, so nothing
+        // starts there meanwhile, and no other tab's prompt waits for it
+        // (#727). The sessions named with `--sessions` are checked against
+        // the worktree again behind that fence, after the stop. A failed stop
         // cannot be discarded by a CLI caller either.
-        let _admission = crate::issue_pipeline::admission::lock();
         self.manager.accepting_work().map_err(ControlError::internal)?;
         let expected = match &named {
             Some(named) => Some(check_named(named, &held_now()?)?),
