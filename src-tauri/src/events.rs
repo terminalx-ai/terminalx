@@ -362,9 +362,10 @@ pub enum Payload {
         prompt_seq: u64,
         into_seq: u64,
     },
-    /// The reader stopped the turn while the `user_message` at `prompt_seq`
-    /// was waiting on what the agent's input box held (#722): it was never
-    /// typed, and will not be. It can be sent again.
+    /// The reader stopped the turn before the agent took the `user_message`
+    /// at `prompt_seq`: while it waited on what the agent's input box held
+    /// (#722), on an agent still starting, or before its Enter (#746). It was
+    /// not sent, and will not be. It can be sent again.
     PromptWithdrawn {
         prompt_seq: u64,
     },
