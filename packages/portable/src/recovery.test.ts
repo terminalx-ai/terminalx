@@ -28,4 +28,15 @@ describe("the recovery offer the desktop and the phone share", () => {
     expect(recoveryOffer("delivery_unconfirmed", { asks: 0, canSendContinue: true })).toMatchObject({ retry: null, sendContinue: false });
     expect(recoveryOffer(null, { asks: 0 })).toMatchObject({ retry: null, continueInNewSession: false });
   });
+
+  it("points a waiting native Codex tab at its conversation, not at a terminal it does not have (#644)", () => {
+    const native = recoveryOffer(null, { asks: 0, native: true });
+    expect(native).toMatchObject({ title: "Waiting for input", message: "Review the conversation above, then send a message or stop the session." });
+    expect(native.message).not.toMatch(/terminal/i);
+    // A tab whose agent runs in its terminal is told to look there, as before.
+    expect(recoveryOffer(null, { asks: 0 }).message).toBe("Check the terminal for a pending decision, or stop the session.");
+    // A request, or a known recovery, says the same on either.
+    expect(recoveryOffer(null, { asks: 1, native: true }).message).toBe("Review the pending request to continue.");
+    expect(recoveryOffer("signed_out", { asks: 0, native: true }).message).toBe(recoveryOffer("signed_out", { asks: 0 }).message);
+  });
 });

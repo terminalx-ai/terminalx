@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
+import type { AgentTabInfo } from "@terminalx/portable/workspace";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 import { page as browserPage } from "@/test/tabsBackend";
@@ -238,6 +239,25 @@ describe("the chat / terminal switch on a local agent tab", () => {
     expect(guard.calls.map((call) => call.command)).toContain("ensure_tab_started");
     expect(screen.queryByTestId("cloud-agent-terminal")).toBeNull();
     expect(runtime.sent).toEqual([]);
+  });
+
+  it("still shows a failed switch with the agent's recovery text, never a raw error and never as a cloud refusal (#644)", async () => {
+    guard.strict = false;
+    guard.local = () => null;
+    guard.handlers.tab_handoff = () => {
+      throw new Error("raw backend failure: /Users/me/api/.secret");
+    };
+    const local: SessionEntry = {
+      id: "local-2", projectPath: "/Users/me/api", cwd: "/Users/me/api", branch: "main", title: "Local work", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
+      tabs: [{ id: "lt-2", harness: "opencode", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "" }],
+    };
+    upsertSession(local);
+    selectSessionTab("local-2", { kind: "agent", id: "lt-2" });
+    render(wrap(<SessionView session={local} sidebarOpen onToggleSidebar={() => undefined} />));
+    fireEvent.click(await screen.findByRole("button", { name: "Show terminal view" }));
+    await waitFor(() => expect(within(screen.getByTestId("composer")).queryByRole("note")?.textContent).toBe("The agent encountered an error. Review the conversation before continuing."));
+    expect(screen.queryByTestId("terminal-view-refused")).toBeNull();
+    expect(screen.queryByText(/raw backend failure/)).toBeNull();
   });
 });
 
@@ -1113,5 +1133,83 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     act(() => xterm.type("hello"));
     await waitFor(() => expect(runtime.typed).toEqual(["hello"]));
     expect(runtime.methods("pty.control")).toHaveLength(1);
+  });
+});
+
+describe("#644 on a cloud agent tab", () => {
+  const scope = { sessionId: "s-1", tabId: "t-1", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
+  const lifecycle = (evidence: Record<string, unknown>, fields: Record<string, unknown> = {}) =>
+    ev({ type: "context_compaction_lifecycle", persisted: true, ...fields, evidence: { scope, generation: 1, ...evidence } } as Payload);
+  /** A native Codex tab: no terminal until it moves to one. */
+  const native = (fields: Partial<AgentTabInfo> = {}) => {
+    runtime.tabs = [agentTab({ harness: "codex", transport: "experimentalCodexStdio", ...fields })];
+    runtime.sessions[0]!.tabs[0] = { ...runtime.sessions[0]!.tabs[0]!, harness: "codex" };
+  };
+  const composerNote = () => within(screen.getByTestId("composer")).queryByRole("note")?.textContent ?? null;
+
+  it("shows a compaction as running once the tab's feed caught up, unknown while the connection is down, and done once it ended", async () => {
+    runtime.events = [
+      ev({ type: "user_message", text: "/compact", queued: false }),
+      lifecycle({ type: "connection_opened" }),
+      lifecycle({ type: "item_started", turnId: "turn", itemId: "item" }, { confirmedStart: true }),
+    ];
+    await open();
+    expect(await screen.findByText("Compacting context…")).toBeTruthy();
+    expect(screen.queryByText(/Compaction status unknown/)).toBeNull();
+    // The connection drops: how the compaction ends would not be heard here.
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
+    expect(await screen.findByText(/Compaction status unknown/)).toBeTruthy();
+    expect(screen.queryByText("Compacting context…")).toBeNull();
+    // Back: once the feed caught up again, it is still running.
+    await act(async () => runtime.connect());
+    expect(await screen.findByText("Compacting context…")).toBeTruthy();
+    // It ended while the connection was down again: the replay says so.
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
+    runtime.events.push(lifecycle({ type: "item_completed", turnId: "turn", itemId: "item" }), lifecycle({ type: "turn_ended", turnId: "turn", outcome: "completed" }));
+    await act(async () => runtime.connect());
+    expect(await screen.findByText(/Context compacted/)).toBeTruthy();
+    expect(screen.queryByText("Compacting context…")).toBeNull();
+    expect(screen.queryByText(/Compaction status unknown/)).toBeNull();
+  });
+
+  it("says why the runtime refused a native Codex tab's move to its terminal, in its own words", async () => {
+    native();
+    runtime.toTerminalRefusal = { code: "conflict", message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." };
+    await open();
+    showTerminal();
+    const refused = await screen.findByTestId("terminal-view-refused");
+    expect(refused.textContent).toBe("The terminal view did not open: Wait for Codex to finish this turn, or interrupt it, before opening its terminal.");
+    expect(runtime.params("session.toTerminal")).toEqual([expect.objectContaining({ sessionId: "s-1", tabId: "t-1" })]);
+    // Never the recovery text a local agent's failure is shown with, and the tab stays in its chat.
+    expect(screen.queryByText(/encountered an error/)).toBeNull();
+    expect(composerNote()).toBeNull();
+    expect(screen.queryByTestId("cloud-agent-terminal")).toBeNull();
+    fireEvent.click(within(refused).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("terminal-view-refused")).toBeNull();
+  });
+
+  it("shows that refusal even while the composer says someone else is driving the tab", async () => {
+    native();
+    shared("driver", [{ holderId: "u-alice" }]);
+    runtime.toTerminalRefusal = { code: "lease_held", message: "someone else is driving this tab" };
+    await open(() => runtime.connect("participate"));
+    await waitFor(() => expect(composerNote()).toBe("Alice is driving this tab. You can send once they release it."));
+    showTerminal();
+    expect((await screen.findByTestId("terminal-view-refused")).textContent).toBe("The terminal view did not open: someone else is driving this tab.");
+    expect(composerNote()).toBe("Alice is driving this tab. You can send once they release it.");
+  });
+
+  it("never tells a waiting native Codex tab to check a terminal it does not have", async () => {
+    native({ status: "waiting" });
+    await open();
+    expect(await screen.findByText("Review the conversation above, then send a message or stop the session.")).toBeTruthy();
+    expect(screen.getByText("Waiting for input")).toBeTruthy();
+    expect(screen.queryByText(/Check the terminal/)).toBeNull();
+  });
+
+  it("still tells a waiting tab whose agent runs in its terminal to check it", async () => {
+    runtime.tabs = [agentTab({ harness: "codex", status: "waiting" })];
+    await open();
+    expect(await screen.findByText("Check the terminal for a pending decision, or stop the session.")).toBeTruthy();
   });
 });

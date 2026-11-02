@@ -57,7 +57,7 @@ export interface RecoveryOffer {
   continueInNewSession: boolean;
 }
 
-export function recoveryOffer(kind: RecoveryKind | null, { asks, limitReset = false, canResend = false, canSendContinue = false, canSignIn = false }: {
+export function recoveryOffer(kind: RecoveryKind | null, { asks, limitReset = false, canResend = false, canSendContinue = false, canSignIn = false, native = false }: {
   /** Requests waiting for an answer: the banner then only says so, and nothing else answers them by accident. */
   asks: number;
   /** A usage limit whose window has reset. */
@@ -65,11 +65,14 @@ export function recoveryOffer(kind: RecoveryKind | null, { asks, limitReset = fa
   canResend?: boolean;
   canSendContinue?: boolean;
   canSignIn?: boolean;
+  /** A native Codex tab (#644): it has no terminal until it is moved to one, so nothing points there. */
+  native?: boolean;
 }): RecoveryOffer {
   const open = asks === 0;
   return {
     title: asks ? "Waiting for input" : kind === "usage_limit" ? "Usage limit reached" : kind === "signed_out" ? "Signed out" : kind === "unsent" ? "Prompt not received" : kind ? "Needs attention" : "Waiting for input",
-    message: kind ? RECOVERY_MESSAGES[kind] : asks ? "Review the pending request to continue." : "Check the terminal for a pending decision, or stop the session.",
+    message: kind ? RECOVERY_MESSAGES[kind] : asks ? "Review the pending request to continue."
+      : native ? "Review the conversation above, then send a message or stop the session." : "Check the terminal for a pending decision, or stop the session.",
     signIn: kind === "signed_out" && canSignIn && open,
     resend: kind === "unsent" && canResend && open,
     retry: kind && kind !== "usage_limit" && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && kind !== "unsent" && open

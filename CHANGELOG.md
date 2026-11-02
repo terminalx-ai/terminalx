@@ -101,6 +101,25 @@
   `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
   readable. (#717)
 
+### Cloud workspaces
+
+- Show a compaction in a cloud workspace's agent tab as **Compacting
+  context…** while it runs, then **Context compacted**. The tab said
+  "Compaction status unknown" the whole time, even while connected. A tab
+  counts as caught up once its live connection has replayed the workspace's
+  saved history; while that connection is down or reconnecting, a compaction
+  still shows as unknown, never as running or done. (#644)
+- Say why a native Codex tab in a cloud workspace did not move to its terminal.
+  The workspace's own reason (a turn still running, someone else driving the
+  tab, no right to type in it) shows above the chat, with Dismiss, also when
+  the composer already says why it is off. It used to say "The agent
+  encountered an error", or nothing at all while someone else drove the tab.
+  Local tabs are unchanged. (#644)
+- A waiting native Codex tab no longer says to check the terminal, which it
+  does not have until it moves there: it points to the conversation above, to
+  send a message or stop the session. Tabs whose agent runs in a terminal are
+  unchanged. (#644)
+
 ### Background sessions
 
 - Never hold a send behind slow work. Merged-workspace cleanup, Settings →

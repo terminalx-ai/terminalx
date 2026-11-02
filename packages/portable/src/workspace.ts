@@ -494,6 +494,12 @@ export interface SessionSubscribeOptions {
   /** The cursor after each event or replay, to keep for the next subscription. */
   onCursor?(cursor: string | undefined): void;
   onStatus?(change: AgentTabStatusChange): void;
+  /**
+   * The runtime's replay was handed to `onEvent`: everything its history
+   * holds after the cursor is here now. Again after each resume (a
+   * reconnect, a new runtime generation).
+   */
+  onReplayed?(): void;
 }
 
 /** A terminal as `pty.create`, `pty.list` and `pty.attach` describe it. */
@@ -964,6 +970,7 @@ export class WorkspaceRpcClient {
       onReplay: (result) => {
         for (const entry of (result.events as { cursor: string; event: unknown }[] | undefined) ?? []) onEvent(entry.event);
         if (typeof result.cursor === "string") moved(result.cursor);
+        options.onReplayed?.();
       },
       listener: (notification) => {
         if (notification.event === "session.status") {

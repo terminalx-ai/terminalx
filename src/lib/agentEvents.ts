@@ -27,7 +27,11 @@ export interface StreamBlock {
 
 export interface TabLog {
   loaded: boolean;
-  /** True only after a manager history read reconciled current ownership. */
+  /**
+   * True only after a manager history read reconciled current ownership, or,
+   * for a cloud tab, while a live feed that caught up from its runtime's own
+   * history holds (`setFeedContinuity`).
+   */
   compactionContinuityKnown?: boolean;
   events: AgentEvent[];
   stream: StreamBlock[];
@@ -40,6 +44,8 @@ const EMPTY: TabLog = { loaded: false, events: [], stream: [], status: "idle", v
 // A read must match both the cache incarnation and its invalidation generation.
 interface StoredLog extends TabLog {
   readonly admission: { generation: number };
+  /** A cloud tab's live feed, not a history read, says whether continuity is known. */
+  fed?: boolean;
 }
 const logs = new Map<string, StoredLog>();
 const listeners = new Map<string, Set<() => void>>();
@@ -195,6 +201,23 @@ export function getTabLog(sessionId: string, tabId: string): TabLog {
   return logs.get(key(sessionId, tabId)) ?? EMPTY;
 }
 
+/**
+ * Whether a cloud tab's log is continuous with its runtime's own history
+ * (#644): true while a live feed that caught up from that history over a
+ * connected attachment holds, false from when it drops or attaches again.
+ * `cloudAgents` keeps it; a local resume's history read neither sets nor
+ * clears it.
+ */
+export function setFeedContinuity(sessionId: string, tabId: string, known: boolean) {
+  const k = key(sessionId, tabId);
+  const log = known ? getLog(k) : logs.get(k);
+  if (!log) return;
+  log.fed = true;
+  if ((log.compactionContinuityKnown ?? false) === known) return;
+  log.compactionContinuityKnown = known;
+  touch(k, true);
+}
+
 /** Indicators the runtime never saves; their seq may be reused after it restarts. */
 function transient(ev: AgentEvent) {
   return ev.payload.type === "usage_update" || ev.payload.type === "model_request_started"
@@ -286,7 +309,8 @@ export async function reconcileAgentEvents() {
   reconciling = true;
   for (const [k, log] of logs) {
     log.admission.generation++;
-    log.compactionContinuityKnown = false;
+    // A cloud tab's feed follows its own connection, which this read cannot restore.
+    if (!log.fed) log.compactionContinuityKnown = false;
     dirty.add(k);
   }
   // A frame requested before suspension need not be delivered on resume.
