@@ -282,9 +282,9 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
         let world = self.world();
-        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work }))
+        Ok((world.conflict || required).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work }))
     }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let mut resolver = session("resolver", None);
@@ -889,6 +889,8 @@ fn a_person_pressing_merge_cannot_merge_what_the_gate_refuses() {
 fn conflicts_and_branch_protection_stop_it_and_github_refusing_is_reported_in_its_words() {
     let run = Run::start(&github_issue(), true);
     run.to_review();
+    // Conflicts are left to a person.
+    set_resolve_conflicts(&run.host, &run.id, false).unwrap();
     {
         let mut world = run.host.world();
         let pr = world.pr.as_mut().unwrap();
@@ -2299,6 +2301,33 @@ fn a_resolution_limit_dirty_checkout_and_remote_writer_stop_without_push() {
 }
 
 #[test]
+fn a_conflict_github_finds_and_git_does_not_is_resolved_not_left_to_a_person() {
+    // Criss-crossed history (#748): GitHub merges from one of two merge
+    // bases and finds a conflict, git merges the two bases first and none.
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    conflict(&run);
+    assert!(!run.host.world().conflict);
+    let resolving = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((resolving.stage, resolving.reason, resolving.resolutions), (Stage::Resolve, None, 1));
+    assert_eq!(resolving.resolution.as_ref().map(|resolution| resolution.base_commit.as_str()), Some(BASE));
+    assert_eq!(run.host.prompts_to("resolver").len(), 1);
+    // Its merge completes without a conflict, and leaves GitHub one merge base.
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.mergeable = "MERGEABLE".into();
+        pr.merge_state = "CLEAN".into();
+    }
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Merged the base; git found no conflicts.")));
+    assert_eq!(run.host.world().pushes, [C1, C2]);
+    assert_eq!(run.pipeline().stage, Stage::Review);
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Merged);
+    assert_eq!(run.merges()[0].1, C2);
+}
+
+#[test]
 fn conflicts_are_watched_before_a_pull_request_exists() {
     let run = Run::start(&github_issue(), false);
     set_resolve_conflicts(&run.host, &run.id, true).unwrap();
@@ -2996,6 +3025,7 @@ fn a_pull_request_that_could_not_be_opened_is_working_once_its_author_is_answere
 fn conflicts_answered_by_a_person_are_left_to_the_authors_turn_not_put_back_by_the_poller() {
     let run = Run::start(&github_issue(), false);
     run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, false).unwrap();
     let conflicting = |conflict: bool| {
         let mut world = run.host.world();
         let pr = world.pr.as_mut().unwrap();
@@ -3065,6 +3095,7 @@ fn an_answered_turn_cut_short_or_lost_to_a_restart_is_a_persons_again() {
     // At the merge stage too, where a working pipeline is otherwise the poller's.
     let run = Run::start(&github_issue(), false);
     run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, false).unwrap();
     conflict(&run);
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
     run.answer();
@@ -3076,6 +3107,7 @@ fn an_answered_turn_cut_short_or_lost_to_a_restart_is_a_persons_again() {
     // A cloud workspace's runtime that restarts during the answered turn says so when it wakes.
     let run = Run::start_in(cloud_host(&github_issue()), false);
     run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, false).unwrap();
     conflict(&run);
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).reason, Some(StopReason::Conflicts));
     run.answer();

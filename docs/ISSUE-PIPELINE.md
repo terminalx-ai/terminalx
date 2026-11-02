@@ -33,10 +33,15 @@ supplies the same explicit status-block handoff as issue work.
 ## Conflict resolution
 
 Opt-in pipelines are checked every 30 seconds, including before a PR exists.
-The watcher fetches origin and uses `git merge-tree` without modifying the
-checkout. With a PR, GitHub's `CONFLICTING`, `DIRTY`, or required-up-to-date
-`BEHIND` state triggers the comparison. It does nothing while an author or
-reviewer has an active or queued turn. Dirty workspaces stop for a person.
+The watcher fetches origin. Before a PR exists, `git merge-tree` decides,
+without modifying the checkout. With a PR, GitHub's `CONFLICTING`, `DIRTY`, or
+required-up-to-date `BEHIND` state decides, even where `git merge-tree` merges
+cleanly: with criss-crossed history (two merge bases) git merges the bases
+first and GitHub does not, so GitHub can see a conflict git does not. The
+resolver's merge then completes without conflicts and leaves one merge base.
+Nothing is resolved once the branch already contains its base. The watcher
+does nothing while an author or reviewer has an active or queued turn. Dirty
+workspaces stop for a person.
 
 A fresh resolver conversation reserves the checkout. App prompt admission and
 managed agents' tool hooks refuse another conversation while it is reserved.
