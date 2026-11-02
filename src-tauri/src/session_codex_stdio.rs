@@ -477,6 +477,7 @@ impl SessionManager {
         rt.stdio_writer = None;
         rt.stdio_authority = None;
         if let Engine::CodexStdio(engine) = &mut rt.engine { engine.fail(); }
+        self.codex_stdio_unfinished(rt);
         self.cancel_asks(rt);
         self.codex_stdio_loss(rt, CompactionLoss::Disconnected);
         if let Some((_, receipt)) = rt.stdio_receipt.take() {
@@ -503,6 +504,14 @@ impl SessionManager {
                 self.needs_recovery(rt, RecoveryKind::Disconnected);
             }
         }
+    }
+
+    /// What Codex streamed of a reply it never finished stays in the chat when
+    /// the connection, not Codex, ends its turn. The reader already saw it
+    /// arrive, so it is only recorded: it changes no status.
+    fn codex_stdio_unfinished(&self, rt: &mut TabRuntime) {
+        let Engine::CodexStdio(engine) = &mut rt.engine else { return };
+        for payload in engine.unfinished() { self.publish(rt, payload, None); }
     }
 
     fn codex_stdio_loss(&self, rt: &mut TabRuntime, reason: CompactionLoss) {
@@ -697,6 +706,7 @@ impl Sink for StdioSink {
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
         let starting = matches!(&rt.engine, Engine::CodexStdio(e) if !e.ready);
         rt.stdio_compaction = None;
+        self.manager.codex_stdio_unfinished(&mut rt);
         // Reader drain is not process-group extinction. Keep the engine and
         // exact child/PID even on spontaneous exit, until Stop confirms both.
         self.manager.cancel_asks(&mut rt);
