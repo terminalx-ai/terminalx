@@ -72,6 +72,7 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+semver = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.15"

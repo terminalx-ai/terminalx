@@ -44,6 +44,11 @@ impl Terminals {
         self.0.quick("runtime.pty.visibleShells", json!({}))
     }
 
+    /// Every session's shells, tab-held ones too, as every runtime lists them.
+    pub fn all_shells(&self) -> Result<Vec<crate::pty::ShellPane>> {
+        self.0.quick("runtime.pty.shells", json!({}))
+    }
+
     pub fn busy(&self, ids: &[String]) -> Result<Vec<String>> {
         self.0.quick("runtime.pty.busyMany", json!({"ids":ids}))
     }

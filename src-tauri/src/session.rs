@@ -44,6 +44,8 @@ use crate::{git, pty, store};
 pub mod follow;
 #[path = "session_unsent.rs"]
 mod unsent;
+#[path = "session_retire.rs"]
+pub(crate) mod retire;
 
 #[derive(Clone)]
 pub struct PendingAsk {

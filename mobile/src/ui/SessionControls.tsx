@@ -6,6 +6,7 @@ import type { AgentEvent } from "@terminalx/portable/events";
 import type { NewTabSettings, TabControls } from "../data/host-api";
 import { continueHere, continueInNewTab, recoveryState, retrySafely, settingsView } from "../data/session-controls";
 import { useApp } from "../state/AppProvider";
+import { useHostFeatures } from "../state/host-features";
 import { Button, Card } from "./primitives";
 import { useTheme } from "./theme";
 
@@ -27,7 +28,8 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
 }) {
   const app = useApp();
   const { palette } = useTheme();
-  const [supported, setSupported] = useState(false);
+  // Named by the Mac only while its runtime serves them (#730).
+  const supported = useHostFeatures(app.api, app.activeHost?.id)?.sessionControls === 1;
   const [tab, setTab] = useState<TabControls | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [working, setWorking] = useState(false);
@@ -35,12 +37,6 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   const [picker, setPicker] = useState<{ title: string; choices: Choice[] } | null>(null);
   const [continuing, setContinuing] = useState(false);
 
-  useEffect(() => {
-    if (!connected) return;
-    let active = true;
-    void app.api.sessionControls().then((value) => { if (active) setSupported(value); }).catch(() => undefined);
-    return () => { active = false; };
-  }, [app.api, connected]);
   const refresh = useCallback(async () => {
     const next = await app.api.tabControls(sessionId, tabId).catch(() => null);
     setTab(next);

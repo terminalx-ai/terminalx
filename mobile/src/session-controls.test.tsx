@@ -50,8 +50,10 @@ beforeEach(() => {
   openTab.mockClear();
   mocks.app = {
     refreshSessions: vi.fn(async () => {}),
+    activeHost: { id: "mac" },
     api: {
-      sessionControls: vi.fn(async () => true),
+      features: vi.fn(async () => ({ sessionControls: 1 })),
+      onFeaturesChanged: () => () => {},
       tabControls: vi.fn(async () => ({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", status: "idle" })),
       models: vi.fn(async () => models),
       stop: vi.fn(async () => ({ done: true })),
@@ -71,7 +73,7 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 
 describe("session controls on the phone", () => {
   it("offers nothing on a Mac without them", async () => {
-    mocks.app.api.sessionControls.mockResolvedValue(false);
+    mocks.app.api.features.mockResolvedValue({});
     await render();
     expect(container.textContent).toBe("");
   });
