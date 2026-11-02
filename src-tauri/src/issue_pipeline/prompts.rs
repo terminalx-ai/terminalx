@@ -55,6 +55,25 @@ pub fn resolver_ended(why: &str) -> String {
     )
 }
 
+/// To a conflict resolver whose turn ended without its report, with nothing
+/// it started still running to wake it for another.
+pub fn resolver_reminder() -> String {
+    format!(
+        "Your last reply did not end with the `{STATUS_FENCE}` block, and nothing you started is still running, so TerminalX cannot tell whether the conflict is resolved. If the merge is not committed yet, or the project's checks have not finished, finish them now. Then end your reply with the block:\n\n\
+```{STATUS_FENCE}\n{{\"status\": \"done\", \"checks\": \"passed\", \"summary\": \"...\"}}\n```\n\n\
+Use \"status\": \"blocked\" with a specific \"reason\" if you cannot finish. Another reply without the block is taken as a resolution that did not work."
+    )
+}
+
+/// To a conflict resolver that has waited on work it started for as long as
+/// TerminalX waits: its report now, on what it has.
+pub fn resolver_deadline(minutes: u32) -> String {
+    format!(
+        "You have been waiting on work you started for {minutes} minutes, which is as long as TerminalX waits for your report on this conflict resolution. Report now on what you have, and do not end this turn to wait again. If the merge is committed and the project's checks passed, report done. If the checks have not finished or did not pass, stop them and report blocked with the reason. Leave the merge as it is: TerminalX handles one left unfinished.\n\n\
+```{STATUS_FENCE}\n{{\"status\": \"done\", \"checks\": \"passed\", \"summary\": \"...\"}}\n```"
+    )
+}
+
 pub fn author_reminder() -> String {
     format!(
         "Your last reply did not end with the `{STATUS_FENCE}` block, so TerminalX cannot tell whether the work is done. Reply with the block and nothing else:\n\n\
@@ -281,6 +300,9 @@ mod tests {
         // What a session copies from its instructions must parse as a report.
         assert_eq!(author_report(&author_brief()), AuthorReport::Done { checks: LocalChecks::Passed, summary: Some("One or two sentences on what changed and why.".into()) });
         assert!(matches!(author_report(&author_reminder()), AuthorReport::Done { .. }));
+        for prompt in [resolver_reminder(), resolver_deadline(30)] {
+            assert!(matches!(author_report(&prompt), AuthorReport::Done { checks: LocalChecks::Passed, .. }), "{prompt}");
+        }
         let request = ReviewRequest { issue: Some(&github()), issue_body: None, pr_number: 7, pr_url: "https://github.com/acme/widgets/pull/7", commit: "abc1234def", base: "origin/main", security_areas: &[] };
         for prompt in [review(&request), review_again(&request, Some("0001111222")), reviewer_reminder("abc1234def", "it had no verdict block."), reviewer_deadline("abc1234def", 20)] {
             let verdict = read_review(&prompt, 1, "now").unwrap();
@@ -309,7 +331,7 @@ mod tests {
 
     #[test]
     fn the_resolver_commits_its_merge_before_any_check_and_amends_fixes_into_it() {
-        let resolution = crate::issue_pipeline::Resolution { head: "1111111111aa".into(), remote_head: None, base: "main".into(), base_commit: "2222222222bb".into(), return_stage: crate::issue_pipeline::Stage::Work };
+        let resolution = crate::issue_pipeline::Resolution { head: "1111111111aa".into(), remote_head: None, base: "main".into(), base_commit: "2222222222bb".into(), return_stage: crate::issue_pipeline::Stage::Work, waiting_since: None };
         let prompt = resolve(&resolution);
         assert!(prompt.contains("The original head is 1111111111aa. The base main is pinned to 2222222222bb."));
         // `--no-ff` stays: verification wants exactly one commit with both parents.

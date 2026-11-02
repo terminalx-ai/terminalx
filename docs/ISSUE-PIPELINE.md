@@ -53,6 +53,18 @@ failed check, ambiguous resolution, or exhausted `maxResolutions` stops at
 heads invalidate verification. A restart discards an unfinished
 resolution/check result and asks for inspection before continuing.
 
+A resolver is judged on its report, not on the first turn it ends. A turn
+that ends without the status block while the resolver's tab still has work
+it started running (a background command, monitor or agent it has not heard
+back from, a wakeup, a process it left behind; its own checks, most often) is
+not its report: the checkout stays reserved, a `resolutionPending` line says
+what it is waiting on, and the turn that work wakes is the one listened to.
+It is waited for up to 30 minutes from the first such turn; then, once it
+sits idle, it is asked once for its report on what it has. A turn that ends
+without the block with nothing left running gets the same single reminder
+the author and the reviewer get. A second turn without it is a resolution
+that did not work.
+
 A resolver whose turn ends with nothing pushed may still have left its merge
 unfinished: `MERGE_HEAD` set, and every file the base brought in uncommitted.
 When the checkout holds exactly the merge the pipeline asked for (HEAD at the
@@ -60,8 +72,9 @@ original head, the pinned base the only commit being merged), TerminalX runs
 `git merge --abort` under checkout admission and records a `mergeAborted`
 line. It leaves the merge as it is, with a `mergeLeft` line saying why, when a
 person interrupted the resolver or stopped the pipeline (the checkout is then
-theirs to inspect), when another conversation is at work in the checkout, when
-the merge is not the one the pipeline asked for, or when Git refuses the abort
+theirs to inspect), when another conversation is at work in the checkout,
+while the resolver is still waiting on work it left running, when the merge
+is not the one the pipeline asked for, or when Git refuses the abort
 because it would lose an edit it cannot put back. An agent that ended on its
 own is not a person's doing, and its merge is aborted.
 
@@ -71,6 +84,13 @@ pipeline ends, the resolver is told to stop at once, without committing,
 pushing or undoing anything itself, and its unfinished merge is aborted when
 that turn ends. A resolver found idle with the checkout still reserved has it
 aborted there and then.
+
+Carrying a pipeline on from a resolution that did not work (**Inspect
+resolution**) compares the checkout's head with the base as it is now before
+anything is pushed: the resolution may have sat for hours while the base
+moved on. A head that no longer merges cleanly is resolved again (with the
+switch off, it stops at **Needs you** for the conflicts) instead of being
+pushed for a review the merge gate would refuse.
 
 In the desktop app the Changes panel says when a merge is in progress in a
 local checkout: what is being merged, and the uncommitted files split into
@@ -260,8 +280,10 @@ A conflict resolver part way through its merge is told to stop at once when
 the pull request was merged or closed, and its unfinished merge is aborted when
 the turn ends (see *Conflict resolution*); after **Stop** it is not told, and
 finishes its turn, leaving the checkout to the person who stopped the
-pipeline. Stop releases the reviewer and the conflict resolver; a
-merge or close releases the author too, but only an idle one: an author in a
+pipeline. One that sits idle waiting on its own checks is stopped with them,
+and the checkout is the person's at once, with its merge as it is. Stop
+releases the reviewer and the conflict resolver; a merge or close releases
+the author too, but only an idle one: an author in a
 turn is someone's own follow-up, and is neither told nor stopped. A reply that
 comes after the end is noted in the record and ignored.
 
@@ -344,6 +366,7 @@ whatever stage the pipeline was, and recorded as such; so is a pull request
 closed without merging. Releasing the conversations at the end is a
 `participantsReleased` line, a reply after it a `lateReply` line, a
 reviewer waiting on its own checks a `reviewPending` line, a conflict
+resolver waiting on work it left running a `resolutionPending` line, a conflict
 resolver's unfinished merge undone a `mergeAborted` line, and one left as it
 is a `mergeLeft` line.
 
