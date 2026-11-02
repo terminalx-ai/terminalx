@@ -257,6 +257,7 @@ impl Rig {
             entered_at: None,
             held: Vec::new(),
             prompts: RecordedPrompts::default(),
+            input: InputBox::default(),
             resend_after_abort: None,
             codex_interrupt_hooks_owed: 0,
             codex_prompt_starts_turn: false,
