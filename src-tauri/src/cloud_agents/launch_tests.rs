@@ -1005,6 +1005,101 @@ fn a_checkout_plan_is_held_to_the_same_rules_as_a_launch() {
     assert!(!root.exists());
 }
 
+/// A Box workspace's layout: the runtime's root is the canonical
+/// `<base>/state/workspace`, and the server names it through a link,
+/// `<base>/var-lib/workspace`, as `/var/lib/terminalx` is a link to
+/// `/srv/terminalx/state` there. Returns the launcher, its root and the
+/// server's spelling of the root.
+#[cfg(unix)]
+fn linked(dir: &Path, remote: &Path, api: Arc<FakeApi>, starter: Arc<FakeStarter>) -> (Launcher, PathBuf, PathBuf) {
+    let base = std::fs::canonicalize(dir).unwrap();
+    let root = base.join("state").join("workspace");
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(base.join("state"), base.join("var-lib")).unwrap();
+    let state = base.join("serve-state");
+    std::fs::create_dir_all(&state).unwrap();
+    let launcher = Launcher {
+        api,
+        starter,
+        checkout: Arc::new(GitCheckout::from_remote(remote.to_str().unwrap())),
+        store: Store::open(&state),
+        incarnation: "incarnation-aaaaaaaaaaaa".into(),
+        root: root.clone(),
+        cancel_poll: CANCEL_POLL,
+    };
+    (launcher, root, base.join("var-lib").join("workspace"))
+}
+
+#[cfg(unix)]
+#[test]
+fn a_checkout_plan_named_through_a_link_to_the_root_is_set_up_in_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let api = FakeApi::new(None);
+    let (launcher, root, named_root) = linked(dir.path(), &remote, api.clone(), Arc::new(FakeStarter::default()));
+    let app = to_clone(&named_root, "app", None);
+    *api.checkout.lock().unwrap() = Some(plan(vec![app.clone()]));
+
+    assert_eq!(launcher.pass().unwrap(), Pass::None);
+    // Cloned in the root itself, on the workspace's branch, with nothing left beside it.
+    let local = root.join("app");
+    assert_eq!(git(&local, &["branch", "--show-current"]), WORK_BRANCH);
+    assert_eq!(git(&local, &["remote", "get-url", "origin"]), format!("{}/acme/app.git", remote.display()));
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    // Reported in the server's own spelling, the only one it accepts.
+    let reports = api.reports.lock().unwrap().clone();
+    assert_eq!(reports, [vec![CheckoutResult { path: app.path.clone(), state: "ready", category: None }]]);
+
+    // Remembered: the next boot leaves it alone and reports nothing new.
+    git(&local, &["switch", "-qc", "my-own-branch"]);
+    assert_eq!(launcher.pass().unwrap(), Pass::None);
+    assert_eq!(git(&local, &["branch", "--show-current"]), "my-own-branch");
+    assert_eq!(api.reports.lock().unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_launch_named_through_a_link_to_the_root_starts_its_agent_in_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let api = FakeApi::new(None);
+    let starter = Arc::new(FakeStarter::default());
+    let (launcher, root, named_root) = linked(dir.path(), &remote, api.clone(), starter.clone());
+    let app = to_clone(&named_root, "app", None);
+    *api.intent.lock().unwrap() = Some(claim(vec![app.clone()]));
+
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    let local = root.join("app");
+    assert_eq!(git(&local, &["branch", "--show-current"]), WORK_BRANCH);
+    // The agent works under the root's spelling, where the workspace's sessions are kept.
+    assert_eq!(starter.starts.lock().unwrap()[0].0, local);
+    // The branch goes back under the server's spelling of the checkout.
+    assert_eq!(api.completions.lock().unwrap()[0].branches[0].path, app.path);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_that_leads_anywhere_but_the_root_is_still_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let api = FakeApi::new(None);
+    let (launcher, root, named_root) = linked(dir.path(), &remote, api.clone(), Arc::new(FakeStarter::default()));
+    let base = named_root.parent().unwrap().parent().unwrap().to_path_buf();
+    // A link to somewhere else, and a link into a folder inside the root.
+    std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(base.join("elsewhere"), base.join("away")).unwrap();
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::os::unix::fs::symlink(root.join("nested"), base.join("deeper")).unwrap();
+    let (away, deeper) = (to_clone(&base.join("away"), "app", None), to_clone(&base.join("deeper"), "lib", None));
+    *api.checkout.lock().unwrap() = Some(plan(vec![away.clone(), deeper.clone()]));
+
+    assert_eq!(launcher.pass().unwrap(), Pass::None);
+    let categories: Vec<_> = api.reports.lock().unwrap()[0].iter().map(|result| (result.path.clone(), result.category.clone())).collect();
+    assert_eq!(categories, [(away.path, Some("payload-invalid".into())), (deeper.path, Some("payload-invalid".into()))]);
+    assert_eq!(std::fs::read_dir(base.join("elsewhere")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(root.join("nested")).unwrap().count(), 0);
+}
+
 #[test]
 fn the_claim_reads_a_checkout_plan_next_to_no_launch() {
     use std::io::{BufRead, BufReader, Read, Write};
