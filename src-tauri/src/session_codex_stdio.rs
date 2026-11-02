@@ -85,12 +85,29 @@ fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud
     NativeLaunch { args, env, unset, model: route.and_then(|route| route.model.clone()), notice: route.and_then(|route| route.notice.clone()) }
 }
 
+/// Whether native Codex runs in a cloud workspace's home of its own: where
+/// `cloud_grants` gives Codex launches the workspace's credential.
+fn in_workspace() -> bool {
+    #[cfg(test)]
+    if tests::cloud_stand_in().is_some() { return true; }
+    crate::cloud_grants::installed().is_some()
+}
+
+/// What `codex --version` says. Codex makes `$CODEX_HOME/tmp/arg0-*` at
+/// every start, this one too, so in a cloud workspace it runs in the native
+/// home the tab will use and the VM user's own `~/.codex` is left as it was
+/// (#705). On a Mac native Codex uses the reader's home anyway.
+fn codex_version(program: &Path) -> Option<String> {
+    let mut probe = std::process::Command::new(program);
+    probe.arg("--version").env("PATH", crate::binpath::login_path());
+    if in_workspace() { probe.env("CODEX_HOME", codex::home::native_root().ok()?); }
+    crate::git::output_within(probe, Duration::from_secs(5)).ok()
+}
+
 /// Whether the installed Codex can serve the app-server connection.
 fn codex_supported() -> bool {
     let Some(program) = crate::binpath::resolve("codex") else { return false };
-    let mut probe = std::process::Command::new(&program);
-    probe.arg("--version").env("PATH", crate::binpath::login_path());
-    crate::git::output_within(probe, Duration::from_secs(5)).is_ok_and(|version| codex::stdio::supported(&version))
+    codex_version(&program).is_some_and(|version| codex::stdio::supported(&version))
 }
 
 impl SessionManager {
@@ -276,9 +293,7 @@ impl SessionManager {
         current()?;
         let program = crate::binpath::resolve("codex").context("Codex is not installed")?;
         current()?;
-        let mut probe = std::process::Command::new(&program);
-        probe.arg("--version").env("PATH", crate::binpath::login_path());
-        let version = crate::git::output_within(probe, Duration::from_secs(5)).map_err(|_| anyhow!("Could not verify experimental Codex stdio version. No prompt was sent."))?;
+        let version = codex_version(&program).context("Could not verify experimental Codex stdio version. No prompt was sent.")?;
         anyhow::ensure!(codex::stdio::supported(&version), "Experimental stdio requires Codex {} or newer (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::MIN_VERSION, version.trim());
         current()?;
         let mut env = vec![

@@ -2006,6 +2006,19 @@ impl SessionManager {
         })
     }
 
+    /// Whether the tab is `waiting` on nothing but a recovery it shows: an
+    /// agent with no terminal (native Codex, ACP, OpenCode) whose turn ended
+    /// on a failure, a refused sign-in say, with its connection still up, no
+    /// turn and no ask. A send goes straight in and clears the recovery, as
+    /// the desktop's own does (#644). A CLI's `waiting` can be its own prompt
+    /// on screen, which nothing is typed into.
+    pub fn waits_only_on_recovery(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return false };
+        let rt = runtime.lock().unwrap();
+        rt.status == TabStatus::Waiting && rt.recovery.is_some() && !rt.turn_open && rt.pending.is_empty() && !rt.stopping
+            && matches!(rt.engine, Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_))
+    }
+
     pub fn running_tabs(&self) -> Vec<RunningTab> {
         let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         runtimes

@@ -19,7 +19,8 @@ fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
-        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch"] {
+        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch",
+        "mailbox-after-refusal", "mailbox-cli-waiting"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -527,10 +528,13 @@ fn a_cloud_launch_takes_the_route_configuration_and_credential_like_a_terminal_o
 }
 
 /// Stands in for Codex in a cloud workspace: records the arguments and the
-/// variables it was started with, starts a thread and plays one turn.
+/// variables it was started with, starts a thread and plays one turn. Like
+/// Codex, it makes `$CODEX_HOME/tmp` at every start, `--version` included,
+/// and it records the home each version probe ran in.
 const CLOUD_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
-if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+[ -n "${CODEX_HOME-}" ] && mkdir -p "$CODEX_HOME/tmp/arg0"
+if [ "$1" = "--version" ]; then printf '%s\n' "${CODEX_HOME-}" >> "$here/probes"; echo "codex-cli 0.166.0"; exit 0; fi
 printf '%s\n' "$@" > "$here/argv"
 printf 'CODEX_HOME=%s\nCODEX_API_KEY=%s\nNODE_ENV=%s\nOPENAI_API_KEY=%s\n' "${CODEX_HOME-}" "${CODEX_API_KEY-}" "${NODE_ENV-}" "${OPENAI_API_KEY-unset}" > "$here/env"
 while read -r line; do
@@ -590,6 +594,11 @@ fn cloud_launch_fixture() {
     let received: Vec<serde_json::Value> = std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
     let started = received.iter().find(|frame| frame["method"] == "thread/start").expect("thread/start");
     assert_eq!(started["params"]["model"], "routed-model", "the route's model, not the tab's");
+    // Both version probes, the first launch's and the launch's own, ran in
+    // the native home: the VM user's own Codex home is left as it was (#705).
+    let probes = std::fs::read_to_string(bin.join("probes")).unwrap();
+    assert_eq!(probes.lines().collect::<Vec<_>>(), [native.to_str().unwrap(); 2]);
+    assert!(!root.join("user-codex").exists(), "Codex made its temporary files in the VM user's home");
 
     // The terminal view: Codex's own terminal resumes the thread, whose rollout
     // the app server kept in the native home.
@@ -614,7 +623,7 @@ const FIRST_LAUNCH_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 printf '%s\n' "$*" >> "$here/launches"
 case "$1" in
-  --version) cat "$here/version"; exit 0 ;;
+  --version) printf '%s\n' "${CODEX_HOME-}" >> "$here/probes"; cat "$here/version"; exit 0 ;;
   --help) printf '%s\n' "Usage: codex [OPTIONS]" "      --no-daemon  Keep this session to itself"; exit 0 ;;
   app-server) exit 0 ;;
 esac
@@ -657,6 +666,9 @@ fn first_launch_fixture(case: &str) {
         assert_eq!(transport, AgentTransport::ExperimentalCodexStdio);
         assert!(matches!(rt.lock().unwrap().engine, Engine::None), "showing the tab starts nothing");
         assert_eq!(launches().lines().collect::<Vec<_>>(), ["--version"]);
+        // On a Mac native Codex runs in the reader's own home, and so does its check.
+        let probes = std::fs::read_to_string(bin.join("probes")).unwrap();
+        assert_eq!(probes.lines().collect::<Vec<_>>(), [root.join("user-codex").to_str().unwrap()]);
         return;
     }
     assert_eq!(transport, AgentTransport::Pty, "{case}: an older Codex runs on the terminal engine");
@@ -671,6 +683,198 @@ fn first_launch_fixture(case: &str) {
     manager.stop("stdio-owner", "tab").unwrap();
 }
 
+/// Stands in for native Codex whose provider refuses its sign-in for a turn:
+/// while a `refuse` file exists, the next turn fails with an `unauthorized`
+/// error, as on a revoked login, and the file goes. An `ask` file makes the
+/// next turn ask to run a command first, and goes too. While a `hold` file
+/// exists, a turn that has started does not end.
+const SIGNED_OUT_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      if [ -f "$here/ask" ]; then
+        rm "$here/ask"
+        printf '{"id":"ask-%s","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","turnId":"turn-%s","itemId":"cmd-%s"}}\n' "$id" "$id" "$id"
+      fi
+      while [ -f "$here/hold" ]; do sleep 0.02; done
+      if [ -f "$here/refuse" ]; then
+        rm "$here/refuse"
+        printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"failed","error":{"message":"unexpected status 401 Unauthorized","codexErrorInfo":"unauthorized"}}}}\n' "$id"
+      else
+        printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-%s","itemId":"m%s","delta":"done"}}\n' "$id" "$id"
+        printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id"
+      fi ;;
+  esac
+done
+"#;
+
+/// The cloud mailbox over the tabs of `root`, as `terminalx-serve` runs it in
+/// a workspace, with a server that leases nothing itself: each command is
+/// handed to [`mailbox_send`] instead.
+fn cloud_agents(manager: &SessionManager, root: &Path, sink: Arc<dyn crate::sink::EventSink>) -> Arc<crate::cloud_agents::CloudAgents> {
+    use crate::cloud_agents::api::{Ack, AckOutcome, CallError, Checkpoint, Leased, MailboxApi, PutOutcome};
+    struct Server;
+    impl MailboxApi for Server {
+        fn lease(&self, _: &str, _: u32) -> Result<Leased, CallError> { Ok(Leased::default()) }
+        fn ack(&self, _: &str, _: &str, _: &Ack) -> Result<AckOutcome, CallError> { Ok(AckOutcome::Settled) }
+        fn put_checkpoint(&self, _: &str, _: &Checkpoint) -> Result<PutOutcome, CallError> { Ok(PutOutcome::Stored) }
+        fn delete_checkpoint(&self, _: &str) -> Result<(), CallError> { Ok(()) }
+    }
+    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: root.to_string_lossy().into_owned() };
+    let identity = crate::cloud_agents::Identity { organization_id: "org".into(), workspace_id: "ws".into() };
+    crate::cloud_agents::CloudAgents::open(&root.join("cloud-agent"), Arc::new(ops), Some(sink), Some((Arc::new(Server), identity)), 1).unwrap()
+}
+
+/// A message sent to the tab from the CLI, a phone or another member, applied
+/// as the mailbox applies a leased one: its outcome and its receipt's body.
+fn mailbox_send(agents: &crate::cloud_agents::CloudAgents, id: &str, text: &str) -> (String, serde_json::Value) {
+    use crate::cloud_agents::{api, crypto};
+    let (key_id, key) = agents.keys.current().unwrap();
+    let aad = crypto::command_aad("org", "ws", "tab", id, "send", &key_id);
+    let (iv, ciphertext) = crypto::seal(&key, json!({ "v": 1, "text": text }).to_string().as_bytes(), &aad).unwrap();
+    let lease = api::Lease {
+        command_id: format!("command-{id}"), client_command_id: id.into(), tab_id: "tab".into(), kind: "send".into(), sequence: 1,
+        key_id: key_id.clone(), iv, ciphertext, actor: api::Actor { user_id: "member".into(), authority: "manage".into(), role: None, can_approve: None },
+        created_at: crate::cloud_agents::now_ms(), redelivery: false, lease_token: format!("token-{id}"), runtime_generation: 1,
+    };
+    let receipt = crate::cloud_agents::mailbox::handle(agents, &lease);
+    let aad = crypto::receipt_aad("org", "ws", id, &receipt.outcome, &key_id);
+    let body = crypto::open(&key, receipt.result_iv.as_deref().unwrap(), receipt.result_ciphertext.as_deref().unwrap(), &aad).unwrap();
+    (receipt.outcome, serde_json::from_slice(&body).unwrap())
+}
+
+/// A message from the cloud mailbox to a tab whose turn failed on a refused
+/// sign-in (#644). A native tab keeps its connection and waits on that
+/// failure, which no turn end will lift: what was queued behind the failed
+/// turn goes once it has ended, and a message sent to the waiting tab goes
+/// straight in, as the desktop's own does. A terminal tab's waiting can be the
+/// CLI's own prompt on screen, so a message still waits for it.
+fn mailbox_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    std::env::set_var("CODEX_HOME", root.join("user-codex"));
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let native = case == "mailbox-after-refusal";
+    std::fs::write(bin.join("codex"), if native { SIGNED_OUT_CODEX } else { FIRST_LAUNCH_CODEX }).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("version"), "codex-cli 0.166.0\n").unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let transport = if native { "experimentalCodexStdio" } else { "pty" };
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":transport, "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let sink: Arc<dyn crate::sink::EventSink> = Arc::new(crate::sink::BroadcastSink::new(256));
+    let manager = SessionManager::new(sink.clone(),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let agents = cloud_agents(&manager, &root, sink);
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let queued = || agents.follow_ups.list("tab").into_iter().map(|follow_up| follow_up.text).collect::<Vec<_>>();
+    if !native {
+        manager.ensure_started("stdio-owner", "tab").unwrap();
+        let until = Instant::now() + WAIT;
+        while !manager.is_running("stdio-owner", "tab") {
+            assert!(Instant::now() < until, "the terminal Codex did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Waiting on a failure with no turn open, as the native tab below is.
+        manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut);
+        assert!(matches!(rt.lock().unwrap().engine, Engine::Cli(_)));
+        assert!(agents.ops.busy("stdio-owner", "tab"));
+        let (outcome, receipt) = mailbox_send(&agents, "c1", "hello");
+        assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(true)));
+        agents.nudge_follow_ups("tab");
+        assert_eq!(agents.dispatch_follow_ups(), 0);
+        assert_eq!(queued(), ["hello"], "nothing is typed into the CLI's own prompt");
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
+    agents.start();
+    let frames = || -> Vec<serde_json::Value> { std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect() };
+    let starts = || frames().iter().filter(|frame| frame["method"] == "turn/start").map(|frame| frame["params"]["input"][0]["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let ended = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
+        .filter_map(|event| match event.payload { Payload::TurnCompleted { status, auth_failed, .. } => Some((status, auth_failed)), _ => None }).collect::<Vec<_>>();
+    let settled = |turns: usize| {
+        let until = Instant::now() + WAIT;
+        while ended().len() < turns || rt.lock().unwrap().turn_open {
+            assert!(Instant::now() < until, "turn {turns} did not end: sent {:?}, queued {:?}, ended {:?}", starts(), queued(), ended());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    const REFUSED: (TurnStatus, bool) = (TurnStatus::Error, true);
+    const ANSWERED: (TurnStatus, bool) = (TurnStatus::Ok, false);
+
+    // A message sent while a turn runs waits for it, and goes when that turn
+    // ends on the refused sign-in.
+    std::fs::write(bin.join("hold"), "").unwrap();
+    std::fs::write(bin.join("refuse"), "").unwrap();
+    assert_eq!(mailbox_send(&agents, "c1", "fix the build").1["queued"], false);
+    let (outcome, receipt) = mailbox_send(&agents, "c2", "sent mid-turn");
+    assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(true)));
+    assert_eq!(queued(), ["sent mid-turn"]);
+    std::fs::remove_file(bin.join("hold")).unwrap();
+    settled(2);
+    assert_eq!(ended(), [REFUSED, ANSWERED]);
+    assert_eq!(starts(), ["fix the build", "sent mid-turn"]);
+    assert!(queued().is_empty());
+
+    // A message sent to a tab already waiting on a refused sign-in goes
+    // straight in, on the same connection, and lifts the recovery.
+    std::fs::write(bin.join("refuse"), "").unwrap();
+    mailbox_send(&agents, "c3", "and the tests");
+    settled(3);
+    {
+        let rt = rt.lock().unwrap();
+        assert_eq!((rt.status, rt.recovery), (TabStatus::Waiting, Some(RecoveryKind::SignedOut)));
+        assert!(matches!(rt.engine, Engine::CodexStdio(_)) && rt.child.is_some(), "the connection stays up");
+    }
+    assert!(!agents.ops.busy("stdio-owner", "tab"));
+    let (outcome, receipt) = mailbox_send(&agents, "c4", "signed in again");
+    assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(false)));
+    assert!(queued().is_empty());
+    settled(4);
+    assert_eq!(ended(), [REFUSED, ANSWERED, REFUSED, ANSWERED]);
+    assert_eq!(starts(), ["fix the build", "sent mid-turn", "and the tests", "signed in again"]);
+    let after = rt.lock().unwrap();
+    assert_eq!((after.status, after.recovery), (TabStatus::Completed, None));
+    drop(after);
+
+    // A turn refused while it waited on an ask leaves the tab waiting, as it
+    // was: what was queued behind it goes all the same.
+    std::fs::write(bin.join("ask"), "").unwrap();
+    std::fs::write(bin.join("hold"), "").unwrap();
+    std::fs::write(bin.join("refuse"), "").unwrap();
+    mailbox_send(&agents, "c5", "run the migration");
+    let until = Instant::now() + WAIT;
+    while rt.lock().unwrap().pending.is_empty() {
+        assert!(Instant::now() < until, "Codex did not ask");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(mailbox_send(&agents, "c6", "then deploy").1["queued"], true);
+    assert_eq!(agents.dispatch_follow_ups(), 0, "not while the turn waits on its ask");
+    assert_eq!(rt.lock().unwrap().status, TabStatus::Waiting);
+    std::fs::remove_file(bin.join("hold")).unwrap();
+    settled(6);
+    assert_eq!(ended()[4..], [REFUSED, ANSWERED]);
+    assert_eq!(starts()[4..], ["run the migration", "then deploy"]);
+    assert!(queued().is_empty());
+    assert_eq!(frames().iter().filter(|frame| frame["method"] == "initialize").count(), 1, "one connection throughout");
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
@@ -679,6 +883,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
+    if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({
