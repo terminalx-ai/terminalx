@@ -184,9 +184,13 @@ pub struct Sweep<'a> {
     pub shown: &'a HashSet<String>,
     /// What only the runtime that owns the agents knows ([`busy`]).
     pub busy: &'a dyn Fn(&SessionEntry) -> Option<Kept>,
-    /// Sessions that take part in a pipeline still waiting on its pull
-    /// request ([`in_open_pipelines`]).
-    pub in_pipelines: &'a HashSet<String>,
+    /// The part of `busy` a prompt changes ([`taken_up`]), asked again under
+    /// admission just before the archiving: quick, since no prompt is
+    /// admitted while it is asked.
+    pub taken_up: &'a dyn Fn(&SessionEntry) -> Option<Kept>,
+    /// Whether an issue pipeline the session takes part in still waits on
+    /// its pull request ([`Pipelines::keep`]). Asked last: it may ask GitHub.
+    pub in_open_pipeline: &'a dyn Fn(&SessionEntry) -> bool,
     /// Whether a session's own worktree holds work nothing else has ([`local_work`]).
     pub local_work: &'a dyn Fn(&SessionEntry) -> bool,
     /// When a session's tab logs were last written, for one with no message time.
@@ -194,7 +198,7 @@ pub struct Sweep<'a> {
 }
 
 /// Why `session` stays in the list, or `None` when it goes to the archive.
-/// What is cheap to know is asked first; the worktree, last.
+/// What is cheap to know is asked first; then the worktree, and GitHub last.
 pub fn kept(session: &SessionEntry, sweep: &Sweep) -> Option<Kept> {
     if session.pinned {
         return Some(Kept::Pinned);
@@ -218,21 +222,22 @@ pub fn kept(session: &SessionEntry, sweep: &Sweep) -> Option<Kept> {
     if let Some(why) = (sweep.busy)(session) {
         return Some(why);
     }
-    if sweep.in_pipelines.contains(&session.id) {
-        return Some(Kept::PipelineOpen);
-    }
     if (sweep.local_work)(session) {
         return Some(Kept::LocalWork);
+    }
+    if (sweep.in_open_pipeline)(session) {
+        return Some(Kept::PipelineOpen);
     }
     None
 }
 
 /// Archive every session [`kept`] lets go. Returns them, archived, after
-/// telling the windows. The look takes no admission: git and the pipelines
-/// are slow, and no prompt may wait on them (#727). The decision does: under
-/// it no prompt is admitted, the runtime is asked again whether a tab took
-/// something up since the look, and each session is looked at again under
-/// the index's lock before it goes, so a message that landed meanwhile keeps it.
+/// telling the windows. The look takes no admission: git, GitHub and the
+/// process table are slow, and no prompt may wait on them (#727). The
+/// decision does: under it no prompt is admitted, the tabs' runtimes are
+/// asked again whether one took something up since the look ([`taken_up`]),
+/// and each session is looked at again under the index's lock before it
+/// goes, so a message that landed meanwhile keeps it.
 pub fn sweep(sink: &dyn EventSink, sweep: &Sweep) -> Result<Vec<SessionEntry>> {
     let sessions = index::load()?;
     let due: Vec<String> = sessions
@@ -254,7 +259,7 @@ pub fn sweep(sink: &dyn EventSink, sweep: &Sweep) -> Result<Vec<SessionEntry>> {
     let due: Vec<String> = sessions
         .iter()
         .filter(|session| due.contains(&session.id))
-        .filter(|session| match (sweep.busy)(session) {
+        .filter(|session| match (sweep.taken_up)(session) {
             Some(why) => {
                 log::trace!("archive: {} kept ({why:?}) since the look", session.id);
                 false
@@ -295,6 +300,21 @@ pub fn sweep(sink: &dyn EventSink, sweep: &Sweep) -> Result<Vec<SessionEntry>> {
 /// running, or a terminal of the session in use. `live_shells` names the
 /// session of each shell that has not exited.
 pub fn busy(manager: &crate::session::SessionManager, session: &SessionEntry, live_shells: &[&str]) -> Option<Kept> {
+    if let Some(why) = taken_up(manager, session) {
+        return Some(why);
+    }
+    // Work a turn left running: a file to read, and the process table.
+    if session.tabs.iter().any(|tab| manager.background_work(&session.id, &tab.id).is_some()) {
+        return Some(Kept::Working);
+    }
+    let terminals = manager.terminals();
+    crate::session_ops::has_shell_in_use(session, live_shells, |pane| terminals.is_running(pane)).then_some(Kept::Working)
+}
+
+/// What a prompt changes of [`busy`]: a tab in a turn, asking, holding a
+/// message, or with a reply nobody has read. Read from the tabs' runtimes
+/// alone, so it is quick enough to ask while holding admission.
+pub fn taken_up(manager: &crate::session::SessionManager, session: &SessionEntry) -> Option<Kept> {
     for tab in &session.tabs {
         let view = manager.wait_view(&session.id, &tab.id);
         if view.asks || view.status == TabStatus::Waiting {
@@ -309,24 +329,60 @@ pub fn busy(manager: &crate::session::SessionManager, session: &SessionEntry, li
         if view.status == TabStatus::Completed {
             return Some(Kept::Unread);
         }
-        if manager.background_work(&session.id, &tab.id).is_some() {
-            return Some(Kept::Working);
-        }
     }
-    let terminals = manager.terminals();
-    crate::session_ops::has_shell_in_use(session, live_shells, |pane| terminals.is_running(pane)).then_some(Kept::Working)
+    None
 }
 
-/// The sessions taking part in an issue pipeline that still waits on its
-/// pull request (`issue_pipeline::engine::waits_on_pull_request`): its
-/// author, reviewer and resolver.
-pub fn in_open_pipelines() -> Result<HashSet<String>> {
-    let mut sessions = HashSet::new();
-    for pipeline in crate::issue_pipeline::store::list()?.iter().filter(|pipeline| crate::issue_pipeline::engine::waits_on_pull_request(pipeline)) {
-        sessions.insert(pipeline.author.session_id.clone());
-        sessions.extend(pipeline.reviewer.iter().chain(pipeline.resolver.iter()).map(|part| part.session_id.clone()));
+/// The issue pipelines that may still wait on their pull request
+/// (`issue_pipeline::engine::waits_on_pull_request`), by the sessions taking
+/// part in them: author, reviewer and resolver.
+pub struct Pipelines {
+    waiting: std::collections::HashMap<String, Vec<Waiting>>,
+}
+
+/// A pipeline as a session waits on it.
+#[derive(Clone)]
+struct Waiting {
+    project_path: String,
+    /// `None` until it opens one: it is at work, which keeps its sessions.
+    pr: Option<crate::issue_pipeline::PrLink>,
+}
+
+impl Pipelines {
+    pub fn load() -> Result<Self> {
+        let mut waiting: std::collections::HashMap<String, Vec<Waiting>> = std::collections::HashMap::new();
+        for pipeline in crate::issue_pipeline::store::list()?.into_iter().filter(crate::issue_pipeline::engine::waits_on_pull_request) {
+            let part = Waiting { project_path: pipeline.project_path.clone(), pr: pipeline.pr.clone() };
+            let parts = std::iter::once(&pipeline.author).chain(pipeline.reviewer.iter()).chain(pipeline.resolver.iter());
+            for session in parts.map(|part| part.session_id.clone()).collect::<HashSet<_>>() {
+                waiting.entry(session).or_default().push(part.clone());
+            }
+        }
+        Ok(Self { waiting })
     }
-    Ok(sessions)
+
+    /// Whether one that `session_id` takes part in still waits: it has not
+    /// opened its pull request yet, or `open` says that one is open. A
+    /// pipeline does not always learn of its pull request's end: one stopped
+    /// is no longer polled, nor one parked on a person for weeks, and that
+    /// pull request may be merged or closed by hand since. So `open` asks
+    /// ([`pull_request_open`]), and only for a session nothing else keeps.
+    pub fn keep(&self, session_id: &str, open: &dyn Fn(&str, &crate::issue_pipeline::PrLink) -> bool) -> bool {
+        self.waiting.get(session_id).is_some_and(|parts| parts.iter().any(|part| part.pr.as_ref().is_none_or(|pr| open(&part.project_path, pr))))
+    }
+}
+
+/// Whether GitHub says a pipeline's pull request is open. Not knowing (no
+/// network, no `gh`, no access) is not finished: it is taken as open.
+pub fn pull_request_open(project_path: &str, pr: &crate::issue_pipeline::PrLink) -> bool {
+    let url = Some(pr.url.as_str()).filter(|url| !url.is_empty());
+    match crate::github::pr_state(Path::new(project_path), pr.number, url) {
+        Ok(state) => state == "OPEN",
+        Err(error) => {
+            log::debug!("archive: whether pull request #{} is open could not be read: {error:#}", pr.number);
+            true
+        }
+    }
 }
 
 /// Whether a session's own worktree holds work nothing else has: changes
@@ -364,7 +420,18 @@ pub fn sweep_owned(manager: &crate::session::SessionManager, sink: &dyn EventSin
     };
     let shells = manager.terminals().shells();
     let live: Vec<&str> = shells.iter().filter(|shell| !shell.exited).map(|shell| shell.session_id.as_str()).collect();
-    let in_pipelines = in_open_pipelines()?;
+    let pipelines = Pipelines::load()?;
+    // Asked once a sweep for each pull request: its author and reviewer share it.
+    let asked = std::cell::RefCell::new(std::collections::HashMap::<(String, u64), bool>::new());
+    let open = |project_path: &str, pr: &crate::issue_pipeline::PrLink| {
+        let key = (project_path.to_string(), pr.number);
+        if let Some(&open) = asked.borrow().get(&key) {
+            return open;
+        }
+        let open = pull_request_open(project_path, pr);
+        asked.borrow_mut().insert(key, open);
+        open
+    };
     sweep(
         sink,
         &Sweep {
@@ -372,7 +439,8 @@ pub fn sweep_owned(manager: &crate::session::SessionManager, sink: &dyn EventSin
             now: Utc::now(),
             shown,
             busy: &|session| busy(manager, session, &live),
-            in_pipelines: &in_pipelines,
+            taken_up: &|session| taken_up(manager, session),
+            in_open_pipeline: &|session| pipelines.keep(&session.id, &open),
             local_work: &local_work,
             logs_written: &|session| logs_written(&session.id),
         },

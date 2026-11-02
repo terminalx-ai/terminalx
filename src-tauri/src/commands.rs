@@ -2009,14 +2009,45 @@ pub fn set_shown_session(window: tauri::Window, session_id: Option<String>) {
     };
 }
 
+/// What the windows show that a reader can see: `window` says of a label
+/// whether that window is visible, or `None` once it is closed. A closed
+/// window is forgotten. A hidden one (the floating window put away) keeps its
+/// session for when it is shown again, but shows it to nobody meanwhile.
+fn shown_in_windows(by_window: &mut BTreeMap<String, String>, window: impl Fn(&str) -> Option<bool>) -> Vec<String> {
+    let mut shown = Vec::new();
+    by_window.retain(|label, session| match window(label) {
+        None => false,
+        Some(visible) => {
+            if visible {
+                shown.push(session.clone());
+            }
+            true
+        }
+    });
+    shown
+}
+
 /// Archive the sessions nobody has written in for the limit in Settings
 /// (#718), in the runtime that knows what each one is doing. `keep`: what the
-/// asking window shows, besides what every window said it shows. Returns
-/// the ids archived.
+/// asking window shows, besides what every window still open and visible
+/// said it shows. Returns the ids archived.
 #[tauri::command]
-pub async fn archive_idle_sessions(state: State<'_, AppState>, keep: Vec<String>) -> CmdResult<Vec<String>> {
+pub async fn archive_idle_sessions(app: AppHandle, state: State<'_, AppState>, keep: Vec<String>) -> CmdResult<Vec<String>> {
     let sessions = state.sessions().map_err(err)?;
-    let mut shown: Vec<String> = SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).values().cloned().collect();
+    // Each window is asked with nothing held: its answer comes from the main
+    // thread, where `set_shown_session` waits for this lock.
+    let labels: Vec<String> = SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).keys().cloned().collect();
+    // Minimized still shows it (macOS says a minimized window is not
+    // visible), and unknown counts as visible: not knowing is not put away.
+    let windows: BTreeMap<String, Option<bool>> = labels
+        .into_iter()
+        .map(|label| {
+            let visible = app.get_webview_window(&label).map(|window| window.is_visible().unwrap_or(true) || window.is_minimized().unwrap_or(false));
+            (label, visible)
+        })
+        .collect();
+    // A window that said what it shows since was there to say it.
+    let mut shown = shown_in_windows(&mut SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), |label| windows.get(label).copied().unwrap_or(Some(true)));
     shown.extend(keep);
     tauri::async_runtime::spawn_blocking(move || {
         let swept: serde_json::Value = sessions.workspace("archiveIdle", serde_json::json!({ "shown": shown })).map_err(err)?;
@@ -3546,6 +3577,22 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    /// The idle sweep spares what a reader can see (#718): not what a closed
+    /// window last showed, nor the floating window's session while it is put away.
+    #[test]
+    fn only_open_visible_windows_keep_their_session_from_the_idle_sweep() {
+        let mut by_window: std::collections::BTreeMap<String, String> =
+            [("main", "a"), ("floating", "b"), ("closed", "c")].into_iter().map(|(label, id)| (label.to_string(), id.to_string())).collect();
+        let windows = |hidden: &'static str| move |label: &str| match label {
+            "closed" => None,
+            label => Some(label != hidden),
+        };
+        assert_eq!(super::shown_in_windows(&mut by_window, windows("floating")), ["a"]);
+        assert_eq!(by_window.keys().collect::<Vec<_>>(), ["floating", "main"], "a closed window is forgotten, a hidden one kept");
+        // Shown again, the floating window's session is spared again.
+        assert_eq!(super::shown_in_windows(&mut by_window, windows("")), ["b", "a"]);
+    }
+
     #[test]
     fn only_the_agree_button_agrees_to_a_cloud_request() {
         use tauri_plugin_dialog::MessageDialogResult;

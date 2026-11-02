@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { confirmDeleteSessions } from "@/lib/deleteSessionFlow";
-import { clearPicked, usePickedSessions } from "@/lib/rowSelection";
+import { clearPicked, keepPicked, usePickedSessions } from "@/lib/rowSelection";
 import { archiveSessions } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
 
@@ -20,6 +20,7 @@ export function SidebarBulkBar({ sessions }: { sessions: SessionEntry[] }) {
   const chosen = sessions.filter((session) => picked.includes(session.id));
   const active = chosen.length > 0;
 
+  useEffect(() => keepPicked(sessions.map((session) => session.id)), [sessions]);
   useEffect(() => {
     if (!active) return;
     const onKey = (event: KeyboardEvent) => {

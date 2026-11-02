@@ -246,6 +246,18 @@ pub fn associated_pr_details(cwd: &Path, number: u64, url: Option<&str>) -> Resu
     Ok(parse_pr(&serde_json::from_str(&out)?))
 }
 
+/// A pull request's state alone (OPEN, MERGED or CLOSED), addressed by its
+/// URL when it has one, else by its number in `cwd`'s repository.
+pub fn pr_state(cwd: &Path, number: u64, url: Option<&str>) -> Result<String> {
+    let (dir, target) = match url {
+        Some(_) => (outside_checkouts(), associated_target(number, url)?),
+        None => (cwd.to_path_buf(), number.to_string()),
+    };
+    let out = run(&dir, &["pr", "view", &target, "--json", "state"])?;
+    let value: Value = serde_json::from_str(&out)?;
+    value["state"].as_str().map(str::to_string).context("GitHub gave no state for the pull request")
+}
+
 pub fn merge_associated_pr(cwd: &Path, number: u64, method: &str, url: Option<&str>) -> Result<()> {
     if url.is_none() { return merge_pr(cwd, number, method); }
     let target = associated_target(number, url)?;

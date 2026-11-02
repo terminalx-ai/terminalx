@@ -50,6 +50,7 @@ struct Facts {
 impl Facts {
     fn kept(&self, session: &SessionEntry, days: i64) -> Option<Kept> {
         let busy = |session: &SessionEntry| self.busy.get(&session.id).copied();
+        let in_open_pipeline = |session: &SessionEntry| self.in_pipelines.contains(&session.id);
         let local_work = |session: &SessionEntry| self.local_work.contains(&session.id);
         let logs_written = |session: &SessionEntry| self.logs_written.get(&session.id).copied();
         kept(session, &Sweep {
@@ -57,7 +58,8 @@ impl Facts {
             now: now(),
             shown: &self.shown,
             busy: &busy,
-            in_pipelines: &self.in_pipelines,
+            taken_up: &busy,
+            in_open_pipeline: &in_open_pipeline,
             local_work: &local_work,
             logs_written: &logs_written,
         })
@@ -147,13 +149,13 @@ fn the_sweep_archives_what_nothing_keeps_and_tells_the_windows() {
     let sink = BroadcastSink::new(16);
     let mut heard = sink.subscribe();
     let shown: HashSet<String> = ["shown".to_string()].into();
-    let none = HashSet::new();
     let archived = sweep(&sink, &Sweep {
         limit: Duration::days(7),
         now,
         shown: &shown,
         busy: &|_| None,
-        in_pipelines: &none,
+        taken_up: &|_| None,
+        in_open_pipeline: &|_| false,
         local_work: &|_| false,
         logs_written: &|_| None,
     })
@@ -175,18 +177,23 @@ fn the_sweep_archives_what_nothing_keeps_and_tells_the_windows() {
 }
 
 /// The look runs without admission (#727), so a tab can take up a message
-/// between it and the decision; the decision asks the runtime again.
+/// between it and the decision; the decision asks the tabs' runtimes again,
+/// and only what a prompt changes, not the slow rest of the look.
 #[test]
 fn a_tab_that_took_something_up_since_the_look_keeps_its_session() {
     let _home = store::temp_home();
     let now = Utc::now();
     index::save(&[session("quiet", Some(10), now)]).unwrap();
     let sink = BroadcastSink::new(16);
-    let asked = std::cell::Cell::new(0);
+    let (looked, asked_again) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
     // Idle when looked at, holding a queued message by the decision.
     let busy = |_: &SessionEntry| {
-        asked.set(asked.get() + 1);
-        (asked.get() > 1).then_some(Kept::Queued)
+        looked.set(looked.get() + 1);
+        None
+    };
+    let taken_up = |_: &SessionEntry| {
+        asked_again.set(asked_again.get() + 1);
+        Some(Kept::Queued)
     };
     let none = HashSet::new();
     let archived = sweep(&sink, &Sweep {
@@ -194,13 +201,14 @@ fn a_tab_that_took_something_up_since_the_look_keeps_its_session() {
         now,
         shown: &none,
         busy: &busy,
-        in_pipelines: &none,
+        taken_up: &taken_up,
+        in_open_pipeline: &|_| false,
         local_work: &|_| false,
         logs_written: &|_| None,
     })
     .unwrap();
     assert!(archived.is_empty());
-    assert_eq!(asked.get(), 2, "asked at the look and again at the decision");
+    assert_eq!((looked.get(), asked_again.get()), (1, 1), "the whole look once, and what a prompt changes again at the decision");
     assert!(!index::get("quiet").unwrap().archived);
 }
 
@@ -384,6 +392,7 @@ fn a_pipeline_keeps_its_sessions_until_its_pull_request_merges_or_closes() {
     };
     for pipeline in [
         pipeline("working", "working", Value::Null, true),
+        pipeline("unopened", "working", Value::Null, false),
         pipeline("ready", "readyToMerge", json!({"kind": "autoMergeOff"}), true),
         pipeline("merged", "merged", Value::Null, true),
         pipeline("closed", "needsYou", json!({"kind": "pullRequestClosed"}), true),
@@ -392,7 +401,30 @@ fn a_pipeline_keeps_its_sessions_until_its_pull_request_merges_or_closes() {
     ] {
         crate::issue_pipeline::store::insert(&pipeline).unwrap();
     }
-    let mut open: Vec<String> = in_open_pipelines().unwrap().into_iter().collect();
-    open.sort();
-    assert_eq!(open, ["ready-author", "ready-reviewer", "stopped-open-author", "stopped-open-reviewer", "working-author", "working-reviewer"]);
+    let pipelines = Pipelines::load().unwrap();
+    let ids = ["working", "unopened", "ready", "merged", "closed", "stopped-open", "stopped-early"]
+        .into_iter()
+        .flat_map(|id| [format!("{id}-author"), format!("{id}-reviewer")]);
+    let kept = |open: bool| {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let open = |project: &str, pr: &crate::issue_pipeline::PrLink| {
+            asked.borrow_mut().push((project.to_string(), pr.number));
+            open
+        };
+        let kept: Vec<String> = ids.clone().filter(|id| pipelines.keep(id, &open)).collect();
+        (kept, asked.into_inner())
+    };
+
+    // Its pull request still open: each that has not merged or closed keeps
+    // its sessions, a stopped one too, and one not opened yet without asking.
+    let (open, asked) = kept(true);
+    assert_eq!(open, ["working-author", "working-reviewer", "unopened-author", "unopened-reviewer", "ready-author", "ready-reviewer", "stopped-open-author", "stopped-open-reviewer"]);
+    assert!(asked.iter().all(|asked| asked == &("/work".to_string(), 7)), "{asked:?}");
+    assert_eq!(asked.len(), 6, "asked for the three with a pull request, for each of their sessions");
+
+    // Merged or closed by hand since: the pipeline was never told, stopped
+    // or parked, and GitHub says so. Only the one at work without one keeps.
+    let (open, _) = kept(false);
+    assert_eq!(open, ["unopened-author", "unopened-reviewer"]);
+    assert!(!pipelines.keep("nobody", &|_, _| true), "a session in no pipeline");
 }

@@ -65,6 +65,18 @@ export function clearPicked() {
 }
 
 /**
+ * Let go of picked sessions that are gone: deleted from a row's menu, by the CLI, by retention or in another window.
+ * Otherwise one gone would keep the list picking, every plain click picking a row instead of opening it, while no bar
+ * shows anything picked. `existing`: every session there is.
+ */
+export function keepPicked(existing: readonly string[]) {
+  const there = new Set(existing);
+  if (anchor && !anchor.every((id) => there.has(id))) anchor = null;
+  const kept = picked.filter((id) => there.has(id));
+  if (kept.length !== picked.length) set(kept);
+}
+
+/**
  * What a click on a row does while picking: with ⌘ or Ctrl it picks or lets go of the row, with Shift it picks a
  * range, and once anything is picked a plain click picks too. True when the click was taken for that; otherwise the
  * row opens its session as usual.

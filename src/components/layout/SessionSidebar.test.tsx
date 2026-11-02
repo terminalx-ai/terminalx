@@ -689,4 +689,21 @@ describe("the archive (#718)", () => {
     expect(mocks.invoke.mock.calls.some(([command]) => command === "delete_session")).toBe(false);
     expect(screen.getByRole("toolbar", { name: "2 conversations selected" })).toBeTruthy();
   });
+
+  it("lets go of a picked conversation once it is gone, so a plain click opens a row again", async () => {
+    await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4))]);
+    mount();
+    act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk a/ }), { metaKey: true }); });
+    expect(screen.getByRole("toolbar", { name: "1 conversation selected" })).toBeTruthy();
+
+    // Deleted from elsewhere: its own menu, the CLI, retention or another window.
+    act(() => store.removeSessions(["a"]));
+    expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
+    expect(selection.getPickedSessions()).toEqual([]);
+    const row = screen.getByRole("button", { name: /^Talk b/ });
+    expect(row.getAttribute("aria-pressed")).toBeNull();
+    act(() => { fireEvent.click(row); });
+    expect(store.getSessions().selectedSessionId).toBe("b");
+    expect(selection.getPickedSessions()).toEqual([]);
+  });
 });
