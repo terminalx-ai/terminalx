@@ -23,6 +23,8 @@ const C1: &str = "1111111111111111111111111111111111111111";
 const C2: &str = "2222222222222222222222222222222222222222";
 const C3: &str = "3333333333333333333333333333333333333333";
 const C4: &str = "4444444444444444444444444444444444444444";
+/// The base commit a conflict resolver is pinned to.
+const BASE: &str = "5555555555555555555555555555555555555555";
 
 type Hook = Box<dyn FnOnce() + Send>;
 
@@ -50,6 +52,10 @@ struct World {
     local_error: bool,
     during_local: Option<Hook>,
     resolution_error: Option<String>,
+    /// Merges TerminalX aborted: `(head, merge_head)`.
+    aborts: Vec<(String, String)>,
+    /// What git says when asked to abort a merge it will not.
+    abort_error: Option<String>,
     reviewer_tabs: bool,
     announced: u32,
     issue_body: Option<String>,
@@ -108,7 +114,7 @@ impl FakeHost {
             now: DateTime::parse_from_rfc3339("2026-10-12T10:00:00Z").unwrap().with_timezone(&Utc),
             sessions: BTreeMap::from([("author".to_string(), session("author", Some(issue)))]),
             settings: IssuePipelineSettings::default(),
-            workspace: Workspace { head: C1.into(), branch: Some("raccoon/433-open-a-pull-request".into()), default_branch: Some("main".into()), dirty: Vec::new(), ahead_of_base: 2 },
+            workspace: Workspace { head: C1.into(), branch: Some("raccoon/433-open-a-pull-request".into()), default_branch: Some("main".into()), dirty: Vec::new(), ahead_of_base: 2, merging: Vec::new() },
             diff: Diff { paths: vec!["src/lib/format.ts".into()], patch: "+++ b/src/lib/format.ts\n+export const pad = (n: number) => String(n).padStart(2);\n".into() },
             pr: None,
             checks: vec![check("build", "success")],
@@ -126,6 +132,8 @@ impl FakeHost {
             local_error: false,
             during_local: None,
             resolution_error: None,
+            aborts: Vec::new(),
+            abort_error: None,
             reviewer_tabs: false,
             announced: 0,
             issue_body: Some("Sessions stop at code.".into()),
@@ -173,6 +181,18 @@ impl FakeHost {
 
     fn stopped_agents(&self) -> Vec<String> {
         self.world().stopped_agents.iter().map(|(who, _)| who.clone()).collect()
+    }
+
+    /// The resolver has run `git merge --no-ff --no-commit` of the pinned base
+    /// and not committed: every file the base brought in is uncommitted.
+    fn half_merge(&self) {
+        let mut world = self.world();
+        world.workspace.merging = vec![BASE.into()];
+        world.workspace.dirty = vec!["CHANGELOG.md".into(), "src/a.rs".into(), "src/b.rs".into()];
+    }
+
+    fn aborts(&self) -> Vec<(String, String)> {
+        self.world().aborts.clone()
     }
 
 }
@@ -264,7 +284,7 @@ impl Host for FakeHost {
 
     fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
         let world = self.world();
-        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: "base-moved".into(), return_stage: Stage::Work }))
+        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work }))
     }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let mut resolver = session("resolver", None);
@@ -277,6 +297,21 @@ impl Host for FakeHost {
         if let Some(error) = &world.resolution_error { bail!("{error}"); }
         if resolution.remote_head != world.pr.as_ref().map(|pr| pr.head_sha.clone()) { bail!("Someone pushed during resolution"); }
         if head == resolution.head { bail!("No merge commit was made"); }
+        Ok(())
+    }
+
+    fn abort_merge(&self, _cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
+        let mut world = self.world();
+        if let Some(error) = world.abort_error.take() {
+            bail!("{error}");
+        }
+        // `unfinished_merge::abort`'s own check.
+        if world.workspace.head != head || world.workspace.merging != [merge_head] {
+            bail!("The checkout no longer holds that merge.");
+        }
+        world.aborts.push((head.into(), merge_head.into()));
+        world.workspace.merging.clear();
+        world.workspace.dirty.clear();
         Ok(())
     }
 
@@ -3051,4 +3086,211 @@ fn an_answered_turn_cut_short_or_lost_to_a_restart_is_a_persons_again() {
     let woke = run.pipeline();
     assert_eq!(woke.state, State::NeedsYou);
     assert!(matches!(&woke.reason, Some(StopReason::SessionStopped { role, detail }) if role == "author" && detail.contains("restarted")), "{:?}", woke.reason);
+}
+
+// ---- a conflict resolver's unfinished merge (#736) ---------------------------
+
+fn resolver_tab() -> SessionRef {
+    SessionRef { session_id: "resolver".into(), tab_id: "t1".into() }
+}
+
+/// A resolver's report that it could not finish.
+fn resolver_blocked(reason: &str) -> String {
+    format!("Stopping.\n\n```terminalx-status\n{{\"status\": \"blocked\", \"checks\": \"none\", \"reason\": \"{reason}\"}}\n```")
+}
+
+/// The pull request conflicts with its base, and the resolver has merged the
+/// pinned base without committing it yet.
+fn resolving(run: &Run) -> Pipeline {
+    run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    run.host.world().conflict = true;
+    conflict(run);
+    let resolving = run.poll();
+    assert_eq!((resolving.stage, resolving.state), (Stage::Resolve, State::Working), "{:?}", resolving.note);
+    run.host.half_merge();
+    resolving
+}
+
+const ABORTED: &str = "Aborted the conflict resolver's unfinished merge of main at 5555555555; the checkout is back at 1111111111.";
+
+#[test]
+fn a_resolver_that_stops_short_of_its_merge_commit_has_its_unfinished_merge_aborted() {
+    let failed = |message: &str| StopReason::Failed { step: "Resolving conflicts".into(), message: message.into() };
+    let checks_failed = "Red.\n\n```terminalx-status\n{\"status\": \"done\", \"checks\": \"failed\", \"summary\": \"cargo test fails\"}\n```".to_string();
+    for (report, reason) in [
+        (resolver_blocked("The remote moved while the checks ran"), failed("The remote moved while the checks ran")),
+        (checks_failed, StopReason::LocalChecksFailed),
+        ("I could not settle the changelog.".to_string(), failed("The resolver ended without a status block.")),
+        // Said done, never committed: not "uncommitted changes in" the base's files.
+        (done("Merged the base."), failed("The resolver reported its merge done without committing it.")),
+    ] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        turn_completed(&run.host, "resolver", "t1", Some(&report));
+        let stopped = run.pipeline();
+        assert_eq!((stopped.state, stopped.reason.clone()), (State::NeedsYou, Some(reason.clone())));
+        assert!(stopped.resolution.is_none(), "the checkout is released");
+        assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())], "{reason:?}");
+        assert!(run.host.world().workspace.merging.is_empty() && run.host.world().workspace.dirty.is_empty());
+        // Said after why it stopped, with the commit it went back to.
+        let kinds = run.kinds();
+        assert_eq!(kinds[kinds.len() - 2..], ["needsYou", "mergeAborted"]);
+        let aborted = stopped.events.last().unwrap();
+        assert_eq!((aborted.message.as_str(), aborted.commit.as_deref()), (ABORTED, Some(C1)));
+        assert_eq!(run.host.world().pushes, [C1], "nothing of the resolution was pushed");
+    }
+}
+
+#[test]
+fn a_merge_the_pipeline_did_not_ask_for_is_left_as_it_is() {
+    for moved in ["head", "merging"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        if moved == "head" {
+            run.host.commit(C2);
+        } else {
+            run.host.world().workspace.merging = vec![C3.into()];
+        }
+        turn_completed(&run.host, "resolver", "t1", Some(&resolver_blocked("Intent is ambiguous")));
+        assert!(run.host.aborts().is_empty(), "{moved}");
+        assert!(!run.host.world().workspace.merging.is_empty());
+        let left = run.pipeline().events.last().unwrap().clone();
+        assert_eq!(left.kind, "mergeLeft");
+        let expected = if moved == "head" { "The checkout is at 2222222222 merging 5555555555" } else { "The checkout is at 1111111111 merging 3333333333" };
+        assert!(left.message.starts_with(expected) && left.message.ends_with("which is not the merge of main at 5555555555 the pipeline asked for. It is left as it is."), "{}", left.message);
+    }
+}
+
+#[test]
+fn a_merge_a_person_may_be_looking_at_or_git_will_not_undo_is_left_as_it_is() {
+    for case in ["interrupted", "stopped", "in use", "refused"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        let report = resolver_blocked("Tests fail");
+        match case {
+            "interrupted" => turn_failed(&run.host, "resolver", "t1", engine::turn_failure(true)),
+            "stopped" => {
+                act(&run.host, &run.id, Action::Stop).unwrap();
+                turn_completed(&run.host, "resolver", "t1", Some(&report));
+            }
+            "in use" => {
+                run.host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+                turn_completed(&run.host, "resolver", "t1", Some(&report));
+            }
+            _ => {
+                run.host.world().abort_error = Some("git merge --abort: error: Entry 'src/a.rs' not uptodate. Cannot merge.".into());
+                turn_completed(&run.host, "resolver", "t1", Some(&report));
+            }
+        }
+        let pipeline = run.pipeline();
+        assert!(run.host.aborts().is_empty(), "{case}");
+        assert_eq!(run.host.world().workspace.merging, [BASE], "{case}");
+        assert!(pipeline.resolution.is_none(), "{case}: its turn is over either way");
+        let left = pipeline.events.iter().rev().find(|event| event.kind == "mergeLeft").unwrap_or_else(|| panic!("{case}: {:?}", run.kinds()));
+        let expected = match case {
+            "interrupted" | "stopped" => "The conflict resolver's merge of main at 5555555555 is unfinished. It is left as it is for you to inspect: commit or abort it from the Changes panel.",
+            "in use" => "The conflict resolver's merge of main at 5555555555 is unfinished, and another conversation is at work in the checkout. It is left as it is.",
+            _ => "The conflict resolver's unfinished merge of main at 5555555555 could not be aborted, so it is left as it is: git merge --abort: error: Entry 'src/a.rs' not uptodate. Cannot merge.",
+        };
+        assert_eq!(left.message, expected, "{case}");
+    }
+}
+
+#[test]
+fn a_resolver_whose_agent_went_mid_merge_has_the_merge_aborted() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    turn_failed(&run.host, "resolver", "t1", engine::turn_failure(false));
+    let stopped = run.pipeline();
+    assert_eq!(stopped.reason, Some(StopReason::SessionStopped { role: "conflict resolver".into(), detail: "Its agent ended before the turn finished.".into() }));
+    assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())]);
+    assert_eq!(stopped.events.last().unwrap().message, ABORTED);
+}
+
+#[test]
+fn a_pull_request_merged_or_closed_while_the_resolver_works_stops_it_at_once_and_its_merge_is_aborted_when_its_turn_ends() {
+    for outcome in ["MERGED", "CLOSED"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        // At work on the checks; the switch turned off since does not stop the watch.
+        run.host.agent(&resolver_tab(), true);
+        set_resolve_conflicts(&run.host, &run.id, false).unwrap();
+        run.host.world().pr.as_mut().unwrap().state = outcome.into();
+        let ended = run.poll();
+        if outcome == "MERGED" {
+            assert_eq!(ended.state, State::Merged);
+        } else {
+            assert_eq!(ended.reason, Some(StopReason::PullRequestClosed));
+        }
+        let told = run.host.prompts_to("resolver");
+        assert_eq!(told.len(), 2, "{outcome}");
+        assert!(told[1].contains("The merge you are resolving can no longer land") && told[1].contains("do not commit, amend, push or abort the merge"), "{}", told[1]);
+        // Never undone under a running turn: the checkout stays reserved for it.
+        assert!(run.host.aborts().is_empty());
+        assert!(ended.resolution.is_some());
+        assert_eq!(ended.releasing, [resolver_tab()]);
+
+        // That turn ends with the notice still waiting for it: reserved until the turn that reads it ends.
+        turn_completed(&run.host, "resolver", "t1", Some("Checking once more."));
+        assert!(run.pipeline().resolution.is_some() && run.host.aborts().is_empty());
+        // It ends idle: its agent stopped, the checkout released, and its merge undone.
+        run.host.agent(&resolver_tab(), false);
+        turn_completed(&run.host, "resolver", "t1", Some("Stopped the checks."));
+        let after = run.pipeline();
+        assert!(after.resolution.is_none() && after.releasing.is_empty());
+        assert_eq!(run.host.stopped_agents(), [key(&resolver_tab())]);
+        assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())]);
+        assert_eq!((after.state, after.reason.clone()), (ended.state, ended.reason.clone()), "it stays as it ended");
+        let kinds = run.kinds();
+        assert_eq!(kinds[kinds.len() - 2..], ["lateReply", "mergeAborted"]);
+        assert!(super::admission::check("author", "t1").is_ok());
+        assert!(run.merges().is_empty());
+    }
+}
+
+#[test]
+fn a_resolver_found_idle_when_its_pull_request_merges_has_its_merge_aborted_at_once() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    // Out of its turn, with the checkout still reserved: that turn's end was never heard.
+    run.host.agent(&resolver_tab(), false);
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged);
+    assert!(merged.resolution.is_none());
+    assert_eq!(run.host.stopped_agents(), [key(&resolver_tab())]);
+    assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())]);
+    assert_eq!(merged.events.last().unwrap().message, ABORTED);
+    assert_eq!(run.host.prompts_to("resolver").len(), 1, "an idle agent is not typed to");
+}
+
+#[test]
+fn a_resolver_turn_cut_short_after_the_merge_leaves_the_pipeline_merged() {
+    for interrupted in [true, false] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        run.host.agent(&resolver_tab(), true);
+        run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+        assert_eq!(run.poll().state, State::Merged);
+        turn_failed(&run.host, "resolver", "t1", engine::turn_failure(interrupted));
+        let after = run.pipeline();
+        assert_eq!(after.state, State::Merged, "not Needs you for a pull request that merged");
+        assert!(after.resolution.is_none());
+        assert!(after.events.iter().any(|event| event.kind == "lateReply" && event.message.starts_with("The conflict resolver's turn ended after the merge: ")));
+        // A person who interrupted it has the merge as it was; an agent that went leaves it to the pipeline.
+        assert_eq!(run.host.aborts().is_empty(), interrupted);
+        assert_eq!(after.events.last().unwrap().kind, if interrupted { "mergeLeft" } else { "mergeAborted" });
+    }
+}
+
+#[test]
+fn a_poll_while_the_resolver_works_on_an_open_pull_request_changes_nothing() {
+    let run = Run::start(&github_issue(), false);
+    let resolving = resolving(&run);
+    run.host.agent(&resolver_tab(), true);
+    let looked = run.poll();
+    assert_eq!((looked.stage, looked.state, looked.events.len()), (Stage::Resolve, State::Working, resolving.events.len()));
+    assert!(looked.resolution.is_some() && run.host.aborts().is_empty());
+    assert_eq!(run.host.prompts_to("resolver").len(), 1);
 }

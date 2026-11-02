@@ -50,8 +50,10 @@ beforeEach(() => {
   openTab.mockClear();
   mocks.app = {
     refreshSessions: vi.fn(async () => {}),
+    activeHost: { id: "mac" },
     api: {
-      sessionControls: vi.fn(async () => true),
+      features: vi.fn(async () => ({ sessionControls: 1 })),
+      onFeaturesChanged: () => () => {},
       tabControls: vi.fn(async () => ({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", status: "idle" })),
       models: vi.fn(async () => models),
       stop: vi.fn(async () => ({ done: true })),
@@ -71,7 +73,7 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 
 describe("session controls on the phone", () => {
   it("offers nothing on a Mac without them", async () => {
-    mocks.app.api.sessionControls.mockResolvedValue(false);
+    mocks.app.api.features.mockResolvedValue({});
     await render();
     expect(container.textContent).toBe("");
   });
@@ -111,6 +113,16 @@ describe("session controls on the phone", () => {
     expect(mocks.alerts[0]?.title).toBe("Bypass permissions?");
     await act(async () => { mocks.alerts[0]!.buttons.find((choice) => choice.text === "Bypass")!.onPress!(); });
     expect(mocks.app.api.setMode).toHaveBeenCalledWith("s", "t", "bypassPermissions");
+  });
+
+  it("never sends a native Codex tab to a terminal it does not have; a terminal tab is still sent there (#644)", async () => {
+    mocks.app.api.tabControls.mockResolvedValue({ harness: "codex", model: "gpt-5.6", effort: "medium", permissionMode: "auto", status: "waiting", transport: "experimentalCodexStdio" });
+    await render([recovery("permission_expired")]);
+    expect(container.textContent).toContain("The permission request expired. Send a message to carry on, or stop the session.");
+    expect(container.textContent).not.toMatch(/terminal/i);
+    mocks.app.api.tabControls.mockResolvedValue({ harness: "codex", model: "gpt-5.6", effort: "medium", permissionMode: "auto", status: "waiting", transport: "pty" });
+    await render([recovery("permission_expired"), { ...recovery("permission_expired"), id: "again", seq: 3 }]);
+    expect(container.textContent).toContain("Check the terminal for a new request or stop the session.");
   });
 
   it("retries safely, continues here, and stops from the recovery banner", async () => {

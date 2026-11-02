@@ -55,6 +55,8 @@ pub mod typing;
 pub(crate) mod supervisor;
 #[cfg(all(unix, feature = "desktop"))]
 pub mod ui;
+#[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod replace;
 
 pub const PROTOCOL: u64 = 1;
 /// What the event socket understands within [`PROTOCOL`], so a desktop and a
@@ -237,9 +239,13 @@ impl Lifetime {
         let now = Instant::now();
         state.leases.retain(|_, attachment| attachment.valid_at(now));
         let loop_age = self.turned.lock().unwrap().map(|turned| now.saturating_duration_since(turned).as_millis() as u64);
+        // `version` and `mobileFeatures` (#730): a desktop compares the first
+        // with its own to bring this runtime along with an update, and offers
+        // a phone only the features named in the second.
         json!({ "protocol": PROTOCOL, "epoch": self.epoch, "attachedClients": state.leases.len(),
             "stopping": state.stop_requested || state.exiting, "idleGraceSeconds": self.grace.as_secs(),
-            "eventSocket": self.stream_socket.get(), "streamVersion": STREAM_VERSION, "nativeTray": native_tray(), "loopAgeMs": loop_age })
+            "eventSocket": self.stream_socket.get(), "streamVersion": STREAM_VERSION, "nativeTray": native_tray(), "loopAgeMs": loop_age,
+            "version": env!("CARGO_PKG_VERSION"), "mobileFeatures": mobile::features() })
     }
 
     pub(crate) fn attachment(&self, epoch: &str, lease: &str) -> anyhow::Result<Arc<Attachment>> {
@@ -315,6 +321,29 @@ impl Lifetime {
             }
             _ => Err(ControlError::new("unsupported", "Unknown local runtime lifecycle command.", None::<String>)),
         }
+    }
+
+    /// `runtime.stopAllIfIdle` (#730): what `runtime.stopAll` does, committed
+    /// only while this request is the only one being handled and `idle` finds
+    /// nothing it would cut short, under the lock that admits commands. The
+    /// caller holds the admission lock, so no turn starts meanwhile either.
+    pub(crate) fn stop_all_if(&self, params: &Value, idle: impl FnOnce() -> Result<(), ControlError>) -> Result<Value, ControlError> {
+        let mut state = self.state.lock().unwrap();
+        if state.starting {
+            return Err(ControlError::new("runtime_starting", "The local runtime is restoring its stores.", None::<String>));
+        }
+        if state.exiting || state.stop_requested { return Err(unavailable()); }
+        if params["epoch"].as_str() != Some(&self.epoch) {
+            return Err(ControlError::new("runtime_restarted", "Refresh runtime status before stopping all work.", None::<String>));
+        }
+        if state.requests > 1 {
+            return Err(ControlError::new("runtime_busy", "The local runtime is handling another request.", None::<String>));
+        }
+        idle()?;
+        state.stop_requested = true;
+        state.stop_failed = false;
+        for attachment in state.leases.values() { attachment.revoke(); }
+        Ok(json!({ "stopping": true }))
     }
 
     pub(crate) fn stop_failed(&self) {
@@ -452,6 +481,15 @@ mod tests {
         assert!(life.status()["loopAgeMs"].as_u64().unwrap() < 1_000);
     }
 
+    /// #730: a desktop learns from the runtime's own answer which build it
+    /// attached to and what it may offer a phone through it.
+    #[test]
+    fn status_names_the_runtimes_version_and_the_phone_features_it_serves() {
+        let status = Lifetime::new(IDLE_GRACE).status();
+        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["mobileFeatures"], mobile::features());
+    }
+
     #[test]
     fn detach_and_expiry_never_end_busy_work() {
         let life = Lifetime::new(Duration::from_secs(1));
@@ -462,6 +500,27 @@ mod tests {
         assert!(!life.should_exit_at(now, || false));
         assert!(life.should_exit_at(now + Duration::from_secs(1), || false));
         assert!(life.enter().is_err());
+    }
+
+    /// #730: a desktop replacing this runtime by itself stops it only while
+    /// nothing is under way, decided under the lock that admits requests.
+    #[test]
+    fn a_stop_if_idle_commits_only_while_nothing_else_is_under_way() {
+        let life = Lifetime::new(IDLE_GRACE);
+        let epoch = json!({"epoch": life.epoch});
+        let busy = || Err(ControlError::new("runtime_busy", "an agent is in the middle of a turn", None::<String>));
+        let this = life.enter().unwrap();
+        assert_eq!(life.stop_all_if(&epoch, busy).unwrap_err().code, "runtime_busy");
+        assert!(life.enter().is_ok(), "refused: nothing was stopped, and work is still admitted");
+        let other = life.enter().unwrap();
+        assert_eq!(life.stop_all_if(&epoch, || panic!("not asked while another request runs")).unwrap_err().code, "runtime_busy");
+        drop(other);
+        assert_eq!(life.stop_all_if(&json!({"epoch": "replaced"}), || Ok(())).unwrap_err().code, "runtime_restarted");
+        assert_eq!(life.stop_all_if(&epoch, || Ok(())).unwrap(), json!({"stopping": true}));
+        assert!(life.enter().is_err(), "stopping: no new work");
+        assert!(!life.should_exit(|| false), "its own request is still being answered");
+        drop(this);
+        assert!(life.should_exit(|| false));
     }
 
     #[test]

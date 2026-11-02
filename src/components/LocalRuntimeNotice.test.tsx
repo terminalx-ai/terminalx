@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { LocalRuntimeState } from "@/lib/api";
 
-const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart: vi.fn(), listeners: new Map<string, () => void>() }));
+const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart: vi.fn(), replace: vi.fn(), listeners: new Map<string, () => void>() }));
 const terminals = vi.hoisted(() => ({ reattachLocalTerminals: vi.fn() }));
 vi.mock("@/lib/api", () => ({ localRuntime: native, errorMessage: (error: unknown) => String(error) }));
 vi.mock("@/lib/terminal", () => terminals);
@@ -29,6 +29,11 @@ beforeEach(() => {
   native.restart.mockReset().mockImplementation(async () => {
     native.status.mockResolvedValue({ ...connected, epoch: "fresh", generation: 2 });
     return connecting(0, 1);
+  });
+  // The desktop stops the older runtime, then attaches the app's own.
+  native.replace.mockReset().mockImplementation(async () => {
+    native.status.mockResolvedValue({ ...connected, epoch: "bundled", generation: 2 });
+    return { state: "updating", from: "0.2.21", to: "0.2.23" };
   });
   native.listeners.clear();
   terminals.reattachLocalTerminals.mockReset();
@@ -157,4 +162,71 @@ it("says why a restart failed and leaves it to be tried again", async () => {
   await changed(connected);
   await changed(unresponsive);
   expect(screen.queryByRole("alert")).toBeNull();
+});
+
+const outdated = (work: string[] | null, problem: string | null = null, failed = false): LocalRuntimeState =>
+  ({ ...connected, outdated: { running: "0.2.21", app: "0.2.23", work, problem, failed } });
+
+it("says the runtime is older than the app, names what it waits for, and Restart now replaces only that runtime", async () => {
+  await mounted();
+  await changed(outdated(null));
+  const notice = () => screen.getByRole("status").textContent ?? "";
+  expect(notice()).toContain("TerminalX runtime is older than the app");
+  expect(notice()).toContain("version 0.2.21; this app is 0.2.23");
+  expect(notice()).toContain("It restarts with 0.2.23 once it has checked that nothing it runs would be cut short.");
+  // #730 review: not only turns: a terminal running a server is waited for too.
+  await changed(outdated(["Claude Code in “Fix login” (Review), in the middle of a turn", "The terminal “npm run dev” in “Web”"]));
+  expect(notice()).toContain("It restarts with 0.2.23 once nothing it runs would be cut short. It is waiting for:");
+  expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Claude Code in “Fix login” (Review), in the middle of a turn", "The terminal “npm run dev” in “Web”"]);
+  expect(notice()).toContain("Restarting now stops all of that, and its terminals and whatever they run");
+  await changed(outdated(["The terminal “npm run dev” in “Web”"]));
+  expect(notice()).toContain("Restarting now stops that,");
+  await changed(outdated([]));
+  expect(notice()).toContain("Nothing it runs would be cut short: it restarts with 0.2.23 in a moment.");
+  expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+  expect(native.replace).not.toHaveBeenCalled();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
+  // Only the runtime this window was told about.
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(screen.queryByRole("status")).toBeNull();
+  // Its terminals move to the app's own runtime without a reload.
+  expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
+});
+
+it("after a switch failed, says it will not try again by itself rather than that it restarts now", async () => {
+  await mounted();
+  await changed(outdated([], "Could not restart the TerminalX runtime: it did not exit.", true));
+  const notice = screen.getByRole("status").textContent ?? "";
+  expect(notice).toContain("Restarting it with 0.2.23 failed, and it will not try again by itself.");
+  expect(notice).not.toContain("in a moment");
+  expect(screen.getByRole("alert").textContent).toContain("it did not exit");
+  expect(screen.getByRole("button", { name: "Restart now" })).toBeTruthy();
+});
+
+it("says while the runtime is being replaced, and clears once the app's own attaches", async () => {
+  await mounted();
+  await changed({ state: "updating", from: "0.2.21", to: "0.2.23" });
+  expect(screen.getByRole("status").textContent).toContain("Updating the TerminalX runtime");
+  expect(screen.getByRole("status").textContent).toContain("Stopping the 0.2.21 runtime and starting 0.2.23");
+  expect(screen.queryByRole("button")).toBeNull();
+  await changed({ ...connected, epoch: "bundled", generation: 2 });
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
+});
+
+it("hides for the runtime it was hidden for, and says why a restart failed", async () => {
+  native.replace.mockRejectedValue("Could not restart the TerminalX runtime: it did not exit.");
+  await mounted();
+  await changed(outdated(["Codex in “Release notes”, in the middle of a turn"], "Could not tell what it is running: timed out"));
+  expect(screen.getByRole("alert").textContent).toContain("Could not tell what it is running");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
+  expect(screen.getByRole("alert").textContent).toContain("it did not exit");
+  expect((screen.getByRole("button", { name: "Restart now" }) as HTMLButtonElement).disabled).toBe(false);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hide" })); });
+  expect(screen.queryByRole("status")).toBeNull();
+  await changed(outdated([]));
+  expect(screen.queryByRole("status")).toBeNull();
+  // Another older runtime is news again.
+  await changed({ ...outdated([]), epoch: "another", generation: 3 } as LocalRuntimeState);
+  expect(screen.getByRole("status").textContent).toContain("it restarts with 0.2.23 in a moment.");
 });

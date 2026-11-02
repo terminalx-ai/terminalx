@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Offline dictation
+
+- Add opt-in local transcription context, scoped dictionary spellings,
+  replacements and snippets, conservative cleanup and learned corrections.
+  Settings → Transcription includes import/export, sensitive-tab exclusions,
+  language hints and a microphone test showing raw/final text and bias terms.
+  Whisper and Apple receive vocabulary hints; other models use deterministic
+  replacements. Apple refuses network fallback when on-device recognition is
+  unavailable. Dictation event logs retain lengths rather than spoken text.
+  Add an explicit-audio evaluation harness and recording protocol; recognition
+  improvement requires real-audio evidence. Add warmed paired/matrix scoring,
+  raw versus final scores, observed-correction evaluation and context timing.
+  Synthetic file-recognition results are kept separate from microphone acceptance.
+  Record isolated guest settings validation and public-runtime Whisper telemetry,
+  including quiet-speech failures that rule out a no-speech-only filter.
+  Retain a reproducible independent detector experiment and its negative controls;
+  its observed speech loss prevents adopting it as an automatic filter.
+  Compare strict CPU/Metal decoding with pinned fixtures; both reproduce the
+  noise failures, ruling out a backend switch as a remedy for those cases.
+  Add a pinned independent Whisper comparison using identical reference weights
+  to distinguish app-specific behavior from upstream recognition limitations.
+  Retain full-precision comparison failures and paired detector normalization
+  evidence with public speech controls; no experimental runtime is shipped.
+  Validate a static public-GGML detector prototype against multilingual speech
+  and environmental controls, preserving runtime-upgrade incompatibilities and
+  failed prototype evidence instead of changing existing recognition output.
+  Add an opt-in local-model noise guard using the verified native detector,
+  explicit auxiliary-model download/delete controls and detector diagnostics.
+  Detection preserves original recognition audio, keeps text on model errors,
+  and supports cancellation; Apple retains its platform speech detection.
+  Reject symlink and nonregular detector cache entries without blocking capture.
+  Learn a single word correction even when surrounding capitalization or terminal
+  punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
+
 ### Issue pipelines
 
 - Answering the author of a pipeline at **Needs you** puts it back to
@@ -16,6 +50,29 @@
   to **Needs you**. A required review, a closed pull request and other stops
   that wait on someone else stay at **Needs you** until they are checked again.
   (#725)
+- A conflict resolver that stops before committing its merge no longer leaves
+  the checkout half merged. Every file the base brought in used to show as the
+  branch's own uncommitted work: 23 files in Changes, and "23 uncommitted files
+  would be lost" when removing the workspace, though 22 came unchanged from
+  `main`. The resolver now commits the merge as soon as the conflicts are
+  resolved and amends any fix its checks call for into that one commit. When
+  its turn ends with nothing pushed, TerminalX aborts the unfinished merge it
+  asked for, and says so in the record. A pull request merged or closed while
+  the resolver works now ends the pipeline at once, and the resolver is told to
+  stop. A merge is left as it is when a person interrupted the resolver or
+  stopped the pipeline. (#736)
+
+### Changes panel
+
+- A merge left in progress in a local checkout is shown for what it is: what
+  is being merged, and the uncommitted files split into unresolved conflicts,
+  files changed here, and files exactly as Git merged them from the base.
+  **Commit merge** (once nothing is conflicted) and **Abort merge** (after a
+  confirmation) act on that merge only. The warning before removing a
+  workspace counts only what changed while merging as lost. The Repo panel's
+  **Commit** waits until conflicts are resolved, since it would otherwise
+  commit the conflict markers. (#736)
+
 ### Sessions and tabs
 
 - Open the session you click. A session with no tabs open was swapped for
@@ -35,8 +92,18 @@
   hides its page until it is picked. (#721)
 - Offer Undo when closing a session's last running tab. The notice says its
   agent stopped, and Undo reopens the tab on the same conversation. (#721)
+
 ### Chat
 
+- Show a sent message at once. Pressing Send puts the message in the chat,
+  marked as sending, and clears the composer for the next one; it is marked
+  as sent once the runtime has it. A message that could not be sent goes back
+  to the composer with the error, ahead of anything typed since, images and
+  all. (#727)
+- Keep long conversations quick. The chat is built on as events arrive instead
+  of being rebuilt for each one, and only the turns in and near the view are
+  drawn, so a message in a conversation of thousands of events appears as fast
+  as in a short one. (#727)
 - Never type a message into an agent's input box that already holds text. The
   app used to clear the box with Ctrl+U, which deletes only the row the cursor
   is on: when Claude Code had put a dropped prompt back in its box, the prompt
@@ -49,12 +116,114 @@
   input box stays the one message. A message the agent received inside a longer
   prompt is shown once, as received, with what was sent behind it, and its
   queued bubble clears. (#722)
+- Read the input box of an agent started by hand in a shell tab too, before
+  typing into it; it had no check and no Ctrl+U, so a half-typed line or a
+  prompt put back in the box went out glued to the next message. Every
+  message waiting behind a full input box says so, not only the first. Stop
+  withdraws a message still waiting on the box, marked as not sent with Send
+  again, instead of typing it whenever the box next empties. A model or effort
+  change made while the box holds text is refused with the reason rather than
+  typed later. Queued messages the agent receives as one prompt all clear, and
+  a message sent from the chat with a dropped prompt's words is shown as its
+  own. A prompt an idle agent recorded shorter or edited is shown once, as
+  changed, and a waiting note left behind when the app quit mid-wait is
+  cleared on load. (#722)
 - Cut more credentials from the redacted detail line that a refused sign-in or
   an agent that exits early shows in the chat: `key: value` and JSON forms,
   escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's
   secret-looking value, including one that runs on over lines. Errors such as
   `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
   readable. (#717)
+- Show a native Codex reply as one message while it streams. Each piece Codex
+  sent was recorded as a message of its own, so a real reply showed as dozens
+  of fragments, each with its own time, and was saved that way. The reply now
+  grows in place and is saved once, whole, with the time its first piece came;
+  Codex's reasoning summary does the same. What streamed of a reply that never
+  finished, because the turn was interrupted, failed or stopped, or the
+  connection was lost, is kept as it was shown. (#644)
+- Draw a streaming reply as it grows. The desktop chat showed the first piece
+  of a streamed reply and then nothing new until the reply was complete, in
+  local and cloud tabs alike, for every agent that streams previews (ACP
+  agents, OpenCode and native Codex). Streaming thoughts, a tool call's input
+  as it is written, and the end of a thought had the same problem. Each now
+  redraws at the next frame. The phone shows replies once they are complete,
+  as before. (#644)
+
+### Cloud workspaces
+
+- Show a compaction in a cloud workspace's agent tab as **Compacting
+  context…** while it runs, then **Context compacted**. The tab said
+  "Compaction status unknown" the whole time, even while connected. A tab
+  counts as caught up once its live connection has replayed the workspace's
+  saved history; while that connection is down or reconnecting, a compaction
+  still shows as unknown, never as running or done. (#644)
+- Say why a native Codex tab in a cloud workspace did not move to its terminal.
+  The workspace's own reason (a turn still running, someone else driving the
+  tab, no right to type in it) shows above the chat, with Dismiss, also when
+  the composer already says why it is off. It used to say "The agent
+  encountered an error", or nothing at all while someone else drove the tab.
+  Local tabs are unchanged. (#644)
+- A waiting native Codex tab no longer says to check the terminal, which it
+  does not have until it moves there: it points to the conversation above, to
+  send a message or stop the session. Its recovery banner for an expired
+  permission request or an unconfirmed prompt no longer sends it there
+  either. Tabs whose agent runs in a terminal are unchanged. (#644)
+
+### Mobile
+
+- Show a compaction on the phone as on the desktop, in cloud workspace tabs
+  and in tabs on a paired Mac: **Compacting context…** while it runs, then
+  **Context compacted**, **Compaction stopped** or **Compaction status
+  unknown**. Every compaction used to read "Context compacted", even while it
+  ran or after the phone lost track of it. A compaction shows as running only
+  once the phone has read the conversation to its end over a live connection.
+  While disconnected, reconnecting or just back from the background, it shows
+  as unknown. A stopped workspace's saved conversation never shows one as
+  running. (#644)
+- A native Codex tab's recovery card on the phone no longer says to check the
+  terminal (an expired permission request, an unconfirmed prompt); it says
+  what to do in the chat instead, as the desktop now does too. The Mac tells
+  the phone which tabs run native Codex; an older Mac keeps the old wording.
+  (#644)
+
+### Background sessions
+
+- Never hold a send behind slow work. Merged-workspace cleanup, Settings →
+  Storage (scanning, sizing and removal), workspace and session removal,
+  `terminalx worktrees delete` and stopping an idle agent no longer hold the
+  lock every send takes; each closes only the sessions it changes, and a send
+  to any other tab goes through at once. Checking the worktree's tree before a
+  prompt, which reads the whole checkout, now happens before the send waits
+  for anything. A send to a session that is being removed or moved is refused
+  with the reason, and one to an agent being stopped for sitting idle waits
+  for that stop and starts it again. (#727)
+- Time every send. Each tab's diagnostics note when Send was pressed, when the
+  runtime received the send and how long it waited, when the agent took the
+  prompt, and when the window showed it, so a slow send can be traced to the
+  step that took the time. (#727)
+
+### Cloud workspaces
+
+- Deliver a message sent from the command line, a phone or another member to a
+  native Codex tab whose last turn failed, for example on a revoked sign-in.
+  The workspace said it was sent, but the message sat in the queue for good:
+  the tab was taken as busy while it showed the failure, and no turn was left
+  to end and send it. It now goes straight in and clears the failure, as a
+  message sent from the desktop does, and a message queued while that turn
+  ran goes once it ends. ACP and OpenCode tabs get the same fix. A Claude Code
+  or Codex terminal tab that is waiting still holds the message, since its
+  CLI may be showing a prompt of its own. (#644)
+- Let a native Codex tab work again once its sign-in is restored. Codex reads
+  its sign-in only when it starts, so after a turn refused for a revoked login
+  every later turn was refused as well, even after the login was granted
+  again. Codex now stops after such a turn, and the tab keeps saying it is
+  signed out. The next message starts Codex again on the same conversation
+  with the sign-in in place then, and nothing is sent twice. This applies on a
+  Mac too. (#644)
+- Leave the workspace user's own `~/.codex` as it is. Checking the Codex version
+  before a native Codex tab starts made Codex write temporary files there; the
+  check now runs in the tab's own Codex home. (#644)
+
 ### Command line
 
 - `terminalx worktrees delete` no longer deletes sessions it never named. Without

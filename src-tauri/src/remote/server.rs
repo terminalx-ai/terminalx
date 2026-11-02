@@ -2290,12 +2290,10 @@ impl WorkspaceRpc {
         let p: Params = parse(params)?;
         let before = index::load().map_err(RpcError::internal)?;
         let report = |progress: &Progress| peer.notify("cleanup.progress", json!(OfRun { run: &p.client_request_id, progress }));
-        // `stop_agents_confirmed`'s caller holds admission across the stop and
-        // the filing that follows it.
-        let results = {
-            let _admission = crate::issue_pipeline::admission::lock();
-            self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items, Watch { report: Some(&report), stop: None }))?
-        };
+        // Each worktree is fenced from its last inspection to its removal, and
+        // the sessions `stop_agents_confirmed` stops through their filing
+        // (`worktree_cleanup::remove`): no other tab's prompt waits (#727).
+        let results = self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items, Watch { report: Some(&report), stop: None }))?;
         // What the runtime still holds for sessions that were deleted with
         // their worktree, as after `session.delete`.
         let deleted: HashSet<String> = results.iter().flat_map(|done| done.sessions_deleted.iter().cloned()).collect();

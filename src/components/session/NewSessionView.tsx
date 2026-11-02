@@ -1,3 +1,4 @@
+import { useDictationContext } from "@/lib/dictationContext";
 import { cloudPipelineSettings } from "@/lib/issuePipeline";
 import { usePipelineLaunch, pipelineSettings, preparePipelineLaunch } from "@/lib/pipelineLaunch";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -205,7 +206,8 @@ export function NewSessionView({
     }
   };
 
-  const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref);
+  const dictationContext = useDictationContext(NEW_SESSION_TARGET, cloud ? undefined : preset?.cwd ?? project?.path ?? quickCwd ?? undefined, !!cloud, text);
+  const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref, dictationContext);
   useDictationShortcuts(dictation);
   const keymap = useKeymap();
   const sendKeys = keymap["composer.send"][0];

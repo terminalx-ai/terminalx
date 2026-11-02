@@ -227,3 +227,21 @@ describe("a message on its way to the agent", () => {
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });
 });
+
+describe("a message stopped before it was typed (#722)", () => {
+  it("says it was never sent and offers it again, as a prompt or a queued message", () => {
+    const value = turn([]);
+    value.prompt!.withdrawn = true;
+    value.work = [{ kind: "queued", key: "q2", seq: 2, text: "and lint", withdrawn: true }];
+    const onSendAgain = vi.fn();
+    render(<TooltipProvider><TurnBlock turn={value} sessionId="s" stream={[]} working onSendQueuedNow={vi.fn()} onSendAgain={onSendAgain} /></TooltipProvider>);
+    const notes = screen.getAllByTestId("prompt-withdrawn");
+    expect(notes).toHaveLength(2);
+    expect(notes[0].textContent).toContain("Not sent");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    const again = screen.getAllByRole("button", { name: "Send again" });
+    fireEvent.click(again[0]);
+    fireEvent.click(again[1]);
+    expect(onSendAgain.mock.calls).toEqual([[1], [2]]);
+  });
+});

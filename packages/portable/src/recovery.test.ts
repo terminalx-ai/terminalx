@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recoveryOffer } from "./recovery";
+import { RECOVERY_MESSAGES, recoveryOffer } from "./recovery";
 
 describe("the recovery offer the desktop and the phone share", () => {
   it("retries a failed turn safely, continues it, or carries it into a new session", () => {
@@ -27,5 +27,29 @@ describe("the recovery offer the desktop and the phone share", () => {
     expect(recoveryOffer("failed", { asks: 1, canResend: true, canSendContinue: true })).toMatchObject({ title: "Waiting for input", retry: null, sendContinue: false, chooseModel: false });
     expect(recoveryOffer("delivery_unconfirmed", { asks: 0, canSendContinue: true })).toMatchObject({ retry: null, sendContinue: false });
     expect(recoveryOffer(null, { asks: 0 })).toMatchObject({ retry: null, continueInNewSession: false });
+  });
+
+  it("points a waiting native Codex tab at its conversation, not at a terminal it does not have (#644)", () => {
+    const native = recoveryOffer(null, { asks: 0, native: true });
+    expect(native).toMatchObject({ title: "Waiting for input", message: "Review the conversation above, then send a message or stop the session." });
+    expect(native.message).not.toMatch(/terminal/i);
+    // A tab whose agent runs in its terminal is told to look there, as before.
+    expect(recoveryOffer(null, { asks: 0 }).message).toBe("Check the terminal for a pending decision, or stop the session.");
+    // A request says the same on either.
+    expect(recoveryOffer(null, { asks: 1, native: true }).message).toBe("Review the pending request to continue.");
+  });
+
+  it("never sends a native Codex tab to a terminal for any recovery, and leaves the rest as they are (#644)", () => {
+    const kinds = Object.keys(RECOVERY_MESSAGES) as (keyof typeof RECOVERY_MESSAGES)[];
+    for (const kind of kinds) {
+      const native = recoveryOffer(kind, { asks: 0, native: true });
+      expect(native.message, kind).not.toMatch(/terminal/i);
+      // Only the wording changes: what is offered is the same.
+      expect({ ...native, message: "" }, kind).toEqual({ ...recoveryOffer(kind, { asks: 0 }), message: "" });
+      if (!/terminal/i.test(RECOVERY_MESSAGES[kind])) expect(native.message, kind).toBe(RECOVERY_MESSAGES[kind]);
+    }
+    expect(recoveryOffer("permission_expired", { asks: 0, native: true }).message).toBe("The permission request expired. Send a message to carry on, or stop the session.");
+    // A terminal tab is still sent there.
+    expect(recoveryOffer("permission_expired", { asks: 0 }).message).toMatch(/Check the terminal/);
   });
 });

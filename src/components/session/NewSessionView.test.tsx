@@ -244,8 +244,9 @@ describe("starting a quick chat", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("quick-1", "quick-tab", "What is a monad?\nIn one paragraph.", []));
     expect(createQuickChat).toHaveBeenCalledWith({ title: "What is a monad?", cwd: null, tab: { harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" } });
     expect(selectSession).toHaveBeenCalledWith("quick-1");
-    // No project session was made, and no git was read.
-    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["check_agent_readiness", "check_agent_readiness"]);
+    // Only local transcription preferences and agent readiness were read; no
+    // project session was made, and no git was read.
+    expect(invoke.mock.calls.map(([command]) => command).sort()).toEqual(["check_agent_readiness", "check_agent_readiness", "transcription_personalization_load"]);
   });
 
   it("can be pointed at a folder first, which is passed as the working directory and not added as a project", async () => {

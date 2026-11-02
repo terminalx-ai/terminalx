@@ -605,6 +605,38 @@ pub fn actor(params: &Value) -> Result<Actor> {
 }
 
 
+/// The phone features this runtime's owner operations serve, each at the
+/// level it is served (#730). The desktop names a feature to a phone only
+/// when the runtime it is attached to names it: the phone methods behind it
+/// come down to operations of [`execute`], and a runtime that does not know
+/// an operation refuses it. A level only grows, and a runtime that names one
+/// serves every lower level too. Change this with `execute`.
+///
+/// - `sendIds`: `send` takes a `clientMessageId` and answers a repeat once (#675).
+/// - `sessionControls`: `tab`, `models`, `prepareContinuation`, `stop`,
+///   `interrupt`, `resendUnsent`, `setModel`, `setEffort`, `setMode` and `continue`.
+/// - `sessionCreate`: `create`. `macSettings`: `settings` and `setSettings`.
+/// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
+pub fn features() -> Value {
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 })
+}
+
+/// What a runtime too old to name its features serves, by its version
+/// (#730). TerminalX 0.2.22 brought every feature [`features`] names at level
+/// 1; the releases before it serve none of them. A runtime that will not say
+/// its version is taken to serve none.
+pub fn released_features(version: Option<&semver::Version>) -> Value {
+    match version {
+        Some(version) if *version >= semver::Version::new(0, 2, 22) =>
+            serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 }),
+        _ => serde_json::json!({}),
+    }
+}
+
+/// How every runtime, this one and those before it, refuses an operation it
+/// does not know. A desktop attached to an older runtime meets it (#730).
+pub const UNSUPPORTED: &str = "Unsupported paired-device owner operation.";
+
 /// Fixed native owner operations. A guest-facing router never forwards arbitrary
 /// commands here; every connection is admitted from its persisted device record.
 pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, method: &str, params: Value) -> Result<Value> {
@@ -730,7 +762,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
                 }
             }
         }
-        _ => bail!("Unsupported paired-device owner operation."),
+        _ => bail!(UNSUPPORTED),
     }
 }
 
@@ -786,10 +818,12 @@ fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Gra
         let entry = crate::store::index::get(session)?;
         let current = entry.tab(tab).context("The tab does not belong to this session.")?;
         Ok(match method {
+            // `transport`: a native Codex tab (#644) has no terminal until it moves there, and the phone says so.
             "tab" => serde_json::json!({
                 "harness": current.harness, "model": current.model, "effort": current.effort, "permissionMode": current.permission_mode,
                 "requestedModel": current.requested_model, "requestedEffort": current.requested_effort,
                 "requestedPermissionMode": current.requested_permission_mode, "status": manager.status_of(session, tab),
+                "transport": current.transport,
             }),
             "stop" => { manager.stop(session, tab)?; Value::Null }
             "interrupt" => serde_json::json!({ "interrupted": manager.interrupt(session, tab)? }),
@@ -1138,6 +1172,9 @@ mod open_terminal_tests {
         manager.mobile.register(&lifetime,actor.clone(),"watch","viewer").unwrap();
         let open = |connection: &str| execute(&manager,&lifetime,"openTerminal",json!({"actor":actor,"connection":connection,"sessionId":"open","tabId":"native"}));
         let transport = || store::index::get("open").unwrap().tab("native").unwrap().transport;
+        // What the phone reads of the tab names its transport, so a native tab is never sent to a terminal it lacks (#644).
+        let told = |connection: &str| execute(&manager,&lifetime,"tab",json!({"actor":actor,"connection":connection,"sessionId":"open","tabId":"native"})).unwrap()["transport"].clone();
+        assert_eq!(told("watch"), json!("experimentalCodexStdio"));
 
         let refused = open("watch").unwrap_err();
         assert!(format!("{refused:#}").contains("read-only"), "{refused:#}");
@@ -1146,6 +1183,7 @@ mod open_terminal_tests {
 
         assert_eq!(open("phone").unwrap(), json!({"opened":true}));
         assert_eq!(transport(), store::index::AgentTransport::Pty);
+        assert_eq!(told("phone"), json!("pty"));
         let pane = manager.pane_of("open","native").expect("Codex runs in the tab's terminal").pane_id;
         let until = Instant::now() + Duration::from_secs(20);
         let shown = loop {

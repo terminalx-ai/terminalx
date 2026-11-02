@@ -46,15 +46,17 @@ function host(initial = 20, supported = true) {
     return { ok: true, value };
   });
   const subscribe = vi.fn((_method, _params, callback) => { listener = callback; ready = () => callback({ subscriptionId: "subscription" }); return () => { listener = () => {}; }; });
-  const connection = { request, subscribe, transport: () => path, reassemblesFragments: async () => fitted } as unknown as HostConnection;
+  const connection = { request, subscribe, onEvent: () => () => {}, transport: () => path, reassemblesFragments: async () => fitted } as unknown as HostConnection;
   let api = new HostApi(connection);
   const updates: { state: TranscriptCache; replace: boolean }[] = [];
   const error = vi.fn();
+  /** What the watchers said of being caught up with the Mac's history, in order (#644). */
+  const known: boolean[] = [];
   const start = (connected = true, hostId = "host") => {
-    const stop = watchTranscript(api, hostId, "session", "tab", connected, (state, replace) => updates.push({ state, replace }), error);
+    const stop = watchTranscript(api, hostId, "session", "tab", connected, (state, replace) => updates.push({ state, replace }), error, (value) => known.push(value));
     stops.push(stop); return stop;
   };
-  return { request, subscribe, updates, error, start, restartApi: () => { api = new HostApi(connection); }, ready: () => ready(), live: (e: AgentEvent) => listener({ event: e }), append: (count: number) => { events.push(...Array.from({ length: count }, (_, i) => event(events.length + i + 1))); }, edit: () => { events[events.length - 1] = event(events.length, "reconciled"); }, fail: (offset: number) => { failOffset = offset; }, race: (callback: () => void) => { afterPage = callback; }, path: (next: "direct" | "relay") => { path = next; }, fits: (next: boolean) => { fitted = next; }, drop: (code: number | null) => { drop = code; } };
+  return { request, subscribe, updates, error, known, start, restartApi: () => { api = new HostApi(connection); }, ready: () => ready(), live: (e: AgentEvent) => listener({ event: e }), append: (count: number) => { events.push(...Array.from({ length: count }, (_, i) => event(events.length + i + 1))); }, edit: () => { events[events.length - 1] = event(events.length, "reconciled"); }, fail: (offset: number) => { failOffset = offset; }, race: (callback: () => void) => { afterPage = callback; }, path: (next: "direct" | "relay") => { path = next; }, fits: (next: boolean) => { fitted = next; }, drop: (code: number | null) => { drop = code; } };
 }
 
 // Clearing the caches also resets the drop counts kept across watchers.
@@ -309,5 +311,42 @@ describe("a read that keeps dropping the connection", () => {
     for (let i = 0; i < 3; i++) await connection(h, "unsent");
     expect(h.error.mock.calls.every(([cause]) => !(cause instanceof TranscriptHaltedError))).toBe(true);
     expect(syncs(h)).toHaveLength(3);
+  });
+});
+
+describe("whether the conversation is caught up with the Mac's (#644)", () => {
+  it("is caught up only by a read to the end of the Mac's history that went out after the subscription was confirmed", async () => {
+    const h = host();
+    // The Mac records more after the first read and before it confirms the subscription.
+    h.race(() => h.append(2));
+    h.start(); await settle();
+    expect(h.updates.at(-1)!.state.cursor?.offset).toBe(20);
+    // Read to the end, but before the subscription was confirmed: what came in between was not heard.
+    expect(h.known).toEqual([]);
+    h.ready(); await vi.advanceTimersByTimeAsync(100); await settle();
+    expect(h.updates.at(-1)!.state.cursor?.offset).toBe(22);
+    expect(h.known).toEqual([true]);
+  });
+
+  it("is not caught up from a failed read until a later one reaches the end", async () => {
+    const h = host(20);
+    h.start(); await settle();
+    h.ready(); await vi.advanceTimersByTimeAsync(100); await settle();
+    expect(h.known).toEqual([true]);
+    h.append(600); h.fail(520);
+    h.live(event(620)); await vi.advanceTimersByTimeAsync(100); await settle();
+    expect(h.error).toHaveBeenCalledTimes(1);
+    expect(h.known).toEqual([true, false]);
+    h.fail(-1);
+    h.live(event(620)); await vi.advanceTimersByTimeAsync(100); await settle();
+    expect(h.updates.at(-1)!.state.cursor?.offset).toBe(620);
+    expect(h.known).toEqual([true, false, true]);
+  });
+
+  it("is never caught up while disconnected: what is kept on the phone says nothing of now", async () => {
+    const h = host();
+    h.start(false); await settle();
+    expect(h.updates.length).toBeGreaterThan(0);
+    expect(h.known).toEqual([]);
   });
 });
