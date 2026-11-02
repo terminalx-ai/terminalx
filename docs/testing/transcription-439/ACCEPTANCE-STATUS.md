@@ -119,8 +119,14 @@ copy's fake home, talking to a local stand-in Messages API on 127.0.0.1 with a
 dummy key. Headless probes showed: `auth status` reports logged in; the
 stream-json mode the app probes returns a successful turn; the interactive
 CLI in a PTY shows no first-run screen with the pre-approved dummy key and
-records the stand-in's reply in its transcript. The app-level send and learned
-row are still the human step.
+records the stand-in's reply in its transcript. The signed copy (built from
+`5ca33a14`, ad-hoc signed with `Entitlements.plist`, `codesign --verify --deep
+--strict` pass) was then launched once through `~/tx439/launch.sh`. Its local
+runtime started from the isolated store. A quick Claude chat created with the
+copy's bundled CLI completed a turn with the stand-in's reply (app → local
+runtime → CLI → stand-in, one request on 127.0.0.1). The copy and its runtime
+were then stopped. So the send prerequisite is usable. The composer send of a
+dictated edit and the learned row remain the human step.
 
 No new human or microphone evidence exists. All human gates above remain open,
 and #631 keeps its silence assessment. One combined round
