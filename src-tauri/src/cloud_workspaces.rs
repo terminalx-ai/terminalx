@@ -1188,6 +1188,10 @@ pub struct CreateLaunch {
     pub mode: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Settings → Experimental → Native Codex for a Codex launch (#745): the
+    /// runtime starts the first tab on Codex's app server where it can.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_codex: bool,
 }
 
 pub use crate::cloud_agents::launch::{MAX_PROMPT_BYTES, MAX_REPOSITORIES};
@@ -1273,7 +1277,16 @@ fn launch_body(launch: &CreateLaunch) -> Value {
     if let Some(prompt) = launch.prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
         body["prompt"] = json!(prompt);
     }
+    if launch.native_codex {
+        body["nativeCodex"] = json!(true);
+    }
     body
+}
+
+/// Whether a create that asked for native Codex was refused as malformed,
+/// which is how a server from before the field answers it.
+fn refused_native_codex(body: &Value, error: &CloudWorkspaceClientError) -> bool {
+    body["launch"]["nativeCodex"] == json!(true) && error.status == Some(422) && error.code == "cloud_workspace_request_invalid"
 }
 
 /// `POST …/cloud-workspaces/preflight`: can these repositories and refs be
@@ -2427,14 +2440,19 @@ impl CloudWorkspaceService {
             if let Some(launch) = &input.launch {
                 body["launch"] = launch_body(launch);
             }
-            let result = client.request(
-                context,
-                &["cloud-workspaces"],
-                None,
-                Some(body),
-                Some(&idempotency_key),
-                RequestRisk::Create,
-            )?;
+            let send = |body: Value| client.request(context, &["cloud-workspaces"], None, Some(body), Some(&idempotency_key), RequestRisk::Create);
+            let result = match send(body.clone()) {
+                // A server from before `launch.nativeCodex` (#745) refuses the
+                // key before it records anything: the same create again
+                // without it, whose first tab is a terminal tab, as before.
+                Err(error) if refused_native_codex(&body, &error) => {
+                    if let Some(launch) = body["launch"].as_object_mut() {
+                        launch.remove("nativeCodex");
+                    }
+                    send(body)?
+                }
+                result => result?,
+            };
             ensure_snapshot(result, &context.organization_id, None, RequestRisk::Create)
         })
     }
@@ -5122,6 +5140,7 @@ mod tests {
             effort: Some("high".into()),
             mode: None,
             prompt: Some("Fix the login".into()),
+            native_codex: false,
         };
         let result = service.create(None, launch_input(vec![repo("app", Some("main")), repo("lib", None)], Some(launch))).unwrap();
         let captured = request.join().unwrap();
@@ -5140,6 +5159,53 @@ mod tests {
         let launch = result.workspace.launch.expect("the launch view");
         assert_eq!((launch.phase.as_str(), launch.work_branch.as_str()), ("allocating", "terminalx/fix-login-3f9a2c1b7d4e"));
         assert_eq!(launch.timings.requested_at, Some(5));
+    }
+
+    /// #745: Native Codex at create reaches the launch intent, and a server
+    /// from before the field (which refuses unknown keys, recording nothing)
+    /// still gets the create, once more without it, under the same key.
+    #[test]
+    fn a_native_codex_launch_says_so_and_an_older_server_still_gets_the_create() {
+        let body = |request: &str| serde_json::from_str::<Value>(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let key = |request: &str| request.lines().find(|line| line.to_ascii_lowercase().starts_with("idempotency-key:")).map(str::to_owned);
+        let launch = CreateLaunch { agent: "codex".into(), model: None, effort: None, mode: None, prompt: Some("Fix the login".into()), native_codex: true };
+        let native = json!({ "v": 1, "agent": "codex", "prompt": "Fix the login", "nativeCodex": true });
+        let refused = response("422 Unprocessable Entity", r#"{"error":"cloud_workspace_request_invalid"}"#, "");
+
+        let (base, server) = serve_each(vec![response("202 Accepted", &snapshot_body(None), "")]);
+        let (_, service) = test_service(&base);
+        service.create(None, launch_input(Vec::new(), Some(launch.clone()))).unwrap();
+        let received = server.join().unwrap();
+        assert_eq!(body(&received[0])["launch"], native);
+
+        let (base, server) = serve_each(vec![refused.clone(), response("202 Accepted", &snapshot_body(None), "")]);
+        let (_, service) = test_service(&base);
+        service.create(None, launch_input(Vec::new(), Some(launch.clone()))).unwrap();
+        let received = server.join().unwrap();
+        assert_eq!(body(&received[0])["launch"], native);
+        assert_eq!(body(&received[1])["launch"], json!({ "v": 1, "agent": "codex", "prompt": "Fix the login" }));
+        assert_eq!(key(&received[1]), key(&received[0]));
+
+        // A create refused for anything else is refused once more, not sent a third time.
+        let (base, server) = serve_each(vec![refused.clone(), refused.clone(), response("202 Accepted", &snapshot_body(None), "")]);
+        let (_, service) = test_service(&base);
+        let error = service.create(None, launch_input(Vec::new(), Some(launch.clone()))).unwrap_err();
+        assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_request_invalid", Some(422)));
+        assert_eq!(server.join().unwrap()[2], "", "no third request");
+
+        // Without Native Codex the refusal is final: nothing to leave out.
+        let (base, server) = serve_each(vec![refused, response("202 Accepted", &snapshot_body(None), "")]);
+        let (_, service) = test_service(&base);
+        let plain = CreateLaunch { native_codex: false, ..launch };
+        assert!(service.create(None, launch_input(Vec::new(), Some(plain))).is_err());
+        let received = server.join().unwrap();
+        assert!(body(&received[0])["launch"].get("nativeCodex").is_none());
+        assert_eq!(received[1], "", "sent once");
+
+        // What the page sends: the key, only when on.
+        let parsed: CreateLaunch = serde_json::from_value(json!({ "agent": "codex", "nativeCodex": true })).unwrap();
+        assert!(parsed.native_codex);
+        assert!(!serde_json::from_value::<CreateLaunch>(json!({ "agent": "codex" })).unwrap().native_codex);
     }
 
     #[test]
@@ -5170,7 +5236,7 @@ mod tests {
     #[test]
     fn invalid_names_repositories_refs_and_launches_never_reach_the_server() {
         let (_, service) = test_service("http://127.0.0.1:9");
-        let launch = |agent: &str, prompt: Option<String>| Some(CreateLaunch { agent: agent.into(), model: None, effort: None, mode: None, prompt });
+        let launch = |agent: &str, prompt: Option<String>| Some(CreateLaunch { agent: agent.into(), model: None, effort: None, mode: None, prompt, native_codex: false });
         let cases = [
             (launch_input(vec![repo("app", Some("feature..x"))], None), "cloud_workspace_repository_ref_invalid"),
             (launch_input(vec![repo("app", Some("-evil"))], None), "cloud_workspace_repository_ref_invalid"),

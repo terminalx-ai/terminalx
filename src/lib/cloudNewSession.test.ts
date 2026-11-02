@@ -391,6 +391,18 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
+
+  it("asks a new workspace for a native Codex first tab only for Codex, and only when Settings → Experimental says so (#745)", async () => {
+    await place([], { used: 0, limit: 5 });
+    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    let on = false;
+    mocks.invoke.mockImplementation(async (command: string) => (command === "experimental_settings" ? { nativeCodex: on } : undefined));
+    const launch = async (agent: string) => (await flow.prepareCloudCreate(target, { ...request, agent, model: "" })).pending.request.launch;
+    expect(await launch("codex")).not.toHaveProperty("nativeCodex");
+    on = true;
+    expect(await launch("codex")).toMatchObject({ agent: "codex", prompt: request.prompt, nativeCodex: true });
+    expect(await launch("claude")).not.toHaveProperty("nativeCodex");
+  });
 });
 
 describe("blank projects", () => {

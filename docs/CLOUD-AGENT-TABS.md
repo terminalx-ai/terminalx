@@ -568,6 +568,15 @@ never attached holds no workspace content key to encrypt a command with.
 - **Progress:** allocating, booting, authenticating runtime, syncing
   repository, starting agent, running. These phases come from the
   workspace's `launch.phase`, polled from its operation.
+- **Native Codex (#745):** with Settings → Experimental → Native Codex on
+  and Codex as the agent, the create (the form, or a new session in a cloud
+  project with no workspace yet) sends `launch.nativeCodex: true`. It is
+  decided when the price is quoted and kept in the pending request, so a
+  retry resends the same bytes. A server from before the field refuses the
+  key with `422 cloud_workspace_request_invalid` before it records
+  anything; the desktop then sends the same create, under the same key,
+  without it. The setup check and environment preparation are automated
+  runs and stay on the terminal engine.
 
 The runtime half is `src-tauri/src/cloud_agents/launch.rs`:
 
@@ -577,7 +586,13 @@ The runtime half is `src-tauri/src/cloud_agents/launch.rs`:
 3. For each repository, switch to its base ref, then create the workspace's
    own work branch. If the branch already exists, it came from an earlier
    attempt of this same workspace, so switch to it instead.
-4. Start the agent tab in the primary repository and send the prompt.
+4. Start the agent tab in the primary repository and send the prompt. A
+   claim with `nativeCodex` starts it on Codex's app server under the rules
+   of a workspace's `session.create` (`session_ops::native_codex`): Codex
+   only, in a mode the app server can serve (not Ask every time). A Codex
+   older than the app server's minimum falls back to the terminal engine
+   when the tab first starts. The at-most-once record (`launch.json`) is
+   written before the tab exists either way.
 5. Report the outcome.
 
 ### Cloning at launch (Boat, Hetzner, Machine0)
