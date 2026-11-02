@@ -1672,7 +1672,7 @@ export interface UsageWindow {
 }
 
 /** Why a received window did not replace the one shown under its key. */
-export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline" | "endedWindow";
+export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline" | "notYetStarted" | "endedWindow";
 
 /** A manual refresh that did not reach the provider, and when the button will. */
 export interface UsageRefreshSkip {
