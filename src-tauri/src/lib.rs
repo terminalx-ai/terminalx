@@ -82,6 +82,7 @@ mod media;
 mod media_types;
 mod git;
 mod github;
+mod unfinished_merge;
 mod pr_associations;
 mod github_identity;
 mod harness;
@@ -634,6 +635,9 @@ pub fn run() {
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
+            commands::unfinished_merge,
+            commands::commit_merge,
+            commands::abort_merge,
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,

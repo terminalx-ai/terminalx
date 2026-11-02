@@ -118,6 +118,7 @@ fn workspace(cwd: &Path) -> Result<Workspace> {
         // `XY path`: two status letters, a space, the path.
         dirty: porcelain.lines().filter_map(|line| line.get(3..)).map(String::from).collect(),
         ahead_of_base: status.ahead_of_base.unwrap_or(0),
+        merging: crate::unfinished_merge::merge_heads(cwd)?,
     })
 }
 
@@ -285,6 +286,10 @@ impl Host for LocalHost {
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
         verify_resolution(cwd, resolution, head, branch)
+    }
+
+    fn abort_merge(&self, cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
+        crate::unfinished_merge::abort(cwd, head, merge_head)
     }
 
     fn defer_local_check(&self, pipeline_id: &str) -> bool {
@@ -485,8 +490,16 @@ mod tests {
         assert_eq!(workspace(root).unwrap().head, original.head);
         assert!(workspace(root).unwrap().dirty.is_empty());
         assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "branch intent\n");
-        let merge = std::process::Command::new("git").current_dir(root).args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-commit", &resolution.base_commit]).output().unwrap();
-        assert!(!merge.status.success());
+        let merge = || std::process::Command::new("git").current_dir(root).args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-edit", &resolution.base_commit]).output().unwrap();
+        assert!(!merge().status.success());
+        // Stopped here, the checkout holds exactly the merge the pipeline asked for, and it can be undone.
+        let half = workspace(root).unwrap();
+        assert_eq!((half.head.as_str(), half.merging.as_slice()), (resolution.head.as_str(), std::slice::from_ref(&resolution.base_commit)));
+        assert_eq!(half.dirty, ["README.md"]);
+        crate::unfinished_merge::abort(root, &resolution.head, &resolution.base_commit).unwrap();
+        let undone = workspace(root).unwrap();
+        assert!(undone.merging.is_empty() && undone.dirty.is_empty() && undone.head == original.head);
+        assert!(!merge().status.success());
         std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
         git(root, &["add", "README.md"]);
         git(root, &["commit", "-qm", "preserve both intents"]);

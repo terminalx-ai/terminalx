@@ -93,15 +93,15 @@ impl Sessions {
     }
 
     pub fn usage_snapshot(&self) -> Result<crate::status::usage::UsageSnapshot> {
-        self.quick("runtime.session.usage", json!({}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.quick("runtime.session.usage", json!({}))?)
     }
 
     pub fn refresh_usage(&self, manual: bool) -> Result<crate::status::usage::UsageSnapshot> {
-        self.call("runtime.session.refreshUsage", json!({"manual":manual}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.refreshUsage", json!({"manual":manual}))?)
     }
 
     pub fn reset_codex_usage(&self) -> Result<crate::status::usage::UsageSnapshot> {
-        self.call("runtime.session.resetCodexUsage", json!({}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.resetCodexUsage", json!({}))?)
     }
 
     pub fn activity_summary(&self) -> Result<crate::store::activity::Summary> {

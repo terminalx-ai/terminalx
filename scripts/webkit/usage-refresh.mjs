@@ -18,15 +18,20 @@ function setup() {
   const { answers, emit } = window.__PW_STUB__;
   const hour = 60 * 60_000;
   const settings = { visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed", usageRefreshMinutes: 1 };
-  const fixture = { refreshes: [], patches: [], used: 12, failing: false, revision: 0, lastSuccess: null, retryAt: null };
+  // `unchanged` (#729): Claude answers but replaces nothing, and the Codex button is inside its debounce.
+  const fixture = { refreshes: [], patches: [], used: 12, failing: false, revision: 0, lastSuccess: null, retryAt: null, unchanged: null, codexSkip: null };
   const snapshot = () => {
     const now = Date.now();
-    const window_ = (agent, key, label, usedPercent, minutes, reset) => ({ agent, key, label, usedPercent, resetsAt: now + reset, windowMinutes: minutes, updatedAt: (agent === "codex" ? fixture.codexSuccess : fixture.lastSuccess) ?? now, stale: false });
+    const updatedAt = (agent) => (agent === "codex" ? fixture.codexSuccess : fixture.unchanged?.claudeUpdated ?? fixture.lastSuccess) ?? now;
+    const window_ = (agent, key, label, usedPercent, minutes, reset) => ({ agent, key, label, usedPercent, resetsAt: now + reset, windowMinutes: minutes, updatedAt: updatedAt(agent), stale: false });
+    const unchanged = fixture.unchanged
+      ? { lastUpdatedAt: fixture.unchanged.claudeUpdated, refused: fixture.unchanged.refused, liveRefused: fixture.unchanged.liveRefused }
+      : {};
     return {
       revision: ++fixture.revision,
       claudeAccount: "synthetic",
-      claude: { retryAt: null, revalidateAt: null, error: null, lastSuccessAt: fixture.lastSuccess },
-      codexRefresh: { retryAt: fixture.retryAt, error: fixture.failing ? "read Codex rate limits: synthetic timeout" : null, lastSuccessAt: fixture.codexSuccess ?? fixture.lastSuccess },
+      claude: { retryAt: null, revalidateAt: null, error: null, lastSuccessAt: fixture.lastSuccess, ...unchanged },
+      codexRefresh: { retryAt: fixture.retryAt, error: fixture.failing ? "read Codex rate limits: synthetic timeout" : null, lastSuccessAt: fixture.codexSuccess ?? fixture.lastSuccess, skipped: fixture.codexSkip },
       windows: [
         window_("claude", "five_hour", "5h", fixture.used, 300, 2 * hour),
         window_("claude", "seven_day", "7d", 41, 10_080, 100 * hour),
@@ -46,6 +51,12 @@ function setup() {
     status_usage_snapshot: snapshot,
     status_usage_refresh: ({ manual }) => {
       fixture.refreshes.push({ at: Date.now(), manual });
+      if (fixture.unchanged) {
+        fixture.lastSuccess = Date.now();
+        if (manual) fixture.codexSkip = { at: Date.now(), reason: "recent", nextAt: fixture.codexSuccess + 5 * 60_000 };
+        return snapshot();
+      }
+      fixture.codexSkip = null;
       fixture.used += 1;
       if (fixture.failing) fixture.retryAt = Date.now() + 4 * 60_000;
       else { fixture.retryAt = null; fixture.codexSuccess = Date.now(); }
@@ -122,6 +133,35 @@ try {
   if (shots) await page.screenshot({ path: join(shots, "usage-detail-fresh.png"), animations: "disabled" });
   await page.keyboard.press("Escape");
   console.log("ok  details: last refresh time, paused/last-known wording, and recovery");
+
+  // #729: Claude answers and replaces nothing; Codex's button is inside its debounce.
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__USAGE_FIXTURE__.unchanged = {
+      claudeUpdated: now - 7 * 60 * 60_000,
+      refused: [{ key: "seven_day", label: "7d", reason: "earlierWindow" }],
+      liveRefused: { at: now - 3 * 60_000, reason: "launchMismatch" },
+    };
+  });
+  const before = await refreshes();
+  await bar.getByRole("button", { name: /Claude 5h/ }).click();
+  await popover.getByRole("button", { name: "Refresh usage", exact: true }).click();
+  await page.waitForFunction((n) => window.__USAGE_FIXTURE__.refreshes.length === n, before + 1);
+  const skipped = popover.locator('[data-usage-notice="info"]');
+  await skipped.getByText(/^Codex was refreshed (just now|\dm ago)$/).waitFor();
+  await skipped.getByText(/^Next refresh available in \dm$/).waitFor();
+  await fits(skipped, popover, "debounced Codex notice");
+  await popover.getByRole("button", { name: /^Claude, / }).click();
+  const claudeFreshness = page.locator('[data-usage-detail="claude"] [data-usage-freshness]');
+  await claudeFreshness.getByText("Last refreshed 7h ago", { exact: true }).waitFor();
+  await claudeFreshness.getByText("Checked just now · no newer usage", { exact: true }).waitFor();
+  await claudeFreshness.getByText("7d kept: the reply's reset time is earlier than the shown window's", { exact: true }).waitFor();
+  await claudeFreshness.getByText(/^Live usage from a turn was refused 3m ago: its tab started under a different Claude account/).waitFor();
+  await fits(claudeFreshness, page.locator('[data-usage-detail="claude"]'), "unchanged-refresh freshness lines");
+  if (shots) await page.screenshot({ path: join(shots, "usage-detail-unchanged.png"), animations: "disabled" });
+  await page.evaluate(() => { window.__USAGE_FIXTURE__.unchanged = null; });
+  await page.keyboard.press("Escape");
+  console.log("ok  #729: a check that changed nothing, a kept window, refused live usage, a debounced Codex press");
 
   // Settings → Appearance: the control, laid out at a wide and a narrow window.
   await page.locator('[data-testid="sidebar-rail"]').getByRole("button", { name: "Settings", exact: true }).click();
