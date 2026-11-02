@@ -2747,6 +2747,25 @@ pub async fn git_discard(cwd: String, path: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || git::discard_file(Path::new(&cwd), &path).map_err(err)).await.map_err(err)?
 }
 
+/// The merge left in progress in a checkout, with what each of its
+/// uncommitted files is; `None` when no merge is in progress.
+#[tauri::command]
+pub async fn unfinished_merge(cwd: String) -> CmdResult<Option<crate::unfinished_merge::UnfinishedMerge>> {
+    tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::read(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+/// Commit the merge that was read (HEAD at `head`, merging `merge_head`).
+#[tauri::command]
+pub async fn commit_merge(cwd: String, head: String, merge_head: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::commit(Path::new(&cwd), &head, &merge_head).map_err(err)).await.map_err(err)?
+}
+
+/// Abort the merge that was read (HEAD at `head`, merging `merge_head`).
+#[tauri::command]
+pub async fn abort_merge(cwd: String, head: String, merge_head: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::abort(Path::new(&cwd), &head, &merge_head).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || git::checkout_branch(Path::new(&cwd), &name, create).map_err(err)).await.map_err(err)?

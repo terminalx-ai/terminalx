@@ -130,7 +130,10 @@ pub struct Event {
     /// `started`, `workDone`, `pullRequest`, `tracker`, `reviewRequested`,
     /// `reviewPending`, `verdict`, `findingsPosted`, `findingsSent`, `pushed`,
     /// `reminder`, `waiting`, `readyToMerge`, `needsYou`, `answered`, `merged`,
-    /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`, `note`.
+    /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`,
+    /// `resolutionRequested`, `resolved`, `resolutionStopped`, `mergeAborted`
+    /// (a resolver's unfinished merge undone), `mergeLeft` (one left as it
+    /// is, and why), `note`.
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

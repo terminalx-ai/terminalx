@@ -26,6 +26,7 @@ import type {
   WorkspaceDisposition,
   TabEntry,
   TabStatus,
+  UnfinishedMerge,
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
@@ -1984,6 +1985,12 @@ export const git = {
   discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string) => invoke<[string, ChangedFile[]]>("working_changes", { cwd }),
+  /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
+  unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
+  /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
+  commitMerge: (cwd: string, head: string, mergeHead: string) => invoke<string>("commit_merge", { cwd, head, mergeHead }),
+  /** `git merge --abort` of the merge that was read, and no other. */
+  abortMerge: (cwd: string, head: string, mergeHead: string) => invoke<void>("abort_merge", { cwd, head, mergeHead }),
 };
 
 export type PrScope = { kind: "local"; cwd: string } | { kind: "cloud"; workspace: string; repo: string };

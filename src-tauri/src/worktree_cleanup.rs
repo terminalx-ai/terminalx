@@ -617,22 +617,6 @@ fn holds_git_dir(dir: &Path, depth: usize) -> bool {
     std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && holds_git_dir(&entry.path(), depth - 1))
 }
 
-/// The git operation that is under way in the checkout, if one is.
-fn operation_in_progress(path: &Path) -> Result<Option<&'static str>, ()> {
-    let dir = git::run(path, &["rev-parse", "--absolute-git-dir"]).map_err(|_| ())?;
-    let dir = Path::new(dir.trim());
-    let marks = [
-        ("MERGE_HEAD", "merge"),
-        ("rebase-merge", "rebase"),
-        ("rebase-apply", "rebase"),
-        ("CHERRY_PICK_HEAD", "cherry-pick"),
-        ("REVERT_HEAD", "revert"),
-        ("BISECT_LOG", "bisect"),
-        ("sequencer", "cherry-pick or revert"),
-    ];
-    Ok(marks.into_iter().find(|(mark, _)| std::fs::symlink_metadata(dir.join(mark)).is_ok()).map(|(_, what)| what))
-}
-
 fn describe_changes(listing: &str) -> String {
     let (mut conflicts, mut untracked, mut staged, mut modified) = (0, 0, 0, 0);
     for line in listing.lines() {
@@ -749,13 +733,13 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
             return (Verdict::Active, Some(format!("{running}.")));
         }
 
-        match operation_in_progress(&path) {
+        match git::operation_in_progress(&path) {
             Ok(None) => {}
             Ok(Some(what)) => {
                 candidate.brief = Some(format!("a {what} is in progress"));
                 return (Verdict::InProgress, Some(format!("A {what} is in progress.")));
             }
-            Err(()) => return unverifiable("Git could not read the checkout's state."),
+            Err(_) => return unverifiable("Git could not read the checkout's state."),
         }
         match git::run(&path, &["status", "--porcelain", "--untracked-files=all", "--"]) {
             Ok(out) => listing = out,
