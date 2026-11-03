@@ -1803,7 +1803,11 @@ export type LocalRuntimeState =
   /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. `keeping`: it is handed over, and its agents and terminals keep running (#765). */
   | { state: "updating"; from: string | null; to: string; keeping: boolean };
 
-/** A runtime older than this app, until it is replaced (#730). */
+/**
+ * A runtime older than this app, until it is replaced (#730): at once, keeping what it runs, when it can be handed over
+ * (#765); otherwise once nothing it runs would be cut short, or as was chosen before the update (#766). The status bar
+ * shows the wait; a switch that failed gets a notice of its own.
+ */
 export interface LocalRuntimeOutdated {
   /** Its version, when it said. */
   running: string | null;
@@ -1813,7 +1817,7 @@ export interface LocalRuntimeOutdated {
   work: string[] | null;
   /** Why that could not be read, or why the last switch failed. */
   problem: string | null;
-  /** The last switch failed: it is tried again only when asked (Restart now). */
+  /** The last switch failed: it is tried again only when asked (Try again, or Restart now in the status bar). */
   failed: boolean;
   /** It is handed over to the app's own runtime, keeping its agents and terminals running (#765). */
   keeps: boolean;
@@ -1829,6 +1833,19 @@ export interface LocalRuntimeRestartRefused {
   unkept: string[];
 }
 
+/** What replacing the attached runtime now would cut short, read before an update installs (#766). */
+export interface LocalRuntimeWork {
+  /** The runtime it was read from. */
+  epoch: string;
+  /** By name; empty when nothing would be cut short. */
+  work: string[];
+  /** When it was read, in milliseconds since the Unix epoch. */
+  readAt: number;
+}
+
+/** What the app an update relaunches into does with runtime `epoch` (#766, `update_plan.rs`). */
+export interface LocalRuntimeUpdatePlan { epoch: string; forced: boolean; quietSince: number | null; madeAt: number; madeBy: number }
+
 export type QuitBehavior = "keepRunning" | "stopAll";
 export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 
@@ -1839,6 +1856,14 @@ export const localRuntime = {
   restart: (epoch: string | null, how: LocalRuntimeRestart = "keeping") => invoke<LocalRuntimeState>("local_runtime_restart", { epoch, how }),
   /** Replace runtime `epoch`, older than this app, with the app's own now (#730): handed over, stopping only what it cannot carry (#765), or else stopping its agents and terminals. */
   replace: (epoch: string) => invoke<LocalRuntimeState>("local_runtime_replace", { epoch }),
+  /** What replacing the attached runtime now would cut short; throws when it cannot tell. */
+  work: () => invoke<LocalRuntimeWork>("local_runtime_work"),
+  /**
+   * Just before an update relaunches: replace runtime `epoch` at once (`forced`), or once nothing it runs would be
+   * cut short. `quietSince` is when a reading found nothing under way; it counts only if nothing is under way now.
+   */
+  planUpdate: (epoch: string, forced: boolean, quietSince: number | null) =>
+    invoke<LocalRuntimeUpdatePlan>("local_runtime_plan_update", { epoch, forced, quietSince }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
 };

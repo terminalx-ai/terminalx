@@ -40,6 +40,12 @@ vi.mock("@/lib/sessions", () => ({
   }),
 }));
 vi.mock("@/lib/statusPolling", () => ({ useResourceSampling: vi.fn() }));
+const runtimeSwitch = vi.hoisted(() => ({ current: null as import("@/lib/localRuntime").RuntimeSwitch | null }));
+vi.mock("@/lib/localRuntime", () => ({
+  bootLocalRuntime: vi.fn(async () => {}),
+  replaceLocalRuntime: vi.fn(async () => {}),
+  useRuntimeSwitch: () => runtimeSwitch.current,
+}));
 
 const { StatusBar } = await import("./StatusBar");
 
@@ -60,6 +66,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-09-03T12:00:00.000Z"));
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   statusBarWidth = 1_000;
+  runtimeSwitch.current = null;
+  statusState.settings.visible = true;
   statusState.settings.percent = "used";
   statusState.settings.resources = false;
   statusState.resourcesAvailable = true;
@@ -733,4 +741,37 @@ it("rejects confirmation clicks invalidated before React renders and ignores lat
   await act(async () => confirmed.resolve({ killed: false, confirmation: "Late resampled confirmation" }));
   expect(screen.queryByRole("dialog", { name: "Kill process?" })).toBeNull();
   expect(rpc.mock.calls).toEqual([["shell", false], ["shell", false]]);
+});
+
+describe("the runtime the app is moving to (#766)", () => {
+  const waiting = (): import("@/lib/localRuntime").RuntimeSwitch => ({
+    kind: "waiting", epoch: "owner",
+    outdated: { running: "0.2.23", app: "0.2.24", work: ["Codex in “Web”, in the middle of a turn"], problem: null, failed: false, keeps: false },
+  });
+
+  it("sits beside usage while a switch waits, and goes once it is done", () => {
+    runtimeSwitch.current = waiting();
+    const view = render(<StatusBar />);
+    expect(screen.getByTestId("runtime-status").textContent).toBe("Runtime 0.2.23 · waiting for 1");
+    expect(view.container.querySelector('[data-usage-agent="claude"]')).not.toBeNull();
+    runtimeSwitch.current = null;
+    view.rerender(<StatusBar />);
+    expect(screen.queryByTestId("runtime-status")).toBeNull();
+  });
+
+  it("a hidden status bar still shows it, and only it, until the switch is done", () => {
+    statusState.settings.visible = false;
+    const view = render(<StatusBar />);
+    expect(view.container.querySelector("[data-status-bar]")).toBeNull();
+    runtimeSwitch.current = waiting();
+    view.rerender(<StatusBar />);
+    expect(screen.getByTestId("runtime-status").textContent).toBe("Runtime 0.2.23 · waiting for 1");
+    expect(view.container.querySelector("[data-usage-agent]")).toBeNull();
+    runtimeSwitch.current = { kind: "updating", from: "0.2.23", to: "0.2.24" };
+    view.rerender(<StatusBar />);
+    expect(screen.getByRole("status", { name: "Updating the runtime to 0.2.24" })).toBeTruthy();
+    runtimeSwitch.current = null;
+    view.rerender(<StatusBar />);
+    expect(view.container.querySelector("[data-status-bar]")).toBeNull();
+  });
 });

@@ -268,6 +268,55 @@ pub async fn local_runtime_replace(app: AppHandle, window: tauri::WebviewWindow,
     }).await.map_err(|error| error.to_string())?
 }
 
+/// What replacing the attached runtime now would cut short (#766).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeWork {
+    /// The runtime it was read from, which a plan for the update names.
+    epoch: String,
+    /// What would stop with it, by name; empty when nothing would.
+    work: Vec<String>,
+    /// When it was read, in milliseconds since the Unix epoch.
+    read_at: u64,
+}
+
+/// Asked before an update installs, so that the choice about the runtime
+/// comes first, once (#766). Not attached, or not able to tell: an error.
+#[tauri::command]
+pub async fn local_runtime_work(app: AppHandle) -> Result<RuntimeWork, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let runtime = app.state::<AppState>().runtime().filter(|runtime| runtime.attachment().is_ok())
+            .ok_or_else(|| "The TerminalX runtime is not attached.".to_string())?;
+        let work = super::replace::cut_short(&app, &runtime).map_err(|error| format!("Could not tell what the TerminalX runtime is running: {error:#}"))?;
+        // Read after the answer: the quiet it reports is no longer than it was.
+        let read_at = super::update_plan::millis(std::time::SystemTime::now());
+        Ok(RuntimeWork { epoch: runtime.epoch().to_owned(), work, read_at })
+    }).await.map_err(|error| error.to_string())?
+}
+
+/// Leave the decision about runtime `epoch` for the app an update relaunches
+/// into (#766), just before the relaunch. `forced` is Update now. Otherwise
+/// `quiet_since` is when a reading before the update found nothing under
+/// way: it carries over only if nothing is under way now either.
+#[tauri::command]
+pub async fn local_runtime_plan_update(app: AppHandle, epoch: String, forced: bool, quiet_since: Option<u64>) -> Result<super::update_plan::Plan, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let quiet_since = quiet_since.filter(|_| !forced).filter(|_| {
+            let runtime = app.state::<AppState>().runtime().filter(|runtime| runtime.epoch() == epoch && runtime.attachment().is_ok());
+            let work = runtime.map(|runtime| super::replace::cut_short(&app, &runtime));
+            if let Some(Err(error)) = &work { log::warn!("read what the local runtime is running before the update: {error:#}"); }
+            matches!(work, Some(Ok(work)) if work.is_empty())
+        });
+        let clock = std::time::SystemTime::now();
+        let plan = super::update_plan::Plan { epoch, forced, quiet_since, made_at: super::update_plan::millis(clock), made_by: std::process::id() };
+        let home = crate::store::root().map_err(|error| format!("{error:#}"))?;
+        super::update_plan::save(&home, &plan).map_err(|error| format!("{error:#}"))?;
+        log::info!("the local runtime {} is replaced after the update {}", plan.epoch,
+            if plan.forced { "at once, as chosen" } else if plan.quiet_since.is_some() { "as the app attaches, if nothing has started" } else { "once nothing it runs would be cut short" });
+        Ok(plan)
+    }).await.map_err(|error| error.to_string())?
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettings { quit_behavior: Option<QuitBehavior> }

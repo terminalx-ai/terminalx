@@ -25,6 +25,8 @@ import {
 import { selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import { useResourceSampling } from "@/lib/statusPolling";
+import { useRuntimeSwitch } from "@/lib/localRuntime";
+import { RuntimeStatus } from "./RuntimeStatus";
 import {
   errorMessage,
   statusBar,
@@ -41,7 +43,8 @@ const COMPACT_AT = 900;
 const ICON_ONLY_AT = 500;
 type StatusTier = "full" | "compact" | "icon";
 
-/** The quiet, app-wide chrome beneath every column. */
+/** The quiet, app-wide chrome beneath every column. Hidden, it still shows a
+ * runtime the app is moving to (#766), and only that, until it has. */
 export function StatusBar({
   onOpenAgentSettings,
   onOpenUsageDetails,
@@ -50,6 +53,7 @@ export function StatusBar({
   onOpenUsageDetails?: () => void;
 } = {}) {
   const { settings } = useStatus();
+  const runtime = useRuntimeSwitch();
   const ref = useRef<HTMLDivElement>(null);
   const [tier, setTier] = useState<StatusTier>("full");
 
@@ -64,7 +68,7 @@ export function StatusBar({
     return () => observer.disconnect();
   }, []);
 
-  if (!settings.visible) return null;
+  if (!settings.visible && !runtime) return null;
 
   return (
     <ContextMenu>
@@ -76,10 +80,11 @@ export function StatusBar({
           className="flex h-[22px] shrink-0 items-center justify-between gap-1 overflow-hidden border-t border-hairline bg-background/70 px-2 text-[11px] leading-none text-muted-foreground"
         >
           <div className="flex min-w-0 flex-1 items-center overflow-hidden">
-            <UsageCluster tier={tier} onOpenAgentSettings={onOpenAgentSettings} onOpenUsageDetails={onOpenUsageDetails} />
+            {settings.visible ? <UsageCluster tier={tier} onOpenAgentSettings={onOpenAgentSettings} onOpenUsageDetails={onOpenUsageDetails} /> : null}
           </div>
           <div className="flex shrink-0 items-center">
-            <ResourceCluster narrow={tier !== "full"} />
+            <RuntimeStatus tier={tier} />
+            {settings.visible ? <ResourceCluster narrow={tier !== "full"} /> : null}
           </div>
         </div>
       </ContextMenuTrigger>

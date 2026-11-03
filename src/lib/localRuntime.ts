@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { errorMessage, localRuntime, type LocalRuntimeRestart, type LocalRuntimeState } from "@/lib/api";
+import { errorMessage, localRuntime, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeState } from "@/lib/api";
 import { reattachLocalTerminals } from "@/lib/terminal";
 
 /**
@@ -121,4 +121,23 @@ export function useLocalRuntime(): LocalRuntimeView {
     () => current,
     () => current,
   );
+}
+
+/**
+ * The runtime the app came with, while it is not yet the one running (#766):
+ * an older runtime waiting to be replaced (or failed to be), or one being
+ * replaced. The status bar shows it, in place of a card in every window.
+ */
+export type RuntimeSwitch =
+  | { kind: "waiting"; epoch: string; outdated: LocalRuntimeOutdated }
+  | { kind: "updating"; from: string | null; to: string };
+
+export function runtimeSwitchOf(state: LocalRuntimeState | null): RuntimeSwitch | null {
+  if (state?.state === "updating") return { kind: "updating", from: state.from, to: state.to };
+  if (state?.state === "connected" && state.outdated) return { kind: "waiting", epoch: state.epoch, outdated: state.outdated };
+  return null;
+}
+
+export function useRuntimeSwitch(): RuntimeSwitch | null {
+  return runtimeSwitchOf(useLocalRuntime().state);
 }

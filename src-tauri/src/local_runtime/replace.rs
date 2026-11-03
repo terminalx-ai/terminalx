@@ -37,9 +37,18 @@
 //! runtime. A runtime of the app's version or a newer one is attached as it
 //! always was, so two builds sharing one home never take turns replacing each
 //! other's runtime.
+//!
+//! An update made in the app decides about the runtime before it installs
+//! (#766, `update_plan.rs`), and the app it relaunches into follows that
+//! plan: it replaces the runtime as it attaches when Update now was chosen,
+//! or when nothing was under way before the relaunch and still is; otherwise
+//! it waits as above, without asking again. One that can be handed over
+//! needs no plan to keep what it runs: Update now stops only what its
+//! handover cannot carry. Windows show the wait in the status bar, and a
+//! floating notice only when a switch failed.
 
 use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use serde::Serialize;
@@ -48,6 +57,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::client::{Build, Refused};
 use super::desktop::Desktop;
+use super::update_plan::Plan;
 use crate::session::retire::{Work, WorkKind};
 use crate::store::index::SessionEntry;
 use crate::AppState;
@@ -103,6 +113,9 @@ struct Inner {
     stopping: bool,
     /// Look again now rather than at the next check.
     due: bool,
+    /// Update now was chosen before the update (#766): replace the older
+    /// runtime at once, whatever it runs.
+    forced: bool,
 }
 
 impl Inner {
@@ -116,6 +129,15 @@ impl Inner {
     fn outdated(&mut self, epoch: &str) -> Option<&mut Outdated> {
         self.pending.as_mut().filter(|(pending, _)| pending == epoch).map(|(_, outdated)| outdated)
     }
+}
+
+/// What the watch is to do next with the older runtime attached.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Due {
+    /// Read what it runs, and replace it once nothing would be cut short.
+    Check(String),
+    /// Replace it now, whatever it runs, as was chosen before the update.
+    Replace(String),
 }
 
 /// What the desktop knows about replacing the attached runtime, for every window.
@@ -132,7 +154,14 @@ fn app_version() -> semver::Version {
 
 impl Replacement {
     /// An attachment was published, to the runtime `epoch` of `build`.
-    pub(crate) fn attached(&self, epoch: &str, build: &Build) {
+    /// `plan` is what was decided about the runtime before an update, if one
+    /// was left for this app (#766): it holds only for the runtime it was
+    /// made for, and only while it is current.
+    pub(crate) fn attached(&self, epoch: &str, build: &Build, plan: Option<&Plan>) {
+        self.attached_at(epoch, build, plan, SystemTime::now(), Instant::now());
+    }
+
+    fn attached_at(&self, epoch: &str, build: &Build, plan: Option<&Plan>, clock: SystemTime, now: Instant) {
         let app = app_version();
         let mut inner = self.inner.lock().unwrap();
         inner.switching = None;
@@ -140,22 +169,34 @@ impl Replacement {
         if !build.older_than(&app) {
             inner.pending = None;
             inner.quiet_since = None;
+            inner.forced = false;
             return;
         }
+        let plan = plan.filter(|plan| plan.epoch == epoch && plan.current(clock));
         // A new attachment to the same older runtime keeps what was found.
         if inner.pending.as_ref().is_none_or(|(pending, _)| pending != epoch) {
             // The runtime bundled with this app reads the record it writes.
             let keeps = keeps(build);
             let running = build.version.as_ref().map_or_else(|| "a version it would not say".to_string(), ToString::to_string);
             if keeps {
-                log::warn!("the local runtime ({running}) is older than this app ({app}); it is handed over to this app's, keeping what it runs");
+                let when = if plan.is_some_and(|plan| plan.forced) { " now, as was chosen before the update," } else { "" };
+                log::warn!("the local runtime ({running}) is older than this app ({app}); it is handed over to this app's{when} keeping what it runs");
             } else {
-                log::warn!("the local runtime ({running}) is older than this app ({app}); it is replaced once nothing it runs would be cut short");
+                let when = match plan {
+                    Some(plan) if plan.forced => "now, as was chosen before the update",
+                    Some(_) => "once nothing it runs would be cut short, as was chosen before the update",
+                    None => "once nothing it runs would be cut short",
+                };
+                log::warn!("the local runtime ({running}) is older than this app ({app}); it is replaced {when}");
             }
             inner.pending = Some((epoch.into(), Outdated {
                 running: build.version.as_ref().map(ToString::to_string), app: app.to_string(), work: None, problem: None, failed: false, keeps,
             }));
-            inner.quiet_since = None;
+            // Nothing found under way by every reading before the relaunch
+            // counts towards the wait for it to settle; the first reading
+            // here still has to find nothing.
+            inner.quiet_since = plan.and_then(|plan| plan.quiet_for(clock)).and_then(|quiet| now.checked_sub(quiet));
+            inner.forced = plan.is_some_and(|plan| plan.forced);
         }
         inner.due = true;
         drop(inner);
@@ -254,6 +295,7 @@ impl Replacement {
 
     fn failed(&self, epoch: &str, problem: String) {
         let mut inner = self.inner.lock().unwrap();
+        inner.forced = false;
         inner.switching = None;
         inner.stopping = false;
         inner.quiet_since = None;
@@ -263,17 +305,23 @@ impl Replacement {
         }
     }
 
-    /// The older runtime to check next: at once when it was just attached,
-    /// and every [`CHECK_EVERY`] after that. Waits while there is none.
-    fn next(&self) -> String {
+    /// What to do next with the older runtime attached: replace it at once
+    /// when Update now was chosen for it, or else check it at once when it
+    /// was just attached, and every [`CHECK_EVERY`] after that. Waits while
+    /// there is none.
+    fn next(&self) -> Due {
         let mut inner = self.inner.lock().unwrap();
         loop {
             if inner.checkable().is_none() {
                 inner = self.wake.wait(inner).unwrap();
                 continue;
             }
+            if std::mem::take(&mut inner.forced) {
+                inner.due = false;
+                return Due::Replace(inner.checkable().expect("checked above").to_owned());
+            }
             if std::mem::take(&mut inner.due) {
-                return inner.checkable().expect("checked above").to_owned();
+                return Due::Check(inner.checkable().expect("checked above").to_owned());
             }
             let (next, waited) = self.wake.wait_timeout(inner, CHECK_EVERY).unwrap();
             inner = next;
@@ -390,12 +438,20 @@ fn check(replacement: &Replacement, epoch: &str, work: anyhow::Result<Vec<String
 }
 
 /// Ask an older attached runtime, every few seconds, what it is running, and
-/// replace it once nothing would be cut short.
+/// replace it once nothing would be cut short; or at once, when Update now
+/// was chosen for it before the update (#766).
 pub(crate) fn watch(app: &AppHandle) {
     let app = app.clone();
     let spawned = std::thread::Builder::new().name("local-runtime-replacement".into()).spawn(move || loop {
         let state = app.state::<AppState>();
-        let epoch = state.runtime_replacement.next();
+        let epoch = match state.runtime_replacement.next() {
+            Due::Replace(epoch) => {
+                let _one = super::ui::RESTART.blocking_lock();
+                if let Err(error) = switch(&state.runtime_replacement, &AppHost(&app), &epoch, true) { log::warn!("replace the older local runtime: {error}"); }
+                continue;
+            }
+            Due::Check(epoch) => epoch,
+        };
         let Some(runtime) = state.runtime().filter(|runtime| runtime.epoch() == epoch && runtime.attachment().is_ok()) else { continue };
         let read = if state.runtime_replacement.keeps(&epoch) { kept_back(&app, &runtime) } else { work(&runtime) };
         // The bundled runtime cannot take this one over: replaced as before.
@@ -489,6 +545,21 @@ pub(crate) fn kept_back(app: &AppHandle, runtime: &Desktop) -> anyhow::Result<Ve
     Ok(runtime.handover_plan(&binary)?.iter().map(|work| named(&sessions, work)).collect())
 }
 
+/// What moving `runtime` to the runtime bundled with this app would cut
+/// short, by name, read before an update installs (#766) as the watch reads
+/// it: what its handover cannot carry when it can be handed over (#765), or
+/// else what stopping it would.
+pub(super) fn cut_short(app: &AppHandle, runtime: &Desktop) -> anyhow::Result<Vec<String>> {
+    if keeps(runtime.build()) {
+        match kept_back(app, runtime) {
+            // The bundled runtime cannot take it over: it is stopped instead.
+            Err(error) if super::launch::refused(&error, "handover_unsupported") => {}
+            read => return read,
+        }
+    }
+    work(runtime)
+}
+
 /// Stop `runtime` as Stop All does, only if nothing it runs would be cut
 /// short: decided by the runtime under the lock that admits work when it can
 /// (`runtime.stopAllIfIdle`), or, for one too old to, by reading its work
@@ -504,7 +575,7 @@ fn stop_if_idle(runtime: &Desktop) -> anyhow::Result<()> {
 
 /// What stopping `runtime` now would cut short, by name: as it says, or, for
 /// a runtime too old to say, as far as what it shows tells.
-fn work(runtime: &Desktop) -> anyhow::Result<Vec<String>> {
+pub(super) fn work(runtime: &Desktop) -> anyhow::Result<Vec<String>> {
     let sessions = crate::store::index::load().unwrap_or_default();
     if let Some(work) = runtime.work()? {
         return Ok(work.iter().map(|work| named(&sessions, work)).collect());
@@ -603,24 +674,24 @@ mod tests {
     #[test]
     fn only_a_runtime_older_than_the_app_is_replaced() {
         let replacement = Replacement::default();
-        replacement.attached("same", &build(Some(env!("CARGO_PKG_VERSION"))));
+        replacement.attached("same", &build(Some(env!("CARGO_PKG_VERSION"))), None);
         assert_eq!(replacement.outdated("same"), None);
         assert_eq!(replacement.next_now(), None, "nothing to check");
         let mut newer = app_version();
         newer.minor += 1;
-        replacement.attached("newer", &build(Some(&newer.to_string())));
+        replacement.attached("newer", &build(Some(&newer.to_string())), None);
         assert_eq!(replacement.outdated("newer"), None, "a newer runtime is never replaced by an older app");
 
-        replacement.attached("old", &build(Some(&older())));
+        replacement.attached("old", &build(Some(&older())), None);
         let outdated = replacement.outdated("old").expect("an older runtime is");
         assert_eq!((outdated.running, outdated.app, outdated.work, outdated.failed, outdated.keeps), (Some(older()), env!("CARGO_PKG_VERSION").to_string(), None, false, false));
-        assert_eq!(replacement.next_now().as_deref(), Some("old"), "checked at once");
+        assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "checked at once");
         assert_eq!(replacement.outdated("another"), None, "only windows attached to it are told");
 
-        replacement.attached("unsaid", &build(None));
+        replacement.attached("unsaid", &build(None), None);
         assert_eq!(replacement.outdated("unsaid").unwrap().running, None, "one that would not say is taken for older");
         // Its replacement, of this app's version, clears it.
-        replacement.attached("bundled", &build(Some(env!("CARGO_PKG_VERSION"))));
+        replacement.attached("bundled", &build(Some(env!("CARGO_PKG_VERSION"))), None);
         assert_eq!(replacement.outdated("unsaid"), None);
     }
 
@@ -630,7 +701,7 @@ mod tests {
     #[test]
     fn an_older_runtime_is_switched_only_once_nothing_has_been_under_way_for_a_while() {
         let replacement = Replacement::default();
-        replacement.attached("old", &build(Some(&older())));
+        replacement.attached("old", &build(Some(&older())), None);
         let switched = std::cell::Cell::new(0);
         let switch = || { switched.set(switched.get() + 1); Ok(()) };
         let start = Instant::now();
@@ -708,7 +779,7 @@ mod tests {
             // The bundled runtime is slow to start the first time, then attaches.
             self.replacement.attach_failed();
             self.note("bundled failed to attach once");
-            self.replacement.attached("bundled", &build(Some(env!("CARGO_PKG_VERSION"))));
+            self.replacement.attached("bundled", &build(Some(env!("CARGO_PKG_VERSION"))), None);
         }
         fn changed(&self) { self.note("changed"); }
     }
@@ -718,7 +789,7 @@ mod tests {
     #[test]
     fn a_switch_stops_the_older_runtime_then_attaches_the_bundled_one_and_windows_follow() {
         let replacement = Replacement::default();
-        replacement.attached("old", &build(Some(&older())));
+        replacement.attached("old", &build(Some(&older())), None);
         let forced = std::cell::Cell::new(None);
         let supervisor = Supervisor { replacement: &replacement, stop: Box::new(|force| { forced.set(Some(force)); Ok(()) }), steps: RefCell::default() };
         assert_eq!(switch(&replacement, &supervisor, "old", false), Ok(()));
@@ -743,7 +814,7 @@ mod tests {
     #[test]
     fn work_found_as_the_runtime_stops_puts_the_switch_off_without_stopping_anything() {
         let replacement = Replacement::default();
-        replacement.attached("old", &build(Some(&older())));
+        replacement.attached("old", &build(Some(&older())), None);
         let busy = Supervisor { replacement: &replacement, steps: RefCell::default(), stop: Box::new(|_| {
             Err(anyhow::Error::from(Refused { code: "runtime_busy".into(), message: "an agent is mid-turn".into() })
                 .context(super::super::launch::LeftRunning("The TerminalX runtime has work under way; nothing was stopped.")))
@@ -752,7 +823,7 @@ mod tests {
         assert_eq!(*busy.steps.borrow(), ["changed: updating", "retire: updating", "changed: outdated"], "never reattached");
         let outdated = replacement.outdated("old").unwrap();
         assert!(!outdated.failed && outdated.problem.is_none());
-        assert_eq!(replacement.next_now().as_deref(), Some("old"), "read again at once, and waited for from the start");
+        assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "read again at once, and waited for from the start");
         assert!(!replacement.settled("old", Instant::now() + SETTLE));
     }
 
@@ -762,7 +833,7 @@ mod tests {
     #[test]
     fn a_runtime_left_running_by_a_failure_before_it_agreed_is_waited_for_again() {
         let replacement = Replacement::default();
-        replacement.attached("old", &build(Some(&older())));
+        replacement.attached("old", &build(Some(&older())), None);
         let left = Supervisor { replacement: &replacement, steps: RefCell::default(), stop: Box::new(|_| {
             Err(anyhow::anyhow!("The TerminalX runtime did not answer status within 15 seconds.")
                 .context(super::super::launch::LeftRunning("The TerminalX runtime did not agree to stop; nothing was stopped.")))
@@ -772,13 +843,13 @@ mod tests {
         let outdated = replacement.outdated("old").unwrap();
         assert!(!outdated.failed, "not a failed switch: nothing was stopped");
         assert!(outdated.problem.as_deref().is_some_and(|problem| problem.contains("did not agree to stop") && problem.contains("15 seconds")), "{outdated:?}");
-        assert_eq!(replacement.next_now().as_deref(), Some("old"), "read again, and waited for from the start");
+        assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "read again, and waited for from the start");
     }
 
     #[test]
     fn a_failed_switch_says_why_and_is_tried_again_only_when_asked() {
         let replacement = Replacement::default();
-        replacement.attached("old", &build(Some(&older())));
+        replacement.attached("old", &build(Some(&older())), None);
         let failing = Supervisor { replacement: &replacement, steps: RefCell::default(), stop: Box::new(|_| anyhow::bail!("it did not exit")) };
         let error = switch(&replacement, &failing, "old", false).unwrap_err();
         assert_eq!(error, "Could not restart the TerminalX runtime: it did not exit");
@@ -797,7 +868,7 @@ mod tests {
     #[test]
     fn one_switch_at_a_time_and_only_from_the_older_runtime_attached() {
         let replacement = Replacement::default();
-        replacement.attached("old", &build(Some(&older())));
+        replacement.attached("old", &build(Some(&older())), None);
         assert!(replacement.begin("old"));
         assert!(!replacement.begin("old"));
         assert_eq!(shown(&replacement, connected("old")), updating());
@@ -814,14 +885,14 @@ mod tests {
     #[test]
     fn a_runtime_that_can_be_handed_over_is_handed_over_at_once_and_keeps_what_it_runs() {
         let replacement = Replacement::default();
-        replacement.attached("old", &handing(&older()));
+        replacement.attached("old", &handing(&older()), None);
         assert!(replacement.outdated("old").unwrap().keeps);
         let switched = std::cell::Cell::new(0);
         assert!(!check(&replacement, "old", Ok(vec![]), Instant::now(), || { switched.set(switched.get() + 1); Ok(()) }), "the switch tells windows itself");
         assert_eq!(switched.get(), 1, "no wait for turns to end: they go on");
 
         let replacement = Replacement::default();
-        replacement.attached("old", &handing(&older()));
+        replacement.attached("old", &handing(&older()), None);
         let stopping = std::cell::Cell::new(None);
         let supervisor = Supervisor::new(&replacement, |stop| { stopping.set(Some(stop)); Ok(()) });
         assert_eq!(switch(&replacement, &supervisor, "old", false), Ok(()));
@@ -841,7 +912,7 @@ mod tests {
     #[test]
     fn what_a_handover_cannot_carry_is_named_and_stopped_only_when_asked() {
         let replacement = Replacement::default();
-        replacement.attached("old", &handing(&older()));
+        replacement.attached("old", &handing(&older()), None);
         let unkept = || Ok(vec!["Codex in \u{201c}Web\u{201d}, in the middle of a turn".to_string()]);
         let start = Instant::now();
         assert!(check(&replacement, "old", unkept(), start, || panic!("never by itself")));
@@ -862,16 +933,16 @@ mod tests {
         let refusal = |code: &'static str| move |_| -> anyhow::Result<()> { Err(Refused { code: code.into(), message: "refused".into() }.into()) };
         for code in ["handover_busy", "handover_unadoptable", "runtime_restarted"] {
             let replacement = Replacement::default();
-            replacement.attached("old", &handing(&older()));
+            replacement.attached("old", &handing(&older()), None);
             let busy = Supervisor::new(&replacement, refusal(code));
             assert_eq!(switch(&replacement, &busy, "old", false), Ok(()), "{code}");
             assert_eq!(busy.steps.borrow().last().map(String::as_str), Some("changed: outdated"), "{code}: never reattached");
             let outdated = replacement.outdated("old").unwrap();
             assert!(!outdated.failed && outdated.keeps && outdated.problem.is_none(), "{code}: {outdated:?}");
-            assert_eq!(replacement.next_now().as_deref(), Some("old"), "{code}: looked at again");
+            assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "{code}: looked at again");
         }
         let replacement = Replacement::default();
-        replacement.attached("old", &handing(&older()));
+        replacement.attached("old", &handing(&older()), None);
         let impossible = Supervisor::new(&replacement, refusal("handover_unsupported"));
         assert_eq!(switch(&replacement, &impossible, "old", false), Ok(()));
         let outdated = replacement.outdated("old").unwrap();
@@ -891,13 +962,136 @@ mod tests {
     #[test]
     fn a_failed_handover_says_why_and_is_tried_again_only_when_asked() {
         let replacement = Replacement::default();
-        replacement.attached("old", &handing(&older()));
+        replacement.attached("old", &handing(&older()), None);
         let failing = Supervisor::new(&replacement, |_| anyhow::bail!("the updated TerminalX runtime did not answer after the handover"));
         let error = switch(&replacement, &failing, "old", false).unwrap_err();
         assert!(error.contains("did not answer after the handover"), "{error}");
         let outdated = replacement.outdated("old").unwrap();
         assert!(outdated.failed && outdated.keeps);
         assert_eq!(replacement.next_now(), None, "not by itself");
+    }
+
+    /// What the app that installed an update left for this one (#766).
+    fn plan(epoch: &str, forced: bool, quiet_for: Option<Duration>, clock: SystemTime) -> Plan {
+        let millis = super::super::update_plan::millis;
+        Plan { epoch: epoch.into(), forced, quiet_since: quiet_for.map(|quiet| millis(clock - quiet)), made_at: millis(clock - Duration::from_secs(3)), made_by: 1 }
+    }
+
+    /// #766: Update now was chosen, listing what it stops: the relaunched app
+    /// replaces the older runtime as it attaches, whatever it runs, and asks
+    /// nothing.
+    #[test]
+    fn update_now_chosen_before_the_update_replaces_the_older_runtime_as_it_attaches() {
+        let replacement = Replacement::default();
+        let clock = SystemTime::now();
+        replacement.attached_at("old", &build(Some(&older())), Some(&plan("old", true, None, clock)), clock, Instant::now());
+        assert_eq!(replacement.next_now(), Some(Due::Replace("old".into())), "at once, without reading what it runs first");
+        assert_eq!(replacement.next_now(), None, "once");
+        let forced = std::cell::Cell::new(None);
+        let supervisor = Supervisor { replacement: &replacement, stop: Box::new(|force| { forced.set(Some(force)); Ok(()) }), steps: RefCell::default() };
+        assert_eq!(switch(&replacement, &supervisor, "old", true), Ok(()));
+        assert_eq!(forced.get(), Some(true), "whatever it runs stops with it");
+        assert_eq!(supervisor.steps.borrow().last().map(String::as_str), Some("changed: connected"));
+        assert_eq!(replacement.outdated("bundled"), None, "no notice follows: the bundled runtime is attached");
+    }
+
+    /// #765 with #766: Update now chosen for a runtime that can be handed
+    /// over hands it over as the app attaches, stopping only what its
+    /// handover cannot carry, which is all the update card listed.
+    #[test]
+    fn update_now_chosen_for_a_runtime_that_can_be_handed_over_stops_only_what_it_cannot_carry() {
+        let replacement = Replacement::default();
+        let clock = SystemTime::now();
+        replacement.attached_at("old", &handing(&older()), Some(&plan("old", true, None, clock)), clock, Instant::now());
+        assert!(replacement.outdated("old").unwrap().keeps);
+        assert_eq!(replacement.next_now(), Some(Due::Replace("old".into())), "at once, as was chosen");
+        let stopping = std::cell::Cell::new(None);
+        let supervisor = Supervisor::new(&replacement, |stop| { stopping.set(Some(stop)); Ok(()) });
+        assert_eq!(switch(&replacement, &supervisor, "old", true), Ok(()));
+        assert_eq!(stopping.get(), Some(true), "what it cannot carry stops, as the card said");
+        assert_eq!(supervisor.steps.borrow()[1], "hand over, stopping the unkept: updating, keeping", "handed over, never retired");
+        assert_eq!(supervisor.steps.borrow().last().map(String::as_str), Some("changed: connected"));
+    }
+
+    /// #766: a failed switch during an update says why, and is tried again
+    /// only when asked.
+    #[test]
+    fn a_switch_chosen_before_the_update_that_fails_says_why_and_waits_to_be_asked_again() {
+        let replacement = Replacement::default();
+        let clock = SystemTime::now();
+        replacement.attached_at("old", &build(Some(&older())), Some(&plan("old", true, None, clock)), clock, Instant::now());
+        assert_eq!(replacement.next_now(), Some(Due::Replace("old".into())));
+        let failing = Supervisor { replacement: &replacement, steps: RefCell::default(), stop: Box::new(|_| anyhow::bail!("it did not exit")) };
+        assert_eq!(switch(&replacement, &failing, "old", true), Err("Could not restart the TerminalX runtime: it did not exit".into()));
+        let outdated = replacement.outdated("old").unwrap();
+        assert!(outdated.failed && outdated.problem.as_deref() == Some("Could not restart the TerminalX runtime: it did not exit"), "{outdated:?}");
+        assert_eq!(replacement.next_now(), None, "neither replaced again nor checked by itself");
+        // A new attachment to the same runtime does not bring the plan back.
+        replacement.attached_at("old", &build(Some(&older())), None, clock, Instant::now());
+        assert_eq!(replacement.next_now(), None);
+    }
+
+    /// #766: nothing was under way when the update was asked for, nor once
+    /// it was installed: the relaunched app replaces the older runtime on
+    /// its first reading that finds nothing, without waiting from the start.
+    #[test]
+    fn nothing_under_way_before_the_relaunch_replaces_the_older_runtime_on_the_first_quiet_reading() {
+        let switched = std::cell::Cell::new(0);
+        let switch = || { switched.set(switched.get() + 1); Ok(()) };
+        let clock = SystemTime::now();
+        let now = Instant::now();
+
+        let replacement = Replacement::default();
+        replacement.attached_at("old", &build(Some(&older())), Some(&plan("old", false, Some(SETTLE + CHECK_EVERY), clock)), clock, now);
+        assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "read first: it is never replaced on a reading from before the relaunch alone");
+        check(&replacement, "old", Ok(vec![]), now, switch);
+        assert_eq!(switched.get(), 1, "replaced as it attaches");
+
+        // A download quicker than SETTLE: the rest of the wait, not all of it.
+        let replacement = Replacement::default();
+        replacement.attached_at("old", &build(Some(&older())), Some(&plan("old", false, Some(SETTLE - CHECK_EVERY), clock)), clock, now);
+        check(&replacement, "old", Ok(vec![]), now, switch);
+        assert_eq!(switched.get(), 1);
+        check(&replacement, "old", Ok(vec![]), now + CHECK_EVERY, switch);
+        assert_eq!(switched.get(), 2);
+
+        // Something started meanwhile: it waits, by itself, from the start.
+        let replacement = Replacement::default();
+        replacement.attached_at("old", &build(Some(&older())), Some(&plan("old", false, Some(SETTLE * 2), clock)), clock, now);
+        assert!(check(&replacement, "old", Ok(vec!["Codex in \u{201c}Web\u{201d}, in the middle of a turn".into()]), now, switch));
+        check(&replacement, "old", Ok(vec![]), now + CHECK_EVERY, switch);
+        assert_eq!(switched.get(), 2, "not before it has settled again");
+        check(&replacement, "old", Ok(vec![]), now + CHECK_EVERY + SETTLE, switch);
+        assert_eq!(switched.get(), 3, "and then by itself, without asking");
+    }
+
+    /// #766: Update when they're done is the wait #730 made, with nothing to
+    /// ask; and a plan for another runtime, or one made long ago, is no plan.
+    #[test]
+    fn a_plan_holds_only_for_the_runtime_it_was_made_for_and_only_for_a_while() {
+        let switched = std::cell::Cell::new(0);
+        let switch = || { switched.set(switched.get() + 1); Ok(()) };
+        let clock = SystemTime::now();
+        let now = Instant::now();
+        let quiet = Some(SETTLE * 2);
+        for (case, plan) in [
+            ("when they're done", plan("old", false, None, clock)),
+            ("another runtime's", plan("other", true, quiet, clock)),
+            ("one made long ago", plan("old", true, quiet, clock - super::super::update_plan::VALID_FOR - Duration::from_secs(5))),
+        ] {
+            let replacement = Replacement::default();
+            replacement.attached_at("old", &build(Some(&older())), Some(&plan), clock, now);
+            assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "{case}: checked, not replaced at once");
+            check(&replacement, "old", Ok(vec![]), now, switch);
+            assert_eq!(switched.get(), 0, "{case}: waits for nothing to be under way for SETTLE");
+            check(&replacement, "old", Ok(vec![]), now + SETTLE, switch);
+            assert_eq!(switched.get(), 1, "{case}: then replaced by itself");
+            switched.set(0);
+        }
+        // A runtime not older than the app has nothing to replace, whatever the plan says.
+        let replacement = Replacement::default();
+        replacement.attached_at("old", &build(Some(env!("CARGO_PKG_VERSION"))), Some(&plan("old", true, quiet, clock)), clock, now);
+        assert_eq!(replacement.next_now(), None);
     }
 
     fn sessions() -> Vec<SessionEntry> {
@@ -960,10 +1154,14 @@ mod tests {
 
     impl Replacement {
         /// [`Replacement::next`] without waiting: what is due now, if anything.
-        fn next_now(&self) -> Option<String> {
+        fn next_now(&self) -> Option<Due> {
             let mut inner = self.inner.lock().unwrap();
             let epoch = inner.checkable()?.to_owned();
-            std::mem::take(&mut inner.due).then_some(epoch)
+            if std::mem::take(&mut inner.forced) {
+                inner.due = false;
+                return Some(Due::Replace(epoch));
+            }
+            std::mem::take(&mut inner.due).then_some(Due::Check(epoch))
         }
     }
 }

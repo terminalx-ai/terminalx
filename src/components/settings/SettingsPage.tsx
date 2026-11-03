@@ -764,6 +764,9 @@ function AboutTab() {
             </Button>
           </>
         )}
+        {state.kind === "choosing" && (
+          <span className="text-xs text-foreground">Version {state.update.version} would stop work in progress: choose when to update in the card below.</span>
+        )}
         {state.kind === "installing" && <span className="text-xs text-muted-foreground">Installing… {state.pct}%</span>}
       </div>
 
