@@ -7,7 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{canonical_pr, ActivityEvent, PR};
@@ -19,6 +20,20 @@ pub(super) struct Kept {
     pub(super) name: String,
     pub(super) path: PathBuf,
     pub(super) event: ActivityEvent,
+    /// For work, when the runtime that kept it claimed history.
+    pub(super) since: Option<i64>,
+}
+
+/// A record as it is written: the event, and for work kept by a runtime,
+/// when that runtime claimed history. Everything it kept happened after
+/// then, so a new history recovers the session logs only up to there.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Record {
+    #[serde(flatten)]
+    event: ActivityEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<i64>,
 }
 
 pub(super) struct Inbox {
@@ -42,9 +57,12 @@ fn path(root: &Path, event: &ActivityEvent) -> PathBuf {
     root.join(DIR).join(format!("{}.json", name(event)))
 }
 
-/// Keep one record for the writer.
-pub(super) fn keep(root: &Path, event: &ActivityEvent) -> Result<()> {
+/// Keep one record for the writer. While the folder cannot be written, every
+/// record fails with the same message, which names the folder and the cause,
+/// not the record's own file: one failure is logged once (`Owner::settle`).
+pub(super) fn keep(root: &Path, event: &ActivityEvent, since: Option<i64>) -> Result<()> {
     let dir = root.join(DIR);
+    let failed = |error: anyhow::Error| anyhow!("keep activity aside in {}: {}", dir.display(), error.root_cause());
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -52,9 +70,9 @@ pub(super) fn keep(root: &Path, event: &ActivityEvent) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(&dir).with_context(|| format!("create {}", dir.display()))?;
-    crate::store::write_atomic(&path(root, event), &serde_json::to_vec(event)?)
-        .context("keep activity aside for the runtime")
+    builder.create(&dir).map_err(|error| failed(error.into()))?;
+    let bytes = serde_json::to_vec(&Record { event: event.clone(), since })?;
+    crate::store::write_atomic(&path(root, event), &bytes).map_err(failed)
 }
 
 /// Keep a PR for the writer unless history or the inbox has it already.
@@ -65,7 +83,7 @@ pub(super) fn keep_pr(root: &Path, url: &str, at: i64) -> Result<()> {
     {
         return Ok(());
     }
-    keep(root, &event)
+    keep(root, &event, None)
 }
 
 /// Everything kept aside, oldest first. A file still being written has a
@@ -86,14 +104,14 @@ pub(super) fn list(root: &Path) -> Result<Inbox> {
         let Some(name) = path.file_stem().and_then(|stem| stem.to_str()).map(String::from) else {
             continue;
         };
-        let event = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<ActivityEvent>(&bytes).map_err(anyhow::Error::from),
+        let record = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Record>(&bytes).map_err(anyhow::Error::from),
             // Counted and removed by the writer since it was listed.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => Err(error.into()),
         };
-        match event {
-            Ok(event) => inbox.kept.push(Kept { name, path, event }),
+        match record {
+            Ok(Record { event, since }) => inbox.kept.push(Kept { name, path, event, since }),
             Err(error) => inbox.unreadable.push(format!("{}: {error:#}", path.display())),
         }
     }

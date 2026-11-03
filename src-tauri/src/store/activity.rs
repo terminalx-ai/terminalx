@@ -33,6 +33,9 @@ const MAX_EVENTS: usize = 1_000;
 const SCHEMA: u32 = 1;
 /// How soon a runtime notices that the lease's holder let go of it.
 const LEASE_POLL: Duration = Duration::from_millis(500);
+/// How long a holder that could not be identified, or has exited while the
+/// lease is still held, is named before the processes are looked through again.
+const HOLDER_STALE: Duration = Duration::from_secs(10);
 
 const START: &str = "agent_start";
 const STOP: &str = "agent_stop";
@@ -297,7 +300,14 @@ impl Collector {
                 }
                 data
             }
-            None if errors.is_empty() => Snapshot::empty(at),
+            // A new history recovers the session logs only up to `at`, when
+            // this runtime claimed it, or earlier if a runtime that could not
+            // open it kept work aside: that work is counted from its records,
+            // never from the logs as well.
+            None if errors.is_empty() => {
+                let inbox = pending::list(&root).context("read activity kept aside")?;
+                Snapshot::empty(inbox.kept.iter().filter_map(|kept| kept.since).fold(at, i64::min))
+            }
             None => bail!(
                 "Activity history could not be loaded: {}. Existing files were preserved.",
                 errors.join("; ")
@@ -432,7 +442,7 @@ impl Collector {
 /// Why a runtime keeps its work aside instead of writing history.
 enum Unavailable {
     /// Another process holds the lease. A waiter takes it once it is let go.
-    Held(Holder),
+    Held { holder: Holder, found: Instant },
     /// History could not be loaded. Retry (or a restart) opens it again.
     Failed(String),
 }
@@ -441,6 +451,9 @@ enum Unavailable {
 /// their work and every PR are kept aside for when it can.
 #[derive(Default)]
 struct Aside {
+    /// When this runtime claimed history, before any of its hooks could
+    /// publish: everything it keeps aside happened after this.
+    since: i64,
     tabs: Tabs,
     why: Option<Unavailable>,
     error: Option<String>,
@@ -466,7 +479,7 @@ impl Aside {
         };
         let started = event.kind == START;
         self.failing = true;
-        pending::keep(root, &event)?;
+        pending::keep(root, &event, Some(self.since))?;
         self.failing = false;
         // The total with this start in it, so the star reminder's count and
         // the cloud's activity keep moving while the lease is held elsewhere.
@@ -489,7 +502,7 @@ impl Aside {
         self.stopped = true;
         let mut result = Ok(());
         for event in self.tabs.close(at, clock) {
-            if let Err(error) = pending::keep(root, &event) {
+            if let Err(error) = pending::keep(root, &event, Some(self.since)) {
                 result = Err(error);
             }
         }
@@ -513,20 +526,20 @@ struct Owner {
 
 impl Owner {
     fn new(root: PathBuf) -> Self {
-        let mut owner = Self { root, store: Store::Aside(Aside::default()), reported: None };
-        owner.reopen(true);
+        let aside = Aside { since: now_ms(), ..Aside::default() };
+        let mut owner = Self { root, store: Store::Aside(aside), reported: None };
+        owner.reopen();
         owner
     }
 
     /// Become the writer if this process can; otherwise say why once, and
-    /// keep work aside. `find` looks up who holds the lease again, which the
-    /// waiter's frequent attempts skip.
-    fn reopen(&mut self, find: bool) {
+    /// keep work aside.
+    fn reopen(&mut self) {
         let Store::Aside(aside) = &mut self.store else { return };
         if aside.stopped {
             return;
         }
-        match Collector::open(self.root.clone(), now_ms()) {
+        match Collector::open(self.root.clone(), aside.since) {
             Ok(mut collector) => {
                 collector.tabs = std::mem::take(&mut aside.tabs);
                 if collector.error.is_none() {
@@ -538,16 +551,21 @@ impl Owner {
                 self.store = Store::Writer(collector);
             }
             Err(error) if error.is::<LeaseHeld>() => {
-                let known = match &aside.why {
-                    Some(Unavailable::Held(holder)) if !find => Some(holder.clone()),
-                    _ => None,
+                // Looking for the holder reads every process's open files,
+                // under the owner's lock: once per holder, not once per read.
+                let (holder, found) = match &aside.why {
+                    Some(Unavailable::Held { holder, found })
+                        if holder.alive() || found.elapsed() < HOLDER_STALE =>
+                    {
+                        (holder.clone(), *found)
+                    }
+                    _ => (Holder::find(&self.root.join(LOCK)), Instant::now()),
                 };
-                let holder = known.unwrap_or_else(|| Holder::find(&self.root.join(LOCK)));
-                let waiting = matches!(aside.why, Some(Unavailable::Held(_)));
-                if !matches!(&aside.why, Some(Unavailable::Held(known)) if *known == holder) {
+                let waiting = matches!(aside.why, Some(Unavailable::Held { .. }));
+                if !matches!(&aside.why, Some(Unavailable::Held { holder: known, .. }) if *known == holder) {
                     log::warn!("{}", holder.notice());
                 }
-                aside.why = Some(Unavailable::Held(holder));
+                aside.why = Some(Unavailable::Held { holder, found });
                 if !waiting {
                     wait_for_lease(self.root.clone());
                 }
@@ -564,7 +582,7 @@ impl Owner {
 
     /// Whether a waiter should keep trying for the lease.
     fn waiting(&self) -> bool {
-        matches!(&self.store, Store::Aside(Aside { why: Some(Unavailable::Held(_)), stopped: false, .. }))
+        matches!(&self.store, Store::Aside(Aside { why: Some(Unavailable::Held { .. }), stopped: false, .. }))
     }
 
     fn import(&mut self) {
@@ -587,10 +605,11 @@ impl Owner {
                 value
             }
             Err(error) => {
-                let message = format!("{context}: {error:#}");
-                if self.reported.as_ref() != Some(&message) {
-                    log::error!("{message}");
-                    self.reported = Some(message);
+                // The failure itself, whichever write met it first.
+                let failure = format!("{error:#}");
+                if self.reported.as_ref() != Some(&failure) {
+                    log::error!("{context}: {failure}");
+                    self.reported = Some(failure);
                 }
                 T::default()
             }
@@ -598,12 +617,12 @@ impl Owner {
     }
 
     fn summary(&mut self) -> Result<Summary> {
-        self.reopen(true);
+        self.reopen();
         self.import();
         match &self.store {
             Store::Writer(collector) => Ok(collector.summary()),
             Store::Aside(aside) => match &aside.why {
-                Some(Unavailable::Held(holder)) => {
+                Some(Unavailable::Held { holder, .. }) => {
                     let mut summary = published(&self.root)?.map(|data| data.summary()).unwrap_or_default();
                     let notice = holder.notice();
                     summary.accounting_error =
@@ -649,7 +668,7 @@ fn wait_for_lease(root: PathBuf) {
         std::thread::sleep(LEASE_POLL);
         let mut owner = OWNER.lock().unwrap_or_else(|error| error.into_inner());
         match owner.as_mut() {
-            Some(owner) if owner.root == root && owner.waiting() => owner.reopen(false),
+            Some(owner) if owner.root == root && owner.waiting() => owner.reopen(),
             _ => return,
         }
     });

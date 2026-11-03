@@ -554,7 +554,8 @@ fn runtime_owner_child() {
         .record_pr("https://github.com/example/synthetic/pull/1", T)
         .unwrap();
     fs::write(root.join("ready"), "ready").unwrap();
-    loop {
+    // Until killed, or until the test that started it is gone with its root.
+    while root.exists() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -609,6 +610,21 @@ pub(crate) fn lease_held(root: &Path) -> bool {
     }
 }
 
+/// Whether this process opened history for `root`. OWNER is shared by every
+/// test in the binary, so an owner another test left for its own root is
+/// not this test's.
+fn owns(root: &Path) -> bool {
+    OWNER.lock().unwrap().as_ref().is_some_and(|owner| owner.root == root)
+}
+
+/// When this runtime last looked up who holds the lease for `root`.
+fn holder_found(root: &Path) -> Option<Instant> {
+    match OWNER.lock().unwrap().as_ref().map(|owner| (&owner.root, &owner.store)) {
+        Some((known, Store::Aside(Aside { why: Some(Unavailable::Held { found, .. }), .. }))) if known == root => Some(*found),
+        _ => None,
+    }
+}
+
 fn is_writer(root: &Path) -> bool {
     OWNER.lock().unwrap().as_ref().is_some_and(|owner| owner.root == root && matches!(owner.store, Store::Writer(_)))
 }
@@ -629,11 +645,33 @@ fn wait_until(what: &str, done: impl Fn() -> bool) -> Duration {
 }
 
 /// A process that holds the lease without being this runtime: an older app
-/// that still opens it, another runtime, a command. It exits when killed.
-fn hold_lease_elsewhere(root: &Path) -> std::process::Child {
+/// that still opens it, another runtime, a command. It is killed when this
+/// is dropped, so a failing test leaves no holder running.
+struct Holding(std::process::Child);
+
+impl Holding {
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+
+    /// The holder exits, letting go of the lease.
+    fn exit(&mut self) {
+        let _ = self.0.kill();
+        self.0.wait().unwrap();
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn hold_lease_elsewhere(root: &Path) -> Holding {
     let mut holder = spawn_child("runtime_owner_child", root, &[]);
     wait_for(&root.join("ready"), &mut holder);
-    holder
+    Holding(holder)
 }
 
 fn turn(key: &str, run: Duration) {
@@ -679,7 +717,7 @@ fn app_child() {
     assert_eq!(transition("app/tab", TabStatus::InProgress, Source::Live), None);
     report_error("app-side message".into());
     shutdown().unwrap();
-    assert!(OWNER.lock().unwrap().is_none(), "the app never opens the writer");
+    assert!(!owns(&root), "the app never opens the writer");
     assert!(lease_held(&root), "the runtime holds the lease while the app runs");
     fs::write(root.join("app-ready"), saved.agents_spawned.to_string()).unwrap();
     wait_until("the app is told to quit", || root.join("app-quit").exists());
@@ -697,7 +735,7 @@ fn the_app_leaves_the_lease_to_the_runtime_it_starts() {
     record_pr("https://github.com/example/synthetic/pull/3").unwrap();
     record_pr("https://github.com/Example/Synthetic/pull/3/").unwrap();
     assert_eq!(transition("app/tab", TabStatus::InProgress, Source::Live), None);
-    assert!(OWNER.lock().unwrap().is_none(), "the app never opens the writer");
+    assert!(!owns(&root), "the app never opens the writer");
     assert!(!lease_held(&root));
     assert_eq!(saved_summary(&root).unwrap().unwrap().prs_created, 1, "the PR is kept for the runtime, once");
 
@@ -710,7 +748,7 @@ fn the_app_leaves_the_lease_to_the_runtime_it_starts() {
     assert_eq!(fs::read_dir(root.join("stats-activity-pending")).unwrap().count(), 0, "the runtime counted what the app kept");
     finish(&root.join("runtime-quit"), runtime);
     assert!(!lease_held(&root));
-    assert!(OWNER.lock().unwrap().is_none());
+    assert!(!owns(&root));
 }
 
 #[test]
@@ -753,11 +791,10 @@ fn the_runtime_takes_the_lease_once_its_holder_exits_without_a_transition() {
     for _ in 0..3 {
         let summary = summary().unwrap();
         assert_eq!(summary.prs_created, 1);
-        assert!(summary.accounting_error.unwrap().contains(&format!("(pid {})", holder.id())));
+        assert!(summary.accounting_error.unwrap().contains(&format!("(pid {})", holder.pid())));
     }
     assert_eq!(fs::read(root.join(FILE)).unwrap(), before);
-    holder.kill().unwrap();
-    holder.wait().unwrap();
+    holder.exit();
     let took = wait_until("the runtime holds the lease", || is_writer(&root));
     assert!(took < Duration::from_secs(5), "took {took:?}");
     assert!(lease_held(&root));
@@ -776,9 +813,10 @@ fn a_held_lease_is_reported_once_and_names_its_holder() {
     crate::test_log::capture();
     let root = root().unwrap();
     let mut holder = hold_lease_elsewhere(&root);
-    let named = format!("pid {}", holder.id());
+    let named = format!("pid {}", holder.pid());
     let failures = crate::test_log::logged("record agent activity").len();
     claim();
+    let found = holder_found(&root).expect("the holder was looked up");
     for n in 0..50 {
         let key = format!("s/{}", n % 5);
         assert!(transition(&key, TabStatus::InProgress, Source::Live).is_some());
@@ -787,8 +825,10 @@ fn a_held_lease_is_reported_once_and_names_its_holder() {
     record_pr("https://github.com/example/synthetic/pull/2").unwrap();
     let store = std::sync::Arc::new(crate::stats::StatsUsageStore::default());
     let views: Vec<_> = (0..3).map(|_| store.read(summary).unwrap()).collect();
-    holder.kill().unwrap();
-    holder.wait().unwrap();
+    // A holder that is still running is named again without looking through
+    // every process under the owner's lock on each read.
+    assert_eq!(holder_found(&root), Some(found));
+    holder.exit();
     let logged = crate::test_log::logged(&named);
     assert_eq!(logged.len(), 1, "one line for the episode: {logged:?}");
     assert!(logged[0].1.contains(&format!("A TerminalX command ({named}) is holding activity history")));
@@ -821,8 +861,7 @@ fn work_kept_aside_is_counted_once_after_the_runtime_takes_the_lease() {
     // The waiting runtime's counters already include what it kept aside.
     let waiting = summary().unwrap();
     assert_eq!((waiting.agents_spawned, waiting.prs_created), (2, 2));
-    holder.kill().unwrap();
-    holder.wait().unwrap();
+    holder.exit();
     wait_until("the runtime holds the lease", || is_writer(&root));
     assert!(transition("s/running", TabStatus::InProgress, Source::Live).is_none(), "not a new start");
     std::thread::sleep(Duration::from_millis(30));
@@ -844,7 +883,7 @@ fn a_crash_between_counting_and_removing_a_kept_record_does_not_count_it_twice()
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let start = ActivityEvent::work(START, "s/t", T, 0);
-    pending::keep(root, &start).unwrap();
+    pending::keep(root, &start, Some(T)).unwrap();
     let kept = pending::list(root).unwrap().kept.pop().unwrap();
     let copy = fs::read(&kept.path).unwrap();
     let first = Collector::open(root.into(), T).unwrap();
@@ -878,4 +917,95 @@ fn the_app_keeps_only_prs_history_does_not_have() {
     record_pr("https://github.com/example/synthetic/pull/2").unwrap();
     assert_eq!(pending::list(&root).unwrap().kept.len(), 1);
     assert_eq!(saved_summary(&root).unwrap().unwrap().prs_created, 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failure_to_keep_work_aside_is_logged_once_for_the_episode() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = crate::store::temp_home();
+    let _runtime = writer_for_test();
+    crate::test_log::capture();
+    let root = root().unwrap();
+    let mut holder = hold_lease_elsewhere(&root);
+    let folder = root.join("stats-activity-pending");
+    fs::create_dir(&folder).unwrap();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o500)).unwrap();
+    claim();
+    for n in 0..10 {
+        transition(&format!("s/{n}"), TabStatus::InProgress, Source::Live);
+        transition(&format!("s/{n}"), TabStatus::Completed, Source::Live);
+    }
+    record_pr("https://github.com/example/synthetic/pull/4").unwrap();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+    let logged = crate::test_log::logged(&folder.display().to_string());
+    assert_eq!(logged.len(), 1, "one line for the episode: {logged:?}");
+    assert!(logged[0].1.contains("keep activity aside in"), "{logged:?}");
+    // Once records can be kept again, a new failure is a new episode.
+    turn("s/after", Duration::ZERO);
+    assert_eq!(pending::list(&root).unwrap().kept.len(), 2);
+    holder.exit();
+    wait_until("the runtime holds the lease", || is_writer(&root));
+    exit_runtime();
+}
+
+#[test]
+fn work_kept_aside_after_a_failed_open_is_not_recovered_from_the_logs_too() {
+    let _home = crate::store::temp_home();
+    let _runtime = writer_for_test();
+    let root = root().unwrap();
+    // History cannot be read: the runtime keeps its work aside.
+    for file in [FILE, BACKUP] {
+        fs::write(root.join(file), "broken").unwrap();
+    }
+    claim();
+    assert!(summary().is_err());
+    let at = now_ms();
+    transition("s/t", TabStatus::InProgress, Source::Live);
+    transition("s/t", TabStatus::Completed, Source::Live);
+    // The same turn in the tab's event log, as the session writes it.
+    log(
+        &root.join("sessions/s/t.jsonl"),
+        &[
+            (at, json!({"type":"user_message","text":"work"})),
+            (at + 10, json!({"type":"assistant_text","text":"working"})),
+            (at + 20, json!({"type":"turn_completed","status":"ok"})),
+        ],
+    );
+    assert_eq!(pending::list(&root).unwrap().kept.len(), 2);
+    // With the unreadable files gone, Retry opens a new history.
+    for file in [FILE, BACKUP] {
+        fs::remove_file(root.join(file)).unwrap();
+    }
+    let counted = summary().unwrap();
+    assert_eq!(counted.agents_spawned, 1, "counted from its record only");
+    exit_runtime();
+    assert_eq!(super::summary().unwrap().agents_spawned, 1);
+    exit_runtime();
+}
+
+#[test]
+fn a_new_history_recovers_logs_only_from_before_another_runtime_kept_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // A runtime that claimed at T + 1000 could not open history, kept one
+    // turn aside and exited.
+    pending::keep(root, &ActivityEvent::work(START, "s/t", T + 1100, 0), Some(T + 1000)).unwrap();
+    pending::keep(root, &ActivityEvent::work(STOP, "s/t", T + 1300, 200), Some(T + 1000)).unwrap();
+    // The tab's log holds that turn, and one from before that runtime.
+    log(
+        &root.join("sessions/s/t.jsonl"),
+        &[
+            (T + 100, json!({"type":"user_message","text":"earlier"})),
+            (T + 110, json!({"type":"assistant_text","text":"working"})),
+            (T + 200, json!({"type":"turn_completed","status":"ok"})),
+            (T + 1090, json!({"type":"user_message","text":"kept"})),
+            (T + 1110, json!({"type":"assistant_text","text":"working"})),
+            (T + 1300, json!({"type":"turn_completed","status":"ok"})),
+        ],
+    );
+    let c = Collector::open(root.into(), T + 5000).unwrap();
+    assert_eq!(c.data.recovery_before, T + 1000);
+    assert_eq!(c.summary().agents_spawned, 2, "the earlier turn from the log, the kept one from its records");
+    assert_eq!(c.summary().agent_time_ms, 100 + 200);
 }

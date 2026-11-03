@@ -50,11 +50,15 @@ attached; Stats asks the runtime. A PR the app creates or discovers is kept in
 When another process holds the lease, the runtime keeps following its tabs and
 keeps each work start, stop and PR in the same inbox. Its summary stays current
 (saved totals plus what is kept) with one notice naming the holder, found from the
-processes that have the lock file open. A waiter retries the lease every 500 ms
-and takes it as soon as the holder lets go, without a tab transition. The runtime
-then counts each kept record once: a snapshot remembers the names it counted until
-their files are removed, so a crash in between counts nothing twice. One failure
-is one log line until a write succeeds again.
+processes that have the lock file open and named by their executable and arguments
+(the app's binary also runs the CLI and hooks). The lookup runs once per holder,
+not on every read. A waiter retries the lease every 500 ms and takes it as soon as
+the holder lets go, without a tab transition. The runtime then counts each kept
+record once: a snapshot remembers the names it counted until their files are
+removed, so a crash in between counts nothing twice. A history created after work
+was kept aside (its first open failed) recovers the session logs only up to when
+the keeping runtime claimed it, so that work is not also counted from the logs.
+One failure is one log line until a write succeeds again, whichever write meets it.
 
 ## Persistence and scope
 

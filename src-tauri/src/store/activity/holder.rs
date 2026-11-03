@@ -1,6 +1,6 @@
 //! Who holds the activity lease, so a conflict names the real holder (#767).
 //! The OS says which process has the lock file open, whatever its version;
-//! its executable says what it is.
+//! its executable and arguments say what it is.
 
 use std::path::Path;
 
@@ -19,6 +19,26 @@ impl Holder {
         holders(lock).into_iter().find(|pid| *pid != own).map_or(Self::Unknown, classify)
     }
 
+    /// Whether the process found holding the lease is still running, so the
+    /// lookup need not run again. One that could not be identified is not.
+    pub(super) fn alive(&self) -> bool {
+        let (Self::App(pid) | Self::Runtime(pid) | Self::Command(pid)) = self else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            let Ok(pid) = libc::pid_t::try_from(*pid) else { return false };
+            // SAFETY: signal 0 only checks that the process exists.
+            let signalled = unsafe { libc::kill(pid, 0) } == 0;
+            signalled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            true
+        }
+    }
+
     /// What Stats shows, once. Retry cannot help: the runtime takes the
     /// lease by itself as soon as the holder lets go.
     pub(super) fn notice(&self) -> String {
@@ -33,18 +53,29 @@ impl Holder {
 }
 
 fn classify(pid: u32) -> Holder {
-    #[cfg(unix)]
-    if let Ok(executable) = libc::pid_t::try_from(pid).map_err(anyhow::Error::from).and_then(crate::local_runtime::launch::executable) {
-        return of_executable(&executable, pid);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Ok(process) = libc::pid_t::try_from(pid) {
+        if let Ok(executable) = crate::local_runtime::launch::executable(process) {
+            return of_process(&executable, &crate::stray_processes::arguments(process), pid);
+        }
     }
     Holder::Command(pid)
 }
 
 /// The desktop app and the runtime are the only long-lived TerminalX
-/// processes; anything else that opened the file ran as a command.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn of_executable(executable: &Path, pid: u32) -> Holder {
+/// processes. Their binaries also run the CLI and the agents' hooks (as
+/// `main.rs` and `serve::main` choose from the arguments): those, and
+/// anything else that opened the file, ran as a command.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn of_process(executable: &Path, args: &[String], pid: u32) -> Holder {
+    let invoked = args.first().and_then(|arg| Path::new(arg).file_stem()).and_then(|name| name.to_str());
+    let command = matches!(invoked, Some("terminalx" | "tnx"))
+        || args.get(1).is_some_and(|arg| {
+            matches!(arg.as_str(), "terminalx" | "tnx" | "hook" | "statusline")
+                || arg == crate::cloud_github::SUBCOMMAND
+        });
     match executable.file_name().and_then(|name| name.to_str()) {
+        _ if command => Holder::Command(pid),
         Some("terminalx-serve") => Holder::Runtime(pid),
         Some("raccoon") => Holder::App(pid),
         _ => Holder::Command(pid),
@@ -163,11 +194,28 @@ fn lockers(locks: &str, dev: u64, ino: u64) -> Vec<u32> {
 mod tests {
     use super::*;
 
+    fn named(executable: &str, args: &[&str]) -> Holder {
+        of_process(Path::new(executable), &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(), 7)
+    }
+
     #[test]
     fn the_holder_is_named_by_what_it_runs() {
-        assert_eq!(of_executable(Path::new("/Applications/TerminalX.app/Contents/MacOS/raccoon"), 7), Holder::App(7));
-        assert_eq!(of_executable(Path::new("/Applications/TerminalX.app/Contents/Resources/local-runtime/terminalx-serve"), 8), Holder::Runtime(8));
-        assert_eq!(of_executable(Path::new("/usr/local/bin/some-tool"), 9), Holder::Command(9));
+        const APP: &str = "/Applications/TerminalX.app/Contents/MacOS/raccoon";
+        const RUNTIME: &str = "/Applications/TerminalX.app/Contents/Resources/local-runtime/terminalx-serve";
+        assert_eq!(named(APP, &[APP]), Holder::App(7));
+        assert_eq!(named(APP, &[]), Holder::App(7), "arguments that cannot be read");
+        assert_eq!(named(RUNTIME, &[RUNTIME, "--data-dir", "/home/me/.raccoon"]), Holder::Runtime(7));
+        assert_eq!(named("/usr/local/bin/some-tool", &["some-tool"]), Holder::Command(7));
+        // The app's and the runtime's binaries also run the CLI and hooks.
+        assert_eq!(named(APP, &["/usr/local/bin/terminalx", "sessions", "list"]), Holder::Command(7));
+        assert_eq!(named(APP, &["tnx"]), Holder::Command(7));
+        assert_eq!(named(APP, &[APP, "terminalx", "sessions"]), Holder::Command(7));
+        assert_eq!(named(APP, &[APP, "hook", "PreToolUse"]), Holder::Command(7));
+        assert_eq!(named(APP, &[APP, "statusline"]), Holder::Command(7));
+        assert_eq!(named(RUNTIME, &[RUNTIME, "hook", "Stop"]), Holder::Command(7));
+        assert_eq!(named(RUNTIME, &[RUNTIME, crate::cloud_github::SUBCOMMAND, "get"]), Holder::Command(7));
+        assert!(Holder::Command(std::process::id()).alive());
+        assert!(!Holder::Unknown.alive());
         assert!(Holder::App(7).notice().starts_with("The TerminalX app (pid 7) is holding activity history."));
         assert!(Holder::Runtime(8).notice().starts_with("Another runtime (pid 8)"));
         assert!(Holder::Command(9).notice().starts_with("A TerminalX command (pid 9)"));
