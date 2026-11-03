@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, localRuntime } from "@/lib/api";
 import { getPrefs } from "@/lib/prefs";
 
 /**
@@ -9,14 +9,24 @@ import { getPrefs } from "@/lib/prefs";
  * Update button, the card in the corner, and Settings → About. Checked a
  * little after launch and then every few hours, so an update is seen without
  * going to look for it; nothing installs until the reader says so.
+ *
+ * The update brings the runtime with it (#766). The runtime outlives the app,
+ * so the relaunched app replaces it with the one it came with; what that
+ * would cut short is asked about here, before installing, once, and the
+ * relaunched app follows the answer (`update_plan.rs`).
  */
 export type UpdateState =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "none" }
   | { kind: "available"; update: Update }
+  /** Moving to the update's runtime would stop `work` in runtime `epoch`: Update now, or when they're done. */
+  | { kind: "choosing"; update: Update; epoch: string; work: string[] }
   | { kind: "installing"; version: string; pct: number }
   | { kind: "error"; message: string };
+
+/** Update now stops what was listed; Update when they're done waits for it, by itself. */
+export type UpdateChoice = "now" | "whenDone";
 
 const FIRST_CHECK_MS = 15_000;
 const EVERY_MS = 4 * 60 * 60 * 1000;
@@ -56,7 +66,7 @@ export function getUpdateState(): UpdateState {
  * leaves what was known (the reader did not ask, so it is not theirs to read).
  */
 export async function checkForUpdate({ quiet = false }: { quiet?: boolean } = {}): Promise<UpdateState> {
-  if (state.kind === "installing" || state.kind === "checking") return state;
+  if (state.kind === "installing" || state.kind === "checking" || state.kind === "choosing") return state;
   if (quiet && state.kind === "available") return state;
   const before = state;
   if (!quiet) emit({ kind: "checking" });
@@ -69,11 +79,45 @@ export async function checkForUpdate({ quiet = false }: { quiet?: boolean } = {}
   return state;
 }
 
-/** Download, install and relaunch into the update found. */
+/** What the relaunched app is to do with the runtime attached now. */
+interface RuntimePlan { epoch: string; forced: boolean; quietSince: number | null }
+
+/**
+ * Install the update found and relaunch into it, with its runtime. When
+ * moving to that runtime would cut nothing short it just installs, and the
+ * relaunched app moves as it attaches. Otherwise nothing installs yet: the
+ * card lists what would stop, for {@link chooseUpdate}. A runtime that cannot
+ * be read is not asked about: the relaunched app waits until nothing it runs
+ * would be cut short, and says so.
+ */
 export async function installUpdate(): Promise<void> {
   if (state.kind !== "available") return;
   const update = state.update;
   emit({ kind: "installing", version: update.version, pct: 0 });
+  const reading = await localRuntime.work().catch((error: unknown) => {
+    console.warn(`TerminalX update: ${errorMessage(error)}`);
+    return null;
+  });
+  if (reading && reading.work.length > 0) {
+    emit({ kind: "choosing", update, epoch: reading.epoch, work: reading.work });
+    return;
+  }
+  await install(update, reading && { epoch: reading.epoch, forced: false, quietSince: reading.readAt });
+}
+
+/** The answer to what installing would cut short, or `null` to not update now. */
+export async function chooseUpdate(choice: UpdateChoice | null): Promise<void> {
+  if (state.kind !== "choosing") return;
+  const { update, epoch } = state;
+  if (!choice) {
+    emit({ kind: "available", update });
+    return;
+  }
+  emit({ kind: "installing", version: update.version, pct: 0 });
+  await install(update, { epoch, forced: choice === "now", quietSince: null });
+}
+
+async function install(update: Update, plan: RuntimePlan | null): Promise<void> {
   try {
     let total = 0;
     let got = 0;
@@ -84,6 +128,10 @@ export async function installUpdate(): Promise<void> {
         if (total) emit({ kind: "installing", version: update.version, pct: Math.round((got / total) * 100) });
       }
     });
+    // Left for the relaunched app. Without it, that app waits by itself
+    // until nothing would be cut short, and says so: the app is installed
+    // either way, and is relaunched into.
+    if (plan) await localRuntime.planUpdate(plan.epoch, plan.forced, plan.quietSince).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
     await relaunch();
   } catch (error) {
     emit({ kind: "error", message: errorMessage(error) });
