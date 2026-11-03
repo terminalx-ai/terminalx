@@ -15,7 +15,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const connected: LocalRuntimeState = { state: "connected", epoch: "owner", generation: 1, view: 0 };
 const outdated = (work: string[] | null, problem: string | null = null, failed = false, keeps = false): LocalRuntimeState =>
-  ({ ...connected, outdated: { running: "0.2.23", app: "0.2.24", work, problem, failed, keeps } });
+  ({ ...connected, outdated: { running: "0.2.23", app: "0.2.24", work, problem, failed, keeps, unkept: [] } });
 const turn = "Claude Code in “Fix login” (Review), in the middle of a turn";
 const terminal = "The terminal “npm run dev” in “Web”";
 
@@ -87,7 +87,7 @@ it("Restart now replaces only the runtime this window was told about, and says w
   await changed(outdated([terminal]));
   await details();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
-  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", []);
   expect(screen.getByRole("alert").textContent).toContain("it did not exit");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
   expect(native.replace).toHaveBeenCalledTimes(2);
@@ -106,7 +106,7 @@ it("keeps saying a switch failed after its notice is hidden, with Try again (#76
   expect(screen.queryAllByRole("listitem")).toHaveLength(0);
   expect(screen.getByRole("alert").textContent).toContain("it did not exit");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
-  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", []);
 });
 
 // #765: a runtime that can be handed over keeps what it runs.
@@ -125,7 +125,7 @@ it("names what an older runtime's handover cannot carry, and Restart now stops o
   expect(text).toContain("Restarting now stops only that, and everything else keeps running");
   expect(text).not.toContain("its terminals and whatever they run");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
-  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", []);
 });
 
 it("says a handover that failed will not be tried again by itself, and Try again keeps what it runs", async () => {
@@ -153,4 +153,17 @@ it("narrows with the status bar, keeping the version, then only the icon", async
   await mounted("icon");
   expect(item().textContent).toBe("");
   expect(item().getAttribute("aria-label")).toBe("Runtime 0.2.23, waiting for 1");
+});
+
+it("sends back, with Restart now, only what it listed a handover cannot carry, failed or not (#765 review)", async () => {
+  await mounted();
+  const shown = { kind: "turn", sessionId: "s1", tabId: "t1", harness: "gemini" };
+  const listed = (failed: boolean): LocalRuntimeState => ({ ...connected, outdated: { running: "0.2.23", app: "0.2.24",
+    work: ["Gemini in “Docs”, in the middle of a turn"], problem: failed ? "the updated runtime did not answer" : null, failed, keeps: true, unkept: [shown] } });
+  await changed(listed(true));
+  await details();
+  expect(screen.getAllByRole("listitem").map((entry) => entry.textContent)).toEqual(["Gemini in “Docs”, in the middle of a turn"]);
+  expect(screen.getByRole("dialog").textContent).toContain("Trying again stops only that, and everything else keeps running");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", [shown]);
 });

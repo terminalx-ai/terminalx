@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { errorMessage, localRuntime, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeState } from "@/lib/api";
+import { errorMessage, localRuntime, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeState, type LocalRuntimeWorkItem } from "@/lib/api";
 import { reattachLocalTerminals } from "@/lib/terminal";
 
 /**
@@ -86,11 +86,12 @@ export async function reconnectLocalRuntime(): Promise<void> {
  * says otherwise (#765); any other is stopped with them. `epoch` is the
  * runtime this window found not responding: one another window already
  * replaced is left alone. Throws why it was not restarted, with nothing
- * stopped: a `LocalRuntimeRestartRefused` when it could have been.
+ * stopped: a `LocalRuntimeRestartRefused` when it could have been. `stop`,
+ * with `stoppingUnkept`, is what that refusal showed: only that stops.
  */
-export async function restartLocalRuntime(epoch: string | null, how?: LocalRuntimeRestart): Promise<void> {
+export async function restartLocalRuntime(epoch: string | null, how?: LocalRuntimeRestart, stop: LocalRuntimeWorkItem[] = []): Promise<void> {
   try {
-    await localRuntime.restart(epoch, how);
+    await localRuntime.restart(epoch, how, stop);
   } finally {
     await refreshLocalRuntime();
   }
@@ -99,14 +100,15 @@ export async function restartLocalRuntime(epoch: string | null, how?: LocalRunti
 /**
  * "Restart now" for a runtime older than this app (#730), and terminals
  * attach again in place. One that can be handed over keeps its agents and
- * terminals running but what its handover cannot carry, which stops (#765);
- * any other is replaced without waiting for its agents' turns, which stop
- * with it. `epoch` is the runtime this window was told about: one already
- * replaced is left alone. Throws why it could not be replaced.
+ * terminals running but what of `stop`, what the window showed, its handover
+ * cannot carry (#765): anything else it cannot carry is refused, to be shown
+ * in turn. Any other is replaced without waiting for its agents' turns,
+ * which stop with it. `epoch` is the runtime this window was told about: one
+ * already replaced is left alone. Throws why it could not be replaced.
  */
-export async function replaceLocalRuntime(epoch: string): Promise<void> {
+export async function replaceLocalRuntime(epoch: string, stop: LocalRuntimeWorkItem[] = []): Promise<void> {
   try {
-    await localRuntime.replace(epoch);
+    await localRuntime.replace(epoch, stop);
   } finally {
     await refreshLocalRuntime();
   }

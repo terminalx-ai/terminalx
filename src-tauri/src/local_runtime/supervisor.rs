@@ -399,8 +399,20 @@ fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
 
 /// The runtime bundled with this app, installed in `home` as one is started
 /// from: what an older runtime is handed over to (#765).
+///
+/// Installed and checked once per app process: the bundled runtime does not
+/// change while the app runs (an update relaunches it), and installing hashes
+/// it and checks its signature. Installed again if the copy has gone.
 pub(crate) fn bundled(app: &AppHandle, home: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    super::launch::installed(&source(app)?, &std::fs::canonicalize(home)?)
+    static INSTALLED: std::sync::Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>> = std::sync::Mutex::new(None);
+    let home = std::fs::canonicalize(home)?;
+    let mut installed = INSTALLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, binary)) = installed.as_ref().filter(|(for_home, binary)| *for_home == home && binary.is_file()) {
+        return Ok(binary.clone());
+    }
+    let binary = super::launch::installed(&source(app)?, &home)?;
+    *installed = Some((home, binary.clone()));
+    Ok(binary)
 }
 
 /// Discovery, then a new attachment published in place of the old one.

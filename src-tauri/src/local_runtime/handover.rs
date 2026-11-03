@@ -170,7 +170,23 @@ fn refused(code: &str, message: impl Into<String>) -> ControlError {
     ControlError::new(code, message, None::<String>)
 }
 
+/// Agents the handover cannot carry that nobody agreed to have stopped: the
+/// reader is asked about them first (`runtime.handover.plan`).
+#[derive(Debug)]
+struct Unkept(usize);
+
+impl std::fmt::Display for Unkept {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{} agent(s) cannot be kept running through the update; ask before stopping them.", self.0)
+    }
+}
+
+impl std::error::Error for Unkept {}
+
 fn failed(error: anyhow::Error) -> ControlError {
+    if let Some(unkept) = error.downcast_ref::<Unkept>() {
+        return refused("handover_unadoptable", unkept.to_string());
+    }
     if let Some(unsettled) = error.downcast_ref::<Unsettled>() {
         return ControlError::new("handover_busy", format!("{unsettled}; it is handed over once that has settled."), Some("Try again in a moment.".into()));
     }
@@ -204,14 +220,15 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
     let runtime = RUNTIME.get().ok_or_else(|| refused("unsupported", "This runtime cannot be handed over."))?;
     pinned(lifetime, &params)?;
     let binary = PathBuf::from(params["binary"].as_str().ok_or_else(|| ControlError::invalid("binary is required"))?);
-    verify(&runtime.home, &binary).map_err(|error| refused("handover_unsupported", format!("{error:#}")))?;
+    let verified = verify(&runtime.home, &binary).map_err(|error| refused("handover_unsupported", format!("{error:#}")))?;
     let stop: Vec<(String, String)> = params["stop"].as_array().map(|stop| stop.iter().filter_map(|work| {
         Some((work["sessionId"].as_str()?.to_string(), work["tabId"].as_str()?.to_string()))
     }).collect()).unwrap_or_default();
     let named = |work: &Work| work.session_id.as_ref().zip(work.tab_id.as_ref()).is_some_and(|(session, tab)| stop.iter().any(|(s, t)| s == session && t == tab));
     let unadoptable = runtime.manager.unadoptable();
-    if unadoptable.iter().any(|work| !named(work)) {
-        return Err(refused("handover_unadoptable", format!("{} agent(s) cannot be kept running through the update; ask before stopping them.", unadoptable.iter().filter(|work| !named(work)).count())));
+    let unnamed = unadoptable.iter().filter(|work| !named(work)).count();
+    if unnamed > 0 {
+        return Err(failed(Unkept(unnamed).into()));
     }
     // What the reader agreed to have stopped, as Stop stops it, and nothing else.
     for work in unadoptable.iter().filter(|work| named(work)) {
@@ -223,9 +240,8 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
     let (go, gone) = std::sync::mpsc::channel::<()>();
     // This request is the handover itself: nothing waits for it.
     let _aside = crate::hooks::step_aside();
-    let worker = binary.clone();
     std::thread::Builder::new().name("runtime-handover".into()).spawn(move || {
-        let outcome = hand_over(runtime, &worker, &ready, gone);
+        let outcome = hand_over(runtime, &verified, &ready, gone);
         if let Err(error) = outcome {
             log::warn!("the runtime was not handed over: {error:#}");
             let _ = ready.send(Err(failed(error)));
@@ -244,10 +260,10 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
 
 /// Hold everything still, write the record, and exec `binary`. Returns only
 /// when the handover is off, with everything going on as before.
-fn hand_over(runtime: &Runtime, binary: &Path, ready: &std::sync::mpsc::Sender<Result<(), ControlError>>, go: std::sync::mpsc::Receiver<()>) -> Result<()> {
+fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Sender<Result<(), ControlError>>, go: std::sync::mpsc::Receiver<()>) -> Result<()> {
     // No frame is answered from here on, once those under way are: what
     // they wait for (a pipeline step, the admission lock) is not held yet.
-    let hooks = runtime.bridge.freeze(SETTLE_WITHIN).map_err(|error| Unsettled(format!("{error:#}")))?;
+    runtime.bridge.freeze(SETTLE_WITHIN).map_err(|error| Unsettled(format!("{error:#}")))?;
     let thawed = || runtime.bridge.thaw();
     // No pipeline step starts, and none is running.
     let Some(steps) = crate::issue_pipeline::engine::pause_steps(SETTLE_WITHIN) else {
@@ -266,9 +282,12 @@ fn hand_over(runtime: &Runtime, binary: &Path, ready: &std::sync::mpsc::Sender<R
     };
     let path = runtime.home.join("run").join(format!("handover-{}.json", std::process::id()));
     let outcome = runtime.manager.hold_tabs(SETTLE_WITHIN, |held| -> Result<()> {
+        // Started since what had to be stopped was named: asked about first.
         if !held.unadoptable.is_empty() {
-            bail!("{} agent(s) cannot be kept running through the update", held.unadoptable.len());
+            return Err(Unkept(held.unadoptable.len()).into());
         }
+        // Only now, with every tab held, can no waiting hook be answered.
+        let hooks = runtime.bridge.take().map_err(|error| Unsettled(format!("{error:#}")))?;
         let (record, kept) = Record::of(runtime, hooks, terminals, held.tabs)?;
         // It holds the agents' hook tokens: none of it is left behind.
         if let Err(error) = write(&path, &record) {
@@ -287,7 +306,7 @@ fn hand_over(runtime: &Runtime, binary: &Path, ready: &std::sync::mpsc::Sender<R
         let _ = ready.send(Ok(()));
         // The reply to the handover goes out first.
         let _ = go.recv_timeout(REPLY_WITHIN);
-        log::info!("the runtime hands {} terminal(s) and {} agent tab(s) to {}", record.panes.len(), record.tabs.len(), binary.display());
+        log::info!("the runtime hands {} terminal(s) and {} agent tab(s) to {}", record.panes.len(), record.tabs.len(), binary.path.display());
         log::logger().flush();
         let error = exec(binary, &path);
         // Still this runtime: the descriptors go back to being its own.
@@ -295,7 +314,7 @@ fn hand_over(runtime: &Runtime, binary: &Path, ready: &std::sync::mpsc::Sender<R
             let _ = set_cloexec(fd, true);
         }
         let _ = std::fs::remove_file(&path);
-        Err(anyhow::Error::from(error).context(format!("start {}", binary.display())))
+        Err(error.context(format!("start {}", binary.path.display())))
     });
     runtime.terminals.thaw();
     drop((admission, steps));
@@ -360,10 +379,64 @@ fn set_cloexec(fd: RawFd, on: bool) -> Result<()> {
     Ok(())
 }
 
-/// Become `binary`, run with this runtime's own arguments and `--adopt
-/// record`. Returns only on failure.
-fn exec(binary: &Path, record: &Path) -> std::io::Error {
-    use std::os::unix::process::CommandExt;
+/// Become the verified runtime, run with this runtime's own arguments and
+/// `--adopt record`. Returns only on failure. Everything was held still for a
+/// while since it was verified, so it is checked again first: the same file,
+/// with the same contents. On Linux the very descriptor checked is exec'd;
+/// on macOS, which cannot exec one, its path is, a moment after the check.
+fn exec(binary: &Verified, record: &Path) -> anyhow::Error {
+    let (file, identity) = match opened(&binary.path, &binary.digest) {
+        Ok(opened) => opened,
+        Err(error) => return error.context("the runtime to hand over to changed since it was checked"),
+    };
+    if identity != binary.identity {
+        return anyhow::anyhow!("{} was replaced since it was checked", binary.path.display());
+    }
+    let args = arguments(record);
+    #[cfg(target_os = "linux")]
+    return fexecve(&file, &binary.path, &args);
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::unix::process::CommandExt;
+        drop(file);
+        anyhow::Error::from(std::process::Command::new(&binary.path).args(args).exec())
+    }
+}
+
+/// Exec `file`, as `path`, with `args`. Returns only on failure.
+#[cfg(target_os = "linux")]
+fn fexecve(file: &std::fs::File, path: &Path, args: &[OsString]) -> anyhow::Error {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let text = |bytes: &[u8]| CString::new(bytes).map_err(|_| anyhow::anyhow!("an argument holds a NUL byte"));
+    let built = (|| -> Result<(Vec<CString>, Vec<CString>)> {
+        let mut argv = vec![text(path.as_os_str().as_bytes())?];
+        for arg in args { argv.push(text(arg.as_bytes())?); }
+        let mut envp = Vec::new();
+        for (name, value) in std::env::vars_os() {
+            let mut pair = name.as_bytes().to_vec();
+            pair.push(b'=');
+            pair.extend_from_slice(value.as_bytes());
+            envp.push(text(&pair)?);
+        }
+        Ok((argv, envp))
+    })();
+    let (argv, envp) = match built {
+        Ok(built) => built,
+        Err(error) => return error,
+    };
+    let mut argv: Vec<*const libc::c_char> = argv.iter().map(|arg| arg.as_ptr()).collect();
+    argv.push(std::ptr::null());
+    let mut envp: Vec<*const libc::c_char> = envp.iter().map(|pair| pair.as_ptr()).collect();
+    envp.push(std::ptr::null());
+    // SAFETY: both arrays are NUL-terminated, and every string they point at
+    // outlives the call, which returns only on failure.
+    unsafe { libc::fexecve(file.as_raw_fd(), argv.as_ptr(), envp.as_ptr()) };
+    std::io::Error::last_os_error().into()
+}
+
+/// This runtime's own arguments, with `--adopt record` in place of any it had.
+fn arguments(record: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
     let mut given = std::env::args_os().skip(1);
     while let Some(arg) = given.next() {
@@ -376,35 +449,47 @@ fn exec(binary: &Path, record: &Path) -> std::io::Error {
     }
     args.push("--adopt".into());
     args.push(record.into());
-    std::process::Command::new(binary).args(args).exec()
+    args
+}
+
+/// A runtime binary checked to be one this runtime may hand over to, as it
+/// was when checked: checked again just before it is exec'd ([`exec`]).
+pub(crate) struct Verified {
+    /// Its path, every link resolved.
+    path: PathBuf,
+    /// The file that was checked, by device and inode.
+    identity: (u64, u64),
+    /// The digest of its contents, which is the name of its directory.
+    digest: String,
 }
 
 /// Whether `binary` is one this runtime may hand over to: a runtime installed
-/// in `home` as the app installs one (`launch::install`), under the digest of
-/// its contents, private to this user; signed as this runtime is; reading
-/// this runtime's record format; and of this version or a newer one.
-pub(crate) fn verify(home: &Path, binary: &Path) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+/// in `home` as the app installs one (`launch::install`), in a private
+/// directory of this home's named for the digest of its contents, private to
+/// this user; signed as this runtime is (macOS); reading this runtime's
+/// record format; and of this version or a newer one.
+pub(crate) fn verify(home: &Path, binary: &Path) -> Result<Verified> {
+    use std::os::unix::fs::MetadataExt;
     let runtimes = std::fs::canonicalize(home.join("runtime")).context("find this home's installed runtimes")?;
-    let directory = binary.parent().context("the runtime has no directory")?;
-    if std::fs::canonicalize(directory.parent().context("the runtime is not installed")?)? != runtimes
-        || binary.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
+    if binary.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
         bail!("{} is not a runtime installed in this home", binary.display());
     }
-    let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(binary)
-        .with_context(|| format!("open {}", binary.display()))?;
-    let meta = file.metadata()?;
+    let directory = binary.parent().context("the runtime has no directory")?;
+    // The version's own directory, not a link to one elsewhere, and private.
+    let held = std::fs::symlink_metadata(directory).with_context(|| format!("look at {}", directory.display()))?;
     // SAFETY: geteuid has no preconditions.
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 || meta.mode() & 0o100 == 0 {
-        bail!("{} is not a private executable of this user's", binary.display());
+    if !held.is_dir() || held.uid() != unsafe { libc::geteuid() } || held.mode() & 0o077 != 0 {
+        bail!("{} is not a private directory of this home's runtimes", directory.display());
     }
-    let named = directory.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    if super::launch::digest(&mut file)? != named {
-        bail!("{} does not match the version it was installed as", binary.display());
+    let digest = directory.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+    let path = runtimes.join(&digest).join("terminalx-serve");
+    if std::fs::canonicalize(binary).ok().as_ref() != Some(&path) {
+        bail!("{} is not a runtime installed in this home", binary.display());
     }
+    let identity = checked(&path, &digest)?;
     #[cfg(target_os = "macos")]
-    signed_alike(binary)?;
-    let answer = ask(binary)?;
+    signed_alike(&path)?;
+    let answer = ask(&path)?;
     let version = answer["version"].as_str().and_then(|version| semver::Version::parse(version).ok()).context("the runtime did not say its version")?;
     let own = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("the crate's own version is semantic");
     if version < own {
@@ -413,7 +498,36 @@ pub(crate) fn verify(home: &Path, binary: &Path) -> Result<()> {
     if !answer["formats"].as_array().is_some_and(|formats| formats.iter().any(|format| format.as_u64() == Some(u64::from(FORMAT)))) {
         bail!("{} cannot take over this runtime's agents: it reads none of the handover formats this one writes", binary.display());
     }
-    Ok(())
+    // Asking it must not have changed it: what was signed is what is run.
+    if checked(&path, &digest)? != identity {
+        bail!("{} changed while it was checked", binary.display());
+    }
+    Ok(Verified { path, identity, digest })
+}
+
+/// Open `path` as the private executable of this user's whose contents
+/// `digest` names, and say which file it is.
+fn checked(path: &Path, digest: &str) -> Result<(u64, u64)> {
+    let (file, identity) = opened(path, digest)?;
+    drop(file);
+    Ok(identity)
+}
+
+fn opened(path: &Path, digest: &str) -> Result<(std::fs::File, (u64, u64))> {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let meta = file.metadata()?;
+    // SAFETY: geteuid has no preconditions.
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 || meta.mode() & 0o100 == 0 {
+        bail!("{} is not a private executable of this user's", path.display());
+    }
+    if super::launch::digest(&mut file)? != digest {
+        bail!("{} does not match the version it was installed as", path.display());
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok((file, (meta.dev(), meta.ino())))
 }
 
 /// Ask `binary` which records it reads, as `handover-formats` says.
@@ -602,11 +716,19 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         let elsewhere = fixture.path().join("terminalx-serve");
         std::fs::write(&elsewhere, b"#!/bin/sh\n").unwrap();
-        assert!(format!("{:#}", verify(&home, &elsewhere).unwrap_err()).contains("find this home's installed runtimes"));
+        assert!(format!("{:#}", verify(&home, &elsewhere).err().unwrap()).contains("find this home's installed runtimes"));
         let installed = crate::local_runtime::launch::install(&elsewhere, &home).unwrap();
         // Installed, but tampered with since.
         std::fs::write(&installed, b"#!/bin/sh\necho changed\n").unwrap();
-        assert!(format!("{:#}", verify(&home, &installed).unwrap_err()).contains("does not match"));
+        assert!(format!("{:#}", verify(&home, &installed).err().unwrap()).contains("does not match"));
         assert!(verify(&home, &home.join("runtime/x/other")).is_err());
+        // #765 review: the version's directory must be the home's own, not a
+        // link to one elsewhere holding a binary of someone's choosing.
+        let foreign = fixture.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::copy(&elsewhere, foreign.join("terminalx-serve")).unwrap();
+        let linked = home.join("runtime").join("linked");
+        std::os::unix::fs::symlink(&foreign, &linked).unwrap();
+        assert!(format!("{:#}", verify(&home, &linked.join("terminalx-serve")).err().unwrap()).contains("not a private directory"));
     }
 }

@@ -746,7 +746,7 @@ it("rejects confirmation clicks invalidated before React renders and ignores lat
 describe("the runtime the app is moving to (#766)", () => {
   const waiting = (): import("@/lib/localRuntime").RuntimeSwitch => ({
     kind: "waiting", epoch: "owner",
-    outdated: { running: "0.2.23", app: "0.2.24", work: ["Codex in “Web”, in the middle of a turn"], problem: null, failed: false, keeps: false },
+    outdated: { running: "0.2.23", app: "0.2.24", work: ["Codex in “Web”, in the middle of a turn"], problem: null, failed: false, keeps: false, unkept: [] },
   });
 
   it("sits beside usage while a switch waits, and goes once it is done", () => {

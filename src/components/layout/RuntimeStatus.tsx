@@ -75,15 +75,18 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
 function RuntimeDetails({ epoch, outdated }: { epoch: string; outdated: LocalRuntimeOutdated }) {
   const [restarting, setRestarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const { running, app, work, problem, failed, keeps } = outdated;
+  const { running, app, work, problem, failed, keeps, unkept } = outdated;
   const restart = async () => {
     setRestarting(true);
     setFailure(null);
-    try { await replaceLocalRuntime(epoch); }
+    // Handed over, only what is listed here stops: what it shows is what is sent.
+    try { await replaceLocalRuntime(epoch, keeps ? unkept : []); }
     catch (error) { setFailure(errorMessage(error)); }
     finally { setRestarting(false); }
   };
-  const busy = !failed && work !== null && work.length > 0;
+  // What a handover cannot carry is listed whatever came of the last try:
+  // trying again stops it, and nothing else.
+  const busy = (keeps || !failed) && work !== null && work.length > 0;
   const waiting = keeps
     ? failed ? `Handing it over to ${app} failed, and it does not try again by itself.`
       : work === null || work.length === 0 ? `It hands its agents and terminals over to ${app} in a moment; they keep running.`

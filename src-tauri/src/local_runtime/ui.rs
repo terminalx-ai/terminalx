@@ -175,8 +175,11 @@ pub enum Restart {
 #[serde(rename_all = "camelCase")]
 pub struct RestartRefused {
     pub message: String,
-    /// What the handover cannot carry, which [`Restart::StoppingUnkept`] stops.
+    /// What the handover cannot carry, by name.
     pub unkept: Vec<String>,
+    /// The same, as the runtime names it: what [`Restart::StoppingUnkept`]
+    /// is sent back, so that it stops only what the reader was shown.
+    pub stop: Vec<crate::session::retire::Work>,
 }
 
 /// How long an unresponsive runtime has to say it is handing over.
@@ -207,14 +210,16 @@ pub async fn local_runtime_reconnect(app: AppHandle, window: tauri::WebviewWindo
 /// A runtime that can be handed over (#765) is, unless `how` says to stop it:
 /// a fresh runtime takes its process over, and what it runs goes on. When that
 /// cannot happen, nothing is stopped: the window is told why, and what the
-/// handover could not carry, and asks again with `how`. Any other runtime is
+/// handover could not carry, and asks again with `how`, sending back in
+/// `stop` what it was shown would stop. Any other runtime is
 /// stopped without asking, and its agents and terminals with it; each agent
 /// resumes its conversation from the provider's transcript when its tab next
 /// starts.
 #[tauri::command]
-pub async fn local_runtime_restart(app: AppHandle, window: tauri::WebviewWindow, epoch: Option<String>, how: Option<Restart>) -> Result<ConnectionState, RestartRefused> {
+pub async fn local_runtime_restart(app: AppHandle, window: tauri::WebviewWindow, epoch: Option<String>, how: Option<Restart>,
+    stop: Option<Vec<crate::session::retire::Work>>) -> Result<ConnectionState, RestartRefused> {
     let _restart = RESTART.lock().await;
-    let refused = |message: String| RestartRefused { message, unkept: Vec::new() };
+    let refused = |message: String| RestartRefused { message, unkept: Vec::new(), stop: Vec::new() };
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let attached = state.runtime();
@@ -224,11 +229,13 @@ pub async fn local_runtime_restart(app: AppHandle, window: tauri::WebviewWindow,
         let how = how.unwrap_or_default();
         let handed = attached.as_ref().filter(|runtime| how != Restart::StoppingAll && super::replace::keeps(runtime.build()));
         if let Some(runtime) = handed {
-            match super::replace::hand_over_within(&app, runtime, how == Restart::StoppingUnkept, Some(RESTART_HANDOVER)) {
+            // Only what the reader was shown and agreed to stop.
+            let stopping = if how == Restart::StoppingUnkept { stop.unwrap_or_default() } else { Vec::new() };
+            match super::replace::hand_over_within(&app, runtime, &stopping, Some(RESTART_HANDOVER)) {
                 Ok(()) => log::info!("handed the unresponsive local runtime over to a fresh one; attaching it"),
                 Err(error) if super::launch::refused(&error, "handover_unadoptable") => {
-                    let unkept = super::replace::kept_back(&app, runtime).unwrap_or_default();
-                    return Err(RestartRefused { message: "Restarting it keeps everything it runs but what is named here, which would have to stop.".into(), unkept });
+                    let (stop, unkept) = super::replace::kept_back(&app, runtime, false).unwrap_or_default();
+                    return Err(RestartRefused { message: "Restarting it keeps everything it runs but what is named here, which would have to stop.".into(), unkept, stop });
                 }
                 Err(error) => {
                     log::warn!("hand the unresponsive local runtime over: {error:#}");
@@ -253,17 +260,19 @@ pub async fn local_runtime_restart(app: AppHandle, window: tauri::WebviewWindow,
 
 /// "Restart now" for a runtime older than this app (#730): replace runtime
 /// `epoch` with the one bundled with the app now. One that can be handed
-/// over keeps what it runs but what its handover cannot carry, which the
-/// window named, and only that stops (#765). One that cannot is stopped
-/// without waiting for its agents' turns, which stop with it. Each agent
-/// stopped picks up its conversation again when its tab next starts. A
-/// runtime another window already replaced, or one that is not older, is
-/// left alone.
+/// over keeps what it runs but what of `stop` its handover cannot carry:
+/// `stop` is what the window named, and anything else it cannot carry
+/// refuses the handover, with nothing stopped, to be named in turn (#765).
+/// One that cannot is stopped without waiting for its agents' turns, which
+/// stop with it. Each agent stopped picks up its conversation again when its
+/// tab next starts. A runtime another window already replaced, or one that
+/// is not older, is left alone.
 #[tauri::command]
-pub async fn local_runtime_replace(app: AppHandle, window: tauri::WebviewWindow, epoch: String) -> Result<ConnectionState, String> {
+pub async fn local_runtime_replace(app: AppHandle, window: tauri::WebviewWindow, epoch: String, stop: Option<Vec<crate::session::retire::Work>>) -> Result<ConnectionState, String> {
     let _restart = RESTART.lock().await;
     tauri::async_runtime::spawn_blocking(move || {
-        super::replace::switch(&app.state::<AppState>().runtime_replacement, &super::replace::AppHost(&app), &epoch, true)?;
+        let stop = stop.unwrap_or_default();
+        super::replace::switch(&app.state::<AppState>().runtime_replacement, &super::replace::AppHost(&app), &epoch, true, &stop)?;
         Ok(status(&app, window.label()))
     }).await.map_err(|error| error.to_string())?
 }
@@ -276,6 +285,9 @@ pub struct RuntimeWork {
     epoch: String,
     /// What would stop with it, by name; empty when nothing would.
     work: Vec<String>,
+    /// When it can be handed over (#765): the same, as the runtime names
+    /// it, for Update now to stop only that.
+    unkept: Vec<crate::session::retire::Work>,
     /// When it was read, in milliseconds since the Unix epoch.
     read_at: u64,
 }
@@ -287,28 +299,32 @@ pub async fn local_runtime_work(app: AppHandle) -> Result<RuntimeWork, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let runtime = app.state::<AppState>().runtime().filter(|runtime| runtime.attachment().is_ok())
             .ok_or_else(|| "The TerminalX runtime is not attached.".to_string())?;
-        let work = super::replace::cut_short(&app, &runtime).map_err(|error| format!("Could not tell what the TerminalX runtime is running: {error:#}"))?;
+        let (work, unkept) = super::replace::cut_short(&app, &runtime).map_err(|error| format!("Could not tell what the TerminalX runtime is running: {error:#}"))?;
         // Read after the answer: the quiet it reports is no longer than it was.
         let read_at = super::update_plan::millis(std::time::SystemTime::now());
-        Ok(RuntimeWork { epoch: runtime.epoch().to_owned(), work, read_at })
+        Ok(RuntimeWork { epoch: runtime.epoch().to_owned(), work, unkept, read_at })
     }).await.map_err(|error| error.to_string())?
 }
 
 /// Leave the decision about runtime `epoch` for the app an update relaunches
 /// into (#766), just before the relaunch. `forced` is Update now. Otherwise
 /// `quiet_since` is when a reading before the update found nothing under
-/// way: it carries over only if nothing is under way now either.
+/// way: it carries over only if nothing is under way now either. With Update
+/// now, `stop` is what the update card listed that the runtime's handover
+/// cannot carry (#765): only that stops.
 #[tauri::command]
-pub async fn local_runtime_plan_update(app: AppHandle, epoch: String, forced: bool, quiet_since: Option<u64>) -> Result<super::update_plan::Plan, String> {
+pub async fn local_runtime_plan_update(app: AppHandle, epoch: String, forced: bool, quiet_since: Option<u64>,
+    stop: Option<Vec<crate::session::retire::Work>>) -> Result<super::update_plan::Plan, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let quiet_since = quiet_since.filter(|_| !forced).filter(|_| {
             let runtime = app.state::<AppState>().runtime().filter(|runtime| runtime.epoch() == epoch && runtime.attachment().is_ok());
             let work = runtime.map(|runtime| super::replace::cut_short(&app, &runtime));
             if let Some(Err(error)) = &work { log::warn!("read what the local runtime is running before the update: {error:#}"); }
-            matches!(work, Some(Ok(work)) if work.is_empty())
+            matches!(work, Some(Ok((work, _))) if work.is_empty())
         });
         let clock = std::time::SystemTime::now();
-        let plan = super::update_plan::Plan { epoch, forced, quiet_since, made_at: super::update_plan::millis(clock), made_by: std::process::id() };
+        let stop = if forced { stop.unwrap_or_default() } else { Vec::new() };
+        let plan = super::update_plan::Plan { epoch, forced, quiet_since, made_at: super::update_plan::millis(clock), made_by: std::process::id(), stop };
         let home = crate::store::root().map_err(|error| format!("{error:#}"))?;
         super::update_plan::save(&home, &plan).map_err(|error| format!("{error:#}"))?;
         log::info!("the local runtime {} is replaced after the update {}", plan.epoch,
@@ -413,8 +429,11 @@ mod tests {
         assert_eq!(asked, Restart::StoppingUnkept);
         let all: Restart = serde_json::from_value(serde_json::json!("stoppingAll")).unwrap();
         assert_eq!(all, Restart::StoppingAll);
-        let refused = RestartRefused { message: "kept but these".into(), unkept: vec!["Codex in \u{201c}Web\u{201d}".into()] };
-        assert_eq!(serde_json::to_value(&refused).unwrap(), serde_json::json!({ "message": "kept but these", "unkept": ["Codex in \u{201c}Web\u{201d}"] }));
+        let gemini = crate::session::retire::Work { kind: crate::session::retire::WorkKind::Turn, session_id: Some("s1".into()), tab_id: Some("t1".into()),
+            harness: Some("gemini".into()), title: None };
+        let refused = RestartRefused { message: "kept but these".into(), unkept: vec!["Gemini in \u{201c}Web\u{201d}".into()], stop: vec![gemini] };
+        assert_eq!(serde_json::to_value(&refused).unwrap(), serde_json::json!({ "message": "kept but these", "unkept": ["Gemini in \u{201c}Web\u{201d}"],
+            "stop": [{ "kind": "turn", "sessionId": "s1", "tabId": "t1", "harness": "gemini" }] }), "what is sent back to stop only it");
     }
 
     #[test]

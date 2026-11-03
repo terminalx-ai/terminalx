@@ -135,7 +135,7 @@ it("offers a restart, never Try again, for a runtime that stopped answering, and
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
   // Only the runtime this window found not responding, which cannot be
   // handed over: it is stopped, as the notice said.
-  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "stoppingAll");
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "stoppingAll", []);
   expect(screen.queryByRole("status")).toBeNull();
   // Its terminals move to the fresh runtime without a reload.
   expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
@@ -166,7 +166,7 @@ it("says why a restart failed and leaves it to be tried again", async () => {
 });
 
 const outdated = (work: string[] | null, problem: string | null = null, failed = false, keeps = false): LocalRuntimeState =>
-  ({ ...connected, outdated: { running: "0.2.21", app: "0.2.23", work, problem, failed, keeps } });
+  ({ ...connected, outdated: { running: "0.2.21", app: "0.2.23", work, problem, failed, keeps, unkept: [] } });
 
 it("leaves a runtime still waiting to be replaced to the status bar: no card in every window, nothing asked again (#766)", async () => {
   await mounted();
@@ -193,7 +193,7 @@ it("says why a switch failed, never silently, and Try again replaces only that r
   expect(screen.getByRole("alert").textContent).toContain("it did not exit");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
   // Only the runtime this window was told about.
-  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", []);
   expect(screen.queryByRole("status")).toBeNull();
   // Its terminals move to the app's own runtime without a reload.
   expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
@@ -249,7 +249,7 @@ it("says a handover that failed will not be tried again by itself, and Try again
   expect(notice).not.toContain("its terminals and whatever they run");
   expect(screen.getByRole("alert").textContent).toContain("did not answer");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
-  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", []);
 });
 
 it("restarts an unresponsive runtime that can be handed over keeping what it runs", async () => {
@@ -257,23 +257,24 @@ it("restarts an unresponsive runtime that can be handed over keeping what it run
   await changed({ ...unresponsive, keeps: true } as LocalRuntimeState);
   expect(screen.getByRole("status").textContent).toContain("Restarting it hands its agents and terminals to a fresh runtime, and they keep running.");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
-  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "keeping");
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "keeping", []);
   expect(screen.queryByRole("status")).toBeNull();
   expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
 });
 
 it("asks before stopping what an unresponsive runtime's handover cannot carry, or all of it", async () => {
-  native.restart.mockRejectedValueOnce({ message: "Restarting it keeps everything it runs but what is named here, which would have to stop.", unkept: ["Gemini in “Docs”"] });
+  native.restart.mockRejectedValueOnce({ message: "Restarting it keeps everything it runs but what is named here, which would have to stop.", unkept: ["Gemini in “Docs”"], stop: [{ kind: "turn", sessionId: "s1", tabId: "t1", harness: "gemini" }] });
   await mounted();
   await changed({ ...unresponsive, keeps: true } as LocalRuntimeState);
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
-  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "keeping");
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "keeping", []);
   expect(screen.getByRole("alert").textContent).toContain("would have to stop");
   expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Gemini in “Docs”"]);
   expect(screen.getByRole("status").textContent).toContain("Restarting it stopping that keeps everything else running.");
   expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart, stopping that" })); });
-  expect(native.restart).toHaveBeenLastCalledWith("owner", "stoppingUnkept");
+  // Only what it was shown: the refusal's own list goes back.
+  expect(native.restart).toHaveBeenLastCalledWith("owner", "stoppingUnkept", [{ kind: "turn", sessionId: "s1", tabId: "t1", harness: "gemini" }]);
   expect(screen.queryByRole("status")).toBeNull();
 });
 
@@ -287,5 +288,18 @@ it("offers to stop everything only once keeping it running could not be done", a
   expect(screen.getByRole("status").textContent).toContain("Stopping it instead stops everything it runs");
   expect(screen.queryByRole("button", { name: /Restart, stopping/ })).toBeNull();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Stop and restart" })); });
-  expect(native.restart).toHaveBeenLastCalledWith("owner", "stoppingAll");
+  expect(native.restart).toHaveBeenLastCalledWith("owner", "stoppingAll", []);
+});
+
+it("lists what a failed handover cannot carry, and Try again stops only that, as shown (#765 review)", async () => {
+  await mounted();
+  const shown = { kind: "turn", sessionId: "s1", tabId: "t1", harness: "gemini" };
+  await changed({ ...connected, outdated: { running: "0.2.24", app: "0.2.25", work: ["Gemini in “Docs”, in the middle of a turn"],
+    problem: "Could not restart the TerminalX runtime: the updated runtime did not answer.", failed: true, keeps: true, unkept: [shown] } });
+  const notice = screen.getByRole("status").textContent ?? "";
+  expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Gemini in “Docs”, in the middle of a turn"]);
+  expect(notice).toContain("Trying again stops only that, which it cannot carry over, and keeps everything else running.");
+  expect(notice).not.toContain("Trying again keeps its agents and terminals running.");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", [shown]);
 });

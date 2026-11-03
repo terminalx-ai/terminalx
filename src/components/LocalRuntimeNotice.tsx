@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeRestartRefused } from "@/lib/api";
+import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
 import { bootLocalRuntime, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
 
 /** A short gap says nothing: most reconnect before anyone would notice. */
@@ -88,15 +88,18 @@ function UnresponsiveNotice({ epoch, message, keeps }: { epoch: string | null; m
   /** A restart keeping what it runs was refused: it is the reader's call now. */
   const [refused, setRefused] = useState(false);
   const [unkept, setUnkept] = useState<string[]>([]);
+  /** What it named, as the runtime names it: what stopping those sends back. */
+  const [stop, setStop] = useState<LocalRuntimeWorkItem[]>([]);
   const restart = async (how: LocalRuntimeRestart) => {
     setRestarting(true);
     setFailure(null);
     try {
-      await restartLocalRuntime(epoch, how);
+      await restartLocalRuntime(epoch, how, how === "stoppingUnkept" ? stop : []);
     } catch (error) {
       setFailure(errorMessage(error));
-      const named = (error as Partial<LocalRuntimeRestartRefused> | null)?.unkept;
-      setUnkept(Array.isArray(named) ? named : []);
+      const refusal = error as Partial<LocalRuntimeRestartRefused> | null;
+      setUnkept(Array.isArray(refusal?.unkept) ? refusal.unkept : []);
+      setStop(Array.isArray(refusal?.stop) ? refusal.stop : []);
       setRefused(keeps && how !== "stoppingAll");
     } finally {
       setRestarting(false);
@@ -132,11 +135,14 @@ function UnresponsiveNotice({ epoch, message, keeps }: { epoch: string | null; m
 function SwitchFailedNotice({ epoch, outdated, onHide }: { epoch: string; outdated: LocalRuntimeOutdated; onHide: () => void }) {
   const [restarting, setRestarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const { running, app, problem, keeps } = outdated;
+  const { running, app, problem, keeps, work, unkept } = outdated;
+  // Handed over, trying again stops only what is listed here, and that is
+  // what is sent: anything else it cannot carry is refused, and listed.
+  const listed = keeps && work !== null && work.length > 0 ? work : [];
   const restart = async () => {
     setRestarting(true);
     setFailure(null);
-    try { await replaceLocalRuntime(epoch); }
+    try { await replaceLocalRuntime(epoch, keeps ? unkept : []); }
     catch (error) { setFailure(errorMessage(error)); }
     finally { setRestarting(false); }
   };
@@ -146,7 +152,10 @@ function SwitchFailedNotice({ epoch, outdated, onHide }: { epoch: string; outdat
         <div className="font-medium">TerminalX runtime was not updated</div>
         <p className="mt-1 text-muted-foreground">The runtime running your agents is {running ? `version ${running}` : "an earlier version"}; this app is {app}. {keeps ? "Handing it over" : "Moving"} to {app} failed, and it does not try again by itself.</p>
         {(failure ?? problem) && <p role="alert" className="mt-1 text-destructive">{failure ?? problem}</p>}
-        <p className="mt-1 text-muted-foreground">{keeps ? "Trying again keeps its agents and terminals running." : "Trying again stops its agents, and its terminals and whatever they run; each agent picks up its conversation again when its tab starts."}</p>
+        {listed.length > 0 && <ul className="mt-1 list-disc pl-4 text-muted-foreground">{listed.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+        <p className="mt-1 text-muted-foreground">{!keeps ? "Trying again stops its agents, and its terminals and whatever they run; each agent picks up its conversation again when its tab starts."
+          : listed.length > 0 ? `Trying again stops only ${listed.length === 1 ? "that, which it cannot carry over" : "those, which it cannot carry over"}, and keeps everything else running.`
+          : "Trying again keeps its agents and terminals running."}</p>
       </div>
       <div className="flex shrink-0 flex-col gap-1.5">
         <Button variant="outline" size="sm" disabled={restarting} onClick={() => void restart()}>{restarting ? "Restarting…" : "Try again"}</Button>

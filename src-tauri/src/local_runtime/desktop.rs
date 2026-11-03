@@ -28,6 +28,9 @@ const LOOP_STALL: Duration = Duration::from_secs(120);
 /// so: each part of it is given 10 seconds, and stopping what it cannot
 /// carry, when the reader agreed to, takes as long as Stop does.
 const HANDOVER_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long an owner has to check the binary it would be handed over to: it
+/// gives that binary 30 seconds to say which handovers it reads.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn unsupported(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == "unsupported"))
@@ -201,8 +204,15 @@ impl Desktop {
     /// What handing the owner over to `binary` would have to stop: the agents
     /// its handover record cannot carry (#765). Refused by an owner that
     /// cannot be handed over to `binary` (`handover_unsupported`).
-    pub fn handover_plan(&self, binary: &std::path::Path) -> Result<Vec<crate::session::retire::Work>> {
-        let answer = self.client.quick::<serde_json::Value>("runtime.handover.plan", serde_json::json!({"epoch": self.client.epoch(), "binary": binary}))?;
+    /// Given no `binary`, only what would have to stop is asked, which
+    /// waits on nothing but the tabs.
+    pub fn handover_plan(&self, binary: Option<&std::path::Path>) -> Result<Vec<crate::session::retire::Work>> {
+        let params = serde_json::json!({"epoch": self.client.epoch(), "binary": binary});
+        // Checking a binary new to this Mac may wait on its security checks.
+        let answer: serde_json::Value = match binary {
+            Some(_) => self.client.call_within("runtime.handover.plan", params, VERIFY_TIMEOUT)?,
+            None => self.client.quick("runtime.handover.plan", params)?,
+        };
         Ok(serde_json::from_value(answer["unadoptable"].clone())?)
     }
 

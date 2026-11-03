@@ -323,15 +323,32 @@ number; absent before 0.2.24).
   subcommand names. Before holding anything, the runtime being replaced asks
   the binary taking over which it reads, and refuses (`handover_unsupported`)
   one that reads none of its own, or that is not a runtime installed in this
-  home as `launch::install` installs one (under the digest of its contents,
-  private to this user), signed by the same team on macOS, at this version or
-  newer. Whoever holds the control token cannot put a program of their own in
-  the runtime's place.
+  home as `launch::install` installs one (in this home's private runtime
+  directory, under the digest of its contents, private to this user), signed
+  by the same team on macOS, at this version or newer. It checks the binary
+  again just before the exec, after everything was held still: the same file,
+  with the same contents. On Linux it execs the very descriptor it checked;
+  on macOS, which cannot exec one, it execs the path a moment after the check.
+  On macOS, whoever holds the control token therefore cannot put a program of
+  their own in the runtime's place. Linux has no code signature to require:
+  there a program of this user's own, installed in this home's runtime
+  directory under its digest and claiming a newer version, would pass, which
+  gains nothing over what the control token already allows (every terminal
+  and session).
+- **Waiting hooks.** The hook bridge stops answering before anything else
+  comes to rest, and is taken (its sockets, and the frames not yet answered)
+  only once every tab is held, when no waiting hook can be answered any more,
+  since an answer is given under its tab's lock. A permission answered in
+  between is answered here, and the handover is tried again
+  (`handover_busy`).
 - **What it cannot carry** in format 1 is an agent driven over its standard
   input and output (experimental Codex stdio, ACP agents, OpenCode) while its
   process runs. `runtime.handover.plan` names it; the handover refuses
   (`handover_unadoptable`) unless the request names it in `stop`, and then
-  stops only that, as Stop does, and hands the rest over.
+  stops only that, as Stop does, and hands the rest over. Every window sends
+  back exactly what it showed (Restart now, Try again, Restart runtime, and
+  Update now through the update plan): an agent started since is refused
+  (`handover_unadoptable`), with nothing stopped, and shown in turn.
 
 A desktop newer than a runtime that can be handed over replaces it at once,
 mid-turn or not (`replace.rs`): windows say the runtime is being updated and

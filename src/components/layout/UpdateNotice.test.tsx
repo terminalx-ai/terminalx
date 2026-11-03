@@ -100,7 +100,7 @@ describe("the runtime the update comes with (#766)", () => {
     await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
     expect(steps).toEqual(["read", "install", "plan", "relaunch"]);
     // Quiet since that reading, if still quiet just before the relaunch.
-    expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", false, 1_000);
+    expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", false, 1_000, []);
     expect(screen.queryByTestId("update-choice")).toBeNull();
   });
 
@@ -122,7 +122,18 @@ describe("the runtime the update comes with (#766)", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update now" })); });
     await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
     expect(steps).toEqual(["install", "plan", "relaunch"]);
-    expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", true, null);
+    expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", true, null, []);
+  });
+
+  it("Update now for a runtime that is handed over stops only what the card listed (#765 review)", async () => {
+    const shown = { kind: "turn", sessionId: "s1", tabId: "t1", harness: "gemini" };
+    runtime.work.mockResolvedValue({ epoch: "owner", work: ["Gemini in “Docs”, in the middle of a turn"], unkept: [shown], readAt: 1_000 });
+    await found();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update and relaunch" })); });
+    expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Gemini in “Docs”, in the middle of a turn"]);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update now" })); });
+    await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
+    expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", true, null, [shown]);
   });
 
   it("Update when they're done installs now and leaves the runtime to move by itself, without asking again", async () => {
@@ -132,7 +143,7 @@ describe("the runtime the update comes with (#766)", () => {
     expect(screen.getByTestId("update-choice").textContent).toContain("Update now restarts it:");
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update when they're done" })); });
     await vi.waitFor(() => expect(updater.relaunch).toHaveBeenCalledOnce());
-    expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", false, null);
+    expect(runtime.planUpdate).toHaveBeenCalledExactlyOnceWith("owner", false, null, []);
   });
 
   it("closing the choice updates nothing, and a background check does not take it away", async () => {
