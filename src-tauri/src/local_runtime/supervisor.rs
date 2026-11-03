@@ -402,6 +402,9 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
     // here: one older than this app is, once attached (`replace.rs`).
     // A runtime started here keeps its log beside the app's (#661).
     let log = app.path().app_log_dir().ok().map(|dir| dir.join("runtime.log"));
+    // What was decided about the runtime before an update, if the app that
+    // installed it left a plan for this one (#766).
+    let plan = super::update_plan::load(&home);
     let client = super::launch::connect_desktop(&source, &home, &app.config().identifier, log.as_deref())?;
     let next = Arc::new(match &previous {
         Some(previous) => previous.reconnect(client)?,
@@ -418,10 +421,14 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
         anyhow::ensure!(unchanged, "The desktop connection changed while attaching.");
         state.pairing.attach_runtime(next.clone());
         *current = Some(next.clone());
-        // One older than this app is replaced as soon as that cuts off no turn (#730).
-        state.runtime_replacement.attached(next.epoch(), next.build());
+        // One older than this app is replaced as soon as that cuts off no
+        // turn (#730), or as was decided before an update (#766).
+        state.runtime_replacement.attached(next.epoch(), next.build(), plan.as_ref());
         Ok(())
     })?;
+    // Followed, or left with nothing to follow: either way the next
+    // attachment starts from what it finds.
+    if plan.is_some() { super::update_plan::clear(&home); }
     Ok(next.generation())
 }
 

@@ -57,6 +57,8 @@ pub(crate) mod supervisor;
 pub mod ui;
 #[cfg(all(unix, feature = "desktop"))]
 pub(crate) mod replace;
+#[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod update_plan;
 
 pub const PROTOCOL: u64 = 1;
 /// What the event socket understands within [`PROTOCOL`], so a desktop and a
