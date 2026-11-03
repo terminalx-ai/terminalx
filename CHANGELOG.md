@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.23
+
 ### Offline dictation
 
 - Add opt-in local transcription context, scoped dictionary spellings,
@@ -93,6 +95,12 @@
   at once. Carrying a pipeline on from a failed resolution now checks the head
   against the current base first, and resolves again if it conflicts, instead
   of pushing a stale merge for review. (#753)
+- Start the conflict resolver whenever GitHub says the pull request conflicts
+  with its base or is behind it, even where the local merge check finds no
+  conflict. With criss-crossed history (two merge bases) the local check came
+  out clean while GitHub kept reporting a conflict, so the pipeline waited at
+  **conflicts** for good and no resolver ever started. The resolver's merge
+  leaves one merge base, so GitHub then agrees. (#748)
 
 ### Changes panel
 
@@ -147,6 +155,12 @@
   workspace did; the first one opened in Codex's terminal. Ask every time,
   other agents and the switch off still start a terminal tab, and so does a
   workspace whose runtime or server predates this. (#745)
+- Interrupt a Codex terminal tab right after changing its effort or permission
+  mode. Codex restarts to take the change, and an Interrupt sent afterwards,
+  from the desktop or a phone, let the running turn go on to its end. It now
+  stops the turn, and Stop withdraws a prompt not yet entered, whether it was
+  waiting for the restarted Codex to be ready, about to be typed or about to be
+  submitted, so it is never typed into the new Codex. (#746)
 
 ### Chat
 
@@ -223,42 +237,6 @@
   send a message or stop the session. Its recovery banner for an expired
   permission request or an unconfirmed prompt no longer sends it there
   either. Tabs whose agent runs in a terminal are unchanged. (#644)
-
-### Mobile
-
-- Show a compaction on the phone as on the desktop, in cloud workspace tabs
-  and in tabs on a paired Mac: **Compacting context…** while it runs, then
-  **Context compacted**, **Compaction stopped** or **Compaction status
-  unknown**. Every compaction used to read "Context compacted", even while it
-  ran or after the phone lost track of it. A compaction shows as running only
-  once the phone has read the conversation to its end over a live connection.
-  While disconnected, reconnecting or just back from the background, it shows
-  as unknown. A stopped workspace's saved conversation never shows one as
-  running. (#644)
-- A native Codex tab's recovery card on the phone no longer says to check the
-  terminal (an expired permission request, an unconfirmed prompt); it says
-  what to do in the chat instead, as the desktop now does too. The Mac tells
-  the phone which tabs run native Codex; an older Mac keeps the old wording.
-  (#644)
-
-### Background sessions
-
-- Never hold a send behind slow work. Merged-workspace cleanup, Settings →
-  Storage (scanning, sizing and removal), workspace and session removal,
-  `terminalx worktrees delete` and stopping an idle agent no longer hold the
-  lock every send takes; each closes only the sessions it changes, and a send
-  to any other tab goes through at once. Checking the worktree's tree before a
-  prompt, which reads the whole checkout, now happens before the send waits
-  for anything. A send to a session that is being removed or moved is refused
-  with the reason, and one to an agent being stopped for sitting idle waits
-  for that stop and starts it again. (#727)
-- Time every send. Each tab's diagnostics note when Send was pressed, when the
-  runtime received the send and how long it waited, when the agent took the
-  prompt, and when the window showed it, so a slow send can be traced to the
-  step that took the time. (#727)
-
-### Cloud workspaces
-
 - Deliver a message sent from the command line, a phone or another member to a
   native Codex tab whose last turn failed, for example on a revoked sign-in.
   The workspace said it was sent, but the message sat in the queue for good:
@@ -278,6 +256,95 @@
 - Leave the workspace user's own `~/.codex` as it is. Checking the Codex version
   before a native Codex tab starts made Codex write temporary files there; the
   check now runs in the tab's own Codex home. (#644)
+- Take an issue session in a cloud workspace through to its pull request,
+  review and merge. The workspace never cloned its repository, because one
+  folder was compared under two different paths, and an issue session in the
+  repository folder got no pipeline, because that folder was never registered
+  as a project. A GitHub refusal over the app installation's permissions or
+  repository access now says that an organization admin must approve or review
+  them on GitHub and refresh the installation in TerminalX Settings, and the
+  request is not retried by itself. (#461)
+
+### Mobile
+
+- Show a compaction on the phone as on the desktop, in cloud workspace tabs
+  and in tabs on a paired Mac: **Compacting context…** while it runs, then
+  **Context compacted**, **Compaction stopped** or **Compaction status
+  unknown**. Every compaction used to read "Context compacted", even while it
+  ran or after the phone lost track of it. A compaction shows as running only
+  once the phone has read the conversation to its end over a live connection.
+  While disconnected, reconnecting or just back from the background, it shows
+  as unknown. A stopped workspace's saved conversation never shows one as
+  running. (#644)
+- A native Codex tab's recovery card on the phone no longer says to check the
+  terminal (an expired permission request, an unconfirmed prompt); it says
+  what to do in the chat instead, as the desktop now does too. The Mac tells
+  the phone which tabs run native Codex; an older Mac keeps the old wording.
+  (#644)
+- Open sessions on the phone again. The session screen crashed on load,
+  because the terminal emulator it loads reads the browser's user agent and
+  platform, which React Native does not have. (#726)
+- Offer on the phone only what the Mac's background runtime can do. A Mac
+  updated to a new app but still running an older runtime used to offer the
+  Terminal view, session controls, new sessions and Mac settings, which that
+  runtime then refused as "Unsupported paired-device owner operation.". The
+  phone now reads what the runtime serves and shows or hides those features
+  when the Mac switches runtimes, without a restart; a refusal that still
+  happens says "TerminalX on your Mac needs updating or restarting to do
+  this." (#730)
+
+### Background sessions
+
+- Never hold a send behind slow work. Merged-workspace cleanup, Settings →
+  Storage (scanning, sizing and removal), workspace and session removal,
+  `terminalx worktrees delete` and stopping an idle agent no longer hold the
+  lock every send takes; each closes only the sessions it changes, and a send
+  to any other tab goes through at once. Checking the worktree's tree before a
+  prompt, which reads the whole checkout, now happens before the send waits
+  for anything. A send to a session that is being removed or moved is refused
+  with the reason, and one to an agent being stopped for sitting idle waits
+  for that stop and starts it again. (#727)
+- Time every send. Each tab's diagnostics note when Send was pressed, when the
+  runtime received the send and how long it waited, when the agent took the
+  prompt, and when the window showed it, so a slow send can be traced to the
+  step that took the time. (#727)
+- Keep the live connection up when a window falls behind. A terminal that
+  cannot keep up is redrawn from its scrollback on its own, while the others
+  in the window keep streaming. Events the window missed are read again,
+  without reconnecting. Each window's terminal connection now carries terminal
+  output only. Every lost connection is now logged: which connection, why, how
+  long it was down and how many attempts it took to reconnect. The log is
+  `desktop.log`, beside `runtime.log` in `~/Library/Logs`. (#716)
+- Replace an older background runtime after an update. The runtime outlives the
+  app, so an updated TerminalX went on using the runtime of the version before
+  it. The app now replaces a runtime older than itself with its own, by itself,
+  once nothing the runtime runs would be cut short: no agent mid-turn, prompt
+  waiting to be delivered, agent started by hand, open terminal, command an
+  agent left running or issue pipeline step, and none for 15 seconds. Until
+  then every window says the runtime is older than the app, lists what it is
+  waiting for, and offers **Restart now**. Agents pick up their conversation
+  again when their tab next starts. A runtime of the app's version or newer is
+  kept, so two builds sharing one home never replace each other's. (#730)
+
+### Usage
+
+- A refresh that says it succeeded now changes the usage it shows. The status
+  line and the usage endpoint write a window's reset time differently (whole
+  seconds against fractions that move between requests), so the endpoint's
+  window was read as the previous one and dropped on every refresh, and old
+  Claude (sometimes Codex) limits stayed up. Reset times within 60 seconds are
+  now the same window, and a window the provider says has not started shows
+  as 0% with no countdown. (#729)
+- An endpoint window whose reset time is earlier than the one shown, but was
+  still ahead when the request started, replaces it. It was refused as an
+  earlier window until the shown reset time passed, up to a week for the 7-day
+  window. A status line's earlier window is still refused. (#737)
+- "Last refreshed" counts only an answer that replaced a window. When the
+  provider answered and nothing changed, the card says "Checked … · no newer
+  usage" and why each window was kept, including a reply that repeats a window
+  that has just expired. A Codex refresh held back by its debounce says when it
+  will fetch again, a tab started before an account was known says so in its
+  own words, and every refresh is logged. (#729, #738)
 
 ### Command line
 
@@ -296,6 +363,12 @@
   archive, so the sidebar updates at once. `sessions list` now lists what the
   sidebar does, and `sessions list --archived` the archived sessions. (#718)
 
+### Development
+
+- Update vite to 7.3.7, fflate to 0.8.3 and linkify-it to 5.0.2 in the app,
+  the phone app and the shared portable package, and zod to 4.6.6 in the app
+  and the phone app. (#762)
+
 ## 0.2.22
 
 ### Background sessions
@@ -308,13 +381,6 @@
   window whose terminal output alone dropped recovers without affecting others.
   The notice stays quiet for short gaps and asks for action only when retrying
   cannot help or has not helped for minutes. (#643)
-- Keep the live connection up when a window falls behind. A terminal that
-  cannot keep up is redrawn from its scrollback on its own, while the others
-  in the window keep streaming. Events the window missed are read again,
-  without reconnecting. Each window's terminal connection now carries terminal
-  output only. Every lost connection is now logged: which connection, why, how
-  long it was down and how many attempts it took to reconnect. The log is
-  `desktop.log`, beside `runtime.log` in `~/Library/Logs`. (#716)
 - Stop agents nobody is using. An agent the app started that has had nothing to
   do for an hour (Settings → Agents: 30 minutes to a day, or never) is stopped
   with its MCP servers, and its next message starts it again on the same
