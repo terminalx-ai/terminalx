@@ -400,6 +400,11 @@ impl SessionManager {
         if self.mobile.has_pending() {
             return Err(Unsettled("A prompt from a phone is on its way".into()).into());
         }
+        // A tab still stopping was refused above. The processes a stop could
+        // not confirm gone (`stop_pids`, `session_stop_pids`, kept for good
+        // when one ignores its signals) lead process groups the terminals
+        // hand over as their own (`pty::Frozen::groups`), which Stop All
+        // ends; waiting for them could hold every handover off for good.
         let mut records = Vec::new();
         let mut unadoptable = Vec::new();
         for rt in &held {

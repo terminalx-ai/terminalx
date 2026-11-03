@@ -30,6 +30,7 @@ pub(super) struct Hold {
 }
 
 #[derive(Default)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) struct Held {
     frozen: bool,
     /// Chunks the reader has taken from the terminal.
@@ -45,6 +46,7 @@ impl Hold {
 
     /// The pane's state, once it is not being handed over: what the reader
     /// reads under, and what an exited program's waiter waits for.
+    #[cfg(unix)]
     pub(super) fn thawed(&self) -> MutexGuard<'_, Held> {
         let mut held = self.lock();
         while held.frozen {
