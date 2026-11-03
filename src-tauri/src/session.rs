@@ -46,6 +46,9 @@ pub mod follow;
 mod unsent;
 #[path = "session_retire.rs"]
 pub(crate) mod retire;
+#[cfg(unix)]
+#[path = "session_handover.rs"]
+pub(crate) mod handover;
 
 #[derive(Clone)]
 pub struct PendingAsk {
@@ -112,6 +115,9 @@ pub enum Decision {
 pub(crate) struct DecisionSender {
     sender: std::sync::mpsc::Sender<Decision>,
     caller: crate::hooks::Caller,
+    /// The hook that waits: `PermissionRequest` or `PreToolUse`, which a
+    /// handover carries with the wait (#765).
+    gate: String,
 }
 
 impl DecisionSender {
@@ -119,6 +125,17 @@ impl DecisionSender {
         if !self.caller.connected() { return Err(()); }
         self.sender.send(decision).map_err(|_| ())
     }
+}
+
+/// A permission hook's card, as the hook thread waits on its decision.
+struct Waiting {
+    kind: CliKind,
+    /// `PermissionRequest` or `PreToolUse`: which reply the hook prints.
+    gate: String,
+    request_id: String,
+    tool_name: String,
+    input: Value,
+    local_owner: bool,
 }
 
 /// Own the receiver so a timed-out hook stops accepting answers before it
@@ -1004,17 +1021,26 @@ impl TabRuntime {
     }
 }
 
-/// No child survives a restart: a tab persisted mid-turn or waiting is idle
-/// now, whatever the index says.
+#[cfg(test)]
 pub fn idle_orphaned_tabs() {
+    idle_orphaned_tabs_except(&std::collections::HashSet::new(), &std::collections::HashSet::new());
+}
+
+/// No child survives a restart: a tab persisted mid-turn or waiting is idle
+/// now, whatever the index says, and no tab has a pane. What the runtime
+/// this one replaced handed over is the exception (#765): `tabs` keep their
+/// turns and `panes` their terminals, which go on running.
+pub fn idle_orphaned_tabs_except(tabs: &std::collections::HashSet<(String, String)>, panes: &std::collections::HashSet<String>) {
     let _ = index::update(|sessions| {
         for s in sessions.iter_mut() {
             for t in s.tabs.iter_mut() {
-                if matches!(t.status, TabStatus::InProgress | TabStatus::Waiting) {
+                if !tabs.contains(&(s.id.clone(), t.id.clone())) && matches!(t.status, TabStatus::InProgress | TabStatus::Waiting) {
                     t.status = TabStatus::Idle;
                 }
                 // Nor does any pane.
-                t.lose_pane();
+                if !panes.contains(&t.pane_id()) {
+                    t.lose_pane();
+                }
             }
         }
         Ok(())
@@ -5943,6 +5969,7 @@ impl SessionManager {
             p.decisions.insert(request_id.clone(), DecisionSender {
                 sender: tx,
                 caller: if local_owner { crate::hooks::Caller::current() } else { crate::hooks::Caller::default() },
+                gate: gate.to_string(),
             });
             // The event carries no tool_use_id — it fires before the call is
             // recorded — so the card stands on its own rather than attaching
@@ -5974,17 +6001,31 @@ impl SessionManager {
             );
             self.apply(&mut rt, payload, None);
         }
+        let waiting = Waiting { kind, gate: gate.to_string(), request_id, tool_name, input, local_owner };
+        // Teardown or a settings restart may replace this CLI while the hook
+        // waits. An answer for that old launch cannot start the new one's work.
+        self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)))
+    }
+
+    /// Wait for the decision on the card a permission hook asked for, and
+    /// say it as that hook prints it, once `mine` finds the tab still has the
+    /// CLI that asked. A frame handed over by the runtime this one replaced
+    /// waits here too, for the card it asked for there (#765).
+    fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<Decision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
+        let Waiting { kind, gate, request_id, tool_name, input, local_owner } = waiting;
+        let gate = gate.as_str();
         let wait = match kind {
             CliKind::Claude => claude::pty::PERMISSION_WAIT,
             CliKind::Codex => codex::pty::PERMISSION_WAIT,
         };
+        // Waiting on a person, the frame is no work a handover waits for.
+        let parked = crate::hooks::park(&request_id);
         let answer = if local_owner {
             crate::local_runtime::permissions::wait(rx, crate::local_runtime::permissions::WAIT, crate::hooks::caller_connected)
         } else { wait_for_decision(rx, wait) };
+        drop(parked);
         let mut rt = rt_arc.lock().unwrap();
-        // Teardown or a settings restart may replace this CLI while the hook
-        // waits. An answer for that old launch cannot start the new one's work.
-        if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) {
+        if !mine(&rt) {
             return HookReply::default();
         }
         if let Engine::Cli(p) = &mut rt.engine {

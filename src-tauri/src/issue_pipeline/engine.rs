@@ -176,11 +176,45 @@ static STEPS: AtomicUsize = AtomicUsize::new(0);
 
 struct Running;
 
+/// Set while the runtime is handed to its successor (#765): no step starts,
+/// since a step's thread would not go over with the runtime.
+static PAUSED: Mutex<bool> = Mutex::new(false);
+static RESUMED: std::sync::Condvar = std::sync::Condvar::new();
+
 impl Running {
     fn start() -> Self {
+        let mut paused = PAUSED.lock().unwrap_or_else(|error| error.into_inner());
+        while *paused {
+            paused = RESUMED.wait(paused).unwrap_or_else(|error| error.into_inner());
+        }
         STEPS.fetch_add(1, Ordering::Relaxed);
         Running
     }
+}
+
+/// No step starts until this is dropped (#765).
+pub(crate) struct PausedSteps(());
+
+impl Drop for PausedSteps {
+    fn drop(&mut self) {
+        *PAUSED.lock().unwrap_or_else(|error| error.into_inner()) = false;
+        RESUMED.notify_all();
+    }
+}
+
+/// Hold back every step that would start, once none is running: `None` when
+/// one is still running after `within`, and then nothing is held back.
+pub(crate) fn pause_steps(within: std::time::Duration) -> Option<PausedSteps> {
+    *PAUSED.lock().unwrap_or_else(|error| error.into_inner()) = true;
+    let paused = PausedSteps(());
+    let deadline = std::time::Instant::now() + within;
+    while STEPS.load(Ordering::Relaxed) != 0 {
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Some(paused)
 }
 
 impl Drop for Running {

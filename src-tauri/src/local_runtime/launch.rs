@@ -30,7 +30,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn digest(file: &mut File) -> Result<String> {
+pub(crate) fn digest(file: &mut File) -> Result<String> {
     let mut sha = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     loop {

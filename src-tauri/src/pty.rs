@@ -14,13 +14,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 #[cfg(test)]
 use base64::Engine as _;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 
 use crate::sink::EventSink;
+
+#[path = "pty_handover.rs"]
+mod handover;
+#[cfg(unix)]
+pub(crate) use handover::{Frozen, FrozenPane};
+use handover::{Hold, Parts, Waiter};
 const COALESCE: Duration = Duration::from_millis(8);
 pub(crate) const MAX_CHUNK: usize = 32 * 1024;
 /// Enough raw output to reconstruct a useful terminal tail on a newly attached
@@ -180,6 +186,9 @@ struct Pane {
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
+    /// What the pane's reader and waiter hold off on while it is handed to
+    /// the runtime that replaces this one (#765).
+    hold: Arc<Hold>,
 }
 
 
@@ -338,7 +347,13 @@ pub struct Terminals {
     /// N" each is opened with. A chosen name is kept whatever the tab goes
     /// on to run (#437).
     renamed: Mutex<std::collections::HashSet<String>>,
+    /// Every pane is being handed to the runtime that replaces this one
+    /// (#765): none is opened meanwhile.
+    frozen: Mutex<bool>,
 }
+
+/// Why a pane is not opened while the runtime is being replaced.
+pub(crate) const HANDING_OVER: &str = "TerminalX is handing its terminals to its updated runtime; try again in a moment.";
 
 /// A shell tab of a session: a pane the reader opened, as every window lists it.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -391,7 +406,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default() }
+        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), frozen: Mutex::new(false) }
     }
 }
 
@@ -483,6 +498,7 @@ fn screen_size(n: u16) -> std::num::NonZeroU16 {
     std::num::NonZeroU16::new(n).unwrap_or(std::num::NonZeroU16::MIN)
 }
 
+#[cfg(test)]
 fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
     push_scrollback(&mut scrollback.lock().unwrap(), bytes);
 }
@@ -546,6 +562,11 @@ impl Terminals {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
+        // A pane opened now would be left out of the handover under way, and
+        // its program would lose its terminal with the runtime (#765).
+        if *self.frozen.lock().unwrap() {
+            bail!("{}", HANDING_OVER);
+        }
         let PaneSpec { cwd, cols, rows, command, env } = spec;
         // A bare shell is still an interactive shell (also used by disposable
         // PTY fixtures). Shell scripts/arguments are work until the pane exits.
@@ -554,7 +575,6 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        *self.sink.lock().unwrap() = Some(sink.clone());
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
@@ -592,32 +612,52 @@ impl Terminals {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let mut child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
         drop(pair.slave);
         let pid = child.process_id();
-        let mut reader = pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?;
-        let writer = pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?;
+        let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
+        screen.process(&printed);
+        let mut scrollback = VecDeque::with_capacity(SCROLLBACK_BYTES);
+        push_scrollback(&mut scrollback, &printed);
+        self.start(sink, id, Parts {
+            reader: pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?,
+            writer: pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?,
+            master: pair.master,
+            waiter: Waiter::Spawned(child),
+            pid,
+            group: pid,
+            explicit_command,
+            cwd: cwd.to_string(),
+            created: crate::store::index::now(),
+            scrollback,
+            printed: 0,
+            screen,
+            last_output: None,
+        })
+    }
+
+    /// Run a pane's reader, emitter and waiter, and list it: one opened here
+    /// or one handed over by the runtime this one replaced (#765).
+    fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
+        let Parts { master, mut reader, writer, mut waiter, pid, group, explicit_command, cwd, created, scrollback, printed, screen, last_output } = parts;
         #[cfg(unix)]
         let (readable, room) = {
-            let room = non_blocking(pair.master.as_ref())?;
+            let room = non_blocking(master.as_ref())?;
             (room.try_clone()?, room)
         };
+        *self.sink.lock().unwrap() = Some(sink.clone());
         let alive = Arc::new(Mutex::new(true));
-        let group = Arc::new(OwnedGroup(Mutex::new(pid)));
+        let group = Arc::new(OwnedGroup(Mutex::new(group)));
         {
             let mut groups = self.groups.lock().unwrap();
             groups.retain(|group| group.pid().is_some());
             groups.push(group.clone());
         }
-        let last_output = Arc::new(Mutex::new(None));
-        let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
-        append_scrollback(&scrollback, &printed);
-        let own = Arc::new(AtomicU64::new(0));
-        let screen = {
-            let mut parser = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
-            parser.process(&printed);
-            Arc::new(Mutex::new(parser))
-        };
+        let last_output = Arc::new(Mutex::new(last_output));
+        let scrollback = Arc::new(Mutex::new(scrollback));
+        let own = Arc::new(AtomicU64::new(printed));
+        let screen = Arc::new(Mutex::new(screen));
+        let hold = Arc::new(Hold::default());
         let tap = self.tap_slot(id);
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
@@ -634,6 +674,8 @@ impl Terminals {
             let emitted = self.emitted.clone();
             let tap = tap.clone();
             let exited = exited.clone();
+            let reading = hold.clone();
+            let drawing = hold.clone();
             // Reading blocks until the program writes again, so it gets a
             // thread of its own: the emitter below must be able to send what
             // it gathered when the window closes even if the program has
@@ -642,7 +684,21 @@ impl Terminals {
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
                 loop {
-                    match reader.read(&mut buf) {
+                    // Read only while the pane is not being handed over, and
+                    // count what is read under the same lock: a handover then
+                    // finds every byte either on its way to the scrollback or
+                    // still in the terminal for the next owner (#765). The
+                    // master is non-blocking, so this never waits in the read.
+                    #[cfg(unix)]
+                    let read = {
+                        let mut held = reading.thawed();
+                        let read = reader.read(&mut buf);
+                        if matches!(read, Ok(n) if n > 0) { held.read += 1; }
+                        read
+                    };
+                    #[cfg(not(unix))]
+                    let read = reader.read(&mut buf);
+                    match read {
                         Ok(0) => break,
                         Ok(n) => {
                             if chunks.send(buf[..n].to_vec()).is_err() {
@@ -690,6 +746,7 @@ impl Terminals {
                 while open {
                     let Ok(first) = gathered.recv() else { break };
                     acc.extend_from_slice(&first);
+                    let mut got = 1;
                     // Gather a little more if it is arriving fast, so one emit
                     // carries a burst rather than each read costing an eval.
                     // After a quiet spell there is no burst yet to gather: a
@@ -702,7 +759,10 @@ impl Terminals {
                             break;
                         }
                         match gathered.recv_timeout(left) {
-                            Ok(more) => acc.extend_from_slice(&more),
+                            Ok(more) => {
+                                acc.extend_from_slice(&more);
+                                got += 1;
+                            }
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                 open = false;
@@ -711,6 +771,7 @@ impl Terminals {
                         }
                     }
                     flush(&mut acc);
+                    drawing.drew(got);
                     flushed = Some(Instant::now());
                     wait_for_view(&tap, &exited);
                 }
@@ -724,8 +785,9 @@ impl Terminals {
             let id = id.to_string();
             let tap = tap.clone();
             let group = group.clone();
+            let hold = hold.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
-                let code = child.wait().ok().map(|s| s.exit_code() as i32);
+                let code = waiter.wait(pid, &hold);
                 let _ = group.pid();
                 // Let the emitter go if it is holding the pane for its view, then
                 // give it a moment to send the tail, so the exit is not announced
@@ -749,7 +811,7 @@ impl Terminals {
             room,
             stalled: false,
         }));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, cwd: cwd.to_string(), created: crate::store::index::now() });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, cwd, created, hold });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())

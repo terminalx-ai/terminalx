@@ -79,7 +79,7 @@ impl ControlError {
         )
     }
 
-    fn internal(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(error: impl std::fmt::Display) -> Self {
         Self::new(
             "internal",
             format!("{error:#}"),
@@ -439,6 +439,15 @@ impl ControlService {
                         return Err(ControlError::internal(error));
                     }
                     return Ok(json!({ "stopping": true }));
+                }
+                // Replacing this runtime in place, keeping everything it runs (#765).
+                #[cfg(unix)]
+                if command == "runtime.handover.plan" {
+                    return crate::local_runtime::handover::plan(lifetime, &params);
+                }
+                #[cfg(unix)]
+                if command == "runtime.handover" {
+                    return crate::local_runtime::handover::begin(lifetime, params);
                 }
                 if command == "runtime.liveness" {
                     // What a desktop needs to find and watch this owner, and
@@ -981,6 +990,9 @@ impl ControlService {
             .unwrap_or(600)
             .min(86_400);
         let deadline = Instant::now() + Duration::from_secs(timeout);
+        // It only waits and reads: a runtime that replaces this one answers
+        // it afresh, and a handover need not wait for it (#765).
+        let _resumable = crate::hooks::resumable();
         loop {
             if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
                 return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));

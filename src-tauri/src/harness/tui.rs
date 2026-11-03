@@ -304,6 +304,18 @@ impl Ready {
         self.announces_start
     }
 
+    /// How long ago the CLI said it was up, if it has: what a handover
+    /// carries (#765).
+    pub(crate) fn since(&self) -> Option<Duration> {
+        self.at.lock().unwrap().map(|at| at.elapsed())
+    }
+
+    /// One a handed-over CLI said it was up on, `since` ago (#765).
+    pub(crate) fn restored(announces_start: bool, since: Option<Duration>) -> Self {
+        let at = since.map(|since| std::time::Instant::now().checked_sub(since).unwrap_or_else(std::time::Instant::now));
+        Self { at: Mutex::new(at), announces_start }
+    }
+
     /// The `SessionStart` hook arrived. Only the first one counts: a CLI fires
     /// it again after a `/clear` or a compaction, and by then it is long since
     /// listening.
@@ -777,6 +789,22 @@ impl Tail {
         Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::at(offset, decode)), decode, marker: None }
     }
 
+    /// Where a handover leaves this tail (#765): the file, how far into it
+    /// every complete record has been read (a record still being written is
+    /// read again), where reading it began, and the records it drops.
+    pub(crate) fn position(&self) -> (PathBuf, u64, u64, HashSet<String>) {
+        let path = self.path.lock().unwrap().clone();
+        let stream = self.stream.lock().unwrap();
+        (path, stream.offset - stream.partial.len() as u64, stream.began, stream.skip.clone())
+    }
+
+    /// Follow on from where a handover left a tail (`position`).
+    pub(crate) fn resumed(path: PathBuf, offset: u64, began: u64, decode: Decoder, skip: HashSet<String>) -> Self {
+        let mut stream = Streamer::skipping(offset, decode, skip);
+        stream.began = began;
+        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(stream), decode, marker: None }
+    }
+
     /// Also report what the records say about the turn; see [`Self::drain_records`].
     pub fn marking(mut self, marker: Marker) -> Self {
         self.marker = Some(marker);
@@ -940,6 +968,16 @@ impl Default for TurnTail {
 }
 
 impl TurnTail {
+    /// What a handover carries of it (#765): the reply said, the replies
+    /// drawn ahead of their records, and whether the turn is closed.
+    pub(crate) fn parts(&self) -> (Option<String>, Vec<String>, bool) {
+        (self.said.clone(), self.anticipated.iter().cloned().collect(), self.closed)
+    }
+
+    pub(crate) fn from_parts(said: Option<String>, anticipated: Vec<String>, closed: bool) -> Self {
+        Self { said, anticipated: anticipated.into(), closed }
+    }
+
     /// The last reply already delivered for this turn. A watcher closing a
     /// turn uses it to complete an automation without publishing it again.
     pub fn last_assistant_message(&self) -> Option<&str> {
