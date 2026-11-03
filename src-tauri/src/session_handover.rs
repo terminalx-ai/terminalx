@@ -243,6 +243,13 @@ impl Default for TurnTailRecord {
     }
 }
 
+/// A card a handed-over hook waits on: the tab, the card, and the hook's name.
+pub(crate) struct Wait {
+    pub tab: Arc<Mutex<TabRuntime>>,
+    pub ask: AskRecord,
+    pub gate: String,
+}
+
 /// The labels a turn may be opened under, by which a record names them.
 const OPENERS: &[&str] = &[
     "session", "hook", "composer", "hook_user_prompt_submit", "transcript_task_started", "transcript_turn_started",
@@ -308,6 +315,8 @@ impl std::error::Error for Unsettled {}
 
 /// How often a lock some other work holds is tried again.
 const RETRY: Duration = Duration::from_millis(10);
+/// How long the tabs are given to say what a handover cannot carry.
+const PLAN_WITHIN: Duration = Duration::from_secs(2);
 
 /// `lock` as soon as it is free, until `deadline`: never waiting on it, since
 /// whoever holds it may be waiting on something this already holds.
@@ -328,7 +337,10 @@ impl SessionManager {
     /// holding anything, to ask about before a handover begins.
     pub(crate) fn unadoptable(&self) -> Vec<Work> {
         let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
-        tabs.iter().filter_map(|tab| Self::unadoptable_tab(&tab.lock().unwrap())).collect()
+        // A tab held up elsewhere is not waited on for long: the handover
+        // itself finds out whether it comes to rest.
+        let deadline = Instant::now() + PLAN_WITHIN;
+        tabs.iter().filter_map(|tab| Self::unadoptable_tab(&*take(tab, deadline, "An agent tab").ok()?)).collect()
     }
 
     fn unadoptable_tab(rt: &TabRuntime) -> Option<Work> {
@@ -357,10 +369,12 @@ impl SessionManager {
         for writer in &writers {
             typing.push(take(&writer.typing, deadline, "A prompt being typed into an agent")?);
         }
-        let tails: Vec<Arc<tui::Tail>> = runtimes.iter().filter_map(|(_, rt)| match &rt.lock().unwrap().engine {
-            Engine::Cli(p) => Some(p.tail.clone()),
-            _ => None,
-        }).collect();
+        let mut tails: Vec<Arc<tui::Tail>> = Vec::new();
+        for (_, rt) in &runtimes {
+            if let Engine::Cli(p) = &take(rt, deadline, "An agent tab")?.engine {
+                tails.push(p.tail.clone());
+            }
+        }
         let mut reading = Vec::with_capacity(tails.len());
         for tail in &tails {
             reading.push(take(&tail.application, deadline, "An agent's transcript")?);
@@ -368,6 +382,12 @@ impl SessionManager {
         let mut held = Vec::with_capacity(runtimes.len());
         for (_, rt) in &runtimes {
             held.push(take(rt, deadline, "An agent tab")?);
+        }
+        // A CLI started or restarted between reading the tails and holding
+        // the tabs follows a tail that is not held.
+        let unheld = held.iter().any(|rt| matches!(&rt.engine, Engine::Cli(p) if !tails.iter().any(|tail| Arc::ptr_eq(tail, &p.tail))));
+        if unheld {
+            return Err(Unsettled("An agent was starting".into()).into());
         }
         // A prompt handed a place in a pane's line before its writer was
         // held would be typed by a thread that does not go over.
@@ -387,7 +407,7 @@ impl SessionManager {
                 unadoptable.push(work);
                 continue;
             }
-            if let Some(record) = self.tab_record(rt, &tails)? {
+            if let Some(record) = self.tab_record(rt)? {
                 records.push(record);
             }
         }
@@ -398,7 +418,7 @@ impl SessionManager {
 
     /// One held tab as it goes over, or nothing when it holds nothing to
     /// carry. Fails with [`Unsettled`] while it is about to change.
-    fn tab_record(&self, rt: &TabRuntime, tails: &[Arc<tui::Tail>]) -> Result<Option<TabRecord>> {
+    fn tab_record(&self, rt: &TabRuntime) -> Result<Option<TabRecord>> {
         let name = || format!("{}/{}", rt.session_id, rt.tab_id);
         if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || !rt.compaction.is_idle() {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
@@ -443,7 +463,6 @@ impl SessionManager {
         if !self.terminals.is_running(&p.pane_id) {
             return Ok(Some(record));
         }
-        debug_assert!(tails.iter().any(|tail| Arc::ptr_eq(tail, &p.tail)), "every tail was held");
         let (said, anticipated, closed) = p.turn_tail.parts();
         record.cli = Some(CliRecord {
             kind: kind_name(p.harness).into(),
@@ -494,7 +513,7 @@ impl SessionManager {
     /// anything is served: its CLI goes on in its terminal (already adopted),
     /// followed from where the record says. Returns the cards the CLI's
     /// hooks wait on, for their waits to go on here ([`Self::resume_decision`]).
-    pub(crate) fn adopt_tab(&self, record: TabRecord) -> Result<Vec<(Arc<Mutex<TabRuntime>>, AskRecord, String)>> {
+    pub(crate) fn adopt_tab(&self, record: TabRecord) -> Result<Vec<Wait>> {
         let rt_arc = self.runtime(&record.session_id, &record.tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         rt.seq = rt.seq.max(record.seq);
@@ -572,13 +591,14 @@ impl SessionManager {
         });
         drop(rt);
         self.follow_transcript(&rt_arc, tail, pane, generation);
-        Ok(decisions.into_iter().map(|(ask, gate)| (rt_arc.clone(), ask, gate)).collect())
+        Ok(decisions.into_iter().map(|(ask, gate)| Wait { tab: rt_arc.clone(), ask, gate }).collect())
     }
 
     /// Wait on, here, for the decision a handed-over hook was waiting for,
     /// on the connection that hook still holds open (`stream`), and reply to
     /// it there as it would have been replied to (#765).
-    pub(crate) fn resume_decision(&self, bridge: &crate::hooks::Bridge, rt_arc: Arc<Mutex<TabRuntime>>, ask: AskRecord, gate: String, stream: std::os::unix::net::UnixStream) {
+    pub(crate) fn resume_decision(&self, bridge: &crate::hooks::Bridge, wait: Wait, stream: std::os::unix::net::UnixStream) {
+        let Wait { tab: rt_arc, ask, gate } = wait;
         let (tx, rx) = std::sync::mpsc::channel::<Decision>();
         let local_owner = crate::local_runtime::permissions::enabled();
         let (kind, token, generation) = {

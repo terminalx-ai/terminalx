@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Background sessions
+
+- Update without stopping anything. Installing an update used to stop every
+  agent and terminal the background runtime ran: a turn in progress was cut
+  off, terminals and whatever they ran (dev servers, builds) were killed, and
+  each agent started again only when its tab was next opened. The runtime is
+  now handed over in place: the newer one takes over its process, with the
+  same agents, terminals and processes, mid-turn or not. Turns finish,
+  follow-ups queued during them are delivered, permission cards stay
+  answerable, output written during the switch is kept, and no tab says
+  "Session closed". An agent the handover cannot carry (one driven over its
+  standard input and output, such as an ACP agent) is never stopped by itself:
+  the app names it, and Restart now stops only it. Restart runtime, for a
+  runtime that stopped answering, keeps what it runs the same way, and asks
+  before stopping anything when it cannot. Takes effect from the next update
+  after this one: a runtime from before this release cannot be handed over.
+  (#765)
+
 ## 0.2.23
 
 ### Offline dictation

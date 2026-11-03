@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { errorMessage, localRuntime, type LocalRuntimeState } from "@/lib/api";
+import { errorMessage, localRuntime, type LocalRuntimeRestart, type LocalRuntimeState } from "@/lib/api";
 import { reattachLocalTerminals } from "@/lib/terminal";
 
 /**
@@ -80,26 +80,29 @@ export async function reconnectLocalRuntime(): Promise<void> {
 }
 
 /**
- * Stop a runtime that stopped answering, with its agents and terminals (#661).
- * The desktop attaches a fresh one, and terminals attach again in place as
- * after any reconnect. `epoch` is the runtime this window found not
- * responding: one another window already replaced is left alone. Throws why
- * it could not be stopped.
+ * Restart a runtime that stopped answering (#661). The desktop attaches a
+ * fresh one, and terminals attach again in place as after any reconnect. One
+ * that can be handed over keeps its agents and terminals running unless `how`
+ * says otherwise (#765); any other is stopped with them. `epoch` is the
+ * runtime this window found not responding: one another window already
+ * replaced is left alone. Throws why it was not restarted, with nothing
+ * stopped: a `LocalRuntimeRestartRefused` when it could have been.
  */
-export async function restartLocalRuntime(epoch: string | null): Promise<void> {
+export async function restartLocalRuntime(epoch: string | null, how?: LocalRuntimeRestart): Promise<void> {
   try {
-    await localRuntime.restart(epoch);
+    await localRuntime.restart(epoch, how);
   } finally {
     await refreshLocalRuntime();
   }
 }
 
 /**
- * "Restart now" for a runtime older than this app (#730): the desktop
- * replaces it with the app's own without waiting for its agents' turns, which
- * stop with it, and terminals attach again in place. `epoch` is the runtime
- * this window was told about: one already replaced is left alone. Throws why
- * it could not be replaced.
+ * "Restart now" for a runtime older than this app (#730), and terminals
+ * attach again in place. One that can be handed over keeps its agents and
+ * terminals running but what its handover cannot carry, which stops (#765);
+ * any other is replaced without waiting for its agents' turns, which stop
+ * with it. `epoch` is the runtime this window was told about: one already
+ * replaced is left alone. Throws why it could not be replaced.
  */
 export async function replaceLocalRuntime(epoch: string): Promise<void> {
   try {

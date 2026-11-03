@@ -2307,7 +2307,7 @@ mod tests {
     fn runtime_of(version: Option<&str>, named: Option<Value>) -> crate::local_runtime::client::Build {
         let version = version.map(|version| semver::Version::parse(version).unwrap());
         let mobile = named.unwrap_or_else(|| crate::local_runtime::mobile::released_features(version.as_ref()));
-        crate::local_runtime::client::Build { version, mobile: mobile.as_object().unwrap().clone() }
+        crate::local_runtime::client::Build { version, mobile: mobile.as_object().unwrap().clone(), handover: None }
     }
 
     /// #730: the phone is told what the runtime its connection reaches can

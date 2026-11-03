@@ -4,7 +4,7 @@ import type { LocalRuntimeState } from "@/lib/api";
 
 const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart: vi.fn(), replace: vi.fn(), listeners: new Map<string, () => void>() }));
 const terminals = vi.hoisted(() => ({ reattachLocalTerminals: vi.fn() }));
-vi.mock("@/lib/api", () => ({ localRuntime: native, errorMessage: (error: unknown) => String(error) }));
+vi.mock("@/lib/api", async (actual) => ({ localRuntime: native, errorMessage: (await actual<typeof import("@/lib/api")>()).errorMessage }));
 vi.mock("@/lib/terminal", () => terminals);
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, callback: () => void) => {
@@ -18,7 +18,7 @@ const connecting = (downMs: number, attempt = 2, terminal = false): LocalRuntime
   state: "connecting", terminal, attempt, retryInMs: 500, downMs,
   message: "Could not reconnect to the background runtime: connection refused",
 });
-const unresponsive: LocalRuntimeState = { state: "unresponsive", message: "The TerminalX runtime did not answer runtime.liveness within 15 seconds.", epoch: "owner" };
+const unresponsive: LocalRuntimeState = { state: "unresponsive", message: "The TerminalX runtime did not answer runtime.liveness within 15 seconds.", epoch: "owner", keeps: false };
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -33,7 +33,7 @@ beforeEach(() => {
   // The desktop stops the older runtime, then attaches the app's own.
   native.replace.mockReset().mockImplementation(async () => {
     native.status.mockResolvedValue({ ...connected, epoch: "bundled", generation: 2 });
-    return { state: "updating", from: "0.2.21", to: "0.2.23" };
+    return { state: "updating", from: "0.2.21", to: "0.2.23", keeping: false };
   });
   native.listeners.clear();
   terminals.reattachLocalTerminals.mockReset();
@@ -133,8 +133,9 @@ it("offers a restart, never Try again, for a runtime that stopped answering, and
   expect(native.reconnect).not.toHaveBeenCalled();
   expect(native.restart).not.toHaveBeenCalled();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
-  // Only the runtime this window found not responding.
-  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner");
+  // Only the runtime this window found not responding, which cannot be
+  // handed over: it is stopped, as the notice said.
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "stoppingAll");
   expect(screen.queryByRole("status")).toBeNull();
   // Its terminals move to the fresh runtime without a reload.
   expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
@@ -164,8 +165,8 @@ it("says why a restart failed and leaves it to be tried again", async () => {
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-const outdated = (work: string[] | null, problem: string | null = null, failed = false): LocalRuntimeState =>
-  ({ ...connected, outdated: { running: "0.2.21", app: "0.2.23", work, problem, failed } });
+const outdated = (work: string[] | null, problem: string | null = null, failed = false, keeps = false): LocalRuntimeState =>
+  ({ ...connected, outdated: { running: "0.2.21", app: "0.2.23", work, problem, failed, keeps } });
 
 it("says the runtime is older than the app, names what it waits for, and Restart now replaces only that runtime", async () => {
   await mounted();
@@ -205,7 +206,7 @@ it("after a switch failed, says it will not try again by itself rather than that
 
 it("says while the runtime is being replaced, and clears once the app's own attaches", async () => {
   await mounted();
-  await changed({ state: "updating", from: "0.2.21", to: "0.2.23" });
+  await changed({ state: "updating", from: "0.2.21", to: "0.2.23", keeping: false });
   expect(screen.getByRole("status").textContent).toContain("Updating the TerminalX runtime");
   expect(screen.getByRole("status").textContent).toContain("Stopping the 0.2.21 runtime and starting 0.2.23");
   expect(screen.queryByRole("button")).toBeNull();
@@ -229,4 +230,76 @@ it("hides for the runtime it was hidden for, and says why a restart failed", asy
   // Another older runtime is news again.
   await changed({ ...outdated([]), epoch: "another", generation: 3 } as LocalRuntimeState);
   expect(screen.getByRole("status").textContent).toContain("it restarts with 0.2.23 in a moment.");
+});
+
+// #765: a runtime that can be handed over keeps what it runs.
+
+it("says a runtime being handed over keeps its agents and terminals running", async () => {
+  await mounted();
+  await changed({ state: "updating", from: "0.2.24", to: "0.2.25", keeping: true });
+  const notice = screen.getByRole("status").textContent ?? "";
+  expect(notice).toContain("Handing what the 0.2.24 runtime runs over to 0.2.25");
+  expect(notice).toContain("Its agents and terminals keep running.");
+  expect(notice).not.toContain("Stopping");
+  expect(notice).not.toContain("picks up its conversation");
+});
+
+it("names what an older runtime's handover cannot carry, and Restart now stops only that", async () => {
+  await mounted();
+  await changed(outdated(null, null, false, true));
+  const notice = () => screen.getByRole("status").textContent ?? "";
+  expect(notice()).toContain("It hands its agents and terminals over to 0.2.23 in a moment; they keep running.");
+  expect(notice()).toContain("Restarting now keeps its agents and terminals running.");
+  await changed(outdated(["Gemini in “Docs”, in the middle of a turn"], null, false, true));
+  expect(notice()).toContain("It hands everything over to 0.2.23, keeping it running, except what it cannot carry over:");
+  expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Gemini in “Docs”, in the middle of a turn"]);
+  expect(notice()).toContain("Restarting now stops only that, and everything else keeps running");
+  expect(notice()).not.toContain("its terminals and whatever they run");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart now" })); });
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner");
+});
+
+it("says a handover that failed will not be tried again by itself", async () => {
+  await mounted();
+  await changed(outdated([], "Could not restart the TerminalX runtime: the updated runtime did not answer.", true, true));
+  expect(screen.getByRole("status").textContent).toContain("Handing it over to 0.2.23 failed, and it will not try again by itself.");
+  expect(screen.getByRole("alert").textContent).toContain("did not answer");
+});
+
+it("restarts an unresponsive runtime that can be handed over keeping what it runs", async () => {
+  await mounted();
+  await changed({ ...unresponsive, keeps: true } as LocalRuntimeState);
+  expect(screen.getByRole("status").textContent).toContain("Restarting it hands its agents and terminals to a fresh runtime, and they keep running.");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "keeping");
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
+});
+
+it("asks before stopping what an unresponsive runtime's handover cannot carry, or all of it", async () => {
+  native.restart.mockRejectedValueOnce({ message: "Restarting it keeps everything it runs but what is named here, which would have to stop.", unkept: ["Gemini in “Docs”"] });
+  await mounted();
+  await changed({ ...unresponsive, keeps: true } as LocalRuntimeState);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner", "keeping");
+  expect(screen.getByRole("alert").textContent).toContain("would have to stop");
+  expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Gemini in “Docs”"]);
+  expect(screen.getByRole("status").textContent).toContain("Restarting it stopping that keeps everything else running.");
+  expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart, stopping that" })); });
+  expect(native.restart).toHaveBeenLastCalledWith("owner", "stoppingUnkept");
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+it("offers to stop everything only once keeping it running could not be done", async () => {
+  native.restart.mockRejectedValueOnce({ message: "Could not restart it keeping what it runs: it did not answer. Nothing was stopped.", unkept: [] });
+  await mounted();
+  await changed({ ...unresponsive, keeps: true } as LocalRuntimeState);
+  expect(screen.queryByRole("button", { name: "Stop and restart" })).toBeNull();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
+  expect(screen.getByRole("alert").textContent).toContain("Nothing was stopped.");
+  expect(screen.getByRole("status").textContent).toContain("Stopping it instead stops everything it runs");
+  expect(screen.queryByRole("button", { name: /Restart, stopping/ })).toBeNull();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Stop and restart" })); });
+  expect(native.restart).toHaveBeenLastCalledWith("owner", "stoppingAll");
 });

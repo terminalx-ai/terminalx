@@ -459,6 +459,32 @@ fn signed_alike(binary: &Path) -> Result<()> {
 
 // --------------------------------------------------------------- the new side
 
+/// Reap, as they exit, the children the runtime this process was left behind
+/// that nothing here waits for (a probe or a `git` it was running): `kept`
+/// are the ones a pane took over. Read before this runtime starts any child
+/// of its own, so none of those is taken for one.
+pub fn reap_strays(kept: &std::collections::HashSet<u32>) {
+    // SAFETY: getpid has no preconditions.
+    let own = unsafe { libc::getpid() };
+    let strays: Vec<libc::pid_t> = super::launch::children(own).into_iter()
+        .filter(|child| u32::try_from(*child).is_ok_and(|child| !kept.contains(&child))).collect();
+    if strays.is_empty() { return; }
+    log::info!("reaping {} process(es) the replaced runtime started and nothing here waits for", strays.len());
+    let spawned = std::thread::Builder::new().name("handover-reaper".into()).spawn(move || {
+        let mut strays = strays;
+        while !strays.is_empty() {
+            strays.retain(|stray| {
+                let mut status = 0;
+                // SAFETY: WNOHANG reaps this process's own child if it has
+                // exited; one that is not its child any more answers -1.
+                (unsafe { libc::waitpid(*stray, &mut status, libc::WNOHANG) }) == 0
+            });
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    if let Err(error) = spawned { log::warn!("start the handover reaper: {error}"); }
+}
+
 /// A record read back by the runtime that takes over, with the descriptors
 /// it names made this process's own again.
 pub struct Adopted {

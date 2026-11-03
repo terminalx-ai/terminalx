@@ -65,6 +65,11 @@ impl Hold {
     }
 
     #[cfg(unix)]
+    fn is_frozen(&self) -> bool {
+        self.lock().frozen
+    }
+
+    #[cfg(unix)]
     fn thaw(&self) {
         self.lock().frozen = false;
         self.changed.notify_all();
@@ -245,6 +250,11 @@ impl Terminals {
         let titles = self.titles.lock().unwrap().clone();
         let renamed = self.renamed.lock().unwrap().clone();
         let mut frozen = Vec::new();
+        // A pane opened just as the freeze began, by a path that does not
+        // wait for admission, would go on being read after this.
+        if !panes.values().all(|pane| pane.hold.is_frozen()) {
+            bail!("A terminal was opening.");
+        }
         for (id, pane) in panes.iter() {
             let scrollback: Vec<u8> = pane.scrollback.lock().unwrap().iter().copied().collect();
             let title = titles.get(id).cloned();

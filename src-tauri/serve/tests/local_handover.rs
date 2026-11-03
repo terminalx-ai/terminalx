@@ -142,9 +142,9 @@ fn replacing_the_runtime_keeps_its_agents_and_terminals_running() {
     std::fs::write(world.project.join("stop"), b"").unwrap();
 }
 
-/// #765: the runtime that took over can be handed over again, and a binary
-/// that is not one of this home's installed runtimes is refused with nothing
-/// stopped.
+/// #765: the runtime that took over can be handed over again; a binary that
+/// is not one of this home's installed runtimes, or one that cannot read the
+/// record this runtime writes, is refused with nothing stopped.
 #[test]
 fn a_runtime_is_handed_over_only_to_an_installed_runtime_and_again_after() {
     if std::process::Command::new("python3").arg("--version").output().is_err() {
@@ -167,6 +167,19 @@ fn a_runtime_is_handed_over_only_to_an_installed_runtime_and_again_after() {
     assert_eq!(serve.control("status", json!({}))["localRuntime"]["epoch"], epoch, "nothing was replaced");
     let stale = serve.try_control("runtime.handover", json!({ "epoch": "another", "binary": binary }));
     assert_eq!(stale["error"]["code"], "runtime_restarted");
+    // A runtime that reads none of the handover records this one writes
+    // (a newer format only, say) is never handed over to: it is refused
+    // before anything is held, and nothing is stopped.
+    let dir = tempfile::tempdir().unwrap();
+    let foreign = dir.path().join("terminalx-serve");
+    std::fs::write(&foreign, "#!/bin/sh\n[ \"$1\" = handover-formats ] && echo '{\"version\":\"99.0.0\",\"formats\":[999]}' && exit 0\nexit 1\n").unwrap();
+    let foreign = raccoon_lib::local_runtime::launch::install(&foreign, &world.data).unwrap();
+    let unreadable = serve.try_control("runtime.handover", json!({ "epoch": epoch, "binary": foreign }));
+    assert_eq!(unreadable["error"]["code"], "handover_unsupported", "{unreadable}");
+    let planned = serve.try_control("runtime.handover.plan", json!({ "epoch": epoch, "binary": foreign }));
+    assert_eq!(planned["error"]["code"], "handover_unsupported", "{planned}");
+    assert_eq!(serve.control("status", json!({}))["localRuntime"]["epoch"], epoch, "nothing was replaced");
+    assert_eq!(output(&serve, &format!("tab:{tab}")).1, pid, "nothing was stopped");
 
     hand_over(&serve, &binary);
     hand_over(&serve, &binary);

@@ -1792,29 +1792,41 @@ export interface KillResult {
  */
 export type LocalRuntimeState =
   | { state: "inProcess" }
-  /** `outdated`: the runtime is older than this app, and is replaced with the app's own once none of its agents is mid-turn (#730). */
+  /** `outdated`: the runtime is older than this app, and is replaced with the app's own (#730): handed over at once when it `keeps` what it runs (#765), otherwise once none of its agents is mid-turn. */
   | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated }
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
   /** Retrying cannot help until something outside this window changes. */
   | { state: "unavailable"; message: string }
-  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). */
-  | { state: "unresponsive"; message: string; epoch: string | null }
-  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. */
-  | { state: "updating"; from: string | null; to: string };
+  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). `keeps`: restarting it hands what it runs to a fresh runtime first (#765). */
+  | { state: "unresponsive"; message: string; epoch: string | null; keeps: boolean }
+  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. `keeping`: it is handed over, and its agents and terminals keep running (#765). */
+  | { state: "updating"; from: string | null; to: string; keeping: boolean };
 
-/** A runtime older than this app, while its replacement waits until nothing it runs would be cut short (#730). */
+/** A runtime older than this app, until it is replaced (#730). */
 export interface LocalRuntimeOutdated {
   /** Its version, when it said. */
   running: string | null;
   /** This app's, which the runtime that replaces it shares. */
   app: string;
-  /** What restarting it now would cut short (agents mid-turn or with prompts waiting, terminals, processes), which the switch waits for; null until read. */
+  /** When it `keeps` what it runs: what its handover cannot carry, which is never stopped by itself and stops with Restart now. Otherwise what restarting it now would cut short (agents mid-turn or with prompts waiting, terminals, processes), which the switch waits for. Null until read. */
   work: string[] | null;
   /** Why that could not be read, or why the last switch failed. */
   problem: string | null;
   /** The last switch failed: it is tried again only when asked (Restart now). */
   failed: boolean;
+  /** It is handed over to the app's own runtime, keeping its agents and terminals running (#765). */
+  keeps: boolean;
+}
+
+/** How a runtime that stopped answering is restarted (#765): keeping what it runs, stopping only what its handover cannot carry, or stopping all of it. */
+export type LocalRuntimeRestart = "keeping" | "stoppingUnkept" | "stoppingAll";
+
+/** Why a restart that would have kept what the runtime runs did not happen: nothing was stopped (#765). */
+export interface LocalRuntimeRestartRefused {
+  message: string;
+  /** What its handover cannot carry, which restarting with `stoppingUnkept` stops. */
+  unkept: string[];
 }
 
 export type QuitBehavior = "keepRunning" | "stopAll";
@@ -1823,9 +1835,9 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
-  /** Stop the runtime without asking it, with its agents and terminals; the desktop attaches a fresh one. */
-  restart: (epoch: string | null) => invoke<LocalRuntimeState>("local_runtime_restart", { epoch }),
-  /** Replace runtime `epoch`, older than this app, with the app's own now, stopping its agents and terminals (#730). */
+  /** Restart a runtime that stopped answering; the desktop attaches a fresh one. One that can be handed over keeps what it runs unless `how` says otherwise (#765); a refusal is a `LocalRuntimeRestartRefused`, with nothing stopped. */
+  restart: (epoch: string | null, how: LocalRuntimeRestart = "keeping") => invoke<LocalRuntimeState>("local_runtime_restart", { epoch, how }),
+  /** Replace runtime `epoch`, older than this app, with the app's own now (#730): handed over, stopping only what it cannot carry (#765), or else stopping its agents and terminals. */
   replace: (epoch: string) => invoke<LocalRuntimeState>("local_runtime_replace", { epoch }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),

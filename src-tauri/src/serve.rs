@@ -483,6 +483,11 @@ type Inherited = Option<crate::local_runtime::handover::Adopted>;
 #[cfg(not(unix))]
 type Inherited = Option<std::convert::Infallible>;
 
+/// Whether this runtime took over from the one it replaced (#765).
+fn adopted_any(adopted: &Inherited) -> bool {
+    adopted.is_some()
+}
+
 /// The desktop's `setup`, less everything that needs a window. `adopted` is
 /// what the runtime this process was handed over (#765): its terminals,
 /// agent tabs and sockets are taken over before anything is served.
@@ -499,6 +504,13 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     )).unwrap_or_default();
     #[cfg(not(unix))]
     let (kept_tabs, kept_panes) = { let _ = &adopted; (std::collections::HashSet::new(), std::collections::HashSet::new()) };
+    // The sessions whose agents were handed over still running.
+    #[cfg(unix)]
+    let going_on: std::collections::HashSet<String> = adopted.as_ref().map(|adopted| adopted.record.tabs.iter()
+        .filter(|tab| tab.cli.is_some()).map(|tab| tab.session_id.clone()).collect()).unwrap_or_default();
+    #[cfg(not(unix))]
+    let going_on: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let handed_over = adopted_any(&adopted);
     let lifetime = (options.runtime_kind == RuntimeKind::Local)
         .then(|| crate::local_runtime::Lifetime::starting(Duration::from_secs(options.idle_grace_seconds)));
     let project_root = match &options.project_root {
@@ -596,10 +608,10 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     #[cfg(unix)]
     {
         let (waits, mut parked) = taken;
-        for (rt, ask, gate) in waits {
-            match parked.remove(&ask.request_id) {
-                Some(stream) => manager.resume_decision(&bridge, rt, ask, gate, stream),
-                None => log::warn!("no hook was waiting on handed-over card {} any more", ask.request_id),
+        for wait in waits {
+            match parked.remove(&wait.ask.request_id) {
+                Some(stream) => manager.resume_decision(&bridge, wait, stream),
+                None => log::warn!("no hook was waiting on handed-over card {} any more", wait.ask.request_id),
             }
         }
         if !parked.is_empty() {
@@ -612,8 +624,8 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         pipelines.attach(pipeline_host.clone());
         let automation_host = crate::automations::RuntimeHost { sink: sink.clone(), sessions: manager.clone() };
         pipelines.attach_local_automations(automation_host.clone());
-        crate::automations::recover_open_runs(&automation_host);
-        crate::issue_pipeline::runtime::start_local(pipeline_host);
+        crate::automations::recover_open_runs_except(&automation_host, &going_on);
+        crate::issue_pipeline::runtime::start_local(pipeline_host, handed_over);
         crate::automations::start_recovered_scheduler(automation_host);
         // Agents nobody is using are stopped, here where they run (#696).
         crate::idle_agents::start(manager.clone());
@@ -669,11 +681,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
 /// The hook sockets a handover brought, the cards its hooks wait on, and
 /// those hooks' connections by card.
 #[cfg(unix)]
-type TakenOver = (
-    crate::hooks::Adopted,
-    Vec<(Arc<std::sync::Mutex<crate::session::TabRuntime>>, crate::session::handover::AskRecord, String)>,
-    HashMap<String, std::os::unix::net::UnixStream>,
-);
+type TakenOver = (crate::hooks::Adopted, Vec<crate::session::handover::Wait>, HashMap<String, std::os::unix::net::UnixStream>);
 
 /// Take over the terminals and agent tabs the runtime this process was
 /// handed over (#765). One that cannot be taken over is left running as it
@@ -683,6 +691,8 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
     manager: &crate::session::SessionManager) -> Result<TakenOver> {
     let record = &mut adopted.record;
     log::info!("taking over {} terminal(s) and {} agent tab(s) from runtime {}", record.panes.len(), record.tabs.len(), record.from);
+    // Before anything here starts a child of its own.
+    crate::local_runtime::handover::reap_strays(&record.panes.iter().filter_map(|pane| pane.pid).collect());
     let panes = std::mem::take(&mut record.panes);
     let retained = std::mem::take(&mut record.retained);
     let groups = std::mem::take(&mut record.groups);

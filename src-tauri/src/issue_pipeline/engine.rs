@@ -2343,6 +2343,32 @@ pub fn recover(host: &dyn Host) {
     }
 }
 
+/// After the runtime took over from the one it replaced, in the same process
+/// (#765). Nothing was stopped: every turn went on, and so does every
+/// pipeline, waiting where it was. What lived only in the replaced runtime
+/// is made again: the reservations, and a report a session gave just before
+/// the handover, which no step started on, since none starts during one.
+pub fn handed_over(host: &dyn Host) {
+    let Ok(pipelines) = store::list() else {
+        return;
+    };
+    recover_reservations(host, &pipelines);
+    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.resolution.is_none() && !pipeline.checking_locally) {
+        let waits_on = match pipeline.stage {
+            _ if pipeline.answered.is_some() => Some(pipeline.author.clone()),
+            Stage::Work | Stage::Address => Some(pipeline.author.clone()),
+            Stage::Review => pipeline.reviewer.clone(),
+            Stage::Resolve => pipeline.resolver.clone(),
+            Stage::PullRequest | Stage::Merge => None,
+        };
+        let Some(session) = waits_on else { continue };
+        let changed = DateTime::parse_from_rfc3339(&pipeline.modified).ok().map(|at| at.with_timezone(&Utc));
+        if let Some((_, reply)) = host.last_reply(&session).filter(|(at, _)| changed.is_some_and(|changed| *at > changed)) {
+            turn_completed(host, &session.session_id, &session.tab_id, Some(&reply));
+        }
+    }
+}
+
 /// After a cloud workspace's runtime starts. A workspace is put to sleep and
 /// woken as a matter of course, so unlike [`recover`] a pipeline picks up
 /// where it was: one waiting for a session's report keeps waiting, and one at
