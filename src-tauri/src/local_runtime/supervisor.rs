@@ -422,6 +422,14 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
         state.runtime_replacement.attached(next.epoch(), next.build());
         Ok(())
     })?;
+    // The star reminder counts work as its one writer, the runtime, does (#767).
+    let (counting, runtime) = (app.clone(), next.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        match runtime.sessions().and_then(|sessions| sessions.activity_summary()) {
+            Ok(summary) => counting.state::<AppState>().star_nag.counted(summary.agents_spawned as u64),
+            Err(error) => log::warn!("read the runtime's activity count for the star reminder: {error:#}"),
+        }
+    });
     Ok(next.generation())
 }
 

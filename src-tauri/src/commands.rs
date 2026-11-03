@@ -1829,10 +1829,13 @@ pub async fn app_activity_summary(state: State<'_, AppState>) -> CmdResult<crate
         .await.map_err(err)?
 }
 
+/// Activity comes from its one writer, the runtime (#767); without it, Stats
+/// shows the saved counters and offers Retry.
 #[tauri::command]
 pub async fn stats_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::stats::StatsUsageState> {
     let stats = state.stats_usage.clone();
-    tauri::async_runtime::spawn_blocking(move || stats.read().map_err(err))
+    let sessions = state.sessions();
+    tauri::async_runtime::spawn_blocking(move || stats.read(move || sessions?.activity_summary()).map_err(err))
         .await
         .map_err(err)?
 }
@@ -1840,7 +1843,8 @@ pub async fn stats_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate
 #[tauri::command]
 pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, generation: u64) -> CmdResult<crate::stats::StatsUsageState> {
     let stats = state.stats_usage.clone();
-    tauri::async_runtime::spawn_blocking(move || stats.refresh(&scope, generation).map_err(err))
+    let sessions = state.sessions();
+    tauri::async_runtime::spawn_blocking(move || stats.refresh(&scope, generation, move || sessions?.activity_summary()).map_err(err))
         .await
         .map_err(err)?
 }
