@@ -49,6 +49,7 @@ import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialo
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
 import { bootStatus, useStatus } from "@/lib/status";
+import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
@@ -93,6 +94,8 @@ export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 export function AppShell() {
   const prefs = usePrefs();
   const status = useStatus();
+  // A runtime the app is moving to shows in the status bar, even a hidden one (#766).
+  const runtimeSwitch = useRuntimeSwitch();
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
@@ -298,7 +301,7 @@ export function AppShell() {
         )}
       </div>
 
-      {status.settings.visible ? (
+      {status.settings.visible || runtimeSwitch ? (
         <ErrorBoundary label="the status bar" fallback={null}>
           <Suspense fallback={statusBarFallback}>
             <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />

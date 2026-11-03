@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Background sessions
+
+- Update and relaunch brings the background runtime along in the same step.
+  The relaunched app used to keep the runtime it found, older than itself,
+  and ask a second time ("TerminalX runtime is older than the app") after
+  the restart. Now the update asks first, once. When moving to the new
+  runtime would cut something short, the update card lists it before
+  installing (agents mid-turn, open terminals, commands their tools left
+  running) and offers **Update now**, which restarts them (each agent picks
+  up its conversation again when its tab starts), or **Update when they're
+  done**, which installs the app now and moves to the new runtime by itself
+  once nothing would be cut short. With nothing under way the update just
+  installs, and the relaunched app moves to its runtime as it starts. While a
+  move waits, the status bar shows the runtime's version and what it waits
+  for, with Restart now, even when the status bar is hidden; a floating
+  notice appears only when a move failed, with the reason and Try again. An
+  update from 0.2.23, which cannot ask first, waits in the status bar the
+  same way. (#766)
+
 ## 0.2.23
 
 ### Offline dictation
