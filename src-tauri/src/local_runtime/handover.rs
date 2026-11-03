@@ -270,10 +270,19 @@ fn hand_over(runtime: &Runtime, binary: &Path, ready: &std::sync::mpsc::Sender<R
             bail!("{} agent(s) cannot be kept running through the update", held.unadoptable.len());
         }
         let (record, kept) = Record::of(runtime, hooks, terminals, held.tabs)?;
-        write(&path, &record)?;
-        // Every descriptor the record names stays open in the new runtime.
-        for fd in &kept {
-            set_cloexec(fd.as_raw_fd(), false)?;
+        // It holds the agents' hook tokens: none of it is left behind.
+        if let Err(error) = write(&path, &record) {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        // Every descriptor the record names stays open in the new runtime:
+        // the duplicates made for it, and the ownership lock's own, which
+        // is the only one this runtime goes on using if the exec fails.
+        let opened = kept.iter().map(AsRawFd::as_raw_fd).chain([runtime.owner]).try_for_each(|fd| set_cloexec(fd, false));
+        if let Err(error) = opened {
+            let _ = set_cloexec(runtime.owner, true);
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
         }
         let _ = ready.send(Ok(()));
         // The reply to the handover goes out first.
@@ -323,8 +332,6 @@ impl Record {
         }).collect();
         let record = Self { format: FORMAT, from: env!("CARGO_PKG_VERSION").into(), pid: std::process::id(), owner, control, frames, decisions,
             panes, retained: terminals.retained, groups: terminals.groups, tabs };
-        // The owner's descriptor is the runtime's own, not a duplicate.
-        set_cloexec(owner, false)?;
         Ok((record, kept))
     }
 }

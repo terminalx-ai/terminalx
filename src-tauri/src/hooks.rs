@@ -1055,6 +1055,7 @@ impl Drop for Parked {
 }
 
 /// A launch's hook and control sockets, as `serve` left them listening.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct Bridge {
     publisher: std::sync::Arc<std::sync::Mutex<Publisher>>,
 }
