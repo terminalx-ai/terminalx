@@ -157,9 +157,14 @@ fn replacing_the_runtime_keeps_its_agents_and_terminals_running() {
         (created["sessionId"].as_str().unwrap().to_string(), created["tabId"].as_str().unwrap().to_string())
     };
 
+    // A session whose agent has had its say, to host a terminal below. Its
+    // turn is over before the long one starts, which it outlasts otherwise
+    // on a machine slow to deliver prompts.
+    let (session, hosting) = create("echo:terminal host");
+    serve.wait_events(&hosting, "the terminal host's turn to end", |events| count(events, "turn_completed") >= 1);
     // An agent in the middle of a long turn, with a follow-up sent during it.
-    let (_, working) = create("slow:16:400");
-    serve.wait_events(&working, "the long turn to start", |events| texts(events, "assistant_text").iter().any(|text| text == "chunk 2 of 16"));
+    let (_, working) = create("slow:24:400");
+    serve.wait_events(&working, "the long turn to start", |events| texts(events, "assistant_text").iter().any(|text| text == "chunk 2 of 24"));
     assert_eq!(serve.control("send", json!({ "target": working, "text": "and then the tests" }))["outcome"]["queued"], true);
     // An agent waiting on a permission.
     let (_, asking) = create("ask:touch kept.txt");
@@ -167,7 +172,6 @@ fn replacing_the_runtime_keeps_its_agents_and_terminals_running() {
     let asked = serve.control("permissions.list", json!({}))["permissions"].as_array().cloned().unwrap();
     assert_eq!(asked.len(), 1, "{asked:?}");
     // A terminal running a long command.
-    let (session, echoing) = create("echo:terminal host");
     let terminal = format!("{session}:1");
     serve.control("runtime.pty.spawn", json!({ "id": terminal, "cwd": world.project, "cols": 80, "rows": 24,
         "command": "sh -c 'i=0; while [ ! -f stop ]; do i=$((i+1)); echo tick-$i; sleep 0.05; done'" }));
@@ -179,11 +183,10 @@ fn replacing_the_runtime_keeps_its_agents_and_terminals_running() {
     assert!(agent_pid.is_u64() && asking_pid.is_u64() && terminal_pid.is_u64());
 
     let version = serve.control("status", json!({}))["localRuntime"]["version"].clone();
-    // Every turn but the long one has started, and the terminal's host has
-    // ended, before stats are read.
-    serve.wait_events(&echoing, "the terminal host's turn to end", |events| count(events, "turn_completed") >= 1);
+    // Every turn has started, and the long one is still under way.
     let counted = || serve.control("runtime.session.activity", json!({}));
     let before_activity = counted();
+    assert_eq!(count(&serve.events(&working), "turn_completed"), 0, "the long turn is still under way at the handover");
     let after = hand_over(&serve, &binary);
     assert_eq!(after["localRuntime"]["version"], version, "the installed copy is the same build");
 
@@ -196,17 +199,17 @@ fn replacing_the_runtime_keeps_its_agents_and_terminals_running() {
     // it is answered, once.
     let events = serve.wait_events(&working, "the long turn to end", |events| count(events, "turn_completed") >= 1);
     let said = texts(&events, "assistant_text");
-    for chunk in 1..=16 {
-        assert_eq!(said.iter().filter(|text| **text == format!("chunk {chunk} of 16")).count(), 1, "chunk {chunk}: {said:?}");
+    for chunk in 1..=24 {
+        assert_eq!(said.iter().filter(|text| **text == format!("chunk {chunk} of 24")).count(), 1, "chunk {chunk}: {said:?}");
     }
     assert_eq!(said.iter().filter(|text| *text == "steered: and then the tests").count(), 1, "{said:?}");
     assert_eq!(texts(&events, "user_message").iter().filter(|text| *text == "and then the tests").count(), 1);
     // Stats count the turn once, for the whole of it, though it began in the
-    // runtime that handed over: 16 chunks, 400 ms apart, at least 6 s.
+    // runtime that handed over: 24 chunks, 400 ms apart, at least 9.2 s.
     let activity = counted();
     assert_eq!(activity["agentsSpawned"], before_activity["agentsSpawned"], "the turn under way is no new start: {activity}");
     let time = |summary: &Value| summary["agentTimeMs"].as_u64().unwrap();
-    assert!(time(&activity) - time(&before_activity) >= 15 * 400, "the turn's time before the handover counts: {before_activity} then {activity}");
+    assert!(time(&activity) - time(&before_activity) >= 23 * 400, "the turn's time before the handover counts: {before_activity} then {activity}");
 
     // The card asked for before is the one answered after, and the tool runs.
     let pending = serve.control("permissions.list", json!({}))["permissions"].as_array().cloned().unwrap();
