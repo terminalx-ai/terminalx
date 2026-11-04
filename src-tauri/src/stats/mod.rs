@@ -1273,10 +1273,6 @@ fn off_provider(id: &str, label: &str) -> ProviderUsage {
     }
 }
 
-fn app_stats() -> Result<AppStats> {
-    crate::store::activity::summary()
-}
-
 pub use crate::store::activity::record_pr;
 
 fn now_ms() -> i64 {
@@ -1302,7 +1298,8 @@ mod tests {
         }))
         .unwrap();
         crate::store::index::save(&[session]).unwrap();
-        let stats = app_stats().unwrap();
+        let _writer = crate::store::activity::writer_for_test();
+        let stats = crate::store::activity::summary().unwrap();
         assert_eq!(
             stats.agents_spawned, 0,
             "a retained blank tab is not a live work start"

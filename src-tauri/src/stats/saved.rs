@@ -70,12 +70,7 @@ impl StatsUsageState {
                 self.activity_error = None;
             }
             Err(error) => {
-                self.activity_error =
-                    Some(if error.is::<crate::store::activity::OwnershipConflict>() {
-                        crate::store::activity::OwnershipConflict.to_string()
-                    } else {
-                        format!("Activity history unavailable: {error:#}")
-                    });
+                self.activity_error = Some(format!("Activity history unavailable: {error:#}"));
             }
         }
         if let (Some(snapshot), Some(activity)) = (self.snapshot.as_mut(), self.activity.as_ref()) {
@@ -98,8 +93,10 @@ pub struct StatsUsageStore {
 }
 
 impl StatsUsageStore {
-    pub fn read(&self) -> Result<StatsUsageState> {
-        Ok(self.attach_activity(self.read_at(Scope::current()?)?, super::app_stats))
+    /// `activity` reads the lifetime counters from their writer, the runtime
+    /// (#767); the app never opens activity history itself.
+    pub fn read(&self, activity: impl FnOnce() -> Result<super::AppStats>) -> Result<StatsUsageState> {
+        Ok(self.attach_activity(self.read_at(Scope::current()?)?, activity))
     }
 
     fn read_at(&self, scope: Scope) -> Result<StatsUsageState> {
@@ -126,7 +123,12 @@ impl StatsUsageStore {
     /// Starts a worker or joins the current generation without queuing a scan.
     /// The observed identity also coalesces requests arriving just after a scan
     /// completed, and rejects a refresh from a reader of a previous data scope.
-    pub fn refresh(self: &Arc<Self>, scope: &str, generation: u64) -> Result<StatsUsageState> {
+    pub fn refresh(
+        self: &Arc<Self>,
+        scope: &str,
+        generation: u64,
+        activity: impl FnOnce() -> Result<super::AppStats>,
+    ) -> Result<StatsUsageState> {
         let current = Scope::current()?;
         self.read_at(current.clone())?;
         let expected = current.clone();
@@ -138,7 +140,7 @@ impl StatsUsageStore {
             );
             Ok(candidate)
         })?;
-        Ok(self.attach_activity(view, super::app_stats))
+        Ok(self.attach_activity(view, activity))
     }
 
     fn attach_activity(
@@ -156,7 +158,7 @@ impl StatsUsageStore {
                 view.activity = state
                     .scope
                     .as_ref()
-                    .and_then(|scope| crate::store::activity::saved_summary(&scope.root));
+                    .and_then(|scope| crate::store::activity::saved_summary(&scope.root).ok().flatten());
             }
             view = view.with_activity(activity);
             // Keep the latest known counters across failed reads and provider
@@ -364,11 +366,16 @@ mod tests {
         assert!(failed.activity_error.unwrap().contains("unreadable ledger"));
     }
 
+    fn runtime_unattached() -> Result<super::super::AppStats> {
+        Err(anyhow::anyhow!("The background runtime is not attached."))
+    }
+
     #[test]
-    fn ownership_conflict_keeps_saved_activity_and_allows_provider_refresh_then_recovers() {
+    fn an_unattached_runtime_keeps_saved_activity_and_allows_provider_refresh_then_recovers() {
         let _home = crate::store::temp_home();
         let root = crate::store::root().unwrap();
         let scope = Scope::current().unwrap();
+        // The runtime holds the writer lease throughout; Stats never needs it.
         let lease = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -387,7 +394,7 @@ mod tests {
             fs::write(root.join(file), serde_json::to_vec(&ledger).unwrap()).unwrap();
         }
         let store = Arc::new(StatsUsageStore::default());
-        let first = store.read().unwrap();
+        let first = store.read(runtime_unattached).unwrap();
         assert!(first.snapshot.is_none());
         assert_eq!(first.activity.as_ref().unwrap().agents_spawned, 7);
         assert!(first.error.is_none());
@@ -395,16 +402,16 @@ mod tests {
             .activity_error
             .as_ref()
             .unwrap()
-            .contains("Quit the other runtime"));
+            .contains("The background runtime is not attached."));
         for _ in 0..2 {
-            let view = store.read().unwrap();
+            let view = store.read(runtime_unattached).unwrap();
             store
                 .start(scope.clone(), &view.scope, view.generation, || {
                     Ok(snapshot(42))
                 })
                 .unwrap();
             settled(&store, &scope);
-            let view = store.read().unwrap();
+            let view = store.read(runtime_unattached).unwrap();
             assert!(view.error.is_none());
             assert!(view.activity_error.is_some());
             assert_eq!(view.snapshot.as_ref().unwrap().total_tokens, 42);
@@ -418,12 +425,19 @@ mod tests {
             .unwrap(),
             ledger
         );
-        // Retry reopens the ledger once the other runtime's lease is released.
-        drop(lease);
-        let recovered = store.read().unwrap();
+        // Retry reads the runtime's counters once it is attached again.
+        let recovered = store
+            .read(|| Ok(super::super::AppStats { agents_spawned: 8, ..Default::default() }))
+            .unwrap();
         assert!(recovered.activity_error.is_none());
         assert!(recovered.error.is_none());
-        assert_eq!(recovered.activity.unwrap().agents_spawned, 7);
+        assert_eq!(recovered.activity.unwrap().agents_spawned, 8);
+        // Nothing here ever took the lease from the runtime.
+        assert!(matches!(
+            fs::File::open(root.join("stats-activity.lock")).unwrap().try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(lease);
     }
 
     #[test]

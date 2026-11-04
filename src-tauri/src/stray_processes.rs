@@ -154,10 +154,15 @@ fn processes() -> Vec<Process> {
             let leader = fields.get(3).and_then(|session| session.parse::<u32>().ok()).is_none_or(|session| session == pid);
             let uid = std::fs::metadata(&path).ok()?.uid();
             let cwd = std::fs::read_link(path.join("cwd")).ok();
-            let args = std::fs::read(path.join("cmdline")).unwrap_or_default().split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
-            Some(Process { pid, ppid, uid, leader, cwd, args })
+            Some(Process { pid, ppid, uid, leader, cwd, args: arguments(pid as libc::pid_t) })
         })
         .collect()
+}
+
+/// A process's arguments, from /proc. Empty when they cannot be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn arguments(pid: libc::pid_t) -> Vec<String> {
+    std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default().split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).map(|arg| String::from_utf8_lossy(arg).into_owned()).collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -210,8 +215,9 @@ fn processes() -> Vec<Process> {
 
 /// A process's arguments, from `KERN_PROCARGS2`: the argument count, the
 /// executable's path, padding, then the arguments, each ending in a NUL.
+/// Empty when they cannot be read.
 #[cfg(target_os = "macos")]
-fn arguments(pid: libc::pid_t) -> Vec<String> {
+pub(crate) fn arguments(pid: libc::pid_t) -> Vec<String> {
     let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let mut size: libc::size_t = 0;
     // SAFETY: with a null buffer sysctl only reports the size it needs.

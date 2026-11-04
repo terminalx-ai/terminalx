@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Stats & Usage
+
+- Agent work and PRs count again while the app is open. The app took the
+  activity-history lock at launch and held it until it quit, so the background
+  runtime, which records every turn and PR, could write none of them: agents
+  spawned, agent time and PRs created stopped counting, and the star reminder's
+  count froze. Now only the runtime writes activity history. The app reads what
+  the runtime saved, and the PRs the app finds or creates are kept aside for the
+  runtime to count. Turns that went unrecorded before this release are not
+  recovered. (#767)
+- While another process holds activity history (an older app, another runtime,
+  a command), the runtime keeps its turns and PRs aside. It takes the lock
+  within a second of that process quitting, without waiting for a tab to
+  change, and then counts what it kept once, with each turn's whole working
+  time. Stats keeps its counters current meanwhile and shows one notice naming
+  the holder: "The TerminalX app (pid …)", "Another runtime (pid …)" or "A
+  TerminalX command (pid …)". It no longer offers a Retry that cannot help;
+  Retry stays for a read that failed. The log gets one line for the episode
+  instead of one per tab status change, and PR discovery no longer reports a
+  failure on every pass. (#767)
+
 ### Background sessions
 
 - Update and relaunch brings the background runtime along in the same step.
