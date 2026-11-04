@@ -1069,7 +1069,9 @@ impl Drop for Parked {
         let Some((gate, request_id)) = self.gate.take() else { return };
         // Answered before the handover took the bridge: the frame is answered
         // here, and counts as under way again, which the handover waits for
-        // or is called off for. Once taken it went over with the runtime.
+        // or is called off for; still parked, its card is one no tab waits
+        // on, which calls the handover off too (`Bridge::take`). Once taken
+        // it went over with the runtime.
         let mut state = gate.untaken();
         state.parked.remove(&request_id);
         state.busy += 1;
@@ -1133,10 +1135,14 @@ impl Bridge {
 
     /// Hand over what is frozen: the sockets, and the frames not yet
     /// answered. Taken once every tab is held, when no waiting frame can be
-    /// answered any more (an answer is given under its tab's lock). One that
-    /// was answered since the freeze is under way again, and calls this off:
-    /// it is answered here, and the handover tried again.
-    pub(crate) fn take(&self) -> anyhow::Result<Frozen> {
+    /// answered any more: an answer is given under its tab's lock, by taking
+    /// the card's sender from the tab. `awaited` says whether a held tab
+    /// still waits on a card. A frame answered before the tabs were held
+    /// calls this off, to be answered here and the handover tried again:
+    /// one under way again, and one whose thread has yet to wake, which is
+    /// still parked on a card no tab waits on. Taken with the handover, the
+    /// runtime that takes over would find no card for it.
+    pub(crate) fn take(&self, awaited: impl Fn(&str) -> bool) -> anyhow::Result<Frozen> {
         use anyhow::Context;
         use std::os::fd::OwnedFd;
         // The publisher first, and let go: its tick takes the gate under it.
@@ -1152,7 +1158,7 @@ impl Bridge {
         };
         let mut state = self.gate.lock();
         anyhow::ensure!(state.frozen, "the hook bridge is not frozen");
-        if state.busy > 0 {
+        if state.busy > 0 || state.parked.keys().any(|request_id| !awaited(request_id)) {
             anyhow::bail!("A permission was answered as the runtime came to rest.");
         }
         let held = state.held.iter().chain(state.resumable.values())
@@ -2311,8 +2317,10 @@ mod tests {
 
     /// #765 review: a hook parked on a card answered after the bridge froze,
     /// before it was taken, gets its answer here, and the handover is called
-    /// off for it; one still waiting when taken goes over with the handover,
-    /// and is not answered here unless the handover is called off.
+    /// off for it: whether its thread is under way again, or has yet to wake
+    /// and is still parked on a card no tab waits on. One still waiting when
+    /// taken goes over with the handover, and is not answered here unless
+    /// the handover is called off.
     #[cfg(unix)]
     #[test]
     fn a_waiting_hook_answered_as_a_handover_begins_is_answered_and_one_taken_goes_over() {
@@ -2350,16 +2358,30 @@ mod tests {
         // Answered now, as a person's click lands just as the handover begins.
         answer.send("slow").unwrap();
         wait("the answered hook to be under way again", &|| !parked("answered"));
-        let refused = bridge.take().err().expect("a hook under way calls the handover off");
+        let refused = bridge.take(|_| true).err().expect("a hook under way calls the handover off");
         assert!(format!("{refused:#}").contains("answered as the runtime came to rest"), "{refused:#}");
         written.send(()).unwrap();
         assert_eq!(first.join().unwrap()["output"]["answered"], "answered", "the answer reaches the agent");
         bridge.thaw();
 
+        // Answered just before the tabs were held, its thread not woken yet:
+        // still parked, on a card no held tab waits on any more.
+        let unwoken = ask("unwoken");
+        wait("the unwoken hook parks", &|| parked("unwoken"));
+        bridge.freeze(Duration::from_secs(5)).unwrap();
+        let refused = bridge.take(|request_id| request_id != "unwoken").err().expect("a hook whose card was answered calls the handover off");
+        assert!(format!("{refused:#}").contains("answered as the runtime came to rest"), "{refused:#}");
+        assert!(!bridge.gate.lock().taken, "nothing was taken");
+        // It wakes, and nothing holds it up: the answer reaches the agent
+        // from here, while the bridge is still frozen.
+        answer.send("quick").unwrap();
+        assert_eq!(unwoken.join().unwrap()["output"]["answered"], "unwoken", "the answer reaches the agent");
+        bridge.thaw();
+
         let second = ask("waiting");
         wait("the second hook parks", &|| parked("waiting"));
         bridge.freeze(Duration::from_secs(5)).unwrap();
-        let taken = bridge.take().expect("nothing is under way");
+        let taken = bridge.take(|request_id| request_id == "waiting").expect("nothing is under way, and its card is still waited on");
         assert_eq!(taken.parked.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["waiting"], "it goes over with the handover");
         answer.send("quick").unwrap();
         std::thread::sleep(Duration::from_millis(300));

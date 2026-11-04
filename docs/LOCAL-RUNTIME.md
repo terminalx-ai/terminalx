@@ -340,7 +340,9 @@ number; absent before 0.2.24).
   only once every tab is held, when no waiting hook can be answered any more,
   since an answer is given under its tab's lock. A permission answered in
   between is answered here, and the handover is tried again
-  (`handover_busy`).
+  (`handover_busy`). That includes one whose hook has yet to wake when the
+  bridge is taken: it is still waiting, on a card no held tab waits on any
+  more, and the runtime taking over would find no card for it.
 - **What it cannot carry** in format 1 is an agent driven over its standard
   input and output (experimental Codex stdio, ACP agents, OpenCode) while its
   process runs. `runtime.handover.plan` names it; the handover refuses

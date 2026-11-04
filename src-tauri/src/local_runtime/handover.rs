@@ -286,8 +286,9 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
         if !held.unadoptable.is_empty() {
             return Err(Unkept(held.unadoptable.len()).into());
         }
-        // Only now, with every tab held, can no waiting hook be answered.
-        let hooks = runtime.bridge.take().map_err(|error| Unsettled(format!("{error:#}")))?;
+        // Only now, with every tab held, can no waiting hook be answered; one
+        // answered before is answered here.
+        let hooks = runtime.bridge.take(|request_id| held.awaited.contains(request_id)).map_err(|error| Unsettled(format!("{error:#}")))?;
         let (record, kept) = Record::of(runtime, hooks, terminals, held.tabs)?;
         // It holds the agents' hook tokens: none of it is left behind.
         if let Err(error) = write(&path, &record) {

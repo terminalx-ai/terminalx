@@ -299,6 +299,11 @@ pub(crate) struct Held {
     pub tabs: Vec<TabRecord>,
     /// What this format cannot carry, which goes only if it is stopped first.
     pub unadoptable: Vec<Work>,
+    /// The cards a hook waits on, in every tab, by request id. A card is
+    /// answered or withdrawn only under its tab's lock, by taking its sender
+    /// from the tab, so a hook parked on a card not among these has been
+    /// answered, and has yet to wake (`hooks::Bridge::take`).
+    pub awaited: HashSet<String>,
 }
 
 /// What keeps a handover waiting: something about to settle.
@@ -405,6 +410,10 @@ impl SessionManager {
         // when one ignores its signals) lead process groups the terminals
         // hand over as their own (`pty::Frozen::groups`), which Stop All
         // ends; waiting for them could hold every handover off for good.
+        let awaited = held.iter().filter_map(|rt| match &rt.engine {
+            Engine::Cli(p) => Some(p.decisions.keys().cloned()),
+            _ => None,
+        }).flatten().collect();
         let mut records = Vec::new();
         let mut unadoptable = Vec::new();
         for rt in &held {
@@ -418,7 +427,7 @@ impl SessionManager {
         }
         // A tab made meanwhile is one nothing runs in yet: none can start a
         // CLI while the terminals are frozen.
-        Ok(then(Held { tabs: records, unadoptable }))
+        Ok(then(Held { tabs: records, unadoptable, awaited }))
     }
 
     /// One held tab as it goes over, or nothing when it holds nothing to
