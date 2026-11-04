@@ -1699,7 +1699,10 @@ export interface LiveUsageRefused {
 
 // The fields marked optional below are absent from a background runtime older than #729.
 export interface UsageSnapshot {
+  /** Counts within `runtime` alone: a runtime that replaced another counts from 1 again (#772). */
   revision?: number;
+  /** The runtime's usage store this snapshot came from, new each time a runtime starts (#772). Absent before #772. */
+  runtime?: string | null;
   claudeAccount?: string | null;
   claude?: {
     retryAt: number | null;

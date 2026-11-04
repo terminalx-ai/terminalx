@@ -181,6 +181,63 @@ describe("status bar usage", () => {
     expect(detail.textContent).not.toContain("Window expired");
   });
 
+  // #772: the window held a runtime's snapshot for 19 hours, red and current-looking, because nothing replaced it.
+  it("ages a held Codex snapshot to last known with no new one, alike in the bar and the popover", async () => {
+    const now = Date.now();
+    const codexWindows = statusState.usage.windows.filter((window) => window.agent === "codex");
+    for (const window of codexWindows) window.updatedAt = now - 29 * 60_000;
+    codexWindows.find((window) => window.key === "weekly")!.usedPercent = 87;
+    statusState.usage.codexRefresh = { retryAt: null, error: null, lastSuccessAt: now - 29 * 60_000 };
+    const view = render(<StatusBar />);
+    const bar = view.container.querySelector('[data-usage-agent="codex"]') as HTMLElement;
+    const barMeter = () => bar.querySelector("[data-usage-meter] i")!.className;
+    expect(bar.textContent).toBe("23% used3h 5m·87% used6d 4h");
+    expect(barMeter()).toContain("bg-destructive");
+    fireEvent.click(screen.getByRole("button", { name: /Codex 5h/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    const row = within(popover).getByRole("button", { name: /^Codex, / });
+    fireEvent.click(row);
+    const detail = document.querySelector('[data-usage-detail="codex"]') as HTMLElement;
+    const weekly = () => within(detail).getByText("Weekly").parentElement as HTMLElement;
+    expect(weekly().textContent).toContain("87% used");
+    expect(detail.textContent).not.toContain("last known");
+    expect(within(row).queryByText("Last known")).toBeNull();
+
+    // Two minutes on it was updated 31 minutes ago, and no snapshot has come since.
+    await act(async () => vi.advanceTimersByTimeAsync(2 * 60_000));
+    expect(bar.textContent).toBe("23% used5h stale·87% used7d stale");
+    expect(within(bar).getAllByLabelText("Stale usage data")).toHaveLength(2);
+    expect(barMeter()).toContain("bg-muted-foreground/45");
+    expect(barMeter()).not.toContain("bg-destructive");
+    expect(within(row).getByText("Last known")).toBeTruthy();
+    expect(weekly().textContent).toContain("87% used (last known)");
+    expect(weekly().textContent).toContain("Updated 31m ago");
+    expect(weekly().querySelector(".h-full")!.className).toContain("bg-muted-foreground/45");
+    expect((detail.querySelector("[data-usage-freshness]") as HTMLElement).textContent).toBe("Last refreshed 31m ago");
+  });
+
+  it("reads a Codex window past its reset as expired, never 100% used · Resets in now", async () => {
+    const now = Date.now();
+    const weekly = statusState.usage.windows.find((window) => window.agent === "codex" && window.key === "weekly")!;
+    Object.assign(weekly, { usedPercent: 100, resetsAt: now + 1_000, updatedAt: now - 5 * 60_000 });
+    const view = render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Codex 7d 100% used, resets <1m/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    fireEvent.click(within(popover).getByRole("button", { name: /^Codex, Resets in <1m/ }));
+    await act(async () => vi.advanceTimersByTimeAsync(1_001));
+    const bar = view.container.querySelector('[data-usage-agent="codex"]') as HTMLElement;
+    expect(bar.textContent).toContain("100% used7d expired");
+    expect(bar.querySelector("[data-usage-meter] i")!.className).toContain("bg-muted-foreground/45");
+    expect(screen.getByRole("button", { name: /Codex 7d 100% used, window expired; awaiting update/ })).toBeTruthy();
+    expect(within(popover).getByRole("button", { name: /^Codex, Window expired — awaiting update/ })).toBeTruthy();
+    const detail = document.querySelector('[data-usage-detail="codex"]') as HTMLElement;
+    const row = within(detail).getByText("Weekly").parentElement as HTMLElement;
+    expect(row.textContent).toContain("100% used (last known)");
+    expect(row.textContent).toContain("Window expired — awaiting update");
+    expect(row.textContent).toContain("Updated 5m ago");
+    expect(detail.textContent).not.toContain("Resets in now");
+  });
+
   it("renders one brand mark, a meter, and N% used per window in the full tier", () => {
     const { container } = render(<StatusBar />);
 
