@@ -1,8 +1,9 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { ResourceOverview, ResourceSnapshot, UsageSnapshot } from "./api";
+import type { ResourceOverview, ResourceSnapshot, StatusBarSettings, UsageSnapshot } from "./api";
 
 const mocks = vi.hoisted(() => ({
+  settings: { visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed", usageRefreshMinutes: 0 } as StatusBarSettings,
   events: new Map<string, (event: { payload: UsageSnapshot }) => void>(),
   refresh: vi.fn<(...args: unknown[]) => Promise<UsageSnapshot>>(),
   usage: vi.fn<() => Promise<UsageSnapshot>>(),
@@ -24,7 +25,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("@/lib/api", () => ({
   statusBar: {
-    settings: async () => ({ visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed", usageRefreshMinutes: 0 }),
+    settings: async () => ({ ...mocks.settings }),
     usage: mocks.usage,
     refreshUsage: mocks.refresh,
     resourceOverview: mocks.overview,
@@ -37,6 +38,7 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  mocks.settings.usageRefreshMinutes = 0;
 });
 
 it("revalidates on expiry and activation, and never lets a delayed command roll back a live publication", async () => {
@@ -206,4 +208,84 @@ it("invalidates resource authority across disconnect and fences old boot, overvi
   expect(store.resourceGenerationIsCurrent(invalidatedGeneration)).toBe(false);
   expect(store.resourceGenerationIsCurrent(observed.resourceGeneration)).toBe(true);
   expect(observed.usage).toEqual(usage);
+});
+
+// #772: each runtime counts its snapshots from 1, in memory. A window that
+// first attached to a runtime up for days kept its high revision, and then
+// threw away every snapshot of the runtime that replaced it.
+it("shows a replacing runtime's usage at once, from its event, the timer, the button and the reattach", async () => {
+  vi.resetModules();
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000_000);
+  mocks.settings.usageRefreshMinutes = 1;
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const weekly = (usedPercent: number): UsageSnapshot["windows"] => [
+    { agent: "codex", key: "weekly", label: "weekly", usedPercent, resetsAt: 50_000_000, windowMinutes: 10_080, updatedAt: Date.now(), stale: false },
+  ];
+  // After the update the window first attaches to the runtime from before it:
+  // up for days, and older than #772, so it names no runtime.
+  const before: UsageSnapshot = { revision: 5_000, windows: weekly(2) };
+  mocks.usage.mockResolvedValue(before);
+  mocks.refresh.mockResolvedValue(before);
+  const store = await import("./status");
+  let observed!: ReturnType<typeof store.useStatus>;
+  function Probe() { observed = store.useStatus(); return null; }
+  render(<Probe />);
+  await act(async () => { await store.bootStatus(); await vi.advanceTimersByTimeAsync(0); });
+  const shown = () => observed.usage.windows[0]?.usedPercent;
+  const publish = (snapshot: UsageSnapshot) => act(async () => { mocks.events.get("status_usage")!({ payload: snapshot }); });
+  expect(shown()).toBe(2);
+
+  // Restart now: the runtime that replaced it counts from 1 again, and its event shows.
+  await publish({ revision: 3, runtime: "replacement", windows: weekly(100) });
+  expect(shown()).toBe(100);
+  // Within one runtime, an older snapshot arriving late still never rolls the window back.
+  await publish({ revision: 2, runtime: "replacement", windows: weekly(50) });
+  expect(shown()).toBe(100);
+  await publish({ revision: 6_000, runtime: "replacement", windows: weekly(0) });
+  expect(shown()).toBe(0);
+
+  // Restart runtime: the timer's next refresh is answered by a runtime at revision 1.
+  const calls = mocks.refresh.mock.calls.length;
+  mocks.refresh.mockResolvedValue({ revision: 1, runtime: "restarted", windows: weekly(13) });
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(mocks.refresh.mock.calls.length).toBe(calls + 1);
+  expect(shown()).toBe(13);
+  expect(observed.usage.runtime).toBe("restarted");
+
+  // Restarted after a crash: the refresh button's answer shows, though counted lower.
+  await publish({ revision: 7_000, runtime: "restarted", windows: weekly(20) });
+  mocks.refresh.mockResolvedValue({ revision: 2, runtime: "after a crash", windows: weekly(29) });
+  await act(async () => { await store.refreshUsage(true); });
+  expect(mocks.refresh).toHaveBeenLastCalledWith(true);
+  expect(shown()).toBe(29);
+  expect(observed.usageError).toBeNull();
+
+  // Handed over to a new binary (#765): the reattachment asks the new runtime at once, not at the next tick.
+  await publish({ revision: 8_000, runtime: "after a crash", windows: weekly(29) });
+  mocks.refresh.mockResolvedValue({ revision: 1, runtime: "handed over", windows: weekly(31) });
+  const beforeReattach = mocks.refresh.mock.calls.length;
+  await act(async () => {
+    mocks.events.get("local_runtime_reattached")!({ payload: { windows: [] } });
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  expect(mocks.refresh.mock.calls.length).toBe(beforeReattach + 1);
+  expect(shown()).toBe(31);
+  // The old runtime's in-order revision is no guard against the new one's.
+  await publish({ revision: 2, runtime: "handed over", windows: weekly(33) });
+  expect(shown()).toBe(33);
+});
+
+it("compares revisions only within one runtime", async () => {
+  const { replacesUsage } = await import("./status");
+  const held: UsageSnapshot = { revision: 5_000, runtime: "a", windows: [] };
+  expect(replacesUsage(held, { revision: 3, runtime: "b", windows: [] })).toBe(true);
+  expect(replacesUsage(held, { revision: 4_999, runtime: "a", windows: [] })).toBe(false);
+  expect(replacesUsage(held, { revision: 5_000, runtime: "a", windows: [] })).toBe(true);
+  // A runtime older than #772 names none: its own snapshots still compare among themselves.
+  const unnamed: UsageSnapshot = { revision: 5_000, windows: [] };
+  expect(replacesUsage(unnamed, { revision: 3, runtime: null, windows: [] })).toBe(false);
+  expect(replacesUsage(unnamed, { revision: 3, runtime: "b", windows: [] })).toBe(true);
+  expect(replacesUsage({ revision: 3, runtime: "b", windows: [] }, unnamed)).toBe(true);
 });

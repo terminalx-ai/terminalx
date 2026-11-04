@@ -36,7 +36,8 @@ except an earlier endpoint deadline still ahead when the request started (#737).
 Deadlines within 60 seconds are the same window (#729), and there the newer
 observation wins; OAuth observation time is request start. Live data wins a
 timestamp tie against OAuth. See "Matching and refresh outcomes" below. Snapshot revisions
-prevent delayed command responses or events from rolling back the frontend store.
+prevent delayed command responses or events from rolling back the frontend store,
+within one runtime only (see "When the runtime changes" below).
 All three usage surfaces subscribe to that store. Claude refresh results publish
 before waiting for the separate Codex app-server refresh.
 
@@ -65,8 +66,9 @@ payload's size), never with the payload. Such a failure backs off the timer as
 any other, but manual Refresh clears that backoff and tries again at once; a
 failure of the request itself, or a provider's Retry-After, still holds it.
 
-Expired Claude windows keep their last-known percentage, show an expired/stale
-label and muted meter, and remain stale even when recently received. A status
+Expired windows keep their last-known percentage, show an expired/stale
+label and muted meter, and remain stale even when recently received; since
+#772 that holds for Codex as for Claude. A Claude status
 line or endpoint reply repeating that expired window replaces nothing (#738).
 Each detail window has its own freshness label. No elapsed-time path invents
 0%: only the provider's answer shows a window as not started (below).
@@ -194,6 +196,32 @@ usage", or the failure with its retry pause), and any shown window the reply
 left out, which stays as it was. Account refusals of live
 usage are logged when they start; manual skips at info, automatic ones at
 debug.
+
+## When the runtime changes (#772)
+
+`revision` is a counter in the runtime's memory, one up for every snapshot, and
+a runtime that replaced another counts from 1 again. A window that first
+attached to a runtime up for days, then saw it replaced (#730's Restart now,
+Restart runtime, a restart after a crash, a #765 handover), held that runtime's
+high revision. Every snapshot from the new runtime was older by that measure
+and dropped, events, timer, focus and the button alike, while each refresh
+succeeded. The window showed the old runtime's last values for as long as the
+old one had run.
+
+Each snapshot now carries `runtime`, an id its usage store draws when it is
+made, so one per runtime process. The window compares revisions only between
+snapshots naming the same one, and a snapshot from another replaces the one
+held whatever its revision. A runtime older than #772 names none, and its
+snapshots compare among themselves. `local_runtime_reattached` (a new
+attachment, or events missed) asks for a refresh at once, after any already out.
+
+The window also ages what it holds. The runtime sets `stale` when it builds a
+snapshot; the window applies the same rule as time passes, so a window whose
+`updatedAt` is 30 minutes old (`STALE_MS`) or whose reset has passed reads as
+last known in the bar and the popover alike, with no new snapshot needed: grey
+meter, "stale" or "expired" beside its percentage, "(last known)" in the
+details. A Codex window past its reset reads "Window expired — awaiting update",
+never "100% used · Resets in now".
 
 ## Validation and remaining live check
 

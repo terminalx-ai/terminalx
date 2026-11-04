@@ -29,6 +29,8 @@ function setup() {
       : {};
     return {
       revision: ++fixture.revision,
+      // #772: unset is a runtime from before #772, which names none.
+      ...(fixture.runtime ? { runtime: fixture.runtime } : {}),
       claudeAccount: "synthetic",
       claude: { retryAt: null, revalidateAt: null, error: null, lastSuccessAt: fixture.lastSuccess, ...unchanged },
       codexRefresh: { retryAt: fixture.retryAt, error: fixture.failing ? "read Codex rate limits: synthetic timeout" : null, lastSuccessAt: fixture.codexSuccess ?? fixture.lastSuccess, skipped: fixture.codexSkip },
@@ -67,6 +69,7 @@ function setup() {
     "plugin:window|is_focused": false,
     "plugin:window|is_minimized": false,
   });
+  fixture.snapshot = snapshot;
   window.__USAGE_FIXTURE__ = fixture;
 }
 
@@ -162,6 +165,39 @@ try {
   await page.evaluate(() => { window.__USAGE_FIXTURE__.unchanged = null; });
   await page.keyboard.press("Escape");
   console.log("ok  #729: a check that changed nothing, a kept window, refused live usage, a debounced Codex press");
+
+  // #772: the runtime is replaced with the window open. The one before had run
+  // for days (a high revision) and predates #772 (it names no runtime); the one
+  // that replaced it counts from 1 again, and what it says shows at once.
+  const claudeSession = bar.locator('[data-usage-agent="claude"] [data-usage-window="5h"]');
+  const sessionShows = (percent) => claudeSession.getByText(`${percent}% used`, { exact: true }).waitFor();
+  let replaced = await refreshes();
+  await page.evaluate(() => { window.__USAGE_FIXTURE__.revision = 5_000; });
+  await page.clock.runFor(MINUTE);
+  await page.waitForFunction((n) => window.__USAGE_FIXTURE__.refreshes.length === n, ++replaced);
+  await page.evaluate(() => Object.assign(window.__USAGE_FIXTURE__, { runtime: "replacement", revision: 0, used: 70 }));
+  // The reattachment asks the new runtime, not the next tick.
+  await page.evaluate(() => window.__PW_STUB__.emit("local_runtime_reattached", { generation: 2 }));
+  await page.waitForFunction((n) => window.__USAGE_FIXTURE__.refreshes.length === n, ++replaced);
+  await sessionShows(71);
+  // Its events and the timer's answers show too, though counted far below the old runtime's.
+  await page.evaluate(() => { const fixture = window.__USAGE_FIXTURE__; fixture.used = 80; window.__PW_STUB__.emit("status_usage", fixture.snapshot()); });
+  await sessionShows(80);
+  await page.clock.runFor(MINUTE);
+  await page.waitForFunction((n) => window.__USAGE_FIXTURE__.refreshes.length === n, ++replaced);
+  await sessionShows(81);
+  assert.ok((await page.evaluate(() => window.__USAGE_FIXTURE__.revision)) < 5, "the replacement's revisions stayed below the old runtime's");
+  // Within one runtime a late, older snapshot still never rolls the window back.
+  await page.evaluate(() => {
+    const late = window.__USAGE_FIXTURE__.snapshot();
+    late.revision = 1;
+    late.windows[0].usedPercent = 5;
+    window.__PW_STUB__.emit("status_usage", late);
+  });
+  await page.clock.runFor(1_000);
+  await sessionShows(81);
+  assert.equal(await claudeSession.getByText("5% used", { exact: true }).count(), 0);
+  console.log("ok  #772: a replacing runtime's reattachment, events and timer show though it counts from 1 again");
 
   // Settings → Appearance: the control, laid out at a wide and a narrow window.
   await page.locator('[data-testid="sidebar-rail"]').getByRole("button", { name: "Settings", exact: true }).click();

@@ -386,17 +386,21 @@ function isAccountWindow(window: UsageWindow): boolean {
   return window.key === "five_hour" || window.key === "seven_day" || window.key === "weekly";
 }
 
-/**
- * What follows "N% used" in the bar. Account windows are told apart by their
- * reset countdown alone; a scoped window shows its name instead, so Fable
- * reads "2% used Fable".
- */
+/** The runtime's `STALE_MS` (`status/usage.rs`): a window not updated for this long is last known. */
+const USAGE_STALE_MS = 30 * 60_000;
+
+/** Past its reset, for either provider (#772): none of its usage still counts, and only an answer says what does now. */
 function usageExpired(window: UsageWindow, now: number): boolean {
-  return window.agent === "claude" && window.resetsAt != null && window.resetsAt <= now;
+  return window.resetsAt != null && window.resetsAt <= now;
 }
 
+/**
+ * The runtime marks `stale` when it builds a snapshot; the window ages what it
+ * holds by the same rule (#772), so a snapshot nothing has replaced since does
+ * not keep reading as current.
+ */
 function usageStale(window: UsageWindow, now: number): boolean {
-  return window.stale || usageExpired(window, now);
+  return window.stale || now - window.updatedAt >= USAGE_STALE_MS || usageExpired(window, now);
 }
 
 function usageMeterClass(window: UsageWindow, now: number): string {
@@ -407,15 +411,20 @@ function usageTextClass(window: UsageWindow, now: number): string {
   return usageStale(window, now) ? "text-muted-foreground" : urgencyText(window.usedPercent);
 }
 
-function usageResetLabel(agent: UsageAgent, reset: number, now: number): string {
-  return agent === "claude" && reset <= now
+function usageResetLabel(reset: number, now: number): string {
+  return reset <= now
     ? "Window expired — awaiting update"
     : `Resets in ${formatResetCountdown(reset, now, "")}`;
 }
 
+/**
+ * What follows "N% used" in the bar. Account windows are told apart by their
+ * reset countdown alone; a scoped window shows its name instead, so Fable
+ * reads "2% used Fable".
+ */
 function windowTrailer(window: UsageWindow, now: number): string | null {
   if (usageExpired(window, now)) return `${windowLabel(window)} expired`;
-  if (window.stale) return `${windowLabel(window)} stale`;
+  if (usageStale(window, now)) return `${windowLabel(window)} stale`;
   if (!isAccountWindow(window)) return windowLabel(window);
   return window.resetsAt == null ? null : formatResetCountdown(window.resetsAt, now, "");
 }
@@ -593,6 +602,8 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   const compactMode = settings.usageMode === "compact";
   const now = useCountdownNow([
     ...windows.map((window) => window.resetsAt),
+    // Each window turns last known by itself, with no snapshot to say so (#772).
+    ...windows.map((window) => window.updatedAt + USAGE_STALE_MS),
     usage.claude?.retryAt ?? null,
     usage.codexRefresh?.retryAt ?? null,
     usage.claude?.skipped?.nextAt ?? null,
@@ -772,7 +783,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                       type="button"
                       data-usage-compact-agent={compactMode ? agent : undefined}
                       aria-expanded={detailAgent === agent}
-                      aria-label={`${agentName(agent)}${reset == null ? "" : `, ${usageResetLabel(agent, reset, now)}`}`}
+                      aria-label={`${agentName(agent)}${reset == null ? "" : `, ${usageResetLabel(reset, now)}`}`}
                       onClick={() => setDetailAgent((current) => current === agent ? null : agent)}
                       className={cn(
                         "group/agent flex w-full flex-col gap-2.5 px-3 py-2.5 text-left outline-none transition-colors hover:bg-veil-raised focus-visible:bg-veil-raised",
@@ -788,7 +799,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                           </span>
                         ) : null}
                         <span className="ml-auto truncate text-[11px] tabular-nums text-faint">
-                          {reset != null ? usageResetLabel(agent, reset, now) : null}
+                          {reset != null ? usageResetLabel(reset, now) : null}
                         </span>
                         {compactMode ? (
                           <span className={cn("shrink-0 text-[12px] font-medium tabular-nums", usageTextClass(tightest, now))}>
@@ -951,7 +962,7 @@ function AgentUsageDetail({
               </div>
               <div className="mt-1 flex items-center justify-between gap-3 text-[10.5px] tabular-nums text-muted-foreground">
                 <span>{shown}% {percent}{usageStale(window, now) ? " (last known)" : ""}</span>
-                {window.resetsAt != null ? <span>{usageResetLabel(agent, window.resetsAt, now)}</span> : null}
+                {window.resetsAt != null ? <span>{usageResetLabel(window.resetsAt, now)}</span> : null}
               </div>
               <div className="mt-0.5 text-[10px] text-faint">{formatUpdatedAgo(window.updatedAt, now)}</div>
             </div>
