@@ -1009,3 +1009,49 @@ fn a_new_history_recovers_logs_only_from_before_another_runtime_kept_work() {
     assert_eq!(c.summary().agents_spawned, 2, "the earlier turn from the log, the kept one from its records");
     assert_eq!(c.summary().agent_time_ms, 100 + 200);
 }
+
+/// #765: a runtime handed over execs the one that replaces it, in the same
+/// process. Nothing in its memory survives the exec, and the lease goes with
+/// its descriptor; the files stay. With the tab states it hands over, the
+/// runtime that takes over goes on counting where it left off: a turn under
+/// way is no new start when it is seen under way again, and when it ends it
+/// counts the time it ran before the handover too. A tab that was waiting
+/// starts its work afresh once answered, as it would have without the swap.
+#[test]
+fn a_handover_carries_each_tabs_state_so_work_under_way_is_counted_once_and_whole() {
+    let _home = crate::store::temp_home();
+    let _runtime = writer_for_test();
+    let root = root().unwrap();
+    claim();
+    assert_eq!(transition("s/working", TabStatus::InProgress, Source::Live), Some(1));
+    assert_eq!(transition("s/asking", TabStatus::InProgress, Source::Live), Some(2));
+    assert_eq!(transition("s/asking", TabStatus::Waiting, Source::Live), None);
+    let ran = Duration::from_millis(120);
+    std::thread::sleep(ran);
+    let carried = carried();
+    assert_eq!(carried.len(), 2);
+    let working = carried.iter().find(|tab| tab.key == "s/working").unwrap();
+    assert_eq!(working.state, TabStatus::InProgress);
+    assert!(working.opened.is_some_and(|(_, ago)| ago >= ran.as_millis() as u64), "{working:?}");
+    assert_eq!(carried.iter().find(|tab| tab.key == "s/asking").unwrap().opened, None, "waiting is no work under way");
+    let before = summary().unwrap();
+
+    // The exec: no shutdown, and nothing closed.
+    OWNER.lock().unwrap().take();
+    assert!(!lease_held(&root), "the lease went with the old runtime's descriptor");
+    claim();
+    assert!(is_writer(&root));
+    carry_on(carried);
+    assert_eq!(summary().unwrap().agents_spawned, before.agents_spawned, "taking over counts nothing");
+
+    // The turn under way is seen under way again, and then ends.
+    assert_eq!(transition("s/working", TabStatus::InProgress, Source::Live), None, "no new start");
+    assert_eq!(transition("s/working", TabStatus::Idle, Source::Live), None);
+    let after = summary().unwrap();
+    assert_eq!(after.agents_spawned, 2);
+    assert!(after.agent_time_ms - before.agent_time_ms >= ran.as_millis() as u64,
+        "the time it ran before the handover counts: {} ms", after.agent_time_ms - before.agent_time_ms);
+    // The waiting tab is answered: its work starts again, as without a swap.
+    assert_eq!(transition("s/asking", TabStatus::InProgress, Source::Live), Some(3));
+    exit_runtime();
+}

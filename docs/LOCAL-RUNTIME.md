@@ -343,6 +343,12 @@ number; absent before 0.2.24).
   (`handover_busy`). That includes one whose hook has yet to wake when the
   bridge is taken: it is still waiting, on a card no held tab waits on any
   more, and the runtime taking over would find no card for it.
+- **Stats.** Activity history (#767) is written by the runtime, which holds
+  its lease on a descriptor that closes with the exec; the runtime taking
+  over claims it again before it adopts anything. What the exec would lose
+  is each tab's last counted state, which the record carries: a turn under
+  way is not counted as a new agent start when it is seen again, and when it
+  ends it counts the time it ran before the handover too.
 - **What it cannot carry** in format 1 is an agent driven over its standard
   input and output (experimental Codex stdio, ACP agents, OpenCode) while its
   process runs. `runtime.handover.plan` names it; the handover refuses
