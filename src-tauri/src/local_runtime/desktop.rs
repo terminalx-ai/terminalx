@@ -24,6 +24,14 @@ use crate::{pty::Tap, sink::EventSink};
 const LOOP_STALL: Duration = Duration::from_secs(120);
 
 /// An owner too old to know a lifecycle command refuses it as unsupported.
+/// How long an owner has to come to rest, write its handover record and say
+/// so: each part of it is given 10 seconds, and stopping what it cannot
+/// carry, when the reader agreed to, takes as long as Stop does.
+const HANDOVER_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long an owner has to check the binary it would be handed over to: it
+/// gives that binary 30 seconds to say which handovers it reads.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(45);
+
 fn unsupported(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == "unsupported"))
 }
@@ -191,6 +199,31 @@ impl Desktop {
             Err(error) if unsupported(&error) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// What handing the owner over to `binary` would have to stop: the agents
+    /// its handover record cannot carry (#765). Refused by an owner that
+    /// cannot be handed over to `binary` (`handover_unsupported`).
+    /// Given no `binary`, only what would have to stop is asked, which
+    /// waits on nothing but the tabs.
+    pub fn handover_plan(&self, binary: Option<&std::path::Path>) -> Result<Vec<crate::session::retire::Work>> {
+        let params = serde_json::json!({"epoch": self.client.epoch(), "binary": binary});
+        // Checking a binary new to this Mac may wait on its security checks.
+        let answer: serde_json::Value = match binary {
+            Some(_) => self.client.call_within("runtime.handover.plan", params, VERIFY_TIMEOUT)?,
+            None => self.client.quick("runtime.handover.plan", params)?,
+        };
+        Ok(serde_json::from_value(answer["unadoptable"].clone())?)
+    }
+
+    /// Replace the owner with `binary` in its own process, keeping every
+    /// agent and terminal it runs (#765), stopping first only `stop`, which
+    /// the reader agreed to. Returns once the owner says it is handing over;
+    /// [`super::launch::taken_over`] says when the new runtime answers.
+    pub fn hand_over(&self, binary: &std::path::Path, stop: &[crate::session::retire::Work], within: Option<Duration>) -> Result<()> {
+        let _: serde_json::Value = self.client.call_within("runtime.handover",
+            serde_json::json!({"epoch": self.client.epoch(), "binary": binary, "stop": stop}), within.unwrap_or(HANDOVER_TIMEOUT))?;
+        Ok(())
     }
 
     /// Stop the owner as Stop All does, only if nothing would be cut short,

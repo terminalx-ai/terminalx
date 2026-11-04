@@ -173,6 +173,9 @@ jobs:
         run: |
           cargo test --locked --test local_lifetime a_runtime_names_what_stopping_it_would_cut_short_and_stops_by_itself_only_without_any
           cargo test --locked --test local_lifetime a_runtime_says_its_build_and_turns_and_a_retired_one_is_replaced_by_the_next_launch
+      - name: Handing the runtime over without stopping what it runs (#765)
+        working-directory: src-tauri/serve
+        run: cargo test --locked --test local_handover
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test

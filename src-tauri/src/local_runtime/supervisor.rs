@@ -53,11 +53,12 @@ pub enum ConnectionState {
     /// attempt to attach found (`ui.rs`). Reconnecting reaches the same wedged
     /// process; only restarting it recovers (#661). `epoch` names the attached
     /// runtime, if any, so a restart cannot stop its replacement.
-    Unresponsive { message: String, epoch: Option<String> },
+    Unresponsive { message: String, epoch: Option<String>, keeps: bool },
     /// The runtime is being replaced with the one bundled with this app
-    /// (`replace.rs`): its agents and terminals are stopping, and windows
-    /// attach to the new one in place. `from`: its version, when it said.
-    Updating { from: Option<String>, to: String },
+    /// (`replace.rs`), and windows attach to the new one in place. `from`:
+    /// its version, when it said. `keeping`: it is handed over, and its
+    /// agents and terminals go on running (#765); otherwise they stop.
+    Updating { from: Option<String>, to: String, keeping: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -391,11 +392,34 @@ fn log_report(target: &Target, report: &Report) {
     }
 }
 
+/// The runtime bundled with this app.
+fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
+    Ok(app.path().resource_dir()?.join("local-runtime/terminalx-serve"))
+}
+
+/// The runtime bundled with this app, installed in `home` as one is started
+/// from: what an older runtime is handed over to (#765).
+///
+/// Installed and checked once per app process: the bundled runtime does not
+/// change while the app runs (an update relaunches it), and installing hashes
+/// it and checks its signature. Installed again if the copy has gone.
+pub(crate) fn bundled(app: &AppHandle, home: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    static INSTALLED: std::sync::Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>> = std::sync::Mutex::new(None);
+    let home = std::fs::canonicalize(home)?;
+    let mut installed = INSTALLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, binary)) = installed.as_ref().filter(|(for_home, binary)| *for_home == home && binary.is_file()) {
+        return Ok(binary.clone());
+    }
+    let binary = super::launch::installed(&source(app)?, &home)?;
+    *installed = Some((home, binary.clone()));
+    Ok(binary)
+}
+
 /// Discovery, then a new attachment published in place of the old one.
 pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
     let state = app.state::<AppState>();
     let previous = state.runtime();
-    let source = app.path().resource_dir()?.join("local-runtime/terminalx-serve");
+    let source = source(app)?;
     let home = crate::store::root()?;
     // The owner that is running now, which may have restarted since the last
     // attachment, or a new one if it exited. A live owner is never replaced

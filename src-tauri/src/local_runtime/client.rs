@@ -96,6 +96,10 @@ pub struct Build {
     /// The phone features its owner operations serve: as it names them, or,
     /// from an owner too old to name them, as its release served them.
     pub mobile: serde_json::Map<String, Value>,
+    /// The handover record it writes, which a desktop needs to replace it
+    /// without stopping what it runs (#765). `None` from an owner that
+    /// cannot be handed over: TerminalX 0.2.23 and before.
+    pub handover: Option<u32>,
 }
 
 impl Build {
@@ -117,7 +121,8 @@ impl Build {
         let mobile = local["mobileFeatures"].as_object().cloned()
             .or_else(|| super::mobile::released_features(version.as_ref()).as_object().cloned())
             .unwrap_or_default();
-        Self { version, mobile }
+        let handover = local["handover"].as_u64().and_then(|format| u32::try_from(format).ok());
+        Self { version, mobile, handover }
     }
 
     /// Whether this build is older than `app`. One that would not say its

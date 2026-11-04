@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { errorMessage, localRuntime } from "@/lib/api";
+import { errorMessage, localRuntime, type LocalRuntimeWorkItem } from "@/lib/api";
 import { getPrefs } from "@/lib/prefs";
 
 /**
@@ -20,8 +20,8 @@ export type UpdateState =
   | { kind: "checking" }
   | { kind: "none" }
   | { kind: "available"; update: Update }
-  /** Moving to the update's runtime would stop `work` in runtime `epoch`: Update now, or when they're done. */
-  | { kind: "choosing"; update: Update; epoch: string; work: string[] }
+  /** Moving to the update's runtime would stop `work` in runtime `epoch`: Update now, or when they're done. `unkept`: the same, as the runtime names it, when it is handed over (#765). */
+  | { kind: "choosing"; update: Update; epoch: string; work: string[]; unkept: LocalRuntimeWorkItem[] }
   | { kind: "installing"; version: string; pct: number }
   | { kind: "error"; message: string };
 
@@ -80,7 +80,7 @@ export async function checkForUpdate({ quiet = false }: { quiet?: boolean } = {}
 }
 
 /** What the relaunched app is to do with the runtime attached now. */
-interface RuntimePlan { epoch: string; forced: boolean; quietSince: number | null }
+interface RuntimePlan { epoch: string; forced: boolean; quietSince: number | null; stop: LocalRuntimeWorkItem[] }
 
 /**
  * Install the update found and relaunch into it, with its runtime. When
@@ -99,22 +99,23 @@ export async function installUpdate(): Promise<void> {
     return null;
   });
   if (reading && reading.work.length > 0) {
-    emit({ kind: "choosing", update, epoch: reading.epoch, work: reading.work });
+    emit({ kind: "choosing", update, epoch: reading.epoch, work: reading.work, unkept: reading.unkept ?? [] });
     return;
   }
-  await install(update, reading && { epoch: reading.epoch, forced: false, quietSince: reading.readAt });
+  await install(update, reading && { epoch: reading.epoch, forced: false, quietSince: reading.readAt, stop: [] });
 }
 
 /** The answer to what installing would cut short, or `null` to not update now. */
 export async function chooseUpdate(choice: UpdateChoice | null): Promise<void> {
   if (state.kind !== "choosing") return;
-  const { update, epoch } = state;
+  const { update, epoch, unkept } = state;
   if (!choice) {
     emit({ kind: "available", update });
     return;
   }
   emit({ kind: "installing", version: update.version, pct: 0 });
-  await install(update, { epoch, forced: choice === "now", quietSince: null });
+  // Update now stops what the card listed, and, handed over, nothing else.
+  await install(update, { epoch, forced: choice === "now", quietSince: null, stop: choice === "now" ? unkept : [] });
 }
 
 async function install(update: Update, plan: RuntimePlan | null): Promise<void> {
@@ -131,7 +132,7 @@ async function install(update: Update, plan: RuntimePlan | null): Promise<void> 
     // Left for the relaunched app. Without it, that app waits by itself
     // until nothing would be cut short, and says so: the app is installed
     // either way, and is relaunched into.
-    if (plan) await localRuntime.planUpdate(plan.epoch, plan.forced, plan.quietSince).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
+    if (plan) await localRuntime.planUpdate(plan.epoch, plan.forced, plan.quietSince, plan.stop).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
     await relaunch();
   } catch (error) {
     emit({ kind: "error", message: errorMessage(error) });

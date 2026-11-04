@@ -9,6 +9,13 @@ pub(super) struct Admission {
     owners: HashMap<CompactionScope, Owner>,
     degraded: bool,
 }
+
+impl Admission {
+    /// Nothing is admitted: what a handover can leave behind (#765).
+    pub(super) fn is_idle(&self) -> bool {
+        self.owners.is_empty() && !self.degraded
+    }
+}
 #[derive(Clone)]
 pub(super) enum Identity {
     Pty { tail: Arc<tui::Tail>, launch: u64 },

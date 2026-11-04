@@ -67,26 +67,39 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
   );
 }
 
-/** What the switch waits for, and a restart now, which stops all of it. Only
- * the runtime this window was told about: another window may already have
- * replaced it. */
+/** What the switch waits for, and a restart now, which stops all of it. One
+ * that can be handed over keeps what it runs (#765): what its handover cannot
+ * carry is named, never stopped by itself, and restarting now stops only that.
+ * Only the runtime this window was told about: another window may already
+ * have replaced it. */
 function RuntimeDetails({ epoch, outdated }: { epoch: string; outdated: LocalRuntimeOutdated }) {
   const [restarting, setRestarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const { running, app, work, problem, failed } = outdated;
+  const { running, app, work, problem, failed, keeps, unkept } = outdated;
   const restart = async () => {
     setRestarting(true);
     setFailure(null);
-    try { await replaceLocalRuntime(epoch); }
+    // Handed over, only what is listed here stops: what it shows is what is sent.
+    try { await replaceLocalRuntime(epoch, keeps ? unkept : []); }
     catch (error) { setFailure(errorMessage(error)); }
     finally { setRestarting(false); }
   };
-  const busy = !failed && work !== null && work.length > 0;
-  const waiting = failed
-    ? `Moving to ${app} failed, and it does not try again by itself.`
+  // What a handover cannot carry is listed whatever came of the last try:
+  // trying again stops it, and nothing else.
+  const busy = (keeps || !failed) && work !== null && work.length > 0;
+  const waiting = keeps
+    ? failed ? `Handing it over to ${app} failed, and it does not try again by itself.`
+      : work === null || work.length === 0 ? `It hands its agents and terminals over to ${app} in a moment; they keep running.`
+      : `It hands everything over to ${app}, keeping it running, except what it cannot carry over:`
+    : failed ? `Moving to ${app} failed, and it does not try again by itself.`
     : work === null ? `It moves to ${app} by itself once it has checked that nothing it runs would be cut short.`
     : work.length === 0 ? `Nothing it runs would be cut short: it moves to ${app} in a moment.`
     : `It moves to ${app} by itself once nothing it runs would be cut short. It is waiting for:`;
+  const verb = failed ? "Trying again" : "Restarting now";
+  const restarts = keeps
+    ? busy ? `${verb} stops only ${work.length === 1 ? "that" : "those"}, and everything else keeps running; each agent stopped picks up its conversation again when its tab starts.`
+      : `${verb} keeps its agents and terminals running.`
+    : `${verb} stops ${busy ? (work.length === 1 ? "that" : "all of that") : "its agents"}, and its terminals and whatever they run; each agent picks up its conversation again when its tab starts.`;
   return (
     <div className="text-xs">
       <div className="font-medium">Runtime {running ?? "older"} → {app}</div>
@@ -95,9 +108,7 @@ function RuntimeDetails({ epoch, outdated }: { epoch: string; outdated: LocalRun
       </p>
       {busy && <ul className="mt-1 max-h-40 list-disc overflow-y-auto pl-4 text-muted-foreground">{work.map((item, index) => <li key={index}>{item}</li>)}</ul>}
       {(failure ?? problem) && <p role="alert" className="mt-1 text-destructive">{failure ?? problem}</p>}
-      <p className="mt-2 text-muted-foreground">
-        {failed ? "Trying again" : "Restarting now"} stops {busy ? (work.length === 1 ? "that" : "all of that") : "its agents"}, and its terminals and whatever they run; each agent picks up its conversation again when its tab starts.
-      </p>
+      <p className="mt-2 text-muted-foreground">{restarts}</p>
       <div className="mt-2.5 flex justify-end">
         <Button variant="outline" size="sm" disabled={restarting} onClick={() => void restart()}>
           {restarting ? "Restarting…" : failed ? "Try again" : "Restart now"}

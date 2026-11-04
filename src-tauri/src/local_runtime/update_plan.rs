@@ -45,6 +45,11 @@ pub struct Plan {
     pub made_at: u64,
     /// The app process that made it, which never acts on its own plan.
     pub made_by: u32,
+    /// With Update now, for a runtime that can be handed over (#765): what
+    /// the update card listed that its handover cannot carry, which is all
+    /// that stops. Anything else it cannot carry is asked about first.
+    #[serde(default)]
+    pub stop: Vec<crate::session::retire::Work>,
 }
 
 impl Plan {
@@ -111,7 +116,7 @@ mod tests {
     use super::*;
 
     fn plan(made_by: u32) -> Plan {
-        Plan { epoch: "old".into(), forced: false, quiet_since: Some(1_000), made_at: 2_000, made_by }
+        Plan { epoch: "old".into(), forced: false, quiet_since: Some(1_000), made_at: 2_000, made_by, stop: Vec::new() }
     }
 
     #[test]

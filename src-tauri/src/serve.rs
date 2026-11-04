@@ -20,6 +20,7 @@
 //!   only; agents in a cloud workspace reach this runtime through its control
 //!   socket.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -90,6 +91,9 @@ pub struct Options {
     pub self_test: bool,
     pub relay_link: Option<PathBuf>,
     pub log_file: Option<PathBuf>,
+    /// A handover record: this process was the runtime it replaces, and
+    /// takes over what that one ran (#765).
+    pub adopt: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -101,7 +105,7 @@ enum Command {
 
 fn parse(args: &[String]) -> Result<Command> {
     let mut options =
-        Options { idle_grace_seconds: crate::local_runtime::IDLE_GRACE.as_secs(), project_root: None, data_dir: None, runtime_kind: RuntimeKind::Local, self_test: false, relay_link: None, log_file: None };
+        Options { idle_grace_seconds: crate::local_runtime::IDLE_GRACE.as_secs(), project_root: None, data_dir: None, runtime_kind: RuntimeKind::Local, self_test: false, relay_link: None, log_file: None, adopt: None };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -128,6 +132,7 @@ fn parse(args: &[String]) -> Result<Command> {
             }
             "--relay-link" => options.relay_link = Some(PathBuf::from(value(flag)?)),
             "--log-file" => options.log_file = Some(PathBuf::from(value(flag)?)),
+            "--adopt" => options.adopt = Some(PathBuf::from(value(flag)?)),
             "--self-test" if inline.is_none() => options.self_test = true,
             "--idle-grace-seconds" => {
                 options.idle_grace_seconds = value(flag)?.parse().context("idle grace must be seconds from 1 to 3600")?;
@@ -142,6 +147,9 @@ fn parse(args: &[String]) -> Result<Command> {
     if options.relay_link.is_some() && options.project_root.is_none() {
         bail!("--relay-link requires --project-root: the relay serves one workspace");
     }
+    if options.adopt.is_some() && (options.runtime_kind != RuntimeKind::Local || options.self_test || options.relay_link.is_some()) {
+        bail!("--adopt takes over a local runtime only");
+    }
     Ok(Command::Serve(options))
 }
 
@@ -155,6 +163,13 @@ pub fn main() -> i32 {
     // So is Git's credential helper and the `gh` shim (`cloud_github`).
     if args.first().map(String::as_str) == Some(crate::cloud_github::SUBCOMMAND) {
         return crate::cloud_github::run_cli(&args[1..]);
+    }
+    // Which handover records this binary reads, asked by the runtime it is
+    // to replace (#765).
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some(crate::local_runtime::handover::FORMATS_COMMAND) {
+        println!("{}", crate::local_runtime::handover::formats());
+        return 0;
     }
     let options = match parse(&args) {
         Ok(Command::Serve(options)) => options,
@@ -210,6 +225,9 @@ struct Runtime {
     /// The socket this runtime listens on and its agents dial: its own, never
     /// the data dir's published one, which another runtime may hold.
     socket: std::path::PathBuf,
+    /// The hook and control sockets, as a handover passes them on (#765).
+    #[allow(dead_code)]
+    bridge: Arc<crate::hooks::Bridge>,
     project_root: Option<String>,
     /// Agent tabs of the project that were mid-turn when the previous
     /// runtime process ended (PRO-22), before they are reset to idle.
@@ -232,10 +250,20 @@ fn run(options: Options) -> Result<()> {
         bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
     }
     let data_dir = crate::store::root().context("open the state directory")?;
-    let _owner = if options.runtime_kind == RuntimeKind::Local {
-        Some(crate::local_runtime::Owner::acquire(&data_dir)?)
-    } else {
-        None
+    // A runtime taking over from the one this process was (#765) holds the
+    // home already: its lock, its sockets and its terminals came with it.
+    #[cfg(unix)]
+    let mut adopted = match &options.adopt {
+        Some(path) => Some(crate::local_runtime::handover::read(path).context("take over from the runtime this one replaces")?),
+        None => None,
+    };
+    #[cfg(not(unix))]
+    let mut adopted: Option<std::convert::Infallible> = None;
+    let _owner = match (&mut adopted, options.runtime_kind) {
+        #[cfg(unix)]
+        (Some(adopted), _) => Some(crate::local_runtime::Owner::adopt(adopted.owner()?)?),
+        (_, RuntimeKind::Local) => Some(crate::local_runtime::Owner::acquire(&data_dir)?),
+        _ => None,
     };
     // The identity comes first: nothing is served until the runtime knows
     // which workspace it is, and a rejected token stops here.
@@ -268,7 +296,7 @@ fn run(options: Options) -> Result<()> {
             log::error!("start the environment checkout watcher: {error}");
         }
     }
-    let runtime = start(&options)?;
+    let runtime = start(&options, adopted, _owner.as_ref())?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
         report_activity(&runtime, cloud.clone(), origin);
     }
@@ -450,8 +478,39 @@ fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstr
     });
 }
 
-/// The desktop's `setup`, less everything that needs a window.
-fn start(options: &Options) -> Result<Runtime> {
+#[cfg(unix)]
+type Inherited = Option<crate::local_runtime::handover::Adopted>;
+#[cfg(not(unix))]
+type Inherited = Option<std::convert::Infallible>;
+
+/// Whether this runtime took over from the one it replaced (#765).
+fn adopted_any(adopted: &Inherited) -> bool {
+    adopted.is_some()
+}
+
+/// The desktop's `setup`, less everything that needs a window. `adopted` is
+/// what the runtime this process was handed over (#765): its terminals,
+/// agent tabs and sockets are taken over before anything is served.
+fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runtime::Owner>) -> Result<Runtime> {
+    #[cfg(not(unix))]
+    let _ = owner;
+    #[cfg(unix)]
+    let mut adopted = adopted;
+    // What was handed over keeps its turn and its terminal.
+    #[cfg(unix)]
+    let (kept_tabs, kept_panes): (std::collections::HashSet<(String, String)>, std::collections::HashSet<String>) = adopted.as_ref().map(|adopted| (
+        adopted.record.tabs.iter().map(|tab| (tab.session_id.clone(), tab.tab_id.clone())).collect(),
+        adopted.record.panes.iter().map(|pane| pane.id.clone()).collect(),
+    )).unwrap_or_default();
+    #[cfg(not(unix))]
+    let (kept_tabs, kept_panes) = { let _ = &adopted; (std::collections::HashSet::new(), std::collections::HashSet::new()) };
+    // The sessions whose agents were handed over still running.
+    #[cfg(unix)]
+    let going_on: std::collections::HashSet<String> = adopted.as_ref().map(|adopted| adopted.record.tabs.iter()
+        .filter(|tab| tab.cli.is_some()).map(|tab| tab.session_id.clone()).collect()).unwrap_or_default();
+    #[cfg(not(unix))]
+    let going_on: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let handed_over = adopted_any(&adopted);
     let lifetime = (options.runtime_kind == RuntimeKind::Local)
         .then(|| crate::local_runtime::Lifetime::starting(Duration::from_secs(options.idle_grace_seconds)));
     let project_root = match &options.project_root {
@@ -469,11 +528,11 @@ fn start(options: &Options) -> Result<Runtime> {
             session.tabs.into_iter().filter(|tab| matches!(tab.status,
                 crate::store::index::TabStatus::InProgress | crate::store::index::TabStatus::Waiting))
                 .map(move |tab| (session.id.clone(), tab.id))
-        }).collect()
+        }).filter(|tab| !kept_tabs.contains(tab)).collect()
     } else {
         project_root.as_deref().map(crate::cloud_agents::interrupted_tabs).unwrap_or_default()
     };
-    crate::session::idle_orphaned_tabs();
+    crate::session::idle_orphaned_tabs_except(&kept_tabs, &kept_panes);
     // The runtime is the one writer of activity history (#767). Recover
     // local history before hooks can publish live activity.
     crate::store::activity::claim();
@@ -481,9 +540,16 @@ fn start(options: &Options) -> Result<Runtime> {
     let host = Arc::new(crate::harness::host::Host::new());
     let terminals = Arc::new(crate::pty::Terminals::new());
     #[cfg(unix)]
-    if options.runtime_kind == RuntimeKind::Local {
+    if options.runtime_kind == RuntimeKind::Local && adopted.is_none() {
         crate::local_runtime::scrollback::restore(&crate::store::root()?, &terminals)?;
     }
+    // The same socket and token its agents were given, when handed over.
+    #[cfg(unix)]
+    let control_endpoint = match &adopted {
+        Some(adopted) => crate::hooks::ControlEndpoint::adopted(adopted.record.control.socket.clone(), adopted.record.control.token.clone()),
+        None => crate::hooks::prepare_control()?,
+    };
+    #[cfg(not(unix))]
     let control_endpoint = crate::hooks::prepare_control()?;
     let pipelines = Arc::new(RuntimeObserver::default());
     if options.runtime_kind == RuntimeKind::Local {
@@ -499,6 +565,13 @@ fn start(options: &Options) -> Result<Runtime> {
         control_endpoint.clone(),
     );
     manager.follow_pane_exits();
+    // Terminals first, then the tabs whose CLIs run in them; the hooks those
+    // CLIs fire are answered only once their tabs are there to hear them.
+    #[cfg(unix)]
+    let taken = match adopted.as_mut() {
+        Some(adopted) => Some(take_over(adopted, &sink, &terminals, &manager)?),
+        None => None,
+    };
     let hooked = manager.clone();
     let mut service = crate::control::ControlService::headless(
         sink.clone(),
@@ -512,23 +585,46 @@ fn start(options: &Options) -> Result<Runtime> {
         lifetime.set_stream_socket(crate::local_runtime::stream::start(&control_endpoint, sink.clone(), terminals.clone(), lifetime.clone())?);
     }
     let hook_lifetime = lifetime.clone();
-    let socket = crate::hooks::serve(control_endpoint, move |frame| {
+    let served_endpoint = control_endpoint.clone();
+    let on_hook = move |frame| {
         let _request = match hook_lifetime.as_ref().map(|life| life.enter()).transpose() {
             Ok(request) => request,
             Err(_) => return crate::hooks::HookReply::refused("The runtime is stopping."),
         };
         hooked.on_hook(frame)
-    }, move |request| service.handle(request))
-        .context("listen on the hook and control socket")?;
+    };
+    let on_control = move |request| service.handle(request);
+    #[cfg(unix)]
+    let (taken, served) = match taken {
+        Some((sockets, waits, parked)) => ((waits, parked), crate::hooks::serve_adopted(control_endpoint, sockets, on_hook, on_control)),
+        None => ((Vec::new(), HashMap::new()), crate::hooks::serve(control_endpoint, on_hook, on_control)),
+    };
+    #[cfg(not(unix))]
+    let served = crate::hooks::serve(control_endpoint, on_hook, on_control);
+    let (socket, bridge) = served.context("listen on the hook and control socket")?;
     log::info!("hook socket at {}", socket.display());
+    // The decisions the handed-over hooks were waiting for are waited for here.
+    #[cfg(unix)]
+    {
+        let (waits, mut parked) = taken;
+        for wait in waits {
+            match parked.remove(&wait.ask.request_id) {
+                Some(stream) => manager.resume_decision(&bridge, wait, stream),
+                None => log::warn!("no hook was waiting on handed-over card {} any more", wait.ask.request_id),
+            }
+        }
+        if !parked.is_empty() {
+            log::warn!("{} handed-over hook(s) waited on a card no tab holds; they are answered as refused", parked.len());
+        }
+    }
     if options.runtime_kind == RuntimeKind::Local && options.relay_link.is_none() && !options.self_test {
         manager.follow_terminals();
         let pipeline_host = Arc::new(crate::issue_pipeline::host::LocalHost::new(sink.clone(), manager.clone()));
         pipelines.attach(pipeline_host.clone());
         let automation_host = crate::automations::RuntimeHost { sink: sink.clone(), sessions: manager.clone() };
         pipelines.attach_local_automations(automation_host.clone());
-        crate::automations::recover_open_runs(&automation_host);
-        crate::issue_pipeline::runtime::start_local(pipeline_host);
+        crate::automations::recover_open_runs_except(&automation_host, &going_on);
+        crate::issue_pipeline::runtime::start_local(pipeline_host, handed_over);
         crate::automations::start_recovered_scheduler(automation_host);
         // Agents nobody is using are stopped, here where they run (#696).
         crate::idle_agents::start(manager.clone());
@@ -563,7 +659,75 @@ fn start(options: &Options) -> Result<Runtime> {
             crate::local_runtime::workspaces::start_retention(manager.clone(), lifetime.clone());
         }
     }
-    Ok(Runtime { lifetime, sink, host, terminals, manager, socket, project_root, interrupted, pipelines })
+    // From here on it can be handed over in its turn (#765).
+    #[cfg(unix)]
+    if let (Some(owner), true) = (owner, options.runtime_kind == RuntimeKind::Local && options.relay_link.is_none() && !options.self_test) {
+        crate::local_runtime::handover::install(crate::local_runtime::handover::Runtime {
+            manager: manager.clone(), terminals: terminals.clone(), bridge: bridge.clone(), control: served_endpoint,
+            home: crate::store::root()?, owner: owner.descriptor(),
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = served_endpoint;
+    // Ready: what was queued for the runtime this one replaced is answered.
+    #[cfg(unix)]
+    if adopted.is_some() {
+        bridge.thaw();
+    }
+    Ok(Runtime { lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines })
+}
+
+/// The hook sockets a handover brought, the cards its hooks wait on, and
+/// those hooks' connections by card.
+#[cfg(unix)]
+type TakenOver = (crate::hooks::Adopted, Vec<crate::session::handover::Wait>, HashMap<String, std::os::unix::net::UnixStream>);
+
+/// Take over the terminals and agent tabs the runtime this process was
+/// handed over (#765). One that cannot be taken over is left running as it
+/// is, and said so: nothing that was handed over is stopped here.
+#[cfg(unix)]
+fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<BroadcastSink>, terminals: &Arc<crate::pty::Terminals>,
+    manager: &crate::session::SessionManager) -> Result<TakenOver> {
+    let record = &mut adopted.record;
+    log::info!("taking over {} terminal(s) and {} agent tab(s) from runtime {}", record.panes.len(), record.tabs.len(), record.from);
+    // Before anything here starts a child of its own.
+    crate::local_runtime::handover::reap_strays(&record.panes.iter().filter_map(|pane| pane.pid).collect());
+    let panes = std::mem::take(&mut record.panes);
+    let retained = std::mem::take(&mut record.retained);
+    let groups = std::mem::take(&mut record.groups);
+    let tabs = std::mem::take(&mut record.tabs);
+    let frames = std::mem::take(&mut record.frames);
+    let decisions = std::mem::take(&mut record.decisions);
+    let (own, published) = (record.control.own, record.control.published);
+    let emit: Arc<dyn EventSink> = sink.clone();
+    for pane in panes {
+        let master = adopted.take(pane.fd)?;
+        let id = pane.id.clone();
+        let frozen = crate::pty::FrozenPane {
+            id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, cwd: pane.cwd, created: pane.created,
+            tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback, printed: pane.printed, screen: pane.screen,
+            quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed,
+        };
+        if let Err(error) = terminals.adopt(emit.clone(), frozen) {
+            log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched");
+        }
+    }
+    terminals.adopt_rest(retained, groups);
+    let mut waits = Vec::new();
+    for tab in tabs {
+        let name = format!("{}/{}", tab.session_id, tab.tab_id);
+        match manager.adopt_tab(tab) {
+            Ok(waiting) => waits.extend(waiting),
+            Err(error) => log::error!("take over the agent tab {name}: {error:#}; it starts afresh when next opened"),
+        }
+    }
+    let sockets = crate::hooks::Adopted {
+        own: adopted.take(own)?,
+        published: match published { Some((listener, lock)) => Some((adopted.take(listener)?, adopted.take(lock)?)), None => None },
+        held: frames.into_iter().map(|frame| Ok((std::os::unix::net::UnixStream::from(adopted.take(frame.fd)?), frame.line))).collect::<Result<_>>()?,
+    };
+    let parked = decisions.into_iter().map(|decision| Ok((decision.request_id, std::os::unix::net::UnixStream::from(adopted.take(decision.fd)?)))).collect::<Result<_>>()?;
+    Ok((sockets, waits, parked))
 }
 
 /// Serve the workspace through the relay in the background, and report
@@ -896,7 +1060,7 @@ mod tests {
         let Some(root) = std::env::var_os("TERMINALX_TEST_SHARING_REPLY_OWNER") else { return };
         run(Options { idle_grace_seconds: 30, project_root: None,
             data_dir: Some(root.into()), runtime_kind: RuntimeKind::Local,
-            self_test: false, relay_link: None, log_file: None }).unwrap();
+            self_test: false, relay_link: None, log_file: None, adopt: None }).unwrap();
     }
 
     fn args(list: &[&str]) -> Vec<String> {
@@ -916,6 +1080,7 @@ mod tests {
                 self_test: false,
                 relay_link: None,
                 log_file: None,
+                adopt: None,
             })
         );
     }
