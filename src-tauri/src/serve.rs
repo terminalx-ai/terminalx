@@ -533,10 +533,9 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         project_root.as_deref().map(crate::cloud_agents::interrupted_tabs).unwrap_or_default()
     };
     crate::session::idle_orphaned_tabs_except(&kept_tabs, &kept_panes);
-    // Recover local history before hooks can publish live activity.
-    if let Err(error) = crate::store::activity::summary() {
-        log::error!("initialize activity history: {error:#}");
-    }
+    // The runtime is the one writer of activity history (#767). Recover
+    // local history before hooks can publish live activity.
+    crate::store::activity::claim();
     let sink = Arc::new(BroadcastSink::new(1024));
     let host = Arc::new(crate::harness::host::Host::new());
     let terminals = Arc::new(crate::pty::Terminals::new());

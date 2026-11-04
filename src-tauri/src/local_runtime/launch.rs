@@ -383,7 +383,7 @@ fn listener(socket: &Path) -> Option<libc::pid_t> {
 }
 
 /// The executable a process is running.
-fn executable(pid: libc::pid_t) -> Result<PathBuf> {
+pub(crate) fn executable(pid: libc::pid_t) -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];

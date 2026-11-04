@@ -1860,15 +1860,12 @@ impl SessionManager {
     }
 
     fn record_activity(&self, rt: &TabRuntime, status: TabStatus, source: store::activity::Source) {
-        match store::activity::transition(&rt.key(), status, source) {
-            Ok(Some(total)) => {
-                // #110's reminder can subscribe without scanning transcripts
-                // or treating hydration/tab creation as fresh usage.
-                self.sink.emit("agent_work_started", &total);
-                self.observer.work_started(total as u64);
-            }
-            Ok(None) => {}
-            Err(error) => log::error!("record app activity: {error:#}"),
+        // A failure to record is reported by the activity store, once (#767).
+        if let Some(total) = store::activity::transition(&rt.key(), status, source) {
+            // #110's reminder can subscribe without scanning transcripts
+            // or treating hydration/tab creation as fresh usage.
+            self.sink.emit("agent_work_started", &total);
+            self.observer.work_started(total as u64);
         }
     }
 
