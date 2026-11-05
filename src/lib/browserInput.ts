@@ -4,7 +4,7 @@
  */
 
 export interface PageInputEvent {
-  method: "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent" | "Input.insertText";
+  method: "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent" | "Input.insertText" | "Emulation.setDeviceMetricsOverride";
   params: Record<string, unknown>;
 }
 
@@ -108,4 +108,19 @@ export function keyEvents(type: "down" | "up", e: Key, mac: boolean): PageInputE
 
 export function insertText(text: string): PageInputEvent {
   return { method: "Input.insertText", params: { text } };
+}
+
+/** The largest frame side the stream sends; the view's scale keeps under it. */
+export const MAX_FRAME_SIDE = 2048;
+
+/**
+ * Lay the page out at the view's size, at the screen's pixel ratio, so it
+ * fills the view crisp the way a page in the app would. The ratio is lowered
+ * when the view in device pixels would pass the largest frame.
+ */
+export function viewportEvent(width: number, height: number, pixelRatio: number): PageInputEvent {
+  const w = Math.max(200, Math.floor(width));
+  const h = Math.max(200, Math.floor(height));
+  const scale = Math.max(1, Math.min(pixelRatio, MAX_FRAME_SIDE / w, MAX_FRAME_SIDE / h));
+  return { method: "Emulation.setDeviceMetricsOverride", params: { width: w, height: h, deviceScaleFactor: Math.round(scale * 100) / 100, mobile: false } };
 }

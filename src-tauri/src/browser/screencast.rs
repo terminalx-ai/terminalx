@@ -4,7 +4,9 @@
 //!
 //! The preview is also driven: the reader's clicks, scrolls and keys reach
 //! the page as `Input.*` commands over the same DevTools connection, so the
-//! reader and the agent work in the one page. Events that arrive while a
+//! reader and the agent work in the one page. The view also sets the page's
+//! viewport to its own size, so the page lays out for the space it is shown
+//! in and the frames come at that size, crisp, as a page in the app would. Events that arrive while a
 //! command waits for its reply are kept and handled after it: a frame left
 //! unacknowledged would stop the stream.
 
@@ -20,8 +22,10 @@ use super::{BrowserError, BrowserResult, BrowserRuntime, FRAME_EVENT, SCREENCAST
 
 /// Chromium sends a frame only when the page repaints, so the budget is
 /// really a ceiling on frame size rather than a rate.
-const MAX_WIDTH: u32 = 1440;
-const MAX_HEIGHT: u32 = 1000;
+/// The page is laid out at the view's size and device pixel ratio, so a frame
+/// is as large as the view in device pixels, up to this.
+const MAX_WIDTH: u32 = 2048;
+const MAX_HEIGHT: u32 = 2048;
 const JPEG_QUALITY: u32 = 60;
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,8 +47,9 @@ pub struct StatePayload {
     pub message: Option<String>,
 }
 
-/// The DevTools commands the reader's input may send to a page: input only.
-pub const INPUT_METHODS: [&str; 3] = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"];
+/// The DevTools commands a browser view may send to its page: the reader's
+/// input, and the viewport the view shows it at.
+pub const VIEW_METHODS: [&str; 4] = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Emulation.setDeviceMetricsOverride"];
 
 type InputBatch = Vec<(String, Value)>;
 
@@ -66,11 +71,11 @@ impl Screencasts {
         self.frames.lock().unwrap_or_else(|e| e.into_inner()).get(page_id).copied().unwrap_or(0)
     }
 
-    /// Send the reader's input to a live page, in order. Only `INPUT_METHODS`
+    /// Send a view's input to a live page, in order. Only `VIEW_METHODS`
     /// pass; the page must be streaming (the reader is looking at it).
     pub fn input(&self, page_id: &str, events: Vec<(String, Value)>) -> BrowserResult<()> {
-        if let Some((method, _)) = events.iter().find(|(method, _)| !INPUT_METHODS.contains(&method.as_str())) {
-            return Err(BrowserError::new("browser_input_refused", format!("{method} is not page input.")));
+        if let Some((method, _)) = events.iter().find(|(method, _)| !VIEW_METHODS.contains(&method.as_str())) {
+            return Err(BrowserError::new("browser_input_refused", format!("{method} is not a browser view command.")));
         }
         let sender = self.inputs.lock().unwrap_or_else(|e| e.into_inner()).get(page_id).cloned();
         let sender = sender.ok_or_else(|| BrowserError::new("browser_preview_not_live", "The page's preview is not live."))?;

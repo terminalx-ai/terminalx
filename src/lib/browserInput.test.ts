@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editingCommand, keyEvents, keyForPage, modifiersOf, mouseEvent, toPagePoint, wheelPixels } from "./browserInput";
+import { editingCommand, keyEvents, keyForPage, modifiersOf, mouseEvent, toPagePoint, viewportEvent, wheelPixels } from "./browserInput";
 
 const none = { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false };
 const key = (k: string, code: string, keyCode: number, mods: Partial<typeof none> = {}) => ({ ...none, ...mods, key: k, code, keyCode });
@@ -43,5 +43,13 @@ describe("the reader's input on a page preview", () => {
     expect(keyForPage(key("t", "KeyT", 84, { metaKey: true }), true)).toBe(false);
     expect(keyForPage(key("v", "KeyV", 86, { metaKey: true }), true)).toBe(false);
     expect(keyForPage(key("a", "KeyA", 65), true)).toBe(true);
+  });
+});
+
+describe("the page's viewport", () => {
+  it("is the view's size at the screen's ratio, lowered to keep the frame within bounds", () => {
+    expect(viewportEvent(520, 900, 2).params).toEqual({ width: 520, height: 900, deviceScaleFactor: 2, mobile: false });
+    expect(viewportEvent(1400, 900, 2).params).toMatchObject({ width: 1400, deviceScaleFactor: 1.46 });
+    expect(viewportEvent(50, 50, 1).params).toMatchObject({ width: 200, height: 200, deviceScaleFactor: 1 });
   });
 });

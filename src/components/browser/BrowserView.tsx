@@ -3,24 +3,27 @@ import { ArrowLeft, ArrowRight, ExternalLink, Globe, Pause, Play, RotateCw } fro
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { BrowserPage } from "@/lib/api";
-import { activateBrowserPage, navigateBrowserPage, sendPageInput, setScreencast, subscribeFrames, useBrowser, watchScreencast } from "@/lib/browser";
-import { insertText, keyEvents, keyForPage, mouseEvent, toPagePoint, wheelEvent, wheelPixels, modifiersOf, type PageInputEvent } from "@/lib/browserInput";
+import { navigateBrowserPage, sendPageInput, setScreencast, subscribeFrames, useBrowser, watchScreencast } from "@/lib/browser";
+import { insertText, keyEvents, keyForPage, mouseEvent, toPagePoint, viewportEvent, wheelEvent, wheelPixels, modifiersOf, type PageInputEvent } from "@/lib/browserInput";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { isMac } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
 import type { SessionEntry } from "@/types/session";
 
 /**
- * One browser page: a toolbar, and the page itself, streamed live from
- * Chromium over DevTools and driven from here. Clicks, drags, the wheel,
- * keys and pasted text reach the page, so the reader works in the same page
- * the agent does without leaving the app. "Open window" still raises the
- * Chromium window for what a preview cannot do (file pickers, extensions).
+ * One browser page: a toolbar, and the page itself. The page runs in a
+ * headless Chromium the agent drives too; here it is laid out at this view's
+ * size and pixel ratio, streamed over DevTools and driven from here, so it
+ * behaves as a page inside the app: clicks, drags, the wheel, keys and pasted
+ * text reach it, and the reader works in the same page the agent does.
+ * "Open in browser" hands the address to the default browser for what an
+ * embedded page cannot do (extensions, the reader's own sign-ins).
  *
  * `compact` is the side panel's: the toolbar keeps to icons and the footer
  * keeps to the title.
  */
-export function BrowserView({ session, page, active, compact }: { session: Pick<SessionEntry, "id">; page: BrowserPage; active: boolean; compact?: boolean }) {
+export function BrowserView({ page, active, compact }: { session: Pick<SessionEntry, "id">; page: BrowserPage; active: boolean; compact?: boolean }) {
   const browser = useBrowser();
   const cast = browser.screencast[page.id];
   const [paused, setPaused] = useState(false);
@@ -54,17 +57,6 @@ export function BrowserView({ session, page, active, compact }: { session: Pick<
     }, 500 * (restarts.current + 1));
     return () => window.clearTimeout(id);
   }, [live, cast?.state, page.id]);
-
-  useEffect(() => {
-    return subscribeFrames(page.id, (frame) => {
-      const img = imgRef.current;
-      if (!img) return;
-      img.src = `data:image/jpeg;base64,${frame.data}`;
-      if (frame.width && frame.height) pageSize.current = { width: frame.width, height: frame.height };
-      setHasFrame(true);
-    });
-  }, [page.id]);
-
 
   useEffect(() => {
     return subscribeFrames(page.id, (frame) => {
@@ -111,6 +103,32 @@ export function BrowserView({ session, page, active, compact }: { session: Pick<
     return toPagePoint(clientX, clientY, img.getBoundingClientRect(), size);
   };
   const interactive = live && hasFrame && cast?.state === "live";
+
+  // The page is laid out at this view's size: on resize, and each time a stream starts (a new connection drops the last size).
+  const streaming = live && cast?.state === "live";
+  useEffect(() => {
+    const el = surfaceRef.current;
+    if (!el || !streaming) return;
+    let timer = 0;
+    let last = "";
+    const fit = () => {
+      const event = viewportEvent(el.clientWidth, el.clientHeight, window.devicePixelRatio || 1);
+      const key = JSON.stringify(event.params);
+      if (key === last) return;
+      last = key;
+      void sendPageInput(page.id, [event]).catch((e) => setError(errorMessage(e)));
+    };
+    fit();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(fit, 120);
+    });
+    observer?.observe(el);
+    return () => {
+      observer?.disconnect();
+      window.clearTimeout(timer);
+    };
+  }, [streaming, page.id]);
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     surfaceRef.current?.focus({ preventScroll: true });
@@ -232,16 +250,10 @@ export function BrowserView({ session, page, active, compact }: { session: Pick<
             {paused ? <Play /> : <Pause />}
           </Button>
         </WithTooltip>
-        <WithTooltip label="Open the browser window">
-          {compact ? (
-            <Button type="button" variant="ghost" size="icon-sm" aria-label="Open window" onClick={() => void activateBrowserPage(session.id, page.id, true)}>
-              <ExternalLink />
-            </Button>
-          ) : (
-            <Button type="button" variant="outline" size="sm" aria-label="Open window" onClick={() => void activateBrowserPage(session.id, page.id, true)}>
-              <ExternalLink /> Open window
-            </Button>
-          )}
+        <WithTooltip label="Open in your browser">
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="Open in browser" disabled={!/^https?:/i.test(page.url)} onClick={() => void openUrl(page.url).catch((e) => setError(errorMessage(e)))}>
+            <ExternalLink />
+          </Button>
         </WithTooltip>
       </form>
       <div
@@ -259,15 +271,15 @@ export function BrowserView({ session, page, active, compact }: { session: Pick<
         onPaste={onPaste}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
-        className={cn("relative flex min-h-0 flex-1 items-start justify-center overflow-hidden bg-well/60 outline-none", compact ? "p-0" : "p-2")}
+        className="relative flex min-h-0 flex-1 items-start justify-center overflow-hidden bg-well/60 outline-none"
         data-testid="browser-surface"
       >
         <img
           ref={imgRef}
           alt={page.title ? `Preview of ${page.title}` : "Page preview"}
           className={cn(
-            "max-h-full max-w-full select-none object-contain",
-            compact ? "" : "rounded-md shadow-button",
+            // Laid out at this view's size, the page fills it.
+            "h-full w-full select-none object-contain object-top",
             interactive ? "cursor-default" : "",
             // Where the keys go: a ring on the page while it has them.
             focused && interactive && "ring-1 ring-accent/60",
