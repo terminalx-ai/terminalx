@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { cn } from "@/lib/cn";
-import type { Turn } from "@/lib/transcript";
+import { messageTime, type Turn } from "@/lib/transcript";
 
 /** Below this many prompts there is nothing to find again: no map. */
 const MIN_PROMPTS = 2;
@@ -102,8 +102,9 @@ export function PromptMap({
   }, [scroller, prompts.length, prompts[prompts.length - 1]?.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (prompts.length < MIN_PROMPTS) return null;
-  const preview =
-    hovered && prompts.find((t) => t.key === hovered.key)?.prompt?.text.trim();
+  const hoveredPrompt = hovered && prompts.find((t) => t.key === hovered.key)?.prompt;
+  const preview = hoveredPrompt?.text.trim();
+  const sent = shortTime(hoveredPrompt?.messageTs);
   const show = (button: HTMLElement, key: string) => {
     const box = nav.current?.getBoundingClientRect();
     const mark = button.getBoundingClientRect();
@@ -174,6 +175,11 @@ export function PromptMap({
           className="pointer-events-none absolute right-7 z-(--z-tooltip) w-max max-w-[18rem] -translate-y-1/2 rounded-md bg-popover glass px-2.5 py-1.5 text-xs leading-snug text-popover-foreground shadow-surface hairline"
           style={{ top: hovered.top }}
         >
+          {sent && (
+            <time dateTime={sent.iso} className="mb-0.5 block text-[11px] text-faint">
+              {sent.label}
+            </time>
+          )}
           <span className="line-clamp-3 whitespace-pre-wrap break-words">
             {preview}
           </span>
@@ -181,4 +187,21 @@ export function PromptMap({
       )}
     </nav>
   );
+}
+
+/**
+ * When a prompt was sent, as short as it can be and still be plain: the
+ * time today, the weekday and time within the week, else the date.
+ */
+export function shortTime(ts?: string, now = new Date(), locales?: string): { label: string; iso: string } | null {
+  const time = messageTime(ts, locales);
+  if (!time) return null;
+  const at = new Date(time.iso);
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const weekAgo = new Date(startOfToday);
+  weekAgo.setDate(weekAgo.getDate() - 6);
+  if (at >= startOfToday) return { label: time.short, iso: time.iso };
+  if (at >= weekAgo) return { label: `${new Intl.DateTimeFormat(locales, { weekday: "short" }).format(at)} ${time.short}`, iso: time.iso };
+  return { label: new Intl.DateTimeFormat(locales, { month: "short", day: "numeric" }).format(at), iso: time.iso };
 }
