@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BranchOverview } from "@/lib/api";
 
@@ -85,7 +85,8 @@ describe("the Branch tab", () => {
       { number: 7, title: "Login", url: "", state: "OPEN", isDraft: false, base: "main", head: "dc/login", additions: 1, deletions: 0, mergeable: "MERGEABLE", reviewDecision: "APPROVED", checks: [{ name: "ci", state: "success" }], body: "", author: "ann" },
     ]);
     render(<BranchPanel cwd="/repo/wt" active onOpenPr={() => undefined} />);
-    expect((await screen.findByTestId("branch-pr")).textContent).toContain("#7 · Ready to merge · Approved");
+    // The row is drawn at once, "Looking for a pull request…" until the lookup answers.
+    await waitFor(() => expect(screen.getByTestId("branch-pr").textContent).toContain("#7 · Ready to merge · Approved"));
     expect(screen.getByTestId("branch-status").textContent).toBe("Ready");
     expect(screen.getByTestId("branch-merge").textContent).toBe("Merges cleanly into main");
     cleanup();
