@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Keep local agent installation and login status current when returning to the
+  app, after an embedded sign-in command exits, and every two minutes while
+  Settings → Agents is open. Each card's badge and setup instructions now use
+  the same readiness check, so they cannot disagree about installation or
+  login. (PRO-170)
+
 ## 0.2.24
 
 ### Background sessions

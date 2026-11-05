@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { onAppResume } from "./appResume";
 
 export interface AgentReadiness {
   state: "missing" | "signed_out" | "ready" | "unknown";
@@ -31,7 +33,7 @@ export function readinessBlock(harness: string, value: AgentReadiness): string |
   return null;
 }
 
-export function useAgentReadiness(harness: string | null) {
+export function useAgentReadiness(harness: string | null, poll = false) {
   const [answer, setAnswer] = useState<{ harness: string; value: AgentReadiness } | null>(null);
   const [checking, setChecking] = useState(false);
   const generation = useRef(0);
@@ -47,5 +49,27 @@ export function useAgentReadiness(harness: string | null) {
     void refresh();
     return () => { generation.current++; };
   }, [refresh]);
+  useEffect(() => {
+    if (!harness) return;
+    const recheck = () => { void refresh(); };
+    const stopResume = onAppResume(recheck);
+    // An embedded login (for example the Codex sign-in shell) exits its PTY
+    // when finished. An exit is only a hint: always probe the actual login.
+    let disposed = false;
+    let stopExit: (() => void) | undefined;
+    void listen("pty_exit", () => { if (!disposed) recheck(); }).then((stop) => {
+      if (disposed) stop();
+      else stopExit = stop;
+    }).catch(() => { /* outside a webview */ });
+    const timer = poll ? setInterval(() => {
+      if (!document.hidden) recheck();
+    }, 2 * 60_000) : undefined;
+    return () => {
+      disposed = true;
+      stopResume();
+      stopExit?.();
+      clearInterval(timer);
+    };
+  }, [harness, poll, refresh]);
   return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
 }
