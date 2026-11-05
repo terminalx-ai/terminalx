@@ -4,12 +4,14 @@ import type { BrowserPage } from "@/lib/api";
 
 const state = { loaded: true, pages: [] as BrowserPage[], screencast: {} };
 const openBrowserPage = vi.fn(async () => "p2");
+const focusBrowserPage = vi.fn(async () => undefined);
 vi.mock("@/lib/browser", () => ({
   useBrowser: () => state,
   bootBrowser: vi.fn(async () => undefined),
   pagesFor: (pages: BrowserPage[], cwd: string) => pages.filter((p) => p.workspacePath === cwd),
   openBrowserPage: (...args: unknown[]) => openBrowserPage(...(args as [])),
   closeBrowserPage: vi.fn(async () => undefined),
+  focusBrowserPage: (...args: unknown[]) => focusBrowserPage(...(args as [])),
 }));
 vi.mock("./BrowserView", () => ({ BrowserView: ({ page }: { page: BrowserPage }) => <div data-testid="browser-view">{page.url}</div> }));
 
@@ -37,5 +39,7 @@ describe("the side panel's browser", () => {
     expect(tabs.map((t) => t.textContent)).toEqual(["localhost:3000", "example.com"]);
     fireEvent.click(tabs[0]);
     expect(screen.getByTestId("browser-view").textContent).toBe("http://localhost:3000/");
+    // The agent's current page follows the pick.
+    expect(focusBrowserPage).toHaveBeenCalledWith("p1");
   });
 });

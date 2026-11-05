@@ -3,7 +3,7 @@ import { Globe, Plus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
-import { bootBrowser, closeBrowserPage, openBrowserPage, pagesFor, useBrowser } from "@/lib/browser";
+import { bootBrowser, closeBrowserPage, focusBrowserPage, openBrowserPage, pagesFor, useBrowser } from "@/lib/browser";
 import { cn } from "@/lib/cn";
 import { BrowserView } from "./BrowserView";
 
@@ -11,7 +11,9 @@ import { BrowserView } from "./BrowserView";
  * The side panel's browser: the workspace's pages beside the chat. It is the
  * same Chromium the agent drives, so a page the agent opened is here to
  * watch and use, and a page opened here is one the agent can read and act
- * in. Pages show as small tabs over the page; with none, an address to open.
+ * in. Picking a page makes it the workspace's active one, the page the
+ * agent's browser commands act on. Pages show as small tabs over the page;
+ * with none, an address to open.
  */
 export function BrowserPanel({ sessionId, cwd, active }: { sessionId: string; cwd: string; active: boolean }) {
   const state = useBrowser();
@@ -30,6 +32,8 @@ export function BrowserPanel({ sessionId, cwd, active }: { sessionId: string; cw
   const opened = (id: string) => {
     setPicked(id);
     setAdding(false);
+    // The agent's "current page" follows the reader's pick, so both mean the same page.
+    void focusBrowserPage(id).catch((e) => console.error("browser activate failed", e));
   };
 
   return (

@@ -143,6 +143,16 @@ export async function openBrowserPage(cwd: string, url?: string | null): Promise
   return opened.browserPageId;
 }
 
+/**
+ * Make a page its workspace's active one, the page an agent's unqualified
+ * browser commands act on, without raising the Chromium window or changing
+ * the session's shown tab: what the reader picks beside the chat is what the
+ * agent means by "the page".
+ */
+export async function focusBrowserPage(pageId: string) {
+  await browserApi.activatePage(pageId, false);
+}
+
 export async function closeBrowserPage(sessionId: string, pageId: string) {
   clearSelectedBrowser(sessionId, pageId);
   await browserApi.closePage(pageId);
