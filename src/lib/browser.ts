@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { PageInputEvent } from "@/lib/browserInput";
 import { browser as browserApi, type BrowserPage } from "@/lib/api";
 import { clearSelectedBrowser, setSelectedBrowser } from "@/lib/terminal";
 
@@ -153,6 +155,36 @@ export async function setScreencast(pageId: string, live: boolean) {
   } catch (error) {
     set({ screencast: { ...state.screencast, [pageId]: { state: "error", message: error instanceof Error ? error.message : String(error) } } });
   }
+}
+
+const watchers = new Map<string, number>();
+
+/**
+ * Keep a page's preview streaming while anything shows it. A page can be in
+ * view twice (a tab and the side panel); the stream starts with the first
+ * view and stops with the last, so closing one never freezes the other.
+ */
+export function watchScreencast(pageId: string): () => void {
+  const count = watchers.get(pageId) ?? 0;
+  watchers.set(pageId, count + 1);
+  if (count === 0) void setScreencast(pageId, true);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    const left = (watchers.get(pageId) ?? 1) - 1;
+    if (left > 0) watchers.set(pageId, left);
+    else {
+      watchers.delete(pageId);
+      void setScreencast(pageId, false);
+    }
+  };
+}
+
+/** Replay the reader's input in a page whose preview is live, in order. */
+export async function sendPageInput(pageId: string, events: PageInputEvent[]) {
+  if (!events.length) return;
+  await invoke("browser_input", { pageId, events });
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

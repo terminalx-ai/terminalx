@@ -725,6 +725,7 @@ pub fn run() {
             browser::ui::browser_activate_page,
             browser::ui::browser_navigate,
             browser::ui::browser_screencast,
+            browser::ui::browser_input,
             browser::ui::browser_runtime_status,
             browser::ui::browser_install_browser,
             browser::ui::browser_profiles,
