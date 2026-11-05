@@ -228,6 +228,19 @@ export function Chat({
   }, [oldestMounted, goToTurn]);
   const { promptMap } = usePrefs();
 
+  // The footer floats over the transcript's foot; the transcript ends in a spacer as tall as it.
+  const footerRef = useRef<HTMLDivElement>(null);
+  const [footerHeight, setFooterHeight] = useState(0);
+  useLayoutEffect(() => {
+    const el = footerRef.current;
+    if (!el) return;
+    const measure = () => setFooterHeight(el.offsetHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
 
@@ -286,11 +299,19 @@ export function Chat({
                 )}
               </div>
             ))}
+            {/* Room to scroll the last of the transcript out from under the footer. Inside the content, so growing it re-pins. */}
+            <div aria-hidden style={{ height: footerHeight }} />
           </div>
         </div>
-        {promptMap && <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} />}
+        {promptMap && (
+          <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: footerHeight }}>
+            <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} />
+          </div>
+        )}
       </div>
-      <div className="relative shrink-0">
+      {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes. */}
+      <div ref={footerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-10 [&>*]:pointer-events-auto">
+        <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_70%)]" />
         {/* Above the composer, never behind it: the composer is see-through. */}
         <div
           className={cn(
