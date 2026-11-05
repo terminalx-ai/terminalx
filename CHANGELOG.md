@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Connect GitHub from the PR tab or Settings → Integrations in an embedded
+  sign-in terminal. Pushing a repository without a remote now offers a URL
+  field, or creation of a GitHub repository when signed in. Git failures show
+  a readable explanation with command output behind **Show details**. (PRO-166)
+
 ## 0.2.24
 
 ### Background sessions

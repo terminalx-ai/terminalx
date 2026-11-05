@@ -745,6 +745,92 @@ pub fn available() -> bool {
     crate::binpath::resolve("gh").is_some()
 }
 
+pub const LOGIN_COMMAND: &str = "gh auth login --web";
+
+pub fn validate_login_pane(id: &str) -> Result<()> {
+    let suffix = id.strip_prefix("github-login-").context("invalid GitHub login pane")?;
+    uuid::Uuid::parse_str(suffix).context("invalid GitHub login pane")?;
+    Ok(())
+}
+
+/// Installation and authentication are separate: finding `gh` on PATH says
+/// nothing about whether it can read pull requests for this person.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionStatus {
+    pub state: &'static str,
+    pub details: Option<String>,
+}
+
+pub fn connection_status() -> ConnectionStatus {
+    let Ok(command) = gh() else {
+        return ConnectionStatus { state: "missing", details: None };
+    };
+    connection_status_with(command)
+}
+
+fn connection_status_with(mut command: Command) -> ConnectionStatus {
+    command.args(["auth", "status", "--active"]);
+    match crate::git::capture_within(command, std::time::Duration::from_secs(15)) {
+        Ok(output) if output.status.success() => ConnectionStatus { state: "connected", details: None },
+        Ok(output) => {
+            let details = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            let lower = details.to_ascii_lowercase();
+            let signed_out = lower.contains("gh auth login") || lower.contains("not logged into") || lower.contains("token") && lower.contains("invalid");
+            ConnectionStatus { state: if signed_out { "signed_out" } else { "unavailable" }, details: Some(details.trim().to_string()) }
+        }
+        Err(error) => ConnectionStatus { state: "unavailable", details: Some(error.to_string()) },
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn login_panes_cannot_address_an_agent_or_session_shell() {
+        validate_login_pane("github-login-2d690d12-4cc3-46f4-a183-05c6aad7a3ce").unwrap();
+        for id in ["tab:agent", "session:shell", "github-login-", "github-login-session:shell"] {
+            assert!(validate_login_pane(id).is_err());
+        }
+        assert_eq!(LOGIN_COMMAND, "gh auth login --web");
+    }
+
+    #[test]
+    fn signed_out_cli_is_a_connection_state_with_optional_details() {
+        let Some(path) = crate::binpath::resolve("gh") else { return; };
+        let config = tempfile::tempdir().unwrap();
+        let mut command = Command::new(path);
+        command.env("GH_CONFIG_DIR", config.path()).env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
+            .env_remove("GH_ENTERPRISE_TOKEN").env_remove("GITHUB_ENTERPRISE_TOKEN").env_remove("GH_HOST");
+        let status = connection_status_with(command);
+        assert_eq!(status.state, "signed_out");
+        assert!(status.details.unwrap().contains("gh auth login"));
+    }
+
+    #[test]
+    fn invalid_repository_names_never_run_gh() {
+        for name in ["", "--public", "a/b/c", "owner/", "../repo", "a;touch bad"] {
+            assert!(create_repository(Path::new("/does-not-exist"), name, true).unwrap_err().to_string().contains("repository name"));
+        }
+    }
+}
+
+/// Create only on explicit submission, private by default in the UI. `gh`
+/// adds origin; publishing commits remains the separate Push action.
+pub fn create_repository(cwd: &Path, name: &str, private: bool) -> Result<()> {
+    if name.is_empty() || name.starts_with('-') || name.split('/').count() > 2
+        || name.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')) {
+        bail!("Enter a repository name, optionally preceded by its owner.");
+    }
+    if crate::git::has_remote(cwd)? {
+        bail!("This repository already has a remote. Refresh before creating a repository.");
+    }
+    run(cwd, &["repo", "create", name, if private { "--private" } else { "--public" }, "--source=.", "--remote=origin"])?;
+    Ok(())
+}
+
 // ---- for the removal of a workspace once its pull request has merged --------
 //
 // These run unattended and on a timer (`merged_cleanup.rs`), so each has a

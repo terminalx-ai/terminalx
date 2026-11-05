@@ -1298,6 +1298,20 @@ pub fn push(cwd: &Path) -> Result<String> {
     }
 }
 
+pub fn has_remote(cwd: &Path) -> Result<bool> {
+    Ok(!run(cwd, &["remote"])?.trim().is_empty())
+}
+
+pub fn add_remote(cwd: &Path, url: &str) -> Result<()> {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
+        bail!("Enter a remote URL.");
+    }
+    // Arguments, never a shell command. Git refuses an existing origin rather
+    // than silently replacing a destination another window just configured.
+    run(cwd, &["remote", "add", "origin", url]).map(|_| ())
+}
+
 pub fn pull(cwd: &Path) -> Result<String> {
     run(cwd, &["pull", "--ff-only"])
 }
@@ -1385,6 +1399,29 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn adding_a_remote_resolves_a_local_only_repository_and_pushes() {
+        let local = repo();
+        let remote = tempfile::tempdir().unwrap();
+        run(remote.path(), &["init", "--bare", "-q"]).unwrap();
+        assert!(!has_remote(local.path()).unwrap());
+        add_remote(local.path(), remote.path().to_str().unwrap()).unwrap();
+        assert!(has_remote(local.path()).unwrap());
+        push(local.path()).unwrap();
+        assert_eq!(run(remote.path(), &["rev-parse", "main"]).unwrap(), run(local.path(), &["rev-parse", "HEAD"]).unwrap());
+        assert!(add_remote(local.path(), "https://example.com/another.git").is_err());
+        assert_eq!(remote_url(local.path()).as_deref(), remote.path().to_str());
+    }
+
+    #[test]
+    fn invalid_remote_urls_do_not_change_git_configuration() {
+        let local = repo();
+        for url in ["", " ", "--upload-pack=bad", "https://example.com/repo\nnext"] {
+            assert!(add_remote(local.path(), url).is_err());
+            assert!(!has_remote(local.path()).unwrap());
+        }
     }
 
     #[test]

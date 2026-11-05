@@ -2839,6 +2839,32 @@ pub async fn git_push(cwd: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
+pub async fn git_has_remote(cwd: String) -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || git::has_remote(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_add_remote(cwd: String, url: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::add_remote(Path::new(&cwd), &url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn gh_connection_status() -> CmdResult<crate::github::ConnectionStatus> {
+    tauri::async_runtime::spawn_blocking(crate::github::connection_status).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn gh_login_start(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.github_login(&id)).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn gh_create_repository(cwd: String, name: String, private: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::create_repository(Path::new(&cwd), &name, private).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn git_pull(cwd: String) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || git::pull(Path::new(&cwd)).map_err(err)).await.map_err(err)?
 }

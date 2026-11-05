@@ -24,6 +24,11 @@ impl Terminals {
         self.0.call("runtime.pty.spawn", json!({"id":id,"cwd":cwd,"cols":cols,"rows":rows,"command":command,"title":title}))
     }
 
+    /// Settings can connect GitHub before there is any project or session.
+    pub fn github_login(&self, id: &str) -> Result<()> {
+        self.0.call("runtime.pty.githubLogin", json!({"id":id}))
+    }
+
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<()> {
         self.0.quick("runtime.pty.write", json!({"id":id,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))
     }
