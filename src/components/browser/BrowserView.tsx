@@ -43,6 +43,29 @@ export function BrowserView({ session, page, active, compact }: { session: Pick<
 
   useEffect(() => (live ? watchScreencast(page.id) : undefined), [live, page.id]);
 
+  // A stream that ends while the page is in view (the app restarted, the connection dropped) is started again, a few times.
+  const restarts = useRef(0);
+  useEffect(() => {
+    if (cast?.state === "live") restarts.current = 0;
+    if (!live || cast?.state !== "ended" || restarts.current >= 3) return;
+    const id = window.setTimeout(() => {
+      restarts.current += 1;
+      void setScreencast(page.id, true);
+    }, 500 * (restarts.current + 1));
+    return () => window.clearTimeout(id);
+  }, [live, cast?.state, page.id]);
+
+  useEffect(() => {
+    return subscribeFrames(page.id, (frame) => {
+      const img = imgRef.current;
+      if (!img) return;
+      img.src = `data:image/jpeg;base64,${frame.data}`;
+      if (frame.width && frame.height) pageSize.current = { width: frame.width, height: frame.height };
+      setHasFrame(true);
+    });
+  }, [page.id]);
+
+
   useEffect(() => {
     return subscribeFrames(page.id, (frame) => {
       const img = imgRef.current;

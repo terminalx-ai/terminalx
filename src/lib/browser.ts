@@ -179,27 +179,50 @@ export async function setScreencast(pageId: string, live: boolean) {
 }
 
 const watchers = new Map<string, number>();
+const pendingStops = new Map<string, ReturnType<typeof setTimeout>>();
+/** How long a stream outlives its last view: a view remounting (React's development double mount, a page moving between a tab and the panel) keeps it. */
+const STOP_GRACE_MS = 400;
 
 /**
  * Keep a page's preview streaming while anything shows it. A page can be in
  * view twice (a tab and the side panel); the stream starts with the first
- * view and stops with the last, so closing one never freezes the other.
+ * view and stops a moment after the last, so closing one never freezes the
+ * other, and a view that remounts finds its stream still running. Stopping
+ * and starting at once raced in the backend (a start that saw the old stream
+ * still live did nothing, then the stop ended it).
  */
 export function watchScreencast(pageId: string): () => void {
+  const pending = pendingStops.get(pageId);
+  if (pending) {
+    clearTimeout(pending);
+    pendingStops.delete(pageId);
+  }
   const count = watchers.get(pageId) ?? 0;
   watchers.set(pageId, count + 1);
-  if (count === 0) void setScreencast(pageId, true);
+  if (count === 0 && !pending) void setScreencast(pageId, true);
   let done = false;
   return () => {
     if (done) return;
     done = true;
     const left = (watchers.get(pageId) ?? 1) - 1;
-    if (left > 0) watchers.set(pageId, left);
-    else {
-      watchers.delete(pageId);
-      void setScreencast(pageId, false);
+    if (left > 0) {
+      watchers.set(pageId, left);
+      return;
     }
+    watchers.delete(pageId);
+    pendingStops.set(
+      pageId,
+      setTimeout(() => {
+        pendingStops.delete(pageId);
+        if (!watchers.has(pageId)) void setScreencast(pageId, false);
+      }, STOP_GRACE_MS),
+    );
   };
+}
+
+/** Whether anything shows the page now. */
+export function isWatched(pageId: string): boolean {
+  return watchers.has(pageId);
 }
 
 /** Replay the reader's input in a page whose preview is live, in order. */
