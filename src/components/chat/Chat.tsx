@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -10,6 +10,7 @@ import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
 import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
+import { turnDivider } from "@/lib/turnDivider";
 
 const NEAR_BOTTOM_PX = 40;
 const FIRST_MOUNT = 12;
@@ -267,9 +268,11 @@ export function Chat({
             )}
             {turns.slice(oldestMounted).map((t, i, arr) => {
               const isLast = i === arr.length - 1;
+              const divider = turnDivider(turns[oldestMounted + i - 1], t);
               return (
+                <Fragment key={t.key}>
+                {divider && <TurnDivider label={divider} />}
                 <TurnBlock
-                  key={t.key}
                   turn={t}
                   cwd={cwd}
                   sessionId={sessionId}
@@ -279,6 +282,7 @@ export function Chat({
                   // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                   onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 />
+                </Fragment>
               );
             })}
             {transcript.compacting && (
@@ -336,6 +340,17 @@ export function Chat({
         <RaccoonRunner active={progressing} obstacle={!atBottom} />
         {footer}
       </div>
+    </div>
+  );
+}
+
+/** The time above a turn that opens a new sitting: a hairline each side, the day and time between. */
+function TurnDivider({ label }: { label: string }) {
+  return (
+    <div role="separator" aria-label={label} className="mb-6 flex items-center gap-3 text-[11px] text-faint" data-testid="turn-divider">
+      <span className="h-px flex-1 bg-hairline" />
+      <span className="shrink-0">{label}</span>
+      <span className="h-px flex-1 bg-hairline" />
     </div>
   );
 }

@@ -1,13 +1,15 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, RefreshCw, Send, Shrink, Users, X } from "@/icons";
+import { Brain, Check, ChevronRight, CircleAlert, Clock, Copy, Image as ImageIcon, RefreshCw, Send, Shrink, Users, X } from "@/icons";
+import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
 import type { Turn, WorkItem } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
-import { MessageTime } from "./MessageTime";
+import { HoverTime, MessageTime } from "./MessageTime";
+import { messageTime } from "@terminalx/portable/transcript";
 import { Markdown } from "./Markdown";
 import { LinkedText } from "./LinkedText";
 import { ToolCallRow, ToolGroupRow } from "./ToolCallRow";
@@ -16,9 +18,14 @@ import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
 
 /**
- * One exchange: the prompt, the work under it, the answer. Once the agent has
- * started answering, the tool calls fold behind one line (a setting), and a
- * settled turn's footer says how long it took.
+ * One exchange: the prompt, the work under it, the answer, and a footer.
+ *
+ * Once the agent has answered, the work folds behind one header line that
+ * says how it went ("Worked for 14s · 2 tool calls"). The footer is a single
+ * quiet row: when the answer came, how long it took when no header said so,
+ * and a copy button that shows on hover. Times stay in the transcript but
+ * out of the reading: the answer's in the footer, the reader's own under
+ * their bubble on hover.
  */
 export const TurnBlock = memo(function TurnBlock({
   turn,
@@ -48,9 +55,10 @@ export const TurnBlock = memo(function TurnBlock({
   const streamThinking = stream.filter((s) => s.kind === "thinking" && s.text && !s.done);
   const linkContext = useMemo(() => cwd ? { sessionId, cwd } : undefined, [cwd, sessionId]);
   const changes = useMemo(() => (prefs.turnChanges && turn.completed ? turnFileChanges(turn) : []), [prefs.turnChanges, turn]);
+  const outcome = turnOutcome(turn);
 
   return (
-    <div className="transcript-turn" data-turn={turn.key}>
+    <div className="transcript-turn group/turn pb-8" data-turn={turn.key}>
       {turn.prompt && <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" />}
 
       {foldable ? (
@@ -58,10 +66,13 @@ export const TurnBlock = memo(function TurnBlock({
           <button
             type="button"
             onClick={() => setExpanded((e) => !e)}
-            className="flex items-center gap-1.5 rounded-md -mx-1.5 px-1.5 py-1 text-xs text-muted-foreground hover:bg-veil-raised"
+            aria-expanded={expanded}
+            className="flex max-w-full items-center gap-1.5 rounded-md -mx-1.5 px-1.5 py-1 text-[13px] hover:bg-veil-raised"
           >
-            <ChevronRight className={cn("size-3.5 transition-transform", expanded && "rotate-90")} />
-            {summarize(turn)}
+            {outcome && outcome.tone !== "ok" && <OutcomeIcon tone={outcome.tone} />}
+            <span className={cn("shrink-0", outcome?.tone === "failed" ? "text-destructive" : "text-muted-foreground")}>{outcome ? outcome.label : summarize(turn)}</span>
+            {outcome && <span className="min-w-0 truncate text-faint">· {summarize(turn)}</span>}
+            <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", expanded && "rotate-90")} />
           </button>
           {expanded && (
             <div className="ml-1 mt-1 border-l border-hairline pl-3.5">
@@ -91,7 +102,7 @@ export const TurnBlock = memo(function TurnBlock({
         </div>
       )}
       {streamText.map((s) => (
-        <div key={`${s.ref.messageId}:${s.ref.index}`} className="mb-3"><Markdown text={s.text} streaming linkContext={linkContext} /><MessageTime ts={s.ts} /></div>
+        <div key={`${s.ref.messageId}:${s.ref.index}`} className="mb-3"><Markdown text={s.text} streaming linkContext={linkContext} /></div>
       ))}
 
       {working && !streamText.length && !streamThinking.length && !streamingTool && (
@@ -113,19 +124,7 @@ export const TurnBlock = memo(function TurnBlock({
 
       {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
 
-      {turn.completed && (
-        <div className="mb-6 flex items-center gap-1.5 -mx-1.5 px-1.5 text-xs text-faint">
-          {turn.completed.status === "ok" ? (
-            <Check className="size-3.5" />
-          ) : turn.completed.status === "aborted" ? (
-            <X className="size-3.5" />
-          ) : (
-            <CircleAlert className="size-3.5 text-destructive" />
-          )}
-          {turn.completed.status === "aborted" ? "Stopped" : turn.completed.status === "ok" ? "Worked" : "Failed"}
-          {turn.completed.durationMs != null && ` for ${formatDuration(turn.completed.durationMs)}`}
-        </div>
-      )}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} />}
     </div>
   );
 });
@@ -133,6 +132,66 @@ export const TurnBlock = memo(function TurnBlock({
 /** What a folded turn still shows: the answer, and the reader's own words (#551). */
 function outsideFold(item: WorkItem): boolean {
   return item.kind === "text" || item.kind === "message" || item.kind === "queued";
+}
+
+type Outcome = { tone: "ok" | "stopped" | "failed"; word: string; label: string; duration: string | null };
+
+/** How a settled turn went, in the words its header or footer uses. */
+function turnOutcome(turn: Turn): Outcome | null {
+  const done = turn.completed;
+  if (!done) return null;
+  const duration = done.durationMs != null ? formatDuration(done.durationMs) : null;
+  if (done.status === "ok") return { tone: "ok", word: "Worked", label: duration ? `Worked for ${duration}` : "Worked", duration: duration && `for ${duration}` };
+  const tone = done.status === "aborted" ? "stopped" : "failed";
+  const word = tone === "stopped" ? "Stopped" : "Failed";
+  return { tone, word, label: duration ? `${word} after ${duration}` : word, duration: duration && `after ${duration}` };
+}
+
+function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
+  if (tone === "ok") return <Check className="size-3.5 shrink-0" />;
+  if (tone === "stopped") return <X className="size-3.5 shrink-0" />;
+  return <CircleAlert className="size-3.5 shrink-0 text-destructive" />;
+}
+
+/**
+ * A settled turn's one footer row: when the answer came, how the turn went
+ * when no header said so, and a copy of the answer on hover.
+ */
+function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) {
+  const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
+  const ts = answer.at(-1)?.messageTs;
+  const text = answer.map((w) => w.text).join("\n\n");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const id = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(id);
+  }, [copied]);
+  const quiet = outcome?.tone === "ok";
+  if (!messageTime(ts) && !outcome && !text) return null;
+  return (
+    <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
+      <MessageTime ts={ts} inline />
+      {outcome && (
+        <span className={cn("flex items-center gap-1.5", outcome.tone === "failed" && "text-destructive")}>
+          {!quiet && <OutcomeIcon tone={outcome.tone} />}
+          <span>{outcome.word}</span>
+          {outcome.duration && <span className="-ml-1">{outcome.duration}</span>}
+        </span>
+      )}
+      {text && (
+          <button
+            type="button"
+            aria-label="Copy answer"
+            title={copied ? "Copied" : "Copy answer"}
+            onClick={() => void copyText(text).then(() => setCopied(true))}
+            className="-my-1 flex size-6 items-center justify-center rounded-md text-faint opacity-0 transition-opacity hover:bg-veil-raised hover:text-foreground focus-visible:opacity-100 group-hover/turn:opacity-100"
+          >
+            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          </button>
+      )}
+    </div>
+  );
 }
 
 function summarize(turn: Turn): string {
@@ -163,7 +222,7 @@ export function previewFromPartialJson(partial: string): string {
 function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void }) {
   switch (item.kind) {
     case "text":
-      return <div className="mb-3"><Markdown text={item.text} linkContext={linkContext} /><MessageTime ts={item.messageTs} /></div>;
+      return <div className="mb-3"><Markdown text={item.text} linkContext={linkContext} /></div>;
     case "reasoning":
       return <ReasoningRow text={item.text} linkContext={linkContext} />;
     case "tool":
@@ -246,7 +305,7 @@ function ReaderMessage({
 }) {
   const layout = usePrefs().transcriptLayout;
   return (
-    <div className={cn(className, "flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+    <div className={cn(className, "group/msg relative flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
       <div
         className={cn(
           "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed",
@@ -270,8 +329,8 @@ function ReaderMessage({
         ) : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
         <div><LinkedText text={message.text} context={linkContext} /></div>
-        <MessageTime ts={message.messageTs} />
       </div>
+      <HoverTime ts={message.messageTs} />
     </div>
   );
 }
