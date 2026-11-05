@@ -58,13 +58,13 @@ export const TurnBlock = memo(function TurnBlock({
           <button
             type="button"
             onClick={() => setExpanded((e) => !e)}
-            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground hover:bg-veil-raised"
+            className="flex items-center gap-1.5 rounded-md -mx-1.5 px-1.5 py-1 text-xs text-muted-foreground hover:bg-veil-raised"
           >
             <ChevronRight className={cn("size-3.5 transition-transform", expanded && "rotate-90")} />
             {summarize(turn)}
           </button>
           {expanded && (
-            <div className="ml-1 mt-1 border-l border-hairline pl-2">
+            <div className="ml-1 mt-1 border-l border-hairline pl-3.5">
               {turn.work.map((w) => (outsideFold(w) ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} />))}
             </div>
           )}
@@ -85,7 +85,7 @@ export const TurnBlock = memo(function TurnBlock({
         </div>
       ))}
       {streamingTool && (
-        <div className="mb-1 flex items-center gap-2 px-1.5 py-1 text-[13px] text-muted-foreground">
+        <div className="mb-1 flex items-center gap-2 -mx-1.5 px-1.5 py-1 text-[13px] text-muted-foreground">
           <span className="text-shimmer">{streamingTool.toolName ?? "Calling a tool"}</span>
           <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-faint"><LinkedText text={previewFromPartialJson(streamingTool.partialJson)} context={linkContext} /></span>
         </div>
@@ -95,7 +95,7 @@ export const TurnBlock = memo(function TurnBlock({
       ))}
 
       {working && !streamText.length && !streamThinking.length && !streamingTool && (
-        <div className="mb-3 flex items-center gap-2 px-1.5 text-[13px]">
+        <div className="mb-3 flex items-center gap-2 -mx-1.5 px-1.5 text-[13px]">
           <span className="relative flex size-3.5 items-center justify-center">
             <span className="absolute size-3.5 rounded-full bg-accent/30 animate-ping" />
             <span className="size-2 rounded-full bg-accent" />
@@ -114,7 +114,7 @@ export const TurnBlock = memo(function TurnBlock({
       {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
 
       {turn.completed && (
-        <div className="mb-6 flex items-center gap-1.5 px-1.5 text-xs text-faint">
+        <div className="mb-6 flex items-center gap-1.5 -mx-1.5 px-1.5 text-xs text-faint">
           {turn.completed.status === "ok" ? (
             <Check className="size-3.5" />
           ) : turn.completed.status === "aborted" ? (
@@ -189,7 +189,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
       );
     case "status":
       return (
-        <div className="px-1.5 py-1 text-xs text-faint">
+        <div className="-mx-1.5 px-1.5 py-1 text-xs text-faint">
           <LinkedText text={item.text} context={linkContext} />
           {item.initiatingPrompt?.trim() && (
             <details className="mt-1">
@@ -210,14 +210,14 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
       return <CompactionRow item={item} linkContext={linkContext} />;
     case "retry":
       return (
-        <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-warning">
+        <div className="my-1 flex items-center gap-2 -mx-1.5 px-1.5 py-1 text-xs text-warning">
           <RefreshCw className="size-3.5 animate-spin" />
           Retrying ({item.attempt}/{item.maxRetries}){item.reason ? <>: <LinkedText text={item.reason} context={linkContext} /></> : null}
         </div>
       );
     case "subagent":
       return (
-        <div className="flex items-center gap-2 px-1.5 py-1 text-[13px] text-muted-foreground">
+        <div className="flex items-center gap-2 -mx-1.5 px-1.5 py-1 text-[13px] text-muted-foreground">
           <Users className="size-3.5" />
           <span className={cn(!item.done && "text-shimmer")}><LinkedText text={item.label ?? "Subagent"} context={linkContext} /></span>
           {item.done && <Check className="size-3.5 text-faint" />}
@@ -225,7 +225,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
       );
     case "decision":
       return (
-        <div className={cn("px-1.5 py-0.5 text-xs", item.allowed ? "text-faint" : "text-destructive/80")}>
+        <div className={cn("-mx-1.5 px-1.5 py-0.5 text-xs", item.allowed ? "text-faint" : "text-destructive/80")}>
           <LinkedText text={item.label} context={linkContext} />
         </div>
       );
@@ -297,7 +297,7 @@ function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: 
   );
   if (!item.summary) {
     return (
-      <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-faint">
+      <div className="my-1 flex items-center gap-2 -mx-1.5 px-1.5 py-1 text-xs text-faint">
         <Shrink className="size-3.5" />
         {label}
       </div>
@@ -309,7 +309,7 @@ function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: 
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs text-faint hover:bg-veil-raised"
+        className="flex w-full items-center gap-2 rounded-md -mx-1.5 px-1.5 py-1 text-left text-xs text-faint hover:bg-veil-raised"
       >
         <Shrink className="size-3.5 shrink-0" />
         <span className="min-w-0 flex-1">{label}</span>
@@ -317,7 +317,7 @@ function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: 
         <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
       </button>
       {open && (
-        <div data-testid="compaction-summary" className="mb-2 ml-6 max-h-72 overflow-auto scrollbar-thin border-l border-hairline pl-3 text-xs leading-relaxed whitespace-pre-wrap text-faint select-text">
+        <div data-testid="compaction-summary" className="mb-2 ml-4.5 max-h-72 overflow-auto scrollbar-thin border-l border-hairline pl-3 text-xs leading-relaxed whitespace-pre-wrap text-faint select-text">
           <LinkedText text={item.summary} context={linkContext} />
         </div>
       )}
@@ -332,13 +332,13 @@ function ReasoningRow({ text, linkContext }: { text: string; linkContext?: { ses
     <div>
       <div
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] text-thinking hover:bg-veil-raised"
+        className="flex w-full items-center gap-2 rounded-md -mx-1.5 px-1.5 py-1 text-left text-[13px] text-thinking hover:bg-veil-raised"
       >
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-3.5 shrink-0" /></button>
         <span className="min-w-0 flex-1 truncate italic opacity-80">{open ? "Thinking" : <LinkedText text={first} context={linkContext} />}</span>
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning details" : "Expand reasoning details"}><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
       </div>
-      {open && <div className="ml-6 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
+      {open && <div className="ml-4.5 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
     </div>
   );
 }

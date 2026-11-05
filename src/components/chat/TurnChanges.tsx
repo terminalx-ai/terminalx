@@ -21,7 +21,7 @@ export function TurnChanges({ changes, cwd, linkContext }: { changes: TurnFileCh
   const rest = changes.slice(SHOWN);
   const sum = (list: TurnFileChange[], key: "added" | "removed") => list.reduce((n, c) => n + c[key], 0);
   return (
-    <div className="mb-3 flex flex-wrap gap-1.5 px-1.5" data-testid="turn-changes" aria-label="Files changed in this turn">
+    <div className="mb-3 flex flex-wrap gap-1.5" data-testid="turn-changes" aria-label="Files changed in this turn">
       {shown.map((change) => {
         const label = `${shortPath(change.path, cwd)}${change.kind === "create" ? " (new)" : change.kind === "delete" ? " (deleted)" : ""}`;
         return (

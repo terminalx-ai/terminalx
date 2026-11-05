@@ -476,7 +476,7 @@ export function Composer({
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 pb-4 pt-2">
+    <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <DictationStatus dictation={dictation} />
       <div

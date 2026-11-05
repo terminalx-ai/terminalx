@@ -282,10 +282,10 @@ export function Chat({
               );
             })}
             {transcript.compacting && (
-              <div className="mb-3 px-1.5 text-[13px] text-shimmer">Compacting context…</div>
+              <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">Compacting context…</div>
             )}
             {transcript.retry && progressing && (
-              <div className="mb-3 px-1.5 text-[13px] text-warning">
+              <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-warning">
                 Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
                 {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
               </div>
