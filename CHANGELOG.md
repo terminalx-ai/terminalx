@@ -2,26 +2,7 @@
 
 ## Unreleased
 
-### Stats & Usage
-
-- Agent work and PRs count again while the app is open. The app took the
-  activity-history lock at launch and held it until it quit, so the background
-  runtime, which records every turn and PR, could write none of them: agents
-  spawned, agent time and PRs created stopped counting, and the star reminder's
-  count froze. Now only the runtime writes activity history. The app reads what
-  the runtime saved, and the PRs the app finds or creates are kept aside for the
-  runtime to count. Turns that went unrecorded before this release are not
-  recovered. (#767)
-- While another process holds activity history (an older app, another runtime,
-  a command), the runtime keeps its turns and PRs aside. It takes the lock
-  within a second of that process quitting, without waiting for a tab to
-  change, and then counts what it kept once, with each turn's whole working
-  time. Stats keeps its counters current meanwhile and shows one notice naming
-  the holder: "The TerminalX app (pid …)", "Another runtime (pid …)" or "A
-  TerminalX command (pid …)". It no longer offers a Retry that cannot help;
-  Retry stays for a read that failed. The log gets one line for the episode
-  instead of one per tab status change, and PR discovery no longer reports a
-  failure on every pass. (#767)
+## 0.2.24
 
 ### Background sessions
 
@@ -56,6 +37,51 @@
   notice appears only when a move failed, with the reason and Try again. An
   update from 0.2.23, which cannot ask first, waits in the status bar the
   same way. (#766)
+
+### Chat
+
+- Keep the chat drawn while scrolling past a long reply. Since 0.2.23 the
+  chat draws only the turns near the view, and a reply taller than the 1200 px
+  it draws past the view (a big table, long code) could be left out while it
+  was on screen: the chat went empty but for the **Latest** button until the
+  next scroll. A turn on screen is now always drawn, and the view no longer
+  sits over the space that stands in for turns not drawn, scrolling either
+  way. (#771)
+
+### Stats & Usage
+
+- Agent work and PRs count again while the app is open. The app took the
+  activity-history lock at launch and held it until it quit, so the background
+  runtime, which records every turn and PR, could write none of them: agents
+  spawned, agent time and PRs created stopped counting, and the star reminder's
+  count froze. Now only the runtime writes activity history. The app reads what
+  the runtime saved, and the PRs the app finds or creates are kept aside for the
+  runtime to count. Turns that went unrecorded before this release are not
+  recovered. (#767)
+- While another process holds activity history (an older app, another runtime,
+  a command), the runtime keeps its turns and PRs aside. It takes the lock
+  within a second of that process quitting, without waiting for a tab to
+  change, and then counts what it kept once, with each turn's whole working
+  time. Stats keeps its counters current meanwhile and shows one notice naming
+  the holder: "The TerminalX app (pid …)", "Another runtime (pid …)" or "A
+  TerminalX command (pid …)". It no longer offers a Retry that cannot help;
+  Retry stays for a read that failed. The log gets one line for the episode
+  instead of one per tab status change, and PR discovery no longer reports a
+  failure on every pass. (#767)
+- Usage keeps updating after the background runtime is replaced (Restart
+  now, Restart runtime, a restart after a crash, an update). The window kept
+  whichever snapshot had the higher revision, a counter that starts again at 1
+  in each new runtime, so it threw away every snapshot from the new one and
+  went on showing the old runtime's last values as current while each refresh
+  succeeded. Snapshots now name the runtime that sent them, and a new
+  runtime's usage shows at once. A window not updated for 30 minutes, or past
+  its reset, reads as last known in the status bar and the popover, and a
+  Codex window past its reset reads as expired instead of "100% used · Resets
+  in now". (#772)
+
+### Development
+
+- Update rustls to 0.23.46 in the app and the background runtime. (#764)
 
 ## 0.2.23
 
