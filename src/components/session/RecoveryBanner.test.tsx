@@ -38,6 +38,35 @@ describe("session recovery UI smoke", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
+  it("offers a prompt the agent never received back, in place of a retry (#663)", () => {
+    // Raised by a launch, never classified out of an error's text.
+    expect(classifyRecovery("The agent never received your last prompt")).not.toBe("unsent");
+    const p = { ...props(), onResend: vi.fn() };
+    const { rerender } = render(<RecoveryBanner {...p} kind="unsent" />);
+    expect(screen.getByText("Prompt not received")).toBeTruthy();
+    expect(screen.getByText(/never received your last prompt/)).toBeTruthy();
+    // There is no turn to retry: the prompt itself is what goes again.
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Resend last prompt", "Stop session", "Continue in new session"]);
+    fireEvent.click(screen.getByRole("button", { name: "Resend last prompt" }));
+    expect(p.onResend).toHaveBeenCalledOnce();
+    // A tab that cannot resend (a cloud tab, a reader who may not send) still says what happened.
+    rerender(<RecoveryBanner {...props()} kind="unsent" />);
+    expect(screen.queryByRole("button", { name: "Resend last prompt" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
+    // While busy, it waits.
+    rerender(<RecoveryBanner {...p} kind="unsent" busy />);
+    expect((screen.getByRole("button", { name: "Resend last prompt" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("never sends a waiting native Codex tab to a terminal it does not have, and still sends a terminal tab there (#644)", () => {
+    const { rerender } = render(<RecoveryBanner {...props()} waiting native />);
+    expect(screen.getByText("Waiting for input")).toBeTruthy();
+    expect(screen.getByText("Review the conversation above, then send a message or stop the session.")).toBeTruthy();
+    expect(screen.queryByText(/Check the terminal/)).toBeNull();
+    rerender(<RecoveryBanner {...props()} waiting />);
+    expect(screen.getByText("Check the terminal for a pending decision, or stop the session.")).toBeTruthy();
+  });
+
   it("keeps hook context through transcript replay and distinguishes the session directory from an explicit workdir", () => {
     // The real Codex PreToolUse event has Bash + command, not the original
     // exec_command arguments the previous UI-only fixture supplied.
@@ -170,6 +199,66 @@ describe("session recovery UI smoke", () => {
     expect(screen.getByText(/process outcome is unknown/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry safely" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Stop session" })).toBeTruthy();
+  });
+
+  it.each([
+    ["failed", ["Retry safely", "Continue here", "Stop session", "Continue in new session"]],
+    ["capacity", ["Retry safely", "Continue here", "Stop session", "Continue in new session"]],
+    ["disconnected", ["Retry safely", "Continue here", "Stop session", "Continue in new session"]],
+    // After signing in: the step that follows it, beside the retry.
+    ["signed_out", ["Sign in", "Retry", "Continue here", "Stop session", "Continue in new session"]],
+  ] as const)("offers to send \"continue\" in the same conversation after %s", (kind, buttons) => {
+    const p = { ...props(), onSendContinue: vi.fn(), onSignIn: vi.fn() };
+    render(<RecoveryBanner {...p} kind={kind} />);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(buttons);
+    fireEvent.click(screen.getByRole("button", { name: "Continue here" }));
+    expect(p.onSendContinue).toHaveBeenCalledOnce();
+    expect(p.onRetry).not.toHaveBeenCalled();
+    expect(p.onContinue).not.toHaveBeenCalled();
+  });
+
+  // A turn still open would only queue it; an unconfirmed delivery's prompt would be cleared from the CLI's input;
+  // an expired request may have a new one in the terminal that the word would answer.
+  it.each(["timeout", "tool", "delivery_unconfirmed", "permission_expired"] as const)("does not send \"continue\" after %s", kind => {
+    render(<RecoveryBanner {...props()} kind={kind} onSendContinue={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue in new session" })).toBeTruthy();
+  });
+
+  it("does not send \"continue\" over a pending request, without a recovery, or while settling", () => {
+    const onSendContinue = vi.fn();
+    const { rerender } = render(<RecoveryBanner {...props()} kind="capacity" asks={[ask]} onSendContinue={onSendContinue} />);
+    expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
+    rerender(<RecoveryBanner {...props()} waiting onSendContinue={onSendContinue} />);
+    expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
+    rerender(<RecoveryBanner {...props()} kind="failed" />);
+    expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
+    rerender(<RecoveryBanner {...props()} kind="failed" busy onSendContinue={onSendContinue} />);
+    const button = screen.getByRole("button", { name: "Continue here" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(onSendContinue).not.toHaveBeenCalled();
+  });
+
+  it("offers \"continue\" after a usage limit only once its window has reset", () => {
+    vi.useFakeTimers();
+    try {
+      const p = { ...props(), onSendContinue: vi.fn() };
+      const resetsAt = Date.now() + 30_000;
+      const { rerender } = render(<RecoveryBanner {...p} kind="usage_limit" limit={{ status: "rejected", resetsAt, window: "five_hour" }} />);
+      expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
+      // The countdown's own timer brings the banner round when the window resets.
+      act(() => vi.advanceTimersByTime(31_000));
+      expect(screen.getByTestId("usage-limit-reset").textContent).toContain("(now)");
+      expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Continue here", "Stop session", "Continue in new session"]);
+      fireEvent.click(screen.getByRole("button", { name: "Continue here" }));
+      expect(p.onSendContinue).toHaveBeenCalledOnce();
+      // With no reset time there is no telling the limit is over.
+      rerender(<RecoveryBanner {...p} kind="usage_limit" limit={{ status: "rejected" }} />);
+      expect(screen.queryByRole("button", { name: "Continue here" })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retires expired permission controls and disables repeated actions while settling", () => {

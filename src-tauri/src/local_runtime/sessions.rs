@@ -24,10 +24,24 @@ impl Sessions {
         self.0.call(command,params)
     }
 
-    fn tab<T: DeserializeOwned>(&self, method: &str, session: &str, tab: &str, mut params: Value) -> Result<T> {
+    /// A read the window shows or a quick control. A wedged owner fails it
+    /// as unresponsive in seconds rather than holding the window for minutes.
+    fn quick<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
+        self.0.quick(command,params)
+    }
+
+    fn tab<T: DeserializeOwned>(&self, method: &str, session: &str, tab: &str, params: Value) -> Result<T> {
+        self.call(&format!("runtime.session.{method}"), Self::addressed(session, tab, params))
+    }
+
+    fn quick_tab<T: DeserializeOwned>(&self, method: &str, session: &str, tab: &str, params: Value) -> Result<T> {
+        self.quick(&format!("runtime.session.{method}"), Self::addressed(session, tab, params))
+    }
+
+    fn addressed(session: &str, tab: &str, mut params: Value) -> Value {
         params["sessionId"] = json!(session);
         params["tabId"] = json!(tab);
-        self.call(&format!("runtime.session.{method}"), params)
+        params
     }
 
     pub fn pipeline<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
@@ -43,15 +57,15 @@ impl Sessions {
     }
 
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
-        self.call("runtime.session.automations", json!({}))
+        self.quick("runtime.session.automations", json!({}))
     }
 
     pub fn automation_runs(&self, id: &str) -> Result<Vec<crate::automations::AutomationRun>> {
-        self.call("runtime.session.automationRuns", json!({"id":id}))
+        self.quick("runtime.session.automationRuns", json!({"id":id}))
     }
 
     pub fn automation_issues(&self) -> Result<Vec<crate::automations::AutomationIssueState>> {
-        self.call("runtime.session.automationIssues", json!({}))
+        self.quick("runtime.session.automationIssues", json!({}))
     }
 
     pub fn save_automation(&self, id: Option<&str>, input: crate::automations::AutomationInput) -> Result<crate::automations::Automation> {
@@ -67,7 +81,7 @@ impl Sessions {
     }
 
     pub fn resource_overview(&self) -> Result<Value> {
-        self.call("runtime.session.resourceOverview", json!({}))
+        self.quick("runtime.session.resourceOverview", json!({}))
     }
 
     pub fn resource_sample(&self) -> Result<Value> {
@@ -79,29 +93,27 @@ impl Sessions {
     }
 
     pub fn usage_snapshot(&self) -> Result<crate::status::usage::UsageSnapshot> {
-        self.call("runtime.session.usage", json!({}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.quick("runtime.session.usage", json!({}))?)
     }
 
     pub fn refresh_usage(&self, manual: bool) -> Result<crate::status::usage::UsageSnapshot> {
-        self.call("runtime.session.refreshUsage", json!({"manual":manual}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.refreshUsage", json!({"manual":manual}))?)
     }
 
     pub fn reset_codex_usage(&self) -> Result<crate::status::usage::UsageSnapshot> {
-        self.call("runtime.session.resetCodexUsage", json!({}))
+        crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.resetCodexUsage", json!({}))?)
     }
 
     pub fn activity_summary(&self) -> Result<crate::store::activity::Summary> {
-        self.call("runtime.session.activity", json!({}))
+        self.quick("runtime.session.activity", json!({}))
     }
 
     pub fn add_tab(&self, session: &str, tab: &crate::session_ops::NewTab) -> Result<crate::store::index::TabEntry> {
-        self.call("runtime.session.addTab", json!({"sessionId":session, "tab":{
-            "harness":tab.harness,"model":tab.model,"effort":tab.effort,"permissionMode":tab.permission_mode
-        }}))
+        self.call("runtime.session.addTab", add_tab_params(session, tab))
     }
 
     pub fn pane_agents(&self) -> Result<Vec<crate::session::follow::PaneAgent>> {
-        self.call("runtime.session.paneAgents", json!({}))
+        self.quick("runtime.session.paneAgents", json!({}))
     }
 
     pub fn resume_conversation(&self, session: &str, tab: &str, harness: &str, provider_session_id: &str) -> Result<()> {
@@ -109,11 +121,11 @@ impl Sessions {
     }
 
     pub fn running_tabs(&self) -> Result<Vec<RunningTab>> {
-        self.call("runtime.session.running", json!({}))
+        self.quick("runtime.session.running", json!({}))
     }
 
     pub fn pending_permissions(&self) -> Result<Vec<PendingPermission>> {
-        self.call("runtime.session.permissions", json!({}))
+        self.quick("runtime.session.permissions", json!({}))
     }
 
     pub fn load_events(&self, session: &str, tab: &str) -> Result<Vec<AgentEvent>> {
@@ -142,27 +154,55 @@ impl Sessions {
     }
 
     pub fn status_of(&self, session: &str, tab: &str) -> Result<TabStatus> {
-        self.tab("status", session, tab, json!({}))
+        self.quick_tab("status", session, tab, json!({}))
     }
 
     pub fn pane_of(&self, session: &str, tab: &str) -> Result<Option<TabPtyEvent>> {
-        self.tab("pane", session, tab, json!({}))
+        self.quick_tab("pane", session, tab, json!({}))
     }
 
     pub fn queued(&self, session: &str, tab: &str) -> Result<Vec<QueuedMessage>> {
-        self.tab("queued", session, tab, json!({}))
+        self.quick_tab("queued", session, tab, json!({}))
     }
 
     pub fn ensure_started(&self, session: &str, tab: &str) -> Result<()> {
         self.tab("ensureStarted", session, tab, json!({}))
     }
 
+    /// The window showed the tab (`SessionManager::start_on_open`).
+    pub fn start_on_open(&self, session: &str, tab: &str) -> Result<()> {
+        self.tab("ensureStarted", session, tab, json!({"opened": true}))
+    }
+
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        self.tab("send", session, tab, json!({"text":text,"images":images}))
+        self.send_pressed(session, tab, text, images, None)
+    }
+
+    /// A composer's send, with when Send was pressed (`SessionManager::send_pressed`).
+    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>) -> Result<SendOutcome> {
+        self.tab("send", session, tab, json!({"text":text,"images":images,"pressedAt":pressed_at}))
+    }
+
+    /// The window drew a sent message (`SessionManager::note_shown`).
+    pub fn note_shown(&self, session: &str, tab: &str, seq: u64, timings: &crate::session::SendShown) -> Result<()> {
+        self.quick_tab("sendShown", session, tab, json!({"seq":seq,"timings":{
+            "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
     }
 
     pub fn send_confirmed(&self, session: &str, tab: &str, text: String) -> Result<SendOutcome> {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
+    }
+
+    pub fn resend_unsent(&self, session: &str, tab: &str) -> Result<SendOutcome> {
+        self.tab("resendUnsent", session, tab, json!({}))
+    }
+
+    pub fn resend_message(&self, session: &str, tab: &str, seq: u64) -> Result<SendOutcome> {
+        self.tab("resendMessage", session, tab, json!({"seq":seq}))
+    }
+
+    pub fn submit_waiting(&self, session: &str, tab: &str, seq: u64) -> Result<bool> {
+        self.tab("submitWaiting", session, tab, json!({"seq":seq}))
     }
 
     pub fn prepare_continuation(&self, session: &str, tab: &str) -> Result<crate::continuation::Context> {
@@ -170,7 +210,7 @@ impl Sessions {
     }
 
     pub fn interrupt(&self, session: &str, tab: &str) -> Result<bool> {
-        self.tab("interrupt", session, tab, json!({}))
+        self.quick_tab("interrupt", session, tab, json!({}))
     }
 
     pub fn stop(&self, session: &str, tab: &str) -> Result<()> {
@@ -183,19 +223,19 @@ impl Sessions {
 
 
     pub fn send_queued_now(&self, session: &str, tab: &str, seq: u64) -> Result<()> {
-        self.tab("sendQueuedNow", session, tab, json!({"seq":seq}))
+        self.quick_tab("sendQueuedNow", session, tab, json!({"seq":seq}))
     }
 
     pub fn cancel_queued(&self, session: &str, tab: &str, message: &str) -> Result<Option<QueuedMessage>> {
-        self.tab("cancelQueued", session, tab, json!({"messageId":message}))
+        self.quick_tab("cancelQueued", session, tab, json!({"messageId":message}))
     }
 
     pub fn respond_permission(&self, session: &str, tab: &str, request: &str, option: &str) -> Result<()> {
-        self.tab("permission", session, tab, json!({"requestId":request,"optionId":option}))
+        self.quick_tab("permission", session, tab, json!({"requestId":request,"optionId":option}))
     }
 
     pub fn answer_questions(&self, session: &str, tab: &str, request: &str, answers: HashMap<String, String>) -> Result<()> {
-        self.tab("questions", session, tab, json!({"requestId":request,"answers":answers}))
+        self.quick_tab("questions", session, tab, json!({"requestId":request,"answers":answers}))
     }
 
     pub fn set_model(&self, session: &str, tab: &str, model: &str) -> Result<()> {
@@ -211,10 +251,37 @@ impl Sessions {
     }
 
     pub fn mark_read(&self, session: &str, tab: &str) -> Result<()> {
-        self.tab("markRead", session, tab, json!({}))
+        self.quick_tab("markRead", session, tab, json!({}))
     }
 
     pub fn handoff(&self, session: &str, tab: &str) -> Result<HandoffInfo> {
         self.tab("handoff", session, tab, json!({}))
+    }
+
+    pub fn to_terminal(&self, session: &str, tab: &str) -> Result<()> {
+        self.tab("toTerminal", session, tab, json!({}))
+    }
+}
+
+/// The tab as the runtime makes it, transport included: a native Codex tab
+/// chosen on the desktop side must not arrive as a terminal one.
+fn add_tab_params(session: &str, tab: &crate::session_ops::NewTab) -> Value {
+    json!({"sessionId":session, "tab":{
+        "harness":tab.harness,"model":tab.model,"effort":tab.effort,"permissionMode":tab.permission_mode,
+        "transport":tab.transport
+    }})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_tab_reaches_the_runtime_with_its_transport() {
+        let tab = crate::session_ops::NewTab { transport: crate::store::index::AgentTransport::ExperimentalCodexStdio, harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some("auto".into()) };
+        let params = add_tab_params("s", &tab);
+        let decoded: crate::session_ops::NewTab = serde_json::from_value(params["tab"].clone()).unwrap();
+        assert_eq!(decoded.transport, crate::store::index::AgentTransport::ExperimentalCodexStdio);
+        assert_eq!(params["tab"]["transport"], "experimentalCodexStdio");
     }
 }

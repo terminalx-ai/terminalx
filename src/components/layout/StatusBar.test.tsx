@@ -40,6 +40,12 @@ vi.mock("@/lib/sessions", () => ({
   }),
 }));
 vi.mock("@/lib/statusPolling", () => ({ useResourceSampling: vi.fn() }));
+const runtimeSwitch = vi.hoisted(() => ({ current: null as import("@/lib/localRuntime").RuntimeSwitch | null }));
+vi.mock("@/lib/localRuntime", () => ({
+  bootLocalRuntime: vi.fn(async () => {}),
+  replaceLocalRuntime: vi.fn(async () => {}),
+  useRuntimeSwitch: () => runtimeSwitch.current,
+}));
 
 const { StatusBar } = await import("./StatusBar");
 
@@ -60,6 +66,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-09-03T12:00:00.000Z"));
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   statusBarWidth = 1_000;
+  runtimeSwitch.current = null;
+  statusState.settings.visible = true;
   statusState.settings.percent = "used";
   statusState.settings.resources = false;
   statusState.resourcesAvailable = true;
@@ -171,6 +179,63 @@ describe("status bar usage", () => {
     expect(row.textContent).toContain("82%");
     expect(within(detail).getByText("Session").parentElement?.textContent).toContain("1% used");
     expect(detail.textContent).not.toContain("Window expired");
+  });
+
+  // #772: the window held a runtime's snapshot for 19 hours, red and current-looking, because nothing replaced it.
+  it("ages a held Codex snapshot to last known with no new one, alike in the bar and the popover", async () => {
+    const now = Date.now();
+    const codexWindows = statusState.usage.windows.filter((window) => window.agent === "codex");
+    for (const window of codexWindows) window.updatedAt = now - 29 * 60_000;
+    codexWindows.find((window) => window.key === "weekly")!.usedPercent = 87;
+    statusState.usage.codexRefresh = { retryAt: null, error: null, lastSuccessAt: now - 29 * 60_000 };
+    const view = render(<StatusBar />);
+    const bar = view.container.querySelector('[data-usage-agent="codex"]') as HTMLElement;
+    const barMeter = () => bar.querySelector("[data-usage-meter] i")!.className;
+    expect(bar.textContent).toBe("23% used3h 5m·87% used6d 4h");
+    expect(barMeter()).toContain("bg-destructive");
+    fireEvent.click(screen.getByRole("button", { name: /Codex 5h/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    const row = within(popover).getByRole("button", { name: /^Codex, / });
+    fireEvent.click(row);
+    const detail = document.querySelector('[data-usage-detail="codex"]') as HTMLElement;
+    const weekly = () => within(detail).getByText("Weekly").parentElement as HTMLElement;
+    expect(weekly().textContent).toContain("87% used");
+    expect(detail.textContent).not.toContain("last known");
+    expect(within(row).queryByText("Last known")).toBeNull();
+
+    // Two minutes on it was updated 31 minutes ago, and no snapshot has come since.
+    await act(async () => vi.advanceTimersByTimeAsync(2 * 60_000));
+    expect(bar.textContent).toBe("23% used5h stale·87% used7d stale");
+    expect(within(bar).getAllByLabelText("Stale usage data")).toHaveLength(2);
+    expect(barMeter()).toContain("bg-muted-foreground/45");
+    expect(barMeter()).not.toContain("bg-destructive");
+    expect(within(row).getByText("Last known")).toBeTruthy();
+    expect(weekly().textContent).toContain("87% used (last known)");
+    expect(weekly().textContent).toContain("Updated 31m ago");
+    expect(weekly().querySelector(".h-full")!.className).toContain("bg-muted-foreground/45");
+    expect((detail.querySelector("[data-usage-freshness]") as HTMLElement).textContent).toBe("Last refreshed 31m ago");
+  });
+
+  it("reads a Codex window past its reset as expired, never 100% used · Resets in now", async () => {
+    const now = Date.now();
+    const weekly = statusState.usage.windows.find((window) => window.agent === "codex" && window.key === "weekly")!;
+    Object.assign(weekly, { usedPercent: 100, resetsAt: now + 1_000, updatedAt: now - 5 * 60_000 });
+    const view = render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Codex 7d 100% used, resets <1m/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    fireEvent.click(within(popover).getByRole("button", { name: /^Codex, Resets in <1m/ }));
+    await act(async () => vi.advanceTimersByTimeAsync(1_001));
+    const bar = view.container.querySelector('[data-usage-agent="codex"]') as HTMLElement;
+    expect(bar.textContent).toContain("100% used7d expired");
+    expect(bar.querySelector("[data-usage-meter] i")!.className).toContain("bg-muted-foreground/45");
+    expect(screen.getByRole("button", { name: /Codex 7d 100% used, window expired; awaiting update/ })).toBeTruthy();
+    expect(within(popover).getByRole("button", { name: /^Codex, Window expired — awaiting update/ })).toBeTruthy();
+    const detail = document.querySelector('[data-usage-detail="codex"]') as HTMLElement;
+    const row = within(detail).getByText("Weekly").parentElement as HTMLElement;
+    expect(row.textContent).toContain("100% used (last known)");
+    expect(row.textContent).toContain("Window expired — awaiting update");
+    expect(row.textContent).toContain("Updated 5m ago");
+    expect(detail.textContent).not.toContain("Resets in now");
   });
 
   it("renders one brand mark, a meter, and N% used per window in the full tier", () => {
@@ -426,6 +491,149 @@ describe("status bar usage", () => {
     });
     expect(within(dialog).getByRole("alert").textContent).toBe("The reset could not be used.");
   });
+
+  describe("#729: refreshes that change nothing, windows not started, refused live usage", () => {
+    const HOUR = 60 * 60_000;
+    const claudeWindow = (key: string) => statusState.usage.windows.find((window) => window.agent === "claude" && window.key === key)!;
+    const openDetail = (agent: "Claude" | "Codex") => {
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(`${agent} 5h`) }));
+      const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+      fireEvent.click(within(popover).getByRole("button", { name: new RegExp(`^${agent}, `) }));
+      return document.querySelector(`[data-usage-detail="${agent.toLowerCase()}"]`) as HTMLElement;
+    };
+
+    it("shows a 5-hour window not yet started as 0% with no countdown, not an expired one awaiting update", () => {
+      const now = Date.now();
+      Object.assign(claudeWindow("five_hour"), { usedPercent: 0, resetsAt: null, updatedAt: now, source: "oauth" });
+      const { container } = render(<StatusBar />);
+      const bar = container.querySelector('[data-usage-agent="claude"]') as HTMLElement;
+      expect(bar.querySelector('[data-usage-window="5h"]')?.textContent).toBe("0% used");
+      expect(bar.textContent).not.toContain("expired");
+      const detail = openDetail("Claude");
+      const session = within(detail).getByText("Session").parentElement as HTMLElement;
+      expect(session.textContent).toBe("Session0% usedUpdated just now");
+      expect(detail.textContent).not.toContain("awaiting update");
+      expect(detail.textContent).not.toContain("last known");
+    });
+
+    it("says a refresh that replaced nothing was only a check, and why each window was kept", () => {
+      const now = Date.now();
+      for (const window of statusState.usage.windows) if (window.agent === "claude") window.updatedAt = now - 7 * HOUR;
+      claudeWindow("five_hour").updatedAt = now - 19 * HOUR;
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: null, error: null,
+        lastSuccessAt: now - 10_000,
+        lastUpdatedAt: now - 7 * HOUR,
+        refused: [
+          { key: "seven_day", label: "7d", reason: "earlierWindow" },
+          { key: "fable_weekly", label: "Fable", reason: "noDeadline" },
+          // A newer turn already replaced it: nothing to explain.
+          { key: "five_hour", label: "5h", reason: "olderObservation" },
+        ],
+      };
+      const view = render(<StatusBar />);
+      const detail = openDetail("Claude");
+      const freshness = () => detail.querySelector("[data-usage-freshness]") as HTMLElement;
+      expect(freshness().textContent).toBe(
+        "Last refreshed 7h ago"
+        + "Checked just now · no newer usage"
+        + "7d kept: the reply's reset time is earlier than the shown window's"
+        + "Fable kept: the reply had no reset time while the shown window runs",
+      );
+      expect(freshness().textContent).not.toContain("Last refreshed just now");
+
+      // A turn since then replaced the 7d window: its old refusal no longer applies.
+      claudeWindow("seven_day").updatedAt = now - 5_000;
+      view.rerender(<StatusBar />);
+      expect(freshness().textContent).toBe("Last refreshed just nowFable kept: the reply had no reset time while the shown window runs");
+
+      // A runtime from before #729 sends no lastUpdatedAt: every answer counted as an update there.
+      statusState.usage.claude = { retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now - 10_000 };
+      claudeWindow("seven_day").updatedAt = now - 7 * HOUR;
+      view.rerender(<StatusBar />);
+      expect(freshness().textContent).toBe("Last refreshed just now");
+    });
+
+    it("puts live usage refused for an account mismatch on the card", () => {
+      const now = Date.now();
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now, lastUpdatedAt: now,
+        liveRefused: { at: now - 3 * 60_000, reason: "launchMismatch" },
+      };
+      const view = render(<StatusBar />);
+      const detail = openDetail("Claude");
+      const notice = () => detail.querySelector("[data-usage-live-refused]");
+      expect(notice()?.textContent).toBe(
+        "Live usage from a turn was refused 3m ago: its tab started under a different Claude account than the one signed in now.",
+      );
+      statusState.usage.claude = { ...statusState.usage.claude, liveRefused: null };
+      view.rerender(<StatusBar />);
+      expect(notice()).toBeNull();
+    });
+
+    // #738: the reply came 30 s past the 5h deadline and still had that window.
+    it("says a check that saw the window that just expired changed nothing, not that it refreshed just now", () => {
+      const now = Date.now();
+      for (const window of statusState.usage.windows) if (window.agent === "claude") window.updatedAt = now - 10 * 60_000;
+      Object.assign(claudeWindow("five_hour"), { resetsAt: now - 30_000, stale: true, source: "oauth" });
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: now + 30_000, error: null,
+        lastSuccessAt: now - 1_000,
+        lastUpdatedAt: now - 10 * 60_000,
+        refused: [{ key: "five_hour", label: "5h", reason: "endedWindow" }],
+      };
+      render(<StatusBar />);
+      const detail = openDetail("Claude");
+      const session = within(detail).getByText("Session").parentElement as HTMLElement;
+      expect(session.textContent).toContain("Window expired — awaiting update");
+      expect((detail.querySelector("[data-usage-freshness]") as HTMLElement).textContent).toBe(
+        "Last refreshed 10m ago"
+        + "Checked just now · no newer usage"
+        + "5h kept: the reply still had the window that just expired",
+      );
+    });
+
+    it("says a tab whose Claude account wasn't known at launch was refused for that, not for another account", () => {
+      const now = Date.now();
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now, lastUpdatedAt: now,
+        liveRefused: { at: now - 60_000, reason: "launchUnknown" },
+      };
+      render(<StatusBar />);
+      const notice = openDetail("Claude").querySelector("[data-usage-live-refused]") as HTMLElement;
+      expect(notice.textContent).toBe("Live usage from a turn was refused 1m ago: the tab's Claude account wasn't known when it started.");
+      expect(notice.textContent).not.toContain("different Claude account");
+    });
+
+    it("says when Codex was last refreshed when its button is inside the debounce, until it can fetch again", async () => {
+      const now = Date.now();
+      for (const window of statusState.usage.windows) if (window.agent === "codex") window.updatedAt = now - 2 * 60_000;
+      statusState.usage.codexRefresh = {
+        retryAt: null, error: null, lastSuccessAt: now - 2 * 60_000,
+        skipped: { at: now, reason: "recent", nextAt: now + 3 * 60_000 },
+      };
+      render(<StatusBar />);
+      fireEvent.click(screen.getByRole("button", { name: /Codex 5h/ }));
+      const notice = screen.getByRole("status").querySelector("[data-usage-notice]") as HTMLElement;
+      expect(notice.getAttribute("data-usage-notice")).toBe("info");
+      expect(notice.textContent).toBe("Codex was refreshed 2m agoNext refresh available in 3m");
+      await act(async () => vi.advanceTimersByTimeAsync(3 * 60_000 + 1));
+      expect(screen.queryByRole("status")).toBeNull();
+    });
+
+    it("says a press is waiting on a refresh already out, and leaves a retry pause to its own notice", () => {
+      const now = Date.now();
+      statusState.usage.claude = { retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now, skipped: { at: now, reason: "inFlight", nextAt: null } };
+      statusState.usage.codexRefresh = {
+        retryAt: now + 60_000, error: "read Codex rate limits: timed out", lastSuccessAt: now - 60_000,
+        skipped: { at: now, reason: "retryPending", nextAt: now + 60_000 },
+      };
+      render(<StatusBar />);
+      fireEvent.click(screen.getByRole("button", { name: /Claude 5h/ }));
+      const notices = [...screen.getByRole("status").querySelectorAll("[data-usage-notice]")].map((notice) => notice.textContent);
+      expect(notices).toEqual(["Claude usage is already refreshing", "Codex refresh paused · retry in 1mTimed out"]);
+    });
+  });
 });
 
 it("removes stale resource counts and kill rows on disconnect, then restores a fresh snapshot", () => {
@@ -540,6 +748,28 @@ it("distinguishes overview-only recovery from a sampled empty process list", () 
   expect(screen.queryByText("Process details have not been sampled yet.")).toBeNull();
 });
 
+/** #696: an idle tab agent is stopped from here once confirmed, and is said to be stopped, not killed. */
+it("asks before stopping an idle tab agent, and stops it once confirmed", async () => {
+  resourceFixture();
+  statusState.resourceSample!.processes = [{ paneId: "tab:t1", tabId: "t1", tabTitle: "Claude Code", sessionId: "s1", sessionTitle: "Review #590",
+    projectPath: "/fixture", projectName: "fixture", cwd: "/fixture", kind: "agent", harness: "claude", orphaned: false,
+    pid: 42, cpuPercent: 0, rssBytes: 512 * 1024 * 1024, childCount: 3, killRule: "stop" }];
+  const rpc = vi.spyOn(statusBar, "killResource")
+    .mockResolvedValueOnce({ killed: false, confirmation: "Stop the agent in Review #590? Its conversation is kept, and your next message starts it again." })
+    .mockResolvedValueOnce({ killed: true, confirmation: null });
+  render(resourceBar());
+  openResources();
+  expect(screen.queryByRole("button", { name: "Kill Claude Code" })).toBeNull();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Stop Claude Code" })));
+  const dialog = screen.getByRole("dialog", { name: "Stop agent?" });
+  expect(within(dialog).getByText(/Its conversation is kept/)).toBeTruthy();
+  // Asked about, and nothing more: the first call only asks.
+  expect(rpc.mock.calls).toEqual([["tab:t1", false]]);
+  await act(async () => fireEvent.click(within(dialog).getByRole("button", { name: "Stop agent" })));
+  expect(rpc.mock.calls).toEqual([["tab:t1", false], ["tab:t1", true]]);
+  expect(screen.queryByRole("dialog", { name: "Stop agent?" })).toBeNull();
+});
+
 it("rejects confirmation clicks invalidated before React renders and ignores late confirmed replies", async () => {
   resourceFixture();
   const confirmed = delayedKill();
@@ -568,4 +798,37 @@ it("rejects confirmation clicks invalidated before React renders and ignores lat
   await act(async () => confirmed.resolve({ killed: false, confirmation: "Late resampled confirmation" }));
   expect(screen.queryByRole("dialog", { name: "Kill process?" })).toBeNull();
   expect(rpc.mock.calls).toEqual([["shell", false], ["shell", false]]);
+});
+
+describe("the runtime the app is moving to (#766)", () => {
+  const waiting = (): import("@/lib/localRuntime").RuntimeSwitch => ({
+    kind: "waiting", epoch: "owner",
+    outdated: { running: "0.2.23", app: "0.2.24", work: ["Codex in “Web”, in the middle of a turn"], problem: null, failed: false, keeps: false, unkept: [] },
+  });
+
+  it("sits beside usage while a switch waits, and goes once it is done", () => {
+    runtimeSwitch.current = waiting();
+    const view = render(<StatusBar />);
+    expect(screen.getByTestId("runtime-status").textContent).toBe("Runtime 0.2.23 · waiting for 1");
+    expect(view.container.querySelector('[data-usage-agent="claude"]')).not.toBeNull();
+    runtimeSwitch.current = null;
+    view.rerender(<StatusBar />);
+    expect(screen.queryByTestId("runtime-status")).toBeNull();
+  });
+
+  it("a hidden status bar still shows it, and only it, until the switch is done", () => {
+    statusState.settings.visible = false;
+    const view = render(<StatusBar />);
+    expect(view.container.querySelector("[data-status-bar]")).toBeNull();
+    runtimeSwitch.current = waiting();
+    view.rerender(<StatusBar />);
+    expect(screen.getByTestId("runtime-status").textContent).toBe("Runtime 0.2.23 · waiting for 1");
+    expect(view.container.querySelector("[data-usage-agent]")).toBeNull();
+    runtimeSwitch.current = { kind: "updating", from: "0.2.23", to: "0.2.24" };
+    view.rerender(<StatusBar />);
+    expect(screen.getByRole("status", { name: "Updating the runtime to 0.2.24" })).toBeTruthy();
+    runtimeSwitch.current = null;
+    view.rerender(<StatusBar />);
+    expect(view.container.querySelector("[data-status-bar]")).toBeNull();
+  });
 });

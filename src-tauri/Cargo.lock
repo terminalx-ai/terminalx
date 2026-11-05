@@ -174,6 +174,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4058,7 +4064,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raccoon"
-version = "0.2.21"
+version = "0.2.24"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4100,10 +4106,12 @@ dependencies = [
  "regex",
  "salsa20",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "socket2",
  "subtle",
  "syn 2.0.119",
  "tauri",
@@ -4118,6 +4126,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tempfile",
+ "terminalx-dictation-detector",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
@@ -4127,6 +4136,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "vt100",
  "which",
  "x25519-dalek 2.0.1",
  "zeroize",
@@ -4368,9 +4378,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -5635,6 +5645,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminalx-dictation-detector"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "sha2 0.10.9",
+ "transcribe-cpp",
+]
+
+[[package]]
 name = "terminalx-serve"
 version = "0.2.2"
 dependencies = [
@@ -6168,6 +6187,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
 name = "universal-hash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6314,6 +6339,27 @@ checksum = "fb067e4cbd1ff067d1df46c9194b5de0e98efd2810bbc95c5d5e5f25a3231150"
 dependencies = [
  "cc",
  "libc",
+]
+
+[[package]]
+name = "vt100"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb05cdd19ae8707bf6a0a269972c07e6358103a7079faec749dec318a5b3dc23"
+dependencies = [
+ "itoa",
+ "unicode-width",
+ "vte",
+]
+
+[[package]]
+name = "vte"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
+dependencies = [
+ "arrayvec",
+ "memchr",
 ]
 
 [[package]]

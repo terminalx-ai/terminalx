@@ -9,7 +9,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api", () => ({ agent: { loadEvents: mocks.loadEvents }, api: { listSessions: mocks.listSessions } }));
 vi.mock("@/lib/sessions", () => ({ getSessions: () => ({ sessions: mocks.sessions }), patchTab: mocks.patchTab }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+const listeners = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+  listeners.set(name, handler);
+  return () => listeners.delete(name);
+}) }));
 
 const event = (id: string, seq: number): AgentEvent => ({
   id, seq, sessionId: "synthetic", tabId: "tab", harness: "synthetic", ts: "", subagent: undefined,
@@ -103,6 +107,28 @@ it("keeps compaction unknown during a pending reconnect read, then restores only
   expect(projection().compacting).toBe(false);
   expect(projection().turns.flatMap(t => t.work)).toContainEqual(expect.objectContaining({ kind: "compaction", lifecycle: expect.objectContaining({ state: "unknown" }) }));
   hook.unmount();
+});
+
+it("leaves a cloud tab's continuity to its live feed: a local resume does not clear it (#644)", async () => {
+  const store = await import("./agentEvents");
+  mocks.sessions = [{ id: "synthetic", tabs: [{ id: "tab", status: "in_progress" }] }];
+  mocks.listSessions.mockResolvedValue(mocks.sessions);
+  mocks.loadEvents.mockResolvedValueOnce(compactionHistory());
+  await store.loadTab("synthetic", "tab");
+  store.mergeTabEvents("cloud-session", "cloud-tab", []);
+  store.setFeedContinuity("cloud-session", "cloud-tab", true);
+  await store.reconcileAgentEvents();
+  // The local tab waits for its own history read; the cloud tab's feed still holds.
+  expect(store.getTabLog("synthetic", "tab").compactionContinuityKnown).toBe(false);
+  expect(store.getTabLog("cloud-session", "cloud-tab").compactionContinuityKnown).toBe(true);
+  // Its feed dropped: unknown until the feed catches up again, whatever is read locally.
+  store.setFeedContinuity("cloud-session", "cloud-tab", false);
+  await store.reconcileAgentEvents();
+  expect(store.getTabLog("cloud-session", "cloud-tab").compactionContinuityKnown).toBe(false);
+  // A feed ending for a tab whose log is gone leaves nothing behind.
+  store.dropTabLog("cloud-session", "cloud-tab");
+  store.setFeedContinuity("cloud-session", "cloud-tab", false);
+  expect(store.getTabLog("cloud-session", "cloud-tab").loaded).toBe(false);
 });
 
 // Source-derived races from the #644 independent review. Promise resolution
@@ -216,5 +242,20 @@ it("rejects a reconciliation response for a dropped and recreated log at the sam
   });
   expect(hook.result.current.compactionContinuityKnown).not.toBe(true);
   expect(hook.result.current.events.map(e => e.id)).toEqual(["replacement"]);
+  hook.unmount();
+});
+
+it("reads missed history and status again over a new live connection, as on resume, sending nothing", async () => {
+  const store = await import("./agentEvents");
+  mocks.sessions = [{ id: "synthetic", tabs: [{ id: "tab", status: "in_progress" }] }];
+  mocks.loadEvents.mockResolvedValueOnce([event("before", 1)]);
+  await store.loadTab("synthetic", "tab");
+  await store.subscribeAgentEvents();
+  const hook = renderHook(() => store.useTabLog("synthetic", "tab"));
+  mocks.listSessions.mockResolvedValue([{ id: "synthetic", tabs: [{ id: "tab", status: "completed" }] }]);
+  mocks.loadEvents.mockResolvedValueOnce([event("before", 1), event("during the gap", 2)]);
+  await act(async () => listeners.get("local_runtime_reattached")!({ payload: { generation: 2 } }));
+  await vi.waitFor(() => expect(hook.result.current.events.map((e) => e.id)).toEqual(["before", "during the gap"]));
+  expect(mocks.patchTab).toHaveBeenCalledWith("synthetic", "tab", { status: "completed" });
   hook.unmount();
 });

@@ -38,10 +38,13 @@ let state: StatusState = {
 };
 const listeners = new Set<() => void>();
 
-const revalidation = createUsageRevalidation(async () => {
+/** A refresh of its own, after any already out: that one asked before whatever this follows. */
+async function refreshUsageAfterFlight(): Promise<void> {
   await usageFlight;
   await refreshUsage();
-});
+}
+
+const revalidation = createUsageRevalidation(refreshUsageAfterFlight);
 
 // The backend reuses an answer for this same interval, so the two move together.
 const polling = createUsagePolling(() => refreshUsage());
@@ -51,8 +54,20 @@ function usagePollInterval(settings: StatusBarSettings): number | null {
   return settings.visible && settings.usage && settings.usageRefreshMinutes > 0 ? settings.usageRefreshMinutes * 60_000 : null;
 }
 
+/**
+ * Whether `next` replaces the usage snapshot held (#772). An event and a
+ * command reply from one runtime can arrive out of order, and its revisions
+ * say which is newer. They count within that runtime alone and start again
+ * at 1 in the next one, so a snapshot from another runtime replaces the one
+ * held whatever its revision: the runtime answering now is the one to show.
+ */
+export function replacesUsage(held: UsageSnapshot, next: UsageSnapshot): boolean {
+  if ((next.runtime ?? null) !== (held.runtime ?? null)) return true;
+  return (next.revision ?? 0) >= (held.revision ?? 0);
+}
+
 function set(patch: Partial<StatusState>) {
-  if (patch.usage && (patch.usage.revision ?? 0) < (state.usage.revision ?? 0)) {
+  if (patch.usage && !replacesUsage(state.usage, patch.usage)) {
     patch = { ...patch, usage: state.usage };
   }
   state = { ...state, ...patch };
@@ -81,7 +96,9 @@ export function bootStatus(): Promise<void> {
       await listen("status_resources_changed", () => void refreshResourceOverview());
       await listen("local_runtime_disconnected", invalidateResources);
       await listen("local_runtime_view_disconnected", invalidateResources);
-      await listen("local_runtime_reattached", () => { invalidateResources(); void refreshResourceOverview(); });
+      // A new attachment may be to a runtime that replaced the last one (#772),
+      // or events were missed: show what it says now, not at the next tick.
+      await listen("local_runtime_reattached", () => { invalidateResources(); void refreshResourceOverview(); void refreshUsageAfterFlight(); });
       const [settings, usage] = await Promise.all([statusBar.settings(), statusBar.usage(), refreshResourceOverview()]);
       set({ settings, usage, ready: true });
       installFocusRefresh();

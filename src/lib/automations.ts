@@ -46,10 +46,16 @@ export async function bootAutomations() {
         const value = event.payload;
         set({ issueStates: { ...state.issueStates, [value.automationId]: value } });
       }),
+      // Changes made while the live connection was down were not announced.
+      listen("local_runtime_reattached", () => void listAutomations()),
     ]);
   } catch {
     /* outside a webview */
   }
+  await listAutomations();
+}
+
+async function listAutomations() {
   try {
     const [automations, issueStates] = await Promise.all([automationsApi.list(), automationsApi.issueStates()]);
     set({

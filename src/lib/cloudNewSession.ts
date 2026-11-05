@@ -1,4 +1,4 @@
-import { api, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
+import { api, experimental, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { getCloudAgents, newCloudAgentTab } from "@/lib/cloudAgents";
@@ -7,7 +7,7 @@ import { cloudOrgArg, defaultOrgId, findCloudWorkspace, getCloudCatalog, isChang
 import {
   CreateRefused,
   createWorkspace,
-  launchInput,
+  personLaunchInput,
   phaseOf,
   preflightCreate,
   repositoriesInput,
@@ -187,7 +187,10 @@ export async function startInWorkspace(
     if (plan.repository && !client.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
     // An issue goes only to a runtime that knows what to do with one: an older one would start a plain session silently.
     const issue = request.issue && client.hasCapability("pipeline/1") ? request.issue : null;
+    // Settings → Experimental → Native Codex follows the reader into a workspace (#644).
+    const nativeCodex = (await experimental.nativeCodexFor(request.agent)) || undefined;
     const params = {
+      nativeCodex,
       agent: request.agent,
       model: request.model || undefined,
       effort: request.effort,
@@ -323,7 +326,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
       confirmProviderSpend: true,
       idempotencyKey,
       repositories,
-      launch: launchInput(form),
+      launch: await personLaunchInput(form),
     },
   };
   return { orgId, project, form, pending, quote, quota, providerLabel: provider.label };

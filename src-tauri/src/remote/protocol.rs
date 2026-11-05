@@ -139,6 +139,11 @@ pub const METHODS: &[Method] = &[
     // nothing or the wrong turn. A participant needs to be the tab's driver
     // (checked per call, as for a mailbox stop).
     method("session.interrupt", "session/3", Participate, false),
+    // #644: native Codex's terminal view moves the tab to Codex's own
+    // terminal and starts it, as `pty.control` with `start` starts a CLI; held
+    // to the same per-call rules. Only a runtime that makes native tabs has
+    // any to move, so no newer version was needed. A resend changes nothing.
+    method("session.toTerminal", "session/3", Participate, true),
     // What a new session or tab may run; read-only, like `harness::offered`.
     method("runtime.agents", "agents/1", Participate, false),
     // What the composer of an agent tab offers: read-only, and never more

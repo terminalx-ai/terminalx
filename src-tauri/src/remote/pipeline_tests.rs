@@ -247,6 +247,41 @@ async fn a_session_started_from_an_issue_is_carried_on_by_the_runtime_and_read_a
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_issue_session_in_the_workspace_repository_checkout_carries_its_pipeline() {
+    let f = fixture();
+    // The workspace's repository, cloned beside the root's own blank project (#461).
+    let child = f.root.join("demo-repository");
+    std::fs::create_dir(&child).unwrap();
+    git(&child, &["init", "-q", "-b", "main"]);
+    std::fs::write(child.join("index.html"), "<h1>Welcome</h1>\n").unwrap();
+    git(&child, &["add", "-A"]);
+    git(&child, &["commit", "-qm", "init"]);
+    git(&child, &["remote", "add", "origin", "https://github.com/acme/demo-repository.git"]);
+    let (manager, _events) = peer(&f.rpc, "desktop", Authority::Manage, &["session/1", "session-repository/1", "pipeline/1"]).await;
+
+    let created = call(&f.rpc, &manager, "session.create", json!({
+        "clientRequestId": "request-child-1", "agent": "claude", "useWorktree": true, "title": "#433 Carry issue sessions on",
+        "issue": issue(), "worktreeName": "433-carry-issue-sessions-on",
+        "repository": { "identity": "github.com/acme/demo-repository", "directory": "demo-repository" },
+        "pipelineSettings": { "maxRounds": 2 },
+    }))
+    .await
+    .unwrap();
+    assert!(created["pipelineNote"].is_null(), "{}", created["pipelineNote"]);
+    let pipeline = &created["pipeline"];
+    assert_eq!((pipeline["cloud"].as_bool(), pipeline["stage"].as_str()), (Some(true), Some("work")));
+    assert_eq!(pipeline["maxRounds"], 2, "the desktop's settings are stored for the checkout and read from there");
+    let child = child.to_string_lossy();
+    assert_eq!(pipeline["projectPath"].as_str(), Some(child.as_ref()));
+    assert_eq!(crate::store::projects::issue_pipeline_settings(&child).unwrap().max_rounds, 2);
+    let session = crate::store::index::get(created["sessionId"].as_str().unwrap()).unwrap();
+    assert_eq!(session.project_path, child);
+    assert!(Path::new(&session.cwd).starts_with(&f.root) && session.cwd != child, "in a worktree of the checkout");
+    // The root keeps its own settings, untouched.
+    assert_eq!(crate::store::projects::issue_pipeline_settings(&f.root.to_string_lossy()).unwrap().max_rounds, crate::store::projects::IssuePipelineSettings::default().max_rounds);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_issue_is_held_to_what_a_tracker_gives_and_one_on_the_root_gets_no_pipeline() {
     let f = fixture();
     let (manager, _events) = peer(&f.rpc, "desktop", Authority::Manage, &["session/1", "pipeline/1"]).await;

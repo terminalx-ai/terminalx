@@ -1,0 +1,13 @@
+[package]
+name = "terminalx-dictation-detector"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+transcribe-cpp = { version = "=0.2.3", default-features = false }
+sha2 = "0.10"
+
+[build-dependencies]
+cc = "1"

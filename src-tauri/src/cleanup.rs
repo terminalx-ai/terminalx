@@ -597,6 +597,7 @@ mod tests {
                 created: index::now(),
                 modified: index::now(),
                 archived: false,
+                archive: Default::default(),
                 pinned: false,
                 active_tab: None,
                 link: None,
@@ -636,7 +637,7 @@ mod tests {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None,
+            fork_from: None, continuation: None, parked: false,
             follow: Default::default(),
             unknown: BTreeMap::new(),
         }

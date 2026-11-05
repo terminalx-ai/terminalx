@@ -1,6 +1,6 @@
 [package]
 name = "raccoon"
-version = "0.2.21"
+version = "0.2.24"
 description = "TerminalX — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"
@@ -39,6 +39,7 @@ desktop = [
     "dep:objc2-foundation",
     "dep:objc2-speech",
     "dep:transcribe-cpp",
+    "dep:terminalx-dictation-detector",
 ]
 
 [[bin]]
@@ -72,6 +73,7 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+semver = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.15"
@@ -89,12 +91,16 @@ hkdf = "0.12.4"
 hmac = "0.12"
 hpke = { version = "0.14.0", default-features = false, features = ["alloc", "chacha", "getrandom", "hkdfsha2", "x25519"] }
 if-addrs = "0.15"
+socket2 = { version = "0.6", features = ["all"] }
 parking_lot = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
 log = "0.4"
 env_logger = "0.11"
 which = "7"
 regex = "1"
+# The screen an agent CLI has drawn, kept as it draws: what is in its input
+# box before a prompt is typed into it (#722).
+vt100 = "0.18"
 salsa20 = "0.10"
 ignore = "0.4"
 nucleo-matcher = "0.3"
@@ -128,9 +134,13 @@ block2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary"], optional = true }
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFTranscriptionSegment", "SFErrors", "block2", "objc2-avf-audio"], optional = true }
 transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"], optional = true }
+terminalx-dictation-detector = { path = "src/transcription/native-detector", optional = true }
 
 [profile.dev]
-incremental = true
+# Keep local builds and per-worktree caches from consuming tens of GB each.
+incremental = false
+# Preserve file/line backtraces without full type and variable debug data.
+debug = "line-tables-only"
 opt-level = 1
 
 [profile.dev.package."*"]

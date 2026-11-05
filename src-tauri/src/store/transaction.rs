@@ -64,7 +64,9 @@ mod tests {
             let _: Result<()> = run(&path, Duration::ZERO, || panic!("fixture panic"));
         });
         assert!(panicked.is_err());
-        assert_eq!(run(&path, Duration::ZERO, || Ok(42)).unwrap(), 42);
+        // A child another test forks shares the lock's file until it execs, so
+        // this waits a little; a lock the unwinding kept would never be free.
+        assert_eq!(run(&path, Duration::from_secs(10), || Ok(42)).unwrap(), 42);
     }
 
     #[cfg(unix)]

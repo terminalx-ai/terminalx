@@ -87,6 +87,16 @@ describe("where a pipeline stands", () => {
     expect(pipelineHeadline(pipeline({ stage: "merge", state: "waiting", note: "Waiting for GitHub to work out whether the branch merges." })).label).toBe("Waiting for GitHub");
   });
 
+  it("says Working once a person answered the author, at whatever stage it was stopped (#725)", async () => {
+    const { pipelineHeadline } = await load();
+    const note = "Answered; waiting for the author session to report.";
+    for (const [stage, kind] of [["work", "authorNotDone"], ["pullRequest", "uncommittedChanges"], ["address", "noChangesMade"], ["merge", "conflicts"]] as const) {
+      expect(pipelineHeadline(pipeline({ stage, state: "working", note, answered: { kind } })), stage).toEqual({ label: "Working", tone: "info" });
+    }
+    // Not answered, the stage's own work is what it is doing.
+    expect(pipelineHeadline(pipeline({ stage: "merge", state: "working", note: "Checking the pull request." })).label).toBe("Checking");
+  });
+
   it("lays the five stages out with the one in hand marked", async () => {
     const { pipelineSteps } = await load();
     const statuses = (value: IssuePipeline) => pipelineSteps(value).map((step) => step.status);
@@ -149,10 +159,27 @@ describe("where a pipeline stands", () => {
     expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "checksFailed" } }))).toEqual({ action: "advance", label: "Check again" });
     // A head nobody reviewed is fixed by a review, not by looking again.
     expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "headMoved" } }))).toEqual({ action: "review", label: "Review the new commit" });
+    // Nor are checks the reviewer saw fail on the commit it passed.
+    expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "reviewChecksFailed", note: null } }))).toEqual({ action: "review", label: "Review again" });
+    // Read and not run, in a project with no CI: the person it waits for merges it.
+    expect(forward(pipeline({ stage: "merge", state: "readyToMerge", reason: { kind: "reviewChecksNotRun" } }))).toEqual({ action: "merge", label: "Merge" });
     // A session that is done and has not said so can be taken at its word by the reader.
     expect(pipelineActions(pipeline()).secondary[0]).toEqual({ action: "advance", label: "Open pull request now" });
     expect(pipelineActions(pipeline({ stage: "address" })).secondary[0]).toEqual({ action: "advance", label: "Review the changes now" });
     expect(pipelineActions(pipeline({ stage: "review" })).secondary.map((button) => button.action)).toEqual(["stop"]);
+  });
+
+  it("says what the reviewer's own checks came to, as the pull request does", async () => {
+    const { reviewChecksLine } = await load();
+    const verdict = { commit: C1, decision: "merge" as const, securityPass: "notNeeded" as const, findings: [], round: 1, at: "2026-10-12T10:05:00.000Z" };
+    expect(reviewChecksLine({ ...verdict, checks: "notRun", checksNote: "the build waits on a file lock." })).toBe("Reviewed by reading only, tests not run: the build waits on a file lock.");
+    expect(reviewChecksLine({ ...verdict, checks: "failed", checksNote: "  " })).toBe("The reviewer's checks failed.");
+    expect(reviewChecksLine({ ...verdict, checks: "passed", checksNote: "cargo test" })).toBe("The reviewer's checks passed: cargo test.");
+    expect(reviewChecksLine({ ...verdict, checks: "passed", checksNote: "cargo test\n\n  ran   ok" })).toBe("The reviewer's checks passed: cargo test ran ok.");
+    expect([...reviewChecksLine({ ...verdict, checks: "passed", checksNote: "x".repeat(500) })!].length).toBe("The reviewer's checks passed: ".length + 200 + "….".length);
+    // A verdict stored before reviews said, or none at all, says nothing.
+    expect(reviewChecksLine(verdict)).toBeNull();
+    expect(reviewChecksLine(null)).toBeNull();
   });
 
   it("finds an issue's newest pipeline and a session's part in one", async () => {
@@ -185,9 +212,11 @@ describe("where a pipeline stands", () => {
     expect(ids(all)).toEqual(["p1", "p2", "p3", "p3-again", "p4", "p5"]);
   });
 
-  it("fills a project's settings in with the defaults, which never merge", async () => {
+  it("fills a project's settings in with the defaults, which make no choice for the launch switches", async () => {
     const { DEFAULT_PIPELINE_SETTINGS, pipelineSettings } = await load();
-    expect(DEFAULT_PIPELINE_SETTINGS).toMatchObject({ enabled: true, autoMerge: false, requirePerson: false, maxRounds: 3, mergeMethod: "merge" });
+    expect(DEFAULT_PIPELINE_SETTINGS).toMatchObject({ enabled: true, requirePerson: false, maxRounds: 3, mergeMethod: "merge" });
+    expect(DEFAULT_PIPELINE_SETTINGS).not.toHaveProperty("autoMerge");
+    expect(DEFAULT_PIPELINE_SETTINGS).not.toHaveProperty("resolveConflicts");
     expect(DEFAULT_PIPELINE_SETTINGS.protected).toEqual({ migrations: true, deploy: true, security: true, paths: [] });
     expect(pipelineSettings(null)).toBe(DEFAULT_PIPELINE_SETTINGS);
     expect(pipelineSettings({ issuePipeline: null })).toBe(DEFAULT_PIPELINE_SETTINGS);
@@ -195,14 +224,34 @@ describe("where a pipeline stands", () => {
     expect(chosen.autoMerge).toBe(true);
     expect(chosen.protected).toEqual({ migrations: true, deploy: false, security: true, paths: [] });
   });
+
+  // #700: an issue's session starts with both switches on unless the project turned them off.
+  it("starts a session from an issue with both switches on, any other with both off, unless the project chose", async () => {
+    const { DEFAULT_PIPELINE_SETTINGS: unset, pipelineLaunchDefaults } = await load();
+    expect(pipelineLaunchDefaults(unset, true)).toEqual({ autoMerge: true, resolveConflicts: true });
+    expect(pipelineLaunchDefaults(unset, false)).toEqual({ autoMerge: false, resolveConflicts: false });
+    const off = { ...unset, autoMerge: false, resolveConflicts: false };
+    expect(pipelineLaunchDefaults(off, true)).toEqual({ autoMerge: false, resolveConflicts: false });
+    const on = { ...unset, autoMerge: true, resolveConflicts: true };
+    expect(pipelineLaunchDefaults(on, false)).toEqual({ autoMerge: true, resolveConflicts: true });
+    // Never set to merge where a person does the merge.
+    expect(pipelineLaunchDefaults({ ...on, requirePerson: true }, true)).toEqual({ autoMerge: false, resolveConflicts: true });
+  });
+
+  it("offers each switch's choice as which sessions start with it on, and stores none for issues", async () => {
+    const { switchChoiceOf, switchDefaultOf } = await load();
+    expect([undefined, true, false].map(switchDefaultOf)).toEqual(["issues", "all", "off"]);
+    expect((["issues", "all", "off"] as const).map(switchChoiceOf)).toEqual([undefined, true, false]);
+  });
 });
 
 describe("a pipeline as the app stores it", () => {
   const fixture = JSON.parse(stored) as IssuePipeline;
 
   it("is read by the page without translation", async () => {
-    const { pipelineHeadline, pipelineSteps, pipelineActions, pipelineForIssue, pipelineForSession } = await load();
+    const { pipelineHeadline, pipelineSteps, pipelineActions, pipelineForIssue, pipelineForSession, reviewChecksLine } = await load();
     expect(pipelineHeadline(fixture)).toEqual({ label: "Needs you", tone: "warning" });
+    expect(reviewChecksLine(fixture.verdict)).toBe("The reviewer's checks passed.");
     expect(pipelineSteps(fixture).map((step) => [step.stage, step.status, step.detail])).toEqual([
       ["work", "done", null],
       ["pullRequest", "done", "#7"],
@@ -235,11 +284,11 @@ describe("a pipeline as the app stores it", () => {
     const declared: (keyof IssuePipeline)[] = [
       "id", "projectPath", "issue", "branch", "author", "reviewer", "autoMerge", "stopped", "stage", "state", "reason", "note", "pr",
       "round", "maxRounds", "reviewCommit", "verdict", "securityAreas", "merged", "events", "created", "modified",
-      "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks",
+      "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks", "reviewPendingSince", "releasing", "answered",
     ];
     const engineOnly = ["summary", "reminded", "reviewRequestedAt", "findingsSentRound", "waitingSince", "mergeRequested", "mergeRefused"];
     expect(Object.keys(fixture).filter((key) => !(declared as string[]).includes(key) && !engineOnly.includes(key))).toEqual([]);
-    expect(Object.keys(fixture.verdict!).sort()).toEqual(["at", "commit", "decision", "findings", "round", "securityPass"]);
+    expect(Object.keys(fixture.verdict!).sort()).toEqual(["at", "checks", "commit", "decision", "findings", "round", "securityPass"]);
     expect(Object.keys(fixture.pr!).sort()).toEqual(["base", "number", "url"]);
     expect(Object.keys(fixture.author).sort()).toEqual(["sessionId", "tabId"]);
   });
@@ -260,6 +309,23 @@ describe("what the window knows of the pipelines", () => {
     // Booting twice subscribes once.
     await bootIssuePipelines();
     expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an answered author's pipeline working the moment it is announced, and stopped again when its turn says so (#725)", async () => {
+    const { bootIssuePipelines, getIssuePipelines, pipelineHeadline } = await load();
+    list.mockResolvedValue([pipeline({ state: "needsYou", reason: { kind: "authorNotDone", detail: "Which table holds the plans?" } })]);
+    await bootIssuePipelines();
+    const headline = () => pipelineHeadline(getIssuePipelines()[0]).label;
+    expect(headline()).toBe("Needs you");
+    // As the engine announces it when a person answers: no list, no refresh.
+    listeners.get("issue_pipeline")!({ payload: pipeline({ state: "working", note: "Answered; waiting for the author session to report.", answered: { kind: "authorNotDone", detail: "Which table holds the plans?" } }) });
+    expect(headline()).toBe("Working");
+    expect(list).toHaveBeenCalledTimes(1);
+    // The turn ends not done: Needs you again, and that is news.
+    const again = pipeline({ state: "needsYou", reason: { kind: "authorNotDone", detail: "No owner column." } });
+    listeners.get("issue_pipeline")!({ payload: again });
+    expect(headline()).toBe("Needs you");
+    expect(notePipelineState).toHaveBeenLastCalledWith(again);
   });
 
   it("raises a notice when a pipeline comes to rest, not on every line of its record", async () => {
@@ -293,5 +359,29 @@ describe("what the window knows of the pipelines", () => {
     expect(act).toHaveBeenCalledWith("p1", "stop");
     expect(getIssuePipelines()).toHaveLength(1);
     expect(getIssuePipelines()[0].state).toBe("stopped");
+  });
+});
+
+describe("after a gap in the live connection", () => {
+  it("takes the listed state over what it knew, keeps what was announced meanwhile, and tells of a pipeline that came to rest", async () => {
+    const store = await load();
+    list.mockResolvedValueOnce([pipeline(), pipeline({ id: "p2" }), pipeline({ id: "gone" })]);
+    await store.bootIssuePipelines();
+    expect(store.getIssuePipelines().map((value) => value.id)).toEqual(["p1", "p2", "gone"]);
+    let listed!: (pipelines: IssuePipeline[]) => void;
+    list.mockReturnValueOnce(new Promise((resolve) => (listed = resolve)));
+    listeners.get("local_runtime_reattached")!({ payload: { generation: 2 } });
+    // Announced while the list is on its way: newer than the list.
+    listeners.get("issue_pipeline")!({ payload: pipeline({ id: "p2", state: "waiting", note: "announced" }) });
+    listeners.get("issue_pipeline")!({ payload: pipeline({ id: "p3", note: "started meanwhile" }) });
+    notePipelineState.mockClear();
+    listed([pipeline({ state: "readyToMerge", note: "finished during the gap" }), pipeline({ id: "p2", note: "listed before the announcement" })]);
+    await vi.waitFor(() => expect(store.getIssuePipelines().map((value) => value.id)).toEqual(["p1", "p2", "p3"]));
+    const [p1, p2, p3] = store.getIssuePipelines();
+    expect(p1).toMatchObject({ state: "readyToMerge", note: "finished during the gap" });
+    expect(p2.note).toBe("announced");
+    expect(p3.note).toBe("started meanwhile");
+    expect(notePipelineState).toHaveBeenCalledOnce();
+    expect(notePipelineState).toHaveBeenCalledWith(expect.objectContaining({ id: "p1", state: "readyToMerge" }));
   });
 });

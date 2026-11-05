@@ -177,7 +177,8 @@ impl Signal {
 }
 
 /// The fields of a tab this module owns.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub model: String,
     pub effort: Option<String>,

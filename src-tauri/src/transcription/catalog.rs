@@ -30,6 +30,12 @@ pub struct ModelSpec {
     pub speed: u8,
     pub accuracy: u8,
     pub recommended: bool,
+    /// Whether these weights give words while the reader speaks, for the
+    /// model's card, which has to answer before anything is downloaded.
+    /// Dictation itself never reads this: it asks the loaded model
+    /// (`capabilities().supports_streaming`), and the real-weights test in
+    /// `engine.rs` holds the two to the same answer.
+    pub live_words: bool,
 }
 
 impl ModelSpec {
@@ -58,6 +64,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 79,
         accuracy: 90,
         recommended: true,
+        live_words: true,
     },
     ModelSpec {
         id: "nemotron-3.5-asr-streaming-0.6b",
@@ -74,6 +81,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 84,
         accuracy: 82,
         recommended: false,
+        live_words: true,
     },
     ModelSpec {
         id: "canary-180m-flash",
@@ -90,6 +98,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 98,
         accuracy: 88,
         recommended: false,
+        live_words: false,
     },
     ModelSpec {
         id: "whisper-small",
@@ -106,6 +115,7 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 78,
         accuracy: 80,
         recommended: false,
+        live_words: false,
     },
     ModelSpec {
         id: "whisper-large-v3-turbo",
@@ -122,8 +132,29 @@ pub const MODELS: &[ModelSpec] = &[
         speed: 35,
         accuracy: 88,
         recommended: false,
+        live_words: false,
     },
 ];
+
+/// Auxiliary detector, deliberately excluded from the recognizer chooser.
+pub const DETECTOR: ModelSpec = ModelSpec {
+    id: "silero-vad-v6.2",
+    name: "Silero speech detector",
+    description: "Optional local-model noise guard. Detection can make mistakes; test quiet speech before relying on it.",
+    repo: "handy-computer/silero-vad-v6.2-gguf",
+    revision: "a9b2d61c20ae4ddf3644edb34969e8185a485448",
+    filename: "silero-vad-v6.2-F32.gguf",
+    size_bytes: 1_241_056,
+    sha256: "0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6",
+    languages: "Speech detection",
+    license: "MIT",
+    license_url: "https://github.com/snakers4/silero-vad/blob/5cd7945676eb32225748052e2e6a0580e4686a08/LICENSE",
+    speed: 0, accuracy: 0, recommended: false, live_words: false,
+};
+
+pub fn downloadable(id: &str) -> Option<&'static ModelSpec> {
+    if id == DETECTOR.id { Some(&DETECTOR) } else { find(id) }
+}
 
 pub fn find(id: &str) -> Option<&'static ModelSpec> {
     MODELS.iter().find(|m| m.id == id)
@@ -132,6 +163,17 @@ pub fn find(id: &str) -> Option<&'static ModelSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detector_is_downloadable_but_never_a_recognizer() {
+        assert!(find(DETECTOR.id).is_none());
+        assert_eq!(downloadable(DETECTOR.id).unwrap().sha256, DETECTOR.sha256);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(DETECTOR.sha256, terminalx_dictation_detector::MODEL_SHA256);
+            assert_eq!(DETECTOR.size_bytes as usize, terminalx_dictation_detector::MODEL_SIZE);
+        }
+    }
 
     #[test]
     fn ids_are_unique_and_urls_are_pinned() {

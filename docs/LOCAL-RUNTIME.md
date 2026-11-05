@@ -177,9 +177,35 @@ Stop-all acknowledges only after managed agents and all terminal process groups
 have actually exited. A failed stop leaves the owner available solely for an
 explicit authenticated stop retry; it never reports success or accepts new work.
 Resource sampling and termination rules are evaluated by the actual owner.
-Explicit session deletion also runs there: checkout admission remains held through
-process confirmation and history removal, failed confirmations retain history,
-and other sessions sharing the same checkout remain running.
+Explicit session deletion also runs there: the session stays fenced from new
+turns through process confirmation and history removal, failed confirmations
+retain history, and other sessions sharing the same checkout remain running.
+
+Checkout admission is one app-wide lock, so it is held only for short decisions:
+whether a prompt may start a turn, and whether a checkout may be reserved for
+local checks or conflict resolution (#727). Work that stops sessions and then
+changes what they run in takes a fence (`issue_pipeline::admission::fence`)
+over just those sessions, one tab, or a checkout path, and runs its slow part
+behind it: workspace and session removal, quick-chat moves and retention, merged
+cleanup's removals and restores, Settings → Storage removal, CLI worktree
+deletion, tab closing, the idle-agent stop, a guest's forced stop and an
+experimental Codex tab's move to its terminal. Taking a fence takes admission
+for a moment only, so a prompt admitted before it has finished (and its turn is
+visible to the work's last look) and one admitted after it meets the fence. A
+prompt for a fenced session is refused with the fence's reason; one for a tab
+whose agent is only being stopped (or moved) waits for that and is then
+admitted as usual, the host's and a guest's alike, and a guest's queued input
+for it stays queued until then. Merged cleanup weighs a workspace's grace period
+again behind its fence, so a turn that ended while the sweep asked GitHub or
+fetched keeps the workspace. Scans, sizing, merged-cleanup's GitHub calls and
+fetches, and the ledger take no fence at all. A prompt's baseline tree
+(`git add -A` into a scratch index) is read before it is admitted.
+
+Every composer send is timed in the tab's diagnostics as `send_timing` lines
+sharing its `seq`: `received` (the window's `pressed_at`, the runtime's
+`received_at`, `waited_ms`, `admitted_ms` and `answered_ms`), `delivered` (the
+agent took it) and `shown` (the window's `drawn_at`, `answered_at` and
+`shown_at`).
 
 ## Window features, updates and macOS
 
@@ -217,8 +243,126 @@ retained executable even after app bundle replacement. Never overwrite/delete a
 running version. New desktop versions negotiate compatibility with the running
 owner; incompatible upgrades must preserve work and explain incompatibility,
 not silently kill/restart it. Versioned helper retention ends only after its
-owner exits. Validate keychain access under the helper signing identity and
+owner exits.
+
+An update brings the runtime with it (#730). The runtime says its `version`
+in `runtime.liveness` (0.2.22 only in `status`, as `appVersion`), and a desktop
+that attaches to one older than itself replaces it with its bundled runtime
+(`local_runtime/replace.rs`). It does so by itself only once nothing the
+runtime runs would be cut short, by the runtime's own idle rule but for an
+agent's own helpers: only managed agents that have settled, running nothing
+their tools started, may be stopped without asking. An agent's MCP and
+language servers start again with it; a shell it started (how its tools run a
+command), and anything left in its process group outside it, is work
+(`idle::working`). A runtime of this build or later names everything else
+(`runtime.work`: agents mid-turn, prompts not yet delivered or held, agents
+started by hand, running terminals, commands agents left running, processes
+that outlived what started them, issue pipeline steps) and stops only when
+there is none,
+deciding under the admission lock (`runtime.stopAllIfIdle`, refused as
+`runtime_busy`). An older one is judged by what it shows (agents mid-turn in
+`runningTabs`, open terminals in `runtime.pty.shells`, what its agents' tools
+left running by the process table), read again just before it is stopped; a
+group whose leader has gone is invisible there. It cannot show the prompts
+it holds, nor can any runtime see a follow-up a CLI holds until its turn ends,
+so nothing may be found under way for 15 s first. Until then every window says
+the runtime is older than the app, lists what it waits for, and offers
+**Restart now**; after a switch that failed it says it will not try again by
+itself. Replacing stops the runtime as Stop All does (`launch::retire`, pinned
+to its epoch). Restart now stops one that will not stop as Restart runtime
+does; replacing it by itself does so only once it agreed to stop, and anything
+that goes wrong before then leaves it running and is waited out. The
+supervisor attaches the bundled runtime in its place; each
+agent picks up its conversation again when its tab next starts. A runtime of
+the app's version or newer is attached as before, so two builds sharing one
+home never take turns replacing each other's runtime. What a phone is offered
+follows the attached runtime, not the app ([MOBILE.md](./MOBILE.md), "What the
+phone is offered"). Validate keychain access under the helper signing identity and
 notification authorization on macOS; these are not established by a shell test.
+
+### Handing the runtime over (#765)
+
+From 0.2.24 a runtime is replaced in place and stops nothing. Every agent and
+terminal belongs to the runtime process (it holds each PTY master, each agent
+is its child, each agent's hooks dial `hooks-<pid>.sock` with a per-launch
+token), so the runtime is not stopped and restarted: asked to hand over
+(`runtime.handover`, pinned to its epoch), it holds everything still and execs
+the newer runtime's binary in its own process (`local_runtime/handover.rs`).
+The pid does not change: the agents stay its children, their hooks reach the
+same socket with the same tokens, and every terminal stays open. The status
+says which handover record a runtime writes (`localRuntime.handover`, a format
+number; absent before 0.2.24).
+
+- **What is held still, in order.** The hook and control sockets stop
+  answering once the frames under way are answered (`hooks::Bridge::freeze`).
+  A frame that waits on a person (a permission card) or only waits and reads
+  (`terminalx wait`) does not hold this up: it goes over with its connection.
+  New connections wait in the listening socket's queue, which goes over too,
+  so a hook that fires mid-swap is answered by the new runtime, never refused.
+  Then no issue pipeline step starts and none runs, nothing is admitted, each
+  PTY's reader stops with all it read in the scrollback (`pty::handover`:
+  output written meanwhile stays in the terminal for the next reader, and an
+  exit meanwhile stays unreaped for it), and every agent tab is held with no
+  prompt being typed into it and no transcript being read
+  (`session::handover`). What is about to settle (a CLI starting or stopping,
+  a prompt on its way, a phone's prompt) refuses the handover as
+  `handover_busy`, with nothing stopped, to be tried again.
+- **The record** (`run/handover-<pid>.json`, owner-only, removed once read)
+  names each descriptor kept open across the exec (the ownership lock, the
+  sockets and their lock, each PTY master, each connection still waiting) and
+  carries each terminal's scrollback, screen and process group, each agent
+  tab's transcript position, open turn, queued prompts, cards and hook token,
+  and the log's `seq`. The new runtime (`--adopt <record>`) takes all of it
+  over before it answers anything, makes every descriptor close-on-exec again,
+  serves its sockets frozen until it is ready, then answers what queued up.
+  An agent's background-command ledger is read again from where its CLI
+  began. A CLI started by hand is found in front of its terminal again and
+  followed on from where it was read to. Startup recovery leaves alone what
+  was handed over: its turns, panes, automation runs and pipelines go on.
+- **Versioned.** A runtime reads every format its `handover-formats`
+  subcommand names. Before holding anything, the runtime being replaced asks
+  the binary taking over which it reads, and refuses (`handover_unsupported`)
+  one that reads none of its own, or that is not a runtime installed in this
+  home as `launch::install` installs one (in this home's private runtime
+  directory, under the digest of its contents, private to this user), signed
+  by the same team on macOS, at this version or newer. It checks the binary
+  again just before the exec, after everything was held still: the same file,
+  with the same contents. On Linux it execs the very descriptor it checked;
+  on macOS, which cannot exec one, it execs the path a moment after the check.
+  On macOS, whoever holds the control token therefore cannot put a program of
+  their own in the runtime's place. Linux has no code signature to require:
+  there a program of this user's own, installed in this home's runtime
+  directory under its digest and claiming a newer version, would pass, which
+  gains nothing over what the control token already allows (every terminal
+  and session).
+- **Waiting hooks.** The hook bridge stops answering before anything else
+  comes to rest, and is taken (its sockets, and the frames not yet answered)
+  only once every tab is held, when no waiting hook can be answered any more,
+  since an answer is given under its tab's lock. A permission answered in
+  between is answered here, and the handover is tried again
+  (`handover_busy`). That includes one whose hook has yet to wake when the
+  bridge is taken: it is still waiting, on a card no held tab waits on any
+  more, and the runtime taking over would find no card for it.
+- **What it cannot carry** in format 1 is an agent driven over its standard
+  input and output (experimental Codex stdio, ACP agents, OpenCode) while its
+  process runs. `runtime.handover.plan` names it; the handover refuses
+  (`handover_unadoptable`) unless the request names it in `stop`, and then
+  stops only that, as Stop does, and hands the rest over. Every window sends
+  back exactly what it showed (Restart now, Try again, Restart runtime, and
+  Update now through the update plan): an agent started since is refused
+  (`handover_unadoptable`), with nothing stopped, and shown in turn.
+
+A desktop newer than a runtime that can be handed over replaces it at once,
+mid-turn or not (`replace.rs`): windows say the runtime is being updated and
+that its agents and terminals keep running. What the handover cannot carry is
+never stopped by itself: every window names it, and **Restart now** hands
+everything else over, stopping only that. A bundled runtime that cannot take
+the runtime over falls back to replacing it as above, once nothing would be cut
+short. **Restart runtime**, for one that stopped answering, hands it over first
+too; when that cannot be done, nothing is stopped, and the window says why and
+offers to stop only what cannot be kept, or everything. A runtime from before
+0.2.24 cannot hand over, so the first update to 0.2.24 still replaces it as
+above.
 
 ## Integration release request and reviewable stages
 
@@ -654,10 +798,152 @@ in-flight writes before acknowledging. Pruning checks snapshots outside the
 registry and removes only matching objects. Shared force-stop can therefore
 invalidate a mobile tab while holding its sharing attachment without cycling
 against a mobile check, close, device revoke or account clear. The bounded mixed
-lease subprocess regression exercises these four interleavings.
+lease subprocess regression exercises these four interleavings. Desktop input
+and a mobile driver claim serialize on that pane's own gate, never the registry:
+no terminal write happens under the registry lock (#661).
 
 The macOS CLI sidecar is a generated native launcher. Its signature stays in
 the executable across updater extraction, while it `exec`s the sibling desktop
 binary's `terminalx` command with unchanged arguments, environment, working
 directory and streams. It does not own sessions or add another runtime process.
 See `docs/RELEASING.md` for archive signature validation.
+
+## A terminal that stops reading input (#661)
+
+On 2026-10-29 one Claude Code pane stopped reading its input after a 6.3 KB
+handoff paste. A PTY master accepts about 1 KB of unread input (1022 bytes on
+macOS) and a blocking write past that waits for good. The desktop's write to
+that pane held the mobile registry lock while it waited, so 58 hook, control,
+retention and worker threads queued behind it. The app's synchronous commands
+then waited up to 120 seconds each on the main thread, and every relaunch
+attached to the same wedged runtime. Its log went to `/dev/null`. The guarantees
+below keep one such pane from taking anything else down.
+
+- **Every write is bounded.** Each PTY master is non-blocking. A write waits
+  for room with `poll`. It fails with `InputStalled` after `pty::INPUT_STALL`
+  (10 s) without progress, or after `pty::INPUT_DEADLINE` (30 s) in all,
+  however slowly the program reads. `InputStalled` says how many bytes got
+  through. Bytes are never written after the call returns. While a pane stays
+  stalled, its next writes fail at once rather than each waiting out the limit.
+  The reader waits on `poll` instead of a blocking `read`. Prompt delivery,
+  nudge and interrupt keys, mobile input and the remote server's input threads
+  all use this one write.
+- **Desktop typing is queued, not dropped.** `runtime.pty.write` hands its
+  bytes to the pane's queue (`local_runtime::typing`) and returns. One thread
+  per pane delivers them in order, in pieces of up to 64 KB. While the program
+  is not reading, it tries again every 250 ms, taking the pane's gate for one
+  attempt at a time. A paste into a shell busy with a command therefore arrives
+  whole once the command ends, as in any terminal. Queued typing goes only to
+  the process it was typed at. Past 1 MB of unread typing, more is refused
+  whole. A mobile driver claiming the pane discards what is still waiting.
+- **No terminal write under the mobile registry.** Desktop input and mobile
+  driver claims serialize on the pane's own gate. Some writes still happen
+  under narrower locks, now bounded by the limits above:
+  - the Enter and Escape that must stay atomic with a tab's state, under that
+    tab's lock;
+  - a shared or mobile prompt's writes and its two paste waits of up to 10 s
+    each, under the sharing lock;
+  - mobile input, under its device grant.
+- **Bounded socket threads.** One launch handles at most 256 hook and control
+  frames at once, across its own and the published socket. Past that, a frame
+  is answered by a single refusal thread. A control request gets `busy`. A hook
+  gets nothing to act on, so a deciding hook fails closed, plus the reason for
+  its CLI's hook log.
+- **The window never waits on the runtime.** Every Tauri command that calls the
+  runtime runs in `spawn_blocking`. That includes the share dialog's status and
+  changes and the mobile-driver list each window loads. Reads the window shows,
+  and quick controls, give up after `client::QUICK_TIMEOUT` (15 s) with
+  `Unresponsive`. The quick calls are status, pane, queue, read marks,
+  permissions, interrupt, terminal input, resize, lists, share status and the
+  quit-time fences. Long operations keep 120 s. Quitting lets go of a runtime
+  the watchdog found not responding before fencing sharing, so it does not
+  wait on one either.
+- **Watchdog and restart.** The owner's loop records each completed pass.
+  `runtime.liveness` reports the age of the last pass as
+  `localRuntime.loopAgeMs`. It reads nothing but the owner's lifetime state,
+  so it answers while sessions, tabs and shares are held up, and a probe never
+  takes a request place that stays taken. Owners too old for it are asked for
+  `status`. Every 5 seconds the desktop probes. A runtime is flagged
+  unresponsive after two failed probes in a row. A probe fails when the owner
+  does not answer in time, refuses as `busy`, or its loop has not finished a
+  pass for 120 seconds. The loop shares the sharing and tab locks with prompt
+  delivery, which can hold them for about a minute at most, so 120 seconds is
+  never reached by delivery that is still working. Only an open attachment is
+  probed. Once it closes, the supervisor's attempts to attach again (#643) say
+  instead: one that times out or meets `busy` counts as not responding, so a
+  window opened onto a wedged runtime offers the restart without having
+  attached. A successful attach clears the finding. The status the window reads
+  shows `unresponsive` in place of connected or reconnecting, because
+  reconnecting reaches the same wedged process. A change is announced with
+  `local_runtime_state`, like the supervisor's own changes.
+- **Restart.** The notice reads "TerminalX runtime is not responding" and
+  offers **Restart runtime**, never Reconnect. `local_runtime_restart` takes the
+  launch lock and finds the process listening on `run/hooks.sock`. It continues
+  only if that process runs `runtime/<hash>/terminalx-serve` from this home. It
+  sends SIGTERM to the runtime's process group, then SIGKILL after 3 seconds,
+  and then ends the sessions of the terminals the runtime started. Then it
+  drops the old attachment and asks the supervisor to attach now. Discovery
+  starts a fresh runtime, and windows re-attach their terminals in place, as
+  after any reconnect, without reloading. Agents resume their conversations
+  from the provider transcripts. The restart names the epoch the window saw,
+  and it acts only while the runtime is still found not responding. A second
+  window's late click therefore stops nothing: not the replacement, and not
+  the old runtime while the replacement is still being attached.
+- **Runtime log.** A desktop-launched runtime gets `--log-file
+  ~/Library/Logs/<identifier>/runtime.log`. Its stdout and stderr point there
+  too, so panics are kept. At 8 MB the log moves to `runtime.log.1` and a new
+  file starts.
+
+## A connection that falls behind (#716)
+
+On 0.2.21 a window showed "Live connection unavailable" while every agent ran
+normally. A window's connections to the event socket could close for being
+read too slowly, and nothing recorded which one closed or why. Each limit was
+the whole connection's: 64 frames or 2 MiB queued, one frame over 1 MiB, a
+subscriber falling 1024 events behind (every pane's output was an event too),
+or one write taking 10 s. Attaching four terminals with full scrollback was
+enough to pass 2 MiB. The guarantees below replace that.
+
+- **One stream per connection.** The runtime advertises `streamVersion: 2` in
+  its status. A desktop that sees it names the stream in its hello:
+  `"stream": "events"`, or `"stream": "terminals"` with the `window` label.
+  An event connection takes no terminal views; a terminal-output connection
+  takes no events. Events are followed on `BroadcastSink::subscribe_app`,
+  which carries no `pty_data`, so busy terminals cannot put it behind. A hello
+  without `stream` is a desktop from before #716: it gets both on one
+  connection, and the old behaviour of losing the connection when anything
+  falls behind. A new desktop sends the old hello to a runtime that does not
+  advertise version 2, which refuses unknown hello fields.
+- **A view that falls behind is let go alone.** Each view has its own 2 MiB
+  queue, inside the connection's 8 MiB. A view that acknowledges what it draws
+  never has more than about 1.4 MiB outstanding (`pty::FLOW_HIGH` and a chunk
+  as base64, a full replay included), so only a view whose window stopped
+  reading fills it. Its pane then stops sending to it, and the runtime queues
+  `{"type":"lagged","id","token"}`. Greetings, pongs and notices use a separate
+  256 KiB budget, so the notice can always be queued. The bridge drops the
+  view and emits `pty_view_lagged`. The window's terminal with that attachment
+  token attaches again: on screen it is reset and redrawn from the pane's
+  scrollback, off screen it is let go. Other views on the connection go on.
+- **No frame is refused for its size.** A full scrollback replay (512 KiB,
+  683 KiB as base64) is one frame, as before. Longer output would be split, so
+  no view is handed a frame over the 1 MiB limit, which would make it fall
+  behind on every attach.
+- **Missed events are counted, not fatal.** An event connection that falls
+  behind the app's events, finds its queue full, or meets an event over 1 MiB
+  counts the event missed. 250 ms after the first, it sends
+  `{"type":"missed","events":n}`. The bridge emits `local_runtime_reattached`
+  with `missedEvents`, and every window re-reads what it shows, as after a
+  reconnect.
+- **What still closes a connection.** The client sends something malformed,
+  stops reading altogether (one frame not read within 10 s), or reads
+  none of 256 KiB of pongs and notices. The desktop gives up on silence after
+  15 s. Each of these means one side has stopped working, not that it is slow.
+- **Every end is logged.** The runtime logs each connection's end, at info when
+  the desktop closed it and warn otherwise. The line names the connection, how
+  long it was up, the reason, and how many views fell behind or events were
+  missed. Views falling behind and missed events are logged as they happen.
+  The desktop keeps its own log, `~/Library/Logs/<identifier>/desktop.log`,
+  beside `runtime.log`, rotated the same way. It records each lost connection
+  with its reason. It records failed attempts sparsely: the first, each with a
+  new reason, and the 2nd, 4th, 8th and so on. Each recovery is recorded with
+  how long the connection was down and how many attempts it took.

@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-type Payload = { kind: string; text?: string; message?: string; settings?: string; segment?: number };
+type Payload = { kind: string; text?: string; raw?: string; message?: string; settings?: string; segment?: number; live?: boolean };
 
 /** The recogniser lives in Rust; here it is a function this file calls. */
 let deliver: (payload: Payload) => void = () => {};
@@ -369,5 +369,123 @@ describe("the reader's own edits while dictating (#428)", () => {
     await startDictating();
     await send({ kind: "partial", text: "run the tests", segment: 0 });
     expect(box().value).toBe("Notes: run the tests");
+  });
+});
+
+/**
+ * A local model through the composer (#754). Rust sends a streaming model's
+ * words as Apple's are sent: partials while the reader speaks, one utterance
+ * (segment 0) with raw beside the processed text, and a final processed as a
+ * whole once Stop has finished the stream. A model that cannot stream says so
+ * on `listening`, and its words come only with the final.
+ */
+describe("a local model's words in the composer (#754)", () => {
+  const STREAMED = [
+    "Please add a settings",
+    "Please add a settings page for notifications",
+    "Please add a settings page for notifications, then write the unit tests",
+  ];
+  const FINAL = "Please add a settings page for notifications, then write the unit tests for it.";
+  const partial = (raw: string, text = raw): Payload => ({ kind: "partial", raw, text, segment: 0 });
+  const final = (raw: string, text = raw): Payload => ({ kind: "final", raw, text, segment: 0 });
+
+  async function listen(live: boolean) {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "mic" }));
+    });
+    await send({ kind: "listening", live });
+  }
+
+  async function stop() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "mic" }));
+    });
+    await send({ kind: "transcribing" });
+  }
+
+  it("shows each streamed partial while the listening row is up, then settles on the final without repeating a word", async () => {
+    await open();
+    await listen(true);
+    for (const raw of STREAMED) {
+      await send(partial(raw));
+      expect(box().value).toBe(raw);
+      expect(screen.getByText("Listening. Speak, then press the mic again.")).toBeTruthy();
+    }
+    await stop();
+    expect(screen.getByText("Finishing…")).toBeTruthy();
+    expect(box().value).toBe(STREAMED[2]);
+    await send(final(FINAL), { kind: "stopped" });
+    expect(box().value).toBe(FINAL);
+  });
+
+  it("keeps a deleted last word deleted through the partials and the final after it", async () => {
+    await open();
+    await listen(true);
+    await send(partial(STREAMED[1]));
+    await erase(30, 44); // " notifications"
+    expect(box().value).toBe("Please add a settings page for");
+    await send(partial(STREAMED[2]));
+    expect(box().value).toBe("Please add a settings page for then write the unit tests");
+    await stop();
+    await send(final(FINAL), { kind: "stopped" });
+    expect(box().value).toBe("Please add a settings page for then write the unit tests for it.");
+    expect(box().value).not.toContain("notifications");
+  });
+
+  it("keeps everything streamed so far deleted when the reader clears it, and adds only what follows", async () => {
+    await open("Notes:");
+    await listen(true);
+    await send(partial(STREAMED[1]));
+    expect(box().value).toBe(`Notes: ${STREAMED[1]}`);
+    await erase(6, box().value.length);
+    expect(box().value).toBe("Notes:");
+    await send(partial(STREAMED[2]));
+    expect(box().value).toBe("Notes: then write the unit tests");
+    await stop();
+    await send(final(FINAL), { kind: "stopped" });
+    expect(box().value).toBe("Notes: then write the unit tests for it.");
+  });
+
+  it("says words appear when you stop for a model that cannot stream, and still delivers its final", async () => {
+    await open("Notes:");
+    await listen(false);
+    expect(screen.getByText("Listening. Words appear when you stop.")).toBeTruthy();
+    expect(screen.queryByText("Listening. Speak, then press the mic again.")).toBeNull();
+    expect(box().value).toBe("Notes:");
+    await stop();
+    expect(screen.getByText("Finishing…")).toBeTruthy();
+    await send(final(FINAL), { kind: "stopped" });
+    expect(box().value).toBe(`Notes: ${FINAL}`);
+  });
+
+  it("says so when the stream breaks part way, and the whole recording's final replaces what had streamed", async () => {
+    await open();
+    await listen(true);
+    await send(partial(STREAMED[0]));
+    await send({ kind: "listening", live: false });
+    expect(screen.getByText("Listening. Words appear when you stop.")).toBeTruthy();
+    expect(box().value).toBe(STREAMED[0]);
+    await stop();
+    await send(final(FINAL), { kind: "stopped" });
+    expect(box().value).toBe(FINAL);
+  });
+
+  it("takes back words it streamed for noise once the noise guard finds no speech", async () => {
+    await open("Notes:");
+    await listen(true);
+    await send(partial("Thank you"));
+    expect(box().value).toBe("Notes: Thank you");
+    await stop();
+    await send(final("Thank you.", ""), { kind: "stopped" });
+    expect(box().value).toBe("Notes:");
+  });
+
+  it("listens live again on the next dictation after one that could not stream", async () => {
+    await open();
+    await listen(false);
+    await stop();
+    await send(final("Fix the build."), { kind: "stopped" });
+    await listen(true);
+    expect(screen.getByText("Listening. Speak, then press the mic again.")).toBeTruthy();
   });
 });

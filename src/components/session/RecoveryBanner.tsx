@@ -1,5 +1,5 @@
 import type { RecoveryKind } from "@/types/events";
-import { RECOVERY_MESSAGES } from "@/lib/recovery";
+import { recoveryOffer } from "@/lib/recovery";
 import type { PendingAsk } from "@/lib/transcript";
 import { PermissionCard, QuestionCard } from "@/components/chat/AskCards";
 import { Button } from "@/components/ui/button";
@@ -21,10 +21,12 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSignIn }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
+  /** A native Codex tab (#644), which has no terminal to check until it is moved to one. */
+  native?: boolean;
   /** When the plan's usage limit is what stopped the turn: which window, and when it resets. */
   limit?: UsageLimit | null;
   waiting: boolean;
@@ -41,14 +43,20 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   onQuestions: (id: string, answers: Record<string, string>) => void;
   onRetry: (model?: string) => void;
   onStop: () => void;
+  /** Continue in a new session, from a summary of this one. */
   onContinue: () => void;
+  /** Send "continue" in this same conversation, with no stop first. */
+  onSendContinue?: () => void;
   /** Signed out: sign the agent in again, where it can be (its terminal, or a shell running its login). */
   onSignIn?: () => void;
+  /** Unsent: send the last prompt the agent never received again, as it was sent. */
+  onResend?: () => void;
 }) {
   const now = useCountdownNow([kind === "usage_limit" ? limit?.resetsAt ?? null : null]);
   if (!kind && !waiting) return null;
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
-  const offerModels = (kind === "capacity" || kind === "usage_limit") && !asks.length;
+  const limitReset = kind === "usage_limit" && limit?.resetsAt != null && limit.resetsAt <= now;
+  const offer = recoveryOffer(kind, { asks: asks.length, limitReset, canResend: !!onResend, canSendContinue: !!onSendContinue, canSignIn: !!onSignIn, native });
   // Only a request to answer: the request's own card says it all, with stopping in its action bar.
   if (!kind && asks.length) {
     const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={onStop}>Stop session</Button>;
@@ -66,22 +74,23 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   return <section aria-label="Session recovery" role="status" className={placement === "composer"
     ? "mx-auto mb-2 max-h-[50vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 overflow-auto rounded-xl border border-warning/30 bg-warning/10 p-3 text-xs"
     : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
-    <p className="font-medium">{asks.length ? "Waiting for input" : kind === "usage_limit" ? "Usage limit reached" : kind === "signed_out" ? "Signed out" : kind ? "Needs attention" : "Waiting for input"}</p>
-    <p className="mt-1">{kind ? RECOVERY_MESSAGES[kind] : asks.length ? "Review the pending request to continue." : "Check the terminal for a pending decision, or stop the session."}</p>
+    <p className="font-medium">{offer.title}</p>
+    <p className="mt-1">{offer.message}</p>
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
-      {kind === "signed_out" && onSignIn && !asks.length && <Button size="sm" disabled={busy} onClick={onSignIn}>Sign in</Button>}
-      {/* Signed out, a retry only fails again until the agent is signed in: it comes second, for after. */}
-      {kind && kind !== "usage_limit" && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && !asks.length && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{kind === "signed_out" ? "Retry" : "Retry safely"}</Button>}
-      {offerModels && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
+      {offer.signIn && <Button size="sm" disabled={busy} onClick={onSignIn}>Sign in</Button>}
+      {offer.resend && <Button size="sm" disabled={busy} onClick={onResend}>Resend last prompt</Button>}
+      {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{offer.retry}</Button>}
+      {offer.sendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={onSendContinue}>Continue here</Button>}
+      {offer.chooseModel && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
         <option value="" disabled>Choose another model</option>
         {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
       </select>}
       <Button size="sm" variant="outline" disabled={busy} onClick={onStop}>Stop session</Button>
-      {kind && <Button size="sm" variant="ghost" disabled={busy} onClick={onContinue}>Continue in new session</Button>}
+      {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={onContinue}>Continue in new session</Button>}
     </div>
   </section>;
 }

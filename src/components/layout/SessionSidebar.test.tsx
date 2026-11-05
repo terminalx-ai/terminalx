@@ -16,6 +16,7 @@ const { ProjectRail } = await import("./ProjectRail");
 const { orderConversations } = await import("./SessionSidebar");
 const store = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
+const selection = await import("@/lib/rowSelection");
 
 const chatsPath = "/store/Chats";
 const projects: Project[] = [{ path: "/repos/web", name: "web", kind: "git" }];
@@ -29,9 +30,15 @@ let sessions: SessionEntry[];
 beforeEach(async () => {
   // Folds are remembered; each test starts from the defaults.
   prefs.setPrefs({ sidebarLayout: "simple", sidebarSections: {}, branchSessions: "sidebar" });
-  mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+  mocks.invoke.mockReset().mockImplementation(async (command: string, args?: unknown) => {
     if (command === "list_projects") return { projects, lastSelected: null };
     if (command === "list_sessions") return sessions;
+    // As the backend answers: the sessions as they are now, archived or back.
+    if (command === "set_sessions_archived") {
+      const { sessionIds, archived } = args as { sessionIds: string[]; archived: boolean };
+      sessions = sessions.map((entry) => (sessionIds.includes(entry.id) ? { ...entry, archived, autoArchived: false } : entry));
+      return sessionIds.map((id) => sessions.find((entry) => entry.id === id)!);
+    }
     if (command === "list_harnesses") return [];
     if (command === "chats_dir") return chatsPath;
     if (command === "list_workspaces") return [{ path: "/repos/web", name: "web", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 }];
@@ -266,9 +273,10 @@ describe("the conversation list", () => {
     mount();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Project menu for web" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
     await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: "Remove from TerminalX…" })); });
-    expect(vi.mocked(dialog.ask).mock.calls[0][0]).toBe("Remove web from TerminalX? Its 2 conversations are archived, and the folder on disk is left as it is.");
-    const calls = mocks.invoke.mock.calls.filter(([command]) => command === "set_session_archived" || command === "remove_project").map(([command, args]) => [command, args]);
-    expect(calls).toEqual([["set_session_archived", { sessionId: "there", archived: true }], ["set_session_archived", { sessionId: "here", archived: true }], ["remove_project", { path: "/repos/web" }]]);
+    expect(vi.mocked(dialog.ask).mock.calls[0][0]).toBe("Remove web from TerminalX? Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.");
+    // Archived together, in one change, before the project goes.
+    const calls = mocks.invoke.mock.calls.filter(([command]) => command === "set_sessions_archived" || command === "remove_project").map(([command, args]) => [command, args]);
+    expect(calls).toEqual([["set_sessions_archived", { sessionIds: ["there", "here"], archived: true }], ["remove_project", { path: "/repos/web" }]]);
     expect(screen.queryByRole("group", { name: "web" })).toBeNull();
   });
 
@@ -322,6 +330,28 @@ describe("the conversation list", () => {
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+  });
+
+  // #721: a session whose tabs were all closed has nothing in the branch's row of tabs to click; it was unreachable here.
+  it("keeps a row of its own for a session of the branch with no tab open, which opens that session", async () => {
+    prefs.setPrefs({ branchSessions: "tabs" });
+    const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+    // m1, the newest, had its last tab closed; m2 and m3 have tabs.
+    await boot([session("m1", "/repos/web", at(9), { tabs: [], activeTab: null }), session("m2", "/repos/web", at(8)), session("m3", "/repos/web", at(7))]);
+    mount();
+    const web = screen.getByRole("group", { name: "web" });
+    // The branch's row stands for the sessions whose tabs are in its row of tabs.
+    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
+    const bare = within(web).getByRole("button", { name: /^Session m1/ });
+    fireEvent.click(bare);
+    expect(store.getSessionStore().selectedSessionId).toBe("m1");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBe("true");
+    expect(main.getAttribute("aria-current")).toBeNull();
+    // The branch's row opens a session with tabs: the latest of them.
+    fireEvent.click(within(web).getByRole("button", { name: "main, 2 sessions" }));
+    expect(store.getSessionStore().selectedSessionId).toBe("m2");
+    expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBeNull();
   });
 
   it("invites a first chat when there is none, and no project to show", async () => {
@@ -366,7 +396,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Archive", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
@@ -477,12 +507,41 @@ it("keeps removed-workspace provenance separate from a live checkout on the same
     session("live", "/repos/web", new Date().toISOString(), { branch: "topic", worktreeName: "live", cwd: "/repos/web/.raccoon/worktrees/live" }),
   ]);
   mount();
+  // Set apart under its fold, and not among the live work (#696).
+  expect(screen.queryByRole("button", { name: "topic (workspace removed), Talk old" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const kept = screen.getByRole("button", { name: "topic (workspace removed), Talk old" });
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
   expect(screen.getByRole("button", { name: "topic, Talk live" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
 });
 
+
+/** #696: "Review #590", its workspace gone on Oct 24, sat among the live work for good. */
+it("sets removed workspaces apart under a fold, which opens while it holds the open conversation", async () => {
+  const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+  const gone = (name: string) => ({ branch: "main", worktreeRemoved: true, removedWorkspace: { name, path: `/repos/web/.raccoon/worktrees/${name}`, branch: name } });
+  await boot([
+    session("live", "/repos/web", at(3), { branch: "feature", worktreeName: "feature", cwd: "/repos/web/.raccoon/worktrees/feature" }),
+    session("review", "/repos/web", at(2), gone("review-590")),
+    session("other", "/repos/web", at(1), gone("other")),
+  ]);
+  mount();
+  const fold = screen.getByRole("button", { name: "Removed workspaces (2)" });
+  expect(fold.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByRole("button", { name: "feature, Talk live" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Talk review/ })).toBeNull();
+  // Not counted among the few a project shows before "View all".
+  expect(screen.queryByRole("button", { name: "View all" })).toBeNull();
+
+  fireEvent.click(fold);
+  expect(prefs.getPrefs().sidebarSections["removed-workspaces:/repos/web"]).toBe("expanded");
+  fireEvent.click(screen.getByRole("button", { name: "review-590 (workspace removed), Talk review" }));
+  // Folded again, it stays open while it holds the open conversation.
+  fireEvent.click(fold);
+  expect(fold.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByRole("button", { name: "review-590 (workspace removed), Talk review" })).toBeTruthy();
+});
 
 it("marks a collapsed group of kept conversations as a removed workspace", async () => {
   const removed = { branch: "main", worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } };
@@ -491,10 +550,160 @@ it("marks a collapsed group of kept conversations as a removed workspace", async
     session("old2", "/repos/web", new Date().toISOString(), removed),
   ]);
   mount();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const group = screen.getByTitle("topic (workspace removed)");
   expect(group.getAttribute("aria-expanded")).toBe("false");
   fireEvent.click(group);
   expect(screen.getByRole("button", { name: /^Talk old1/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: /^Talk old2/ })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /New (session|workspace).*topic/ })).toBeNull();
+});
+
+describe("the archive (#718)", () => {
+  beforeEach(() => {
+    store.setShowArchived(false);
+    selection.clearPicked();
+  });
+  const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
+  const showArchived = () => {
+    fireEvent.click(screen.getByRole("button", { name: /^View/ }));
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Show archived" }));
+  };
+  const archiveCalls = () => mocks.invoke.mock.calls.filter(([command]) => command === "set_sessions_archived").map(([, args]) => args);
+
+  it("lists each project's archived conversations, and the chats', under Show archived, and Unarchive puts one back", async () => {
+    await boot([
+      session("here", "/repos/web", at(5)),
+      session("old-web", "/repos/web", at(2), { archived: true, autoArchived: true, branch: "dev" }),
+      session("chat", chatsPath, at(4)),
+      session("old-chat", chatsPath, at(1), { archived: true }),
+      // Its project was taken out of TerminalX, which archived it.
+      session("left", "/repos/removed", at(3), { archived: true }),
+    ]);
+    mount();
+    expect(screen.queryByTestId("archived-sessions")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Talk old-/ })).toBeNull();
+    expect(screen.queryByRole("group", { name: "removed" })).toBeNull();
+
+    showArchived();
+    expect(screen.getByRole("button", { name: "View: showing archived" })).toBeTruthy();
+    const web = screen.getByRole("group", { name: "web" });
+    const webArchive = within(web).getByTestId("archived-sessions");
+    expect(within(webArchive).getByRole("button", { name: "Archived (1)" }).getAttribute("aria-expanded")).toBe("true");
+    expect(within(webArchive).getByRole("button", { name: /^Talk old-web/ }).textContent).toContain("dev");
+    // The live list is as it was.
+    expect(within(web).getByRole("button", { name: "main, Talk here" })).toBeTruthy();
+
+    const chats = screen.getByRole("region", { name: "Chats" });
+    const chatArchive = within(chats).getByTestId("archived-sessions");
+    expect(within(chatArchive).getByRole("button", { name: /^Talk old-chat/ })).toBeTruthy();
+    expect(within(chats).getByRole("button", { name: /^Talk chat/ })).toBeTruthy();
+    // A project taken out of TerminalX comes back as a group, with what removing it archived.
+    const removed = screen.getByRole("group", { name: "removed" });
+    expect(within(within(removed).getByTestId("archived-sessions")).getByRole("button", { name: /^Talk left/ })).toBeTruthy();
+    expect(within(removed).queryByText("No chats yet")).toBeNull();
+
+    await act(async () => { fireEvent.click(within(webArchive).getByRole("button", { name: "Unarchive Talk old-web" })); });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "set_session_archived").map(([, args]) => args)).toEqual([{ sessionId: "old-web", archived: false }]);
+    // Back among the live ones, alone on its branch, and the fold is gone.
+    expect(within(web).getByRole("button", { name: "dev, Talk old-web" })).toBeTruthy();
+    expect(within(web).queryByTestId("archived-sessions")).toBeNull();
+
+    showArchived();
+    expect(screen.queryByTestId("archived-sessions")).toBeNull();
+    expect(screen.queryByRole("group", { name: "removed" })).toBeNull();
+  });
+
+  it("opens an archived conversation where it is listed, and keeps its fold open while it is open", async () => {
+    await boot([session("here", "/repos/web", at(5)), session("old", "/repos/web", at(2), { archived: true, branch: "dev" })]);
+    mount();
+    // Opened from the palette, with the archive hidden: it shows in the list, marked.
+    act(() => store.selectSession("old"));
+    expect(within(screen.getByRole("group", { name: "web" })).getByRole("button", { name: "dev, Talk old" }).textContent).toContain("archived");
+
+    showArchived();
+    const fold = within(screen.getByRole("group", { name: "web" })).getByRole("button", { name: "Archived (1)" });
+    act(() => { fireEvent.click(fold); });
+    expect(fold.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: /^Talk old/ }).getAttribute("aria-current")).toBe("true");
+  });
+
+  it("picks several rows and archives, brings back or deletes them together", async () => {
+    await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4)), session("c", chatsPath, at(3)), session("d", chatsPath, at(2))]);
+    const dialog = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(dialog.ask).mockReset().mockResolvedValue(true);
+    mount();
+    const row = (id: string) => screen.getByRole("button", { name: new RegExp(`^Talk ${id}`) });
+    expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
+
+    // ⌘-click picks without opening; once picking, a plain click picks too.
+    act(() => { fireEvent.click(row("a"), { metaKey: true }); });
+    expect(screen.getByRole("toolbar", { name: "1 conversation selected" })).toBeTruthy();
+    act(() => { fireEvent.click(row("c")); });
+    expect(store.getSessions().selectedSessionId).toBeNull();
+    expect(row("a").getAttribute("aria-pressed")).toBe("true");
+    expect(row("b").getAttribute("aria-pressed")).toBe("false");
+    const bar = screen.getByRole("toolbar", { name: "2 conversations selected" });
+    expect(within(bar).getByRole("button", { name: /Unarchive/ }).hasAttribute("disabled")).toBe(true);
+
+    await act(async () => { fireEvent.click(within(bar).getByRole("button", { name: /^Archive/ })); });
+    expect(archiveCalls()).toEqual([{ sessionIds: ["a", "c"], archived: true }]);
+    expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Talk a/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Talk c/ })).toBeNull();
+
+    // Shift-click picks every row drawn between, here in the archive.
+    showArchived();
+    act(() => { fireEvent.click(row("a"), { metaKey: true }); });
+    act(() => { fireEvent.click(row("c"), { shiftKey: true }); });
+    const archivedBar = screen.getByRole("toolbar", { name: "2 conversations selected" });
+    expect(within(archivedBar).getByRole("button", { name: /^Archive/ }).hasAttribute("disabled")).toBe(true);
+    await act(async () => { fireEvent.click(within(archivedBar).getByRole("button", { name: /Unarchive/ })); });
+    expect(archiveCalls().at(-1)).toEqual({ sessionIds: ["a", "c"], archived: false });
+
+    // A range of live rows, then Escape lets go of them.
+    act(() => { fireEvent.click(row("a"), { ctrlKey: true }); });
+    act(() => { fireEvent.click(row("c"), { shiftKey: true }); });
+    expect(screen.getByRole("toolbar", { name: "3 conversations selected" })).toBeTruthy();
+    act(() => { fireEvent.keyDown(window, { key: "Escape" }); });
+    expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
+
+    // Delete asks once, for all of them.
+    act(() => { fireEvent.click(row("b"), { metaKey: true }); });
+    act(() => { fireEvent.click(row("d")); });
+    await act(async () => { fireEvent.click(within(screen.getByRole("toolbar", { name: "2 conversations selected" })).getByRole("button", { name: /Delete/ })); });
+    expect(vi.mocked(dialog.ask)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(dialog.ask).mock.calls[0][0]).toMatch(/^Delete 2 sessions\? Their transcripts and attachments are removed\./);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "delete_session").map(([, args]) => args)).toEqual([{ sessionId: "b" }, { sessionId: "d" }]);
+    expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
+  });
+
+  it("leaves the rows picked when the delete is cancelled", async () => {
+    await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4))]);
+    const dialog = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(dialog.ask).mockReset().mockResolvedValue(false);
+    mount();
+    act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk a/ }), { metaKey: true }); });
+    act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk b/ }), { metaKey: true }); });
+    await act(async () => { fireEvent.click(within(screen.getByRole("toolbar", { name: "2 conversations selected" })).getByRole("button", { name: /Delete/ })); });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "delete_session")).toBe(false);
+    expect(screen.getByRole("toolbar", { name: "2 conversations selected" })).toBeTruthy();
+  });
+
+  it("lets go of a picked conversation once it is gone, so a plain click opens a row again", async () => {
+    await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4))]);
+    mount();
+    act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk a/ }), { metaKey: true }); });
+    expect(screen.getByRole("toolbar", { name: "1 conversation selected" })).toBeTruthy();
+
+    // Deleted from elsewhere: its own menu, the CLI, retention or another window.
+    act(() => store.removeSessions(["a"]));
+    expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
+    expect(selection.getPickedSessions()).toEqual([]);
+    const row = screen.getByRole("button", { name: /^Talk b/ });
+    expect(row.getAttribute("aria-pressed")).toBeNull();
+    act(() => { fireEvent.click(row); });
+    expect(store.getSessions().selectedSessionId).toBe("b");
+    expect(selection.getPickedSessions()).toEqual([]);
+  });
 });

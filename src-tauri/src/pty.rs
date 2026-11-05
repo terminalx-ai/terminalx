@@ -14,26 +14,154 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 #[cfg(test)]
 use base64::Engine as _;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 
 use crate::sink::EventSink;
+
+#[path = "pty_handover.rs"]
+mod handover;
+#[cfg(unix)]
+pub(crate) use handover::{Frozen, FrozenPane};
+use handover::{Hold, Parts, Waiter};
 const COALESCE: Duration = Duration::from_millis(8);
-const MAX_CHUNK: usize = 32 * 1024;
+pub(crate) const MAX_CHUNK: usize = 32 * 1024;
 /// Enough raw output to reconstruct a useful terminal tail on a newly attached
 /// mobile reader without retaining an unbounded command history in memory.
-const SCROLLBACK_BYTES: usize = 512 * 1024;
+pub(crate) const SCROLLBACK_BYTES: usize = 512 * 1024;
 /// How long a pane gets to exit on its own before it is killed outright.
 const TERM_GRACE: Duration = Duration::from_millis(400);
+/// How long a write waits for the program in a pane to take any of its input.
+/// A program that has stopped reading fills the terminal's input queue after
+/// about 1 KB, and a write past that would otherwise wait for ever, holding
+/// every lock its caller holds (#661). Matches how long a prompt's paste is
+/// given to be read.
+pub(crate) const INPUT_STALL: Duration = Duration::from_secs(10);
+/// The longest one write may wait for room in all, however little at a time
+/// the program reads. Some writes are made under a lock other work shares (a
+/// tab's, or a shared prompt's sharing lock), and this is what bounds them.
+pub(crate) const INPUT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The program in a pane took none of a write's input for [`INPUT_STALL`], or
+/// so little that the write ran past [`INPUT_DEADLINE`]. What it had taken by
+/// then stays delivered; the rest was not written.
+#[derive(Debug)]
+pub struct InputStalled {
+    pub written: usize,
+    pub total: usize,
+}
+
+impl std::fmt::Display for InputStalled {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "The program in this terminal is not reading its input; {} of {} bytes were delivered.", self.written, self.total)
+    }
+}
+
+impl std::error::Error for InputStalled {}
+
+/// One pane's input. The master is non-blocking, so a write never waits in
+/// the kernel: it waits here, for room, and only as long as [`INPUT_STALL`].
+struct Input {
+    writer: Box<dyn Write + Send>,
+    /// Polled for room. A descriptor of its own (a duplicate of the master),
+    /// so a pane closed during a write cannot hand its number to another file.
+    #[cfg(unix)]
+    room: std::os::fd::OwnedFd,
+    /// The last write gave up on a program that had stopped reading. Until it
+    /// takes input again, a write that finds no room fails at once instead of
+    /// each one waiting out the stall behind the last.
+    stalled: bool,
+}
+
+impl Input {
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        let mut written = 0;
+        let started = Instant::now();
+        let mut progress = started;
+        while written < data.len() {
+            match self.writer.write(&data[written..]) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
+                Ok(count) => {
+                    written += count;
+                    progress = Instant::now();
+                    self.stalled = false;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                #[cfg(unix)]
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let left = if self.stalled { Duration::ZERO } else {
+                        INPUT_STALL.saturating_sub(progress.elapsed()).min(INPUT_DEADLINE.saturating_sub(started.elapsed()))
+                    };
+                    if left.is_zero() || !ready(&self.room, libc::POLLOUT, Some(left))? {
+                        self.stalled = true;
+                        return Err(InputStalled { written, total: data.len() }.into());
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+/// Wait until `fd` is ready for `events`, for at most `timeout` (`None`: for
+/// as long as it takes). `false` when the time ran out. A hang-up or error
+/// counts as ready: the read or write that follows reports it.
+#[cfg(unix)]
+fn ready(fd: &std::os::fd::OwnedFd, events: libc::c_short, timeout: Option<Duration>) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    loop {
+        let wait = deadline.map_or(-1, |deadline| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            // Rounded up, so a sub-millisecond remainder is not a busy loop.
+            i32::try_from(left.as_millis() + u128::from(left.subsec_nanos() % 1_000_000 != 0)).unwrap_or(i32::MAX)
+        });
+        let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events, revents: 0 };
+        // SAFETY: one pollfd that lives across the call, for a descriptor this owns.
+        match unsafe { libc::poll(&mut poll, 1, wait) } {
+            0 => return Ok(false),
+            count if count > 0 => {
+                if poll.revents & libc::POLLNVAL != 0 {
+                    return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+                }
+                return Ok(true);
+            }
+            _ => {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted { return Err(error); }
+            }
+        }
+    }
+}
+
+/// The master's own descriptor, duplicated, after making the master
+/// non-blocking. Reads and writes share the master's open file, so this one
+/// switch applies to the reader too, which waits with [`ready`] instead.
+#[cfg(unix)]
+fn non_blocking(master: &dyn MasterPty) -> Result<std::os::fd::OwnedFd> {
+    use std::os::fd::BorrowedFd;
+    let fd = master.as_raw_fd().context("pty master has no descriptor")?;
+    // SAFETY: fcntl reads and sets the status flags of a descriptor the master keeps open.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(std::io::Error::last_os_error()).context("make the pty master non-blocking");
+        }
+    }
+    // SAFETY: the master keeps fd open for the duration of this borrow.
+    Ok(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?)
+}
 
 struct Pane {
     master: Box<dyn MasterPty + Send>,
     /// Locked on its own, so a write the program is slow to read blocks
     /// only this pane, not every other pane's resize or kill.
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    input: Arc<Mutex<Input>>,
     pid: Option<u32>,
     /// A shell tab launched directly into a command has no interactive shell
     /// beneath it; its original foreground group is work too.
@@ -45,9 +173,22 @@ struct Pane {
     /// only sign that the program has finished drawing and is listening.
     last_output: Arc<Mutex<Option<Instant>>>,
     scrollback: Arc<Mutex<VecDeque<u8>>>,
+    /// How much of the scrollback this pane's own program printed. The rest
+    /// came before it: what the pane's last program left (`respawn`).
+    printed: Arc<AtomicU64>,
+    /// The screen the pane's program has drawn, kept as it draws. Its raw
+    /// output is no use for this: a TUI redraws only the cells that changed,
+    /// so what one row shows now can have been drawn long before the
+    /// scrollback's window (#722). Every pane keeps one: an agent's CLI runs
+    /// in a shell tab too, when the reader starts it there by hand (#437),
+    /// and the app types into it all the same.
+    screen: Arc<Mutex<vt100::Parser>>,
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
+    /// What the pane's reader and waiter hold off on while it is handed to
+    /// the runtime that replaces this one (#765).
+    hold: Arc<Hold>,
 }
 
 
@@ -179,7 +320,7 @@ type TapSlot = Arc<(Mutex<Views>, std::sync::Condvar)>;
 /// A pane this far ahead of its view is not read until the view catches up.
 /// xterm.js throws output away past 50 MB of backlog; this keeps it near none,
 /// and it is what makes Ctrl+C take effect at once during a flood.
-const FLOW_HIGH: usize = 1024 * 1024;
+pub(crate) const FLOW_HIGH: usize = 1024 * 1024;
 /// A view that says nothing for this long while its pane is held (a frozen
 /// window, a page that was reloaded) stops being waited for: a program must
 /// never hang on a window that is not drawing.
@@ -206,7 +347,13 @@ pub struct Terminals {
     /// N" each is opened with. A chosen name is kept whatever the tab goes
     /// on to run (#437).
     renamed: Mutex<std::collections::HashSet<String>>,
+    /// Every pane is being handed to the runtime that replaces this one
+    /// (#765): none is opened meanwhile.
+    frozen: Mutex<bool>,
 }
+
+/// Why a pane is not opened while the runtime is being replaced.
+pub(crate) const HANDING_OVER: &str = "TerminalX is handing its terminals to its updated runtime; try again in a moment.";
 
 /// A shell tab of a session: a pane the reader opened, as every window lists it.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -259,7 +406,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default() }
+        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), frozen: Mutex::new(false) }
     }
 }
 
@@ -346,8 +493,25 @@ fn wait_for_view(slot: &TapSlot, exited: &AtomicBool) {
     }
 }
 
+/// A pane's rows or columns as the screen model takes them: never none.
+fn screen_size(n: u16) -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(n).unwrap_or(std::num::NonZeroU16::MIN)
+}
+
+#[cfg(test)]
 fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
+    push_scrollback(&mut scrollback.lock().unwrap(), bytes);
+}
+
+/// Output of the pane's own program, counted under the scrollback's lock so
+/// that `program_output` never sees the one without the other.
+fn append_own_output(scrollback: &Mutex<VecDeque<u8>>, printed: &AtomicU64, bytes: &[u8]) {
     let mut scrollback = scrollback.lock().unwrap();
+    push_scrollback(&mut scrollback, bytes);
+    printed.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+}
+
+fn push_scrollback(scrollback: &mut VecDeque<u8>, bytes: &[u8]) {
     if bytes.len() >= SCROLLBACK_BYTES {
         scrollback.clear();
         scrollback.extend(bytes[bytes.len() - SCROLLBACK_BYTES..].iter().copied());
@@ -398,6 +562,11 @@ impl Terminals {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
+        // A pane opened now would be left out of the handover under way, and
+        // its program would lose its terminal with the runtime (#765).
+        if *self.frozen.lock().unwrap() {
+            bail!("{}", HANDING_OVER);
+        }
         let PaneSpec { cwd, cols, rows, command, env } = spec;
         // A bare shell is still an interactive shell (also used by disposable
         // PTY fixtures). Shell scripts/arguments are work until the pane exits.
@@ -406,7 +575,6 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        *self.sink.lock().unwrap() = Some(sink.clone());
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
@@ -444,21 +612,52 @@ impl Terminals {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let mut child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
         drop(pair.slave);
         let pid = child.process_id();
-        let mut reader = pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?;
-        let writer = pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?;
+        let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
+        screen.process(&printed);
+        let mut scrollback = VecDeque::with_capacity(SCROLLBACK_BYTES);
+        push_scrollback(&mut scrollback, &printed);
+        self.start(sink, id, Parts {
+            reader: pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?,
+            writer: pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?,
+            master: pair.master,
+            waiter: Waiter::Spawned(child),
+            pid,
+            group: pid,
+            explicit_command,
+            cwd: cwd.to_string(),
+            created: crate::store::index::now(),
+            scrollback,
+            printed: 0,
+            screen,
+            last_output: None,
+        })
+    }
+
+    /// Run a pane's reader, emitter and waiter, and list it: one opened here
+    /// or one handed over by the runtime this one replaced (#765).
+    fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
+        let Parts { master, mut reader, writer, mut waiter, pid, group, explicit_command, cwd, created, scrollback, printed, screen, last_output } = parts;
+        #[cfg(unix)]
+        let (readable, room) = {
+            let room = non_blocking(master.as_ref())?;
+            (room.try_clone()?, room)
+        };
+        *self.sink.lock().unwrap() = Some(sink.clone());
         let alive = Arc::new(Mutex::new(true));
-        let group = Arc::new(OwnedGroup(Mutex::new(pid)));
+        let group = Arc::new(OwnedGroup(Mutex::new(group)));
         {
             let mut groups = self.groups.lock().unwrap();
             groups.retain(|group| group.pid().is_some());
             groups.push(group.clone());
         }
-        let last_output = Arc::new(Mutex::new(None));
-        let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
-        append_scrollback(&scrollback, &printed);
+        let last_output = Arc::new(Mutex::new(last_output));
+        let scrollback = Arc::new(Mutex::new(scrollback));
+        let own = Arc::new(AtomicU64::new(printed));
+        let screen = Arc::new(Mutex::new(screen));
+        let hold = Arc::new(Hold::default());
         let tap = self.tap_slot(id);
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
@@ -470,9 +669,13 @@ impl Terminals {
             let alive = alive.clone();
             let last_output = last_output.clone();
             let scrollback = scrollback.clone();
+            let own = own.clone();
+            let screen = screen.clone();
             let emitted = self.emitted.clone();
             let tap = tap.clone();
             let exited = exited.clone();
+            let reading = hold.clone();
+            let drawing = hold.clone();
             // Reading blocks until the program writes again, so it gets a
             // thread of its own: the emitter below must be able to send what
             // it gathered when the window closes even if the program has
@@ -481,13 +684,36 @@ impl Terminals {
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
                 loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
+                    // Read only while the pane is not being handed over, and
+                    // count what is read under the same lock: a handover then
+                    // finds every byte either on its way to the scrollback or
+                    // still in the terminal for the next owner (#765). The
+                    // master is non-blocking, so this never waits in the read.
+                    #[cfg(unix)]
+                    let read = {
+                        let mut held = reading.thawed();
+                        let read = reader.read(&mut buf);
+                        if matches!(read, Ok(n) if n > 0) { held.read += 1; }
+                        read
+                    };
+                    #[cfg(not(unix))]
+                    let read = reader.read(&mut buf);
+                    match read {
+                        Ok(0) => break,
                         Ok(n) => {
                             if chunks.send(buf[..n].to_vec()).is_err() {
                                 break;
                             }
                         }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        // The master is non-blocking for its writers' sake.
+                        #[cfg(unix)]
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if ready(&readable, libc::POLLIN, None).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
                     }
                 }
             })?;
@@ -498,7 +724,8 @@ impl Terminals {
                         // bytes exactly once: in the scrollback it is handed,
                         // or from its tap.
                         let mut views = tap.0.lock().unwrap();
-                        append_scrollback(&scrollback, acc);
+                        append_own_output(&scrollback, &own, acc);
+                        screen.lock().unwrap_or_else(|e| e.into_inner()).process(acc);
                         views.0.retain_mut(|view| {
                             let received = (view.tap)(acc);
                             if received {
@@ -519,6 +746,7 @@ impl Terminals {
                 while open {
                     let Ok(first) = gathered.recv() else { break };
                     acc.extend_from_slice(&first);
+                    let mut got = 1;
                     // Gather a little more if it is arriving fast, so one emit
                     // carries a burst rather than each read costing an eval.
                     // After a quiet spell there is no burst yet to gather: a
@@ -531,7 +759,10 @@ impl Terminals {
                             break;
                         }
                         match gathered.recv_timeout(left) {
-                            Ok(more) => acc.extend_from_slice(&more),
+                            Ok(more) => {
+                                acc.extend_from_slice(&more);
+                                got += 1;
+                            }
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                 open = false;
@@ -540,6 +771,7 @@ impl Terminals {
                         }
                     }
                     flush(&mut acc);
+                    drawing.drew(got);
                     flushed = Some(Instant::now());
                     wait_for_view(&tap, &exited);
                 }
@@ -553,8 +785,9 @@ impl Terminals {
             let id = id.to_string();
             let tap = tap.clone();
             let group = group.clone();
+            let hold = hold.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
-                let code = child.wait().ok().map(|s| s.exit_code() as i32);
+                let code = waiter.wait(pid, &hold);
                 let _ = group.pid();
                 // Let the emitter go if it is holding the pane for its view, then
                 // give it a moment to send the tail, so the exit is not announced
@@ -572,8 +805,13 @@ impl Terminals {
                 while group.pid().is_some() { std::thread::sleep(Duration::from_millis(20)); }
             })?;
         }
-        let writer = Arc::new(Mutex::new(writer));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, explicit_command, alive, group, last_output, scrollback, cwd: cwd.to_string(), created: crate::store::index::now() });
+        let input = Arc::new(Mutex::new(Input {
+            writer,
+            #[cfg(unix)]
+            room,
+            stalled: false,
+        }));
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, cwd, created, hold });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -697,29 +935,29 @@ impl Terminals {
         self.drop_slot_if_unused(id);
     }
 
+    /// Type `data` into the pane. Fails with [`InputStalled`] once the program
+    /// has taken none of it for [`INPUT_STALL`], or the write has waited
+    /// [`INPUT_DEADLINE`] in all, so no caller waits on a program that has
+    /// stopped reading, or barely reads, for longer than that.
     pub fn write(&self, id: &str, data: &[u8]) -> Result<()> {
-        let writer = self.panes.lock().unwrap().get(id).context("no such terminal")?.writer.clone();
-        let mut writer = writer.lock().unwrap();
-        writer.write_all(data)?;
-        writer.flush()?;
-        Ok(())
+        let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
+        let mut input = input.lock().unwrap();
+        input.write(data)
     }
 
     /// Capture the writer only if it is still the process the caller admitted.
     /// Keeping that writer Arc cannot redirect bytes to a replacement pane.
     pub(crate) fn write_for_process(&self, id: &str, pid: u32, data: &[u8]) -> Result<()> {
-        let writer = {
+        let input = {
             let panes = self.panes.lock().unwrap();
             let pane = panes.get(id).context("no such terminal")?;
             if pane.pid != Some(pid) || !*pane.alive.lock().unwrap() {
                 anyhow::bail!("the terminal process changed before input delivery");
             }
-            pane.writer.clone()
+            pane.input.clone()
         };
-        let mut writer = writer.lock().unwrap();
-        writer.write_all(data)?;
-        writer.flush()?;
-        Ok(())
+        let mut input = input.lock().unwrap();
+        input.write(data)
     }
 
     /// How many bytes written into the pane its program has yet to read.
@@ -749,16 +987,12 @@ impl Terminals {
         }
     }
 
-    /// Desktop input may block on a full PTY. Resolve the writer before
-    /// dispatching so queued work cannot write to a replacement process.
+    /// Desktop input may wait, up to [`INPUT_STALL`], for room in a full PTY.
+    /// Resolve the writer before dispatching so queued work cannot write to a
+    /// replacement process.
     pub async fn write_async(&self, id: &str, data: Vec<u8>) -> Result<()> {
-        let writer = self.panes.lock().unwrap().get(id).context("no such terminal")?.writer.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut writer = writer.lock().unwrap();
-            writer.write_all(&data)?;
-            writer.flush()?;
-            Ok(())
-        }).await?
+        let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
+        tokio::task::spawn_blocking(move || input.lock().unwrap().write(&data)).await?
     }
 
     pub fn pid(&self, id: &str) -> Option<u32> {
@@ -773,10 +1007,31 @@ impl Terminals {
         }
     }
 
+    /// What the pane's own program printed, as far as the scrollback still
+    /// holds it: not what an earlier program in the same pane left there.
+    /// Still there once the program has exited, until the pane is replaced.
+    pub fn program_output(&self, id: &str) -> Option<Vec<u8>> {
+        let (scrollback, printed) = self.panes.lock().unwrap().get(id).map(|pane| (pane.scrollback.clone(), pane.printed.clone()))?;
+        let scrollback = scrollback.lock().unwrap();
+        // Counted under this lock (`append_own_output`), so the two agree.
+        let own = usize::try_from(printed.load(Ordering::Relaxed)).unwrap_or(usize::MAX).min(scrollback.len());
+        Some(scrollback.iter().skip(scrollback.len() - own).copied().collect())
+    }
+
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
         let panes = self.panes.lock().unwrap();
         let pane = panes.get(id).context("no such terminal")?;
-        pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))
+        pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
+        pane.screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(rows), screen_size(cols));
+        Ok(())
+    }
+
+    /// Read the screen pane `id`'s program has drawn, as it stands now.
+    /// `None` when there is no such pane.
+    pub fn screen<R>(&self, id: &str, read: impl FnOnce(&vt100::Screen) -> R) -> Option<R> {
+        let screen = self.panes.lock().unwrap().get(id)?.screen.clone();
+        let parser = screen.lock().unwrap_or_else(|e| e.into_inner());
+        Some(read(parser.screen()))
     }
 
     pub(crate) fn size(&self, id: &str) -> Result<(u16, u16)> {
@@ -1527,6 +1782,29 @@ mod tests {
         terminals.kill_all();
     }
 
+    /// A shell tab keeps the screen it draws, as an agent's pane does: the
+    /// reader can start an agent's CLI in it by hand (#437), and the app reads
+    /// that CLI's input box before typing into it (#722).
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_tab_keeps_the_screen_it_draws() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: None, env: &[] };
+        terminals.spawn(sink, "session-a:1", spec).unwrap();
+        terminals.write("session-a:1", b"printf 'SCREEN-%s\\n' DRAWN\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !terminals.screen("session-a:1", |screen| screen.contents()).unwrap().contains("SCREEN-DRAWN") {
+            assert!(Instant::now() < deadline, "the shell's screen never showed what it printed");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        terminals.resize("session-a:1", 100, 30).unwrap();
+        assert_eq!(terminals.screen("session-a:1", |screen| screen.size()).map(|(rows, cols)| (rows.get(), cols.get())), Some((30, 100)));
+        assert!(terminals.screen("session-z:9", |_| ()).is_none(), "no pane, no screen");
+        terminals.kill_all();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_shell_is_busy_while_it_runs_a_command_and_not_at_its_prompt() {
@@ -1608,6 +1886,43 @@ mod tests {
         assert!(all.find("last-words").unwrap() < all.find("shell-prompt").unwrap(), "{all:?}");
         assert!(terminals.is_running("pane"));
         assert!(terminals.opened("pane").unwrap().1 >= created);
+        terminals.kill_all();
+    }
+
+    /// Why an agent's CLI exited is in what it printed, not in what the pane
+    /// held before it (#663).
+    #[test]
+    fn what_a_program_printed_is_told_apart_from_what_it_was_handed() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        let (watching, watched) = collector();
+        terminals.attach("main", "pane", "watching", watching);
+        pane(&terminals, &sink, &dir, "pane", "sh -c 'printf earlier-program'");
+        read_until(&watched, "earlier-program");
+        let gone = |terminals: &Terminals| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while terminals.is_running("pane") {
+                assert!(Instant::now() < deadline, "the program never exited");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        gone(&terminals);
+        // The login shell the pane runs it from may say something first.
+        let said = |terminals: &Terminals| String::from_utf8(terminals.program_output("pane").unwrap()).unwrap();
+        assert!(said(&terminals).ends_with("earlier-program"), "{:?}", said(&terminals));
+
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'printf its-own-words; exit 1'"), env: &[] };
+        terminals.respawn(sink.clone(), "pane", spec).unwrap();
+        read_until(&watched, "its-own-words");
+        gone(&terminals);
+        // The scrollback has both; the program said only its own, and it is
+        // still there to be read once the program has gone.
+        let all = String::from_utf8(terminals.read_output("pane").unwrap()).unwrap();
+        assert!(all.contains("earlier-program") && all.contains("its-own-words"), "{all:?}");
+        let own = said(&terminals);
+        assert!(own.ends_with("its-own-words") && !own.contains("earlier-program"), "{own:?}");
+        assert!(terminals.program_output("no-such-pane").is_none());
         terminals.kill_all();
     }
 
@@ -1708,7 +2023,7 @@ mod tests {
         pane(&terminals, &sink, &dir, "other", "cat");
         let (entered, started) = tokio::sync::oneshot::channel();
         let (release, resume) = std::sync::mpsc::channel();
-        terminals.panes.lock().unwrap().get_mut("busy").unwrap().writer = Arc::new(Mutex::new(Box::new(BlockedWriter { entered: Some(entered), release: resume })));
+        terminals.panes.lock().unwrap().get("busy").unwrap().input.lock().unwrap().writer = Box::new(BlockedWriter { entered: Some(entered), release: resume });
         let writing = terminals.clone();
         let runtime_thread = std::thread::current().id();
         let busy = tokio::spawn(async move { writing.write_async("busy", vec![b'x'; 1024]).await });
@@ -1721,6 +2036,44 @@ mod tests {
         terminals.kill_all();
         assert_ne!(writer_thread, runtime_thread, "PTY input blocked the runtime thread");
         other.expect("another pane waited for the blocked writer").unwrap();
+    }
+
+    /// The incident in #661: a program stopped reading its input, the next
+    /// write waited in the kernel for good, and every lock its caller held
+    /// went with it. Input now gives up, says how much got through, and a
+    /// pane that has stalled fails the next write at once.
+    #[cfg(unix)]
+    #[test]
+    fn input_to_a_program_that_stopped_reading_gives_up_instead_of_waiting_for_ever() {
+        let terminals = Arc::new(Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let dir = tempfile::tempdir().unwrap();
+        // Never reads: whole lines fill its input queue after about 1 KB.
+        pane(&terminals, &sink, &dir, "deaf", "sleep 600");
+        pane(&terminals, &sink, &dir, "other", "cat");
+        let (tap, output) = collector();
+        terminals.attach("main", "other", "view", tap);
+        let lines = "a line the program never reads\n".repeat(512);
+
+        let started = Instant::now();
+        let writing = terminals.clone();
+        let deaf = std::thread::spawn(move || writing.write("deaf", lines.as_bytes()));
+        // Meanwhile another pane's input and output go on as before.
+        std::thread::sleep(Duration::from_millis(500));
+        terminals.write("other", b"still-answering\n").unwrap();
+        read_until(&output, "still-answering");
+        let error = deaf.join().unwrap().expect_err("a full input queue must not be waited on for ever");
+        let elapsed = started.elapsed();
+        let stalled = error.downcast_ref::<InputStalled>().expect("a stall, not another error");
+        assert!(stalled.written > 0 && stalled.written < stalled.total, "{stalled}");
+        assert!(elapsed >= INPUT_STALL && elapsed < INPUT_STALL + Duration::from_secs(5), "gave up after {elapsed:?}");
+
+        // Known not to be reading: the next write fails at once.
+        let again = Instant::now();
+        let error = terminals.write("deaf", b"x\n").unwrap_err();
+        assert!(again.elapsed() < Duration::from_secs(1), "a stalled pane waited again: {:?}", again.elapsed());
+        assert_eq!(error.downcast_ref::<InputStalled>().map(|stalled| stalled.written), Some(0));
+        terminals.kill_all();
     }
 
     #[test]

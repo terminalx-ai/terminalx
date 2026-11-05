@@ -391,6 +391,18 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
+
+  it("asks a new workspace for a native Codex first tab only for Codex, and only when Settings → Experimental says so (#745)", async () => {
+    await place([], { used: 0, limit: 5 });
+    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    let on = false;
+    mocks.invoke.mockImplementation(async (command: string) => (command === "experimental_settings" ? { nativeCodex: on } : undefined));
+    const launch = async (agent: string) => (await flow.prepareCloudCreate(target, { ...request, agent, model: "" })).pending.request.launch;
+    expect(await launch("codex")).not.toHaveProperty("nativeCodex");
+    on = true;
+    expect(await launch("codex")).toMatchObject({ agent: "codex", prompt: request.prompt, nativeCodex: true });
+    expect(await launch("claude")).not.toHaveProperty("nativeCodex");
+  });
 });
 
 describe("blank projects", () => {
@@ -420,6 +432,19 @@ describe("blank projects", () => {
     expect(mocks.api.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
     expect(runtimes.get("scratch-ws")!.created).toHaveLength(1);
     expect(runtimes.get("scratch-ws")!.created[0]).not.toHaveProperty("repository");
+  });
+
+  it("asks the workspace for native Codex only for a Codex tab, and only when Settings → Experimental says so (#644)", async () => {
+    await place([item("native-ws", { name: "notes", repositories: [] })]);
+    const node = project("blank/notes");
+    const sent = () => runtimes.get("native-ws")!.connection.client.createAgentTab.mock.calls.map((call) => (call[0] as { nativeCodex?: boolean }).nativeCodex);
+    let on = false;
+    mocks.invoke.mockImplementation(async (command: string) => (command === "experimental_settings" ? { nativeCodex: on } : undefined));
+    await flow.startInWorkspace(flow.planCloudStart(node) as never, { ...request, agent: "codex", model: "" });
+    on = true;
+    await flow.startInWorkspace(flow.planCloudStart(node) as never, { ...request, agent: "codex", model: "" });
+    await flow.startInWorkspace(flow.planCloudStart(node) as never, request);
+    expect(sent()).toEqual([undefined, true, undefined]);
   });
 
   it("falls back to working in the folder when the runtime cannot cut a worktree there", async () => {

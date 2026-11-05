@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
-import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -36,6 +36,7 @@ import {
 } from "./cloudAgents";
 import { getTabLog } from "./agentEvents";
 import { getDraft, setDraft } from "./drafts";
+import { buildTranscript } from "./transcript";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 
@@ -130,6 +131,8 @@ class FakeBackend {
 let backend: FakeBackend;
 
 function fakeClient(connected = true, connection: Record<string, unknown> = {}) {
+  const states = new Set<(state: WorkspaceConnectionState) => void>();
+  const now = () => client.connection as unknown as WorkspaceConnectionState;
   const client = {
     // A manage attachment unless a test says who is behind the connection.
     connection: { state: connected ? "connected" : "suspended", authority: "manage", ...connection },
@@ -139,6 +142,17 @@ function fakeClient(connected = true, connection: Record<string, unknown> = {}) 
     configureAgentTab: vi.fn(async (params: Record<string, unknown>) => tabInfo({ model: String(params.model ?? "") })),
     listAgentTabs: vi.fn(async () => [] as AgentTabInfo[]),
     onNotification: vi.fn(() => () => undefined),
+    // As the workspace client does: the state now, then every change.
+    onState: vi.fn((listener: (state: WorkspaceConnectionState) => void): (() => void) => {
+      states.add(listener);
+      listener(now());
+      return () => void states.delete(listener);
+    }),
+    /** The connection drops or comes back. */
+    moveTo: (state: string): void => {
+      client.connection = { ...client.connection, state };
+      for (const listener of [...states]) listener(now());
+    },
   };
   return client as typeof client & WorkspaceRpcClient;
 }
@@ -627,6 +641,84 @@ describe("cloud agent tabs store", () => {
     onEvent({ ...ev(2, { type: "status", text: "The workspace runtime restarted" }), id: "status-after-restart" });
     const events = getTabLog("s-1", "t-1").events;
     expect(events.map((e) => e.id)).toEqual(["t-1-e1", "status-after-restart"]);
+  });
+
+  describe("a compaction's status in a cloud tab (#644)", () => {
+    // What the runtime saved of a compaction that started and has not ended.
+    const started = (): AgentEvent[] => {
+      const scope = { sessionId: "s-1", tabId: "t-1", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
+      return [
+        ev(1, { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "connection_opened", generation: 1 } }),
+        ev(2, { type: "context_compaction_lifecycle", persisted: true, confirmedStart: true, evidence: { scope, type: "item_started", generation: 1, turnId: "turn", itemId: "item" } }),
+      ];
+    };
+    /** What the chat says of it, as the tab's log stands. */
+    const shown = () => {
+      const log = getTabLog("s-1", "t-1");
+      const transcript = buildTranscript(log.events, true, { compactionContinuityKnown: log.compactionContinuityKnown });
+      if (transcript.compacting) return "compacting";
+      const row = transcript.turns.flatMap((turn) => turn.work).find((item) => item.kind === "compaction");
+      return row?.kind === "compaction" ? row.lifecycle?.state : "none";
+    };
+    /** Attach a feed that replays the started compaction, and hand back the runtime's word that its replay is in. */
+    const replaying = (client: ReturnType<typeof fakeClient>) => {
+      const replays: (() => void)[] = [];
+      client.subscribeSession.mockImplementation(async (_s, _t, onEvent, options) => {
+        for (const event of started()) onEvent(event);
+        replays.push((options as { onReplayed: () => void }).onReplayed);
+        return () => undefined;
+      });
+      return replays;
+    };
+
+    it("is known only once the live replay is in over a live connection, and unknown while that connection is down or once the feed ended", async () => {
+      applyLiveTabs(scope, [tabInfo({ lastSeq: 2 })]);
+      const client = fakeClient();
+      const replays = replaying(client);
+      const stop = await attachCloudAgentTab(scope, "t-1", client);
+      // Its events are here; the runtime's word that nothing came after them is not.
+      expect(shown()).toBe("unknown");
+      replays[0]!();
+      expect(shown()).toBe("compacting");
+      // Dropped: how it ends would not be heard here.
+      client.moveTo("reconnecting");
+      expect(shown()).toBe("unknown");
+      // A replay that comes in while the connection is not up attests nothing either.
+      replays[0]!();
+      expect(shown()).toBe("unknown");
+      // Back, and caught up again once the resume's replay is in.
+      client.moveTo("connected");
+      expect(shown()).toBe("unknown");
+      replays[0]!();
+      expect(shown()).toBe("compacting");
+      stop();
+      expect(shown()).toBe("unknown");
+      // A replay answered after the feed ended (its view went away) attests nothing.
+      replays[0]!();
+      expect(shown()).toBe("unknown");
+    });
+
+    it("stays known while another view's feed of the tab is still caught up, and is unknown when a feed's subscribe fails", async () => {
+      applyLiveTabs(scope, [tabInfo({ lastSeq: 2 })]);
+      const client = fakeClient();
+      const replays = replaying(client);
+      const first = await attachCloudAgentTab(scope, "t-1", client);
+      const second = await attachCloudAgentTab(scope, "t-1", client);
+      for (const replayed of replays) replayed();
+      first();
+      expect(shown()).toBe("compacting");
+      second();
+      expect(shown()).toBe("unknown");
+
+      const failing = fakeClient();
+      failing.subscribeSession.mockImplementation(async (_s, _t, onEvent, options) => {
+        for (const event of started()) onEvent(event);
+        (options as { onReplayed: () => void }).onReplayed();
+        throw new WorkspaceRpcError("forbidden", "no", "session.subscribe");
+      });
+      await expect(attachCloudAgentTab(scope, "t-1", failing)).rejects.toThrow("no");
+      expect(shown()).toBe("unknown");
+    });
   });
 
   it("sends over live RPC for a development runtime and refuses what needs the mailbox", async () => {

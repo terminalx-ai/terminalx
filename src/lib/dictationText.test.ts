@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, spokenSince, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
+import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, spokenSince, formattedSince, rawSpokenText, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
 
 /** A recogniser event, as the store hands it over. */
 type Event = { partial: string; at?: number; segment?: number } | { final: string; segment?: number };
@@ -407,5 +407,128 @@ describe("the stream observed from Apple", () => {
       expect(end("Draft:", [...events, { final: "", segment: 1 }]).text).toBe(heard);
       expect(heard.startsWith("Draft: I need a settings page")).toBe(true);
     }
+  });
+});
+
+
+describe("raw/formatted edit ownership", () => {
+  it("owns the transformed command while leaving its new suffix", () => {
+    const raw = "camel case user name end case please save changes";
+    const formatted = "userName please save changes";
+    expect(formattedSince("camel case user name", raw, formatted)).toEqual({
+      taken: "camel case user name end case", formattedTaken: "userName", spoken: "please save changes",
+    });
+  });
+
+  it("keeps multiword expansions atomic at an owned raw boundary", () => {
+    expect(formattedSince("insert the prepared status", "insert the prepared status now please save changes",
+      "Ready for review please save changes").spoken).toBe("please save changes");
+  });
+
+  it("does not consume a newly spoken formatting command after the owned prefix", () => {
+    expect(formattedSince("please review", "please review camel case user name end case", "please review userName").spoken).toBe("userName");
+  });
+
+  it("retains raw settled utterances when the next segment stands alone", () => {
+    const partial = applyPartial(EMPTY_BUFFER, "userName", { raw: "camel case user name end case", segment: 0 });
+    const next = applyPartial(partial, "please save changes", { raw: "please save changes", segment: 1 });
+    const final = applyFinal(next, "please save changes", { raw: "please save changes", segment: 1 });
+    expect(rawSpokenText(final)).toBe("camel case user name end case please save changes");
+    expect(final.committed).toBe("userName please save changes");
+  });
+});
+
+
+it("retains paired part identity through revisions, segment changes and finalization", () => {
+  const first = applyPartial(EMPTY_BUFFER, "camel case user name", { raw: "camel case user name", segment: 0 });
+  const revised = applyPartial(first, "userName", { raw: "camel case user name end case", segment: 0 });
+  const next = applyPartial(revised, "account_id", { raw: "snake case account id end case", segment: 1 });
+  const final = applyFinal(next, "account_id", { raw: "snake case account id end case", segment: 1 });
+  expect(first.parts?.[0].id).toBe(revised.parts?.[0].id);
+  expect(next.parts).toEqual([
+    { id: 0, raw: "camel case user name end case", text: "userName" },
+    { id: 1, raw: "snake case account id end case", text: "account_id" },
+  ]);
+  expect(final.parts).toEqual(next.parts);
+  // Updating a revision must not mutate the snapshot captured by an edit.
+  expect(first.parts).toEqual([{ id: 0, raw: "camel case user name", text: "camel case user name" }]);
+});
+
+
+it("retains identities initialized at recording start before raw metadata exists", () => {
+  const first = applyPartial({ ...EMPTY_BUFFER, parts: [] }, "please save", { segment: 0 });
+  expect(first.raw).toBeUndefined();
+  expect(first.rawCommitted).toBeUndefined();
+  expect(first.parts).toEqual([{ id: 0, raw: "please save", text: "please save" }]);
+  const revised = applyPartial(first, "please save changes", { raw: "please save changes", segment: 0 });
+  expect(revised.parts).toEqual([{ id: 0, raw: "please save changes", text: "please save changes" }]);
+  expect(first.parts).toEqual([{ id: 0, raw: "please save", text: "please save" }]);
+  const settled = applyFinal(first, "please save", { segment: 0 });
+  const fresh = applyPartial(settled, "account_id", { raw: "snake case account id end case", segment: 1 });
+  expect(fresh.parts).toEqual([
+    { id: 0, raw: "please save", text: "please save" },
+    { id: 1, raw: "snake case account id end case", text: "account_id" },
+  ]);
+});
+
+/**
+ * A local model that streams (#754), as Rust sends it: the whole dictation is
+ * one utterance, segment 0. Each partial is the stream's committed text,
+ * which never changes once shown, with the tentative tail it is still
+ * revising; raw comes beside the processed text, and the final is the whole
+ * transcript processed once.
+ */
+describe("a local model's streamed dictation", () => {
+  const STREAMED = [
+    "Please add a settings",
+    "Please add a settings page for notifications",
+    "Please add a settings page for notifications, then write the unit",
+    "Please add a settings page for notifications, then write the unit tests",
+  ];
+  const FINAL = "Please add a settings page for notifications, then write the unit tests for it.";
+  const stream = (texts: string[], buffer: DictationBuffer = { ...EMPTY_BUFFER, parts: [] }) =>
+    texts.reduce((b, raw) => applyPartial(b, raw, { raw, segment: 0 }), buffer);
+
+  it("revises one live utterance with each partial, never folding one into the next", () => {
+    const buffer = stream(STREAMED);
+    expect(buffer.committed).toBe("");
+    expect(buffer.live).toBe(STREAMED[3]);
+    expect(buffer.parts).toEqual([{ id: 0, raw: STREAMED[3], text: STREAMED[3] }]);
+  });
+
+  it("revises the tentative tail too, not only the end of it", () => {
+    // The tail is what the model may still change: "the unit" became "a unit test".
+    const buffer = stream([STREAMED[2], "Please add a settings page for notifications, then write a unit test"]);
+    expect(buffer.live).toBe("Please add a settings page for notifications, then write a unit test");
+    expect(buffer.committed).toBe("");
+  });
+
+  it("settles on the final, adding the held-back words once and dropping none", () => {
+    const buffer = applyFinal(stream(STREAMED), FINAL, { raw: FINAL, segment: 0 });
+    expect(rawSpokenText(buffer)).toBe(FINAL);
+    expect(buffer.committed).toBe(FINAL);
+    expect(buffer.live).toBe("");
+    expect(buffer.parts).toEqual([{ id: 0, raw: FINAL, text: FINAL }]);
+  });
+
+  it("takes a final processed as a whole, whose words differ from the streamed ones", () => {
+    const processed = "Please add a settings page for notifications. Then write the unit tests for it.";
+    const raw = "please add a settings page for notifications then write the unit tests for it";
+    const buffer = applyFinal(stream(STREAMED.map((t) => t.toLowerCase().replace(/,/g, ""))), processed, { raw, segment: 0 });
+    expect(buffer.committed).toBe(processed);
+  });
+
+  it("takes back the streamed words when the final's text is empty though it heard words: the noise guard", () => {
+    const buffer = applyFinal(stream(["Thank you"], { committed: "", live: "", parts: [] }), "", { raw: "Thank you.", segment: 0 });
+    expect(buffer.committed).toBe("");
+    expect(buffer.live).toBe("");
+    expect(rawSpokenText(buffer)).toBe("");
+    // The part stays, emptied, so its id is not handed to anything else.
+    expect(buffer.parts).toEqual([{ id: 0, raw: "", text: "" }]);
+  });
+
+  it("keeps the streamed words when an empty final heard nothing either", () => {
+    const buffer = applyFinal(stream(["Fix the build"]), "", { raw: "", segment: 0 });
+    expect(buffer.committed).toBe("Fix the build");
   });
 });

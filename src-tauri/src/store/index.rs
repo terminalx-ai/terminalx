@@ -209,12 +209,23 @@ pub struct TabEntry {
     pub context_used: Option<u64>,
     #[serde(default)]
     pub context_max: Option<u64>,
-    /// Provider conversation this tab was forked from. It drives the first
-    /// start only (a tab with an id of its own resumes that), and stays set
-    /// afterwards so the parent's transcript is not deleted before the fork
-    /// has one of its own.
+    /// Provider conversation this tab was forked from. It drives every start
+    /// until the fork has a transcript of its own (a tab whose own exists
+    /// resumes that), and stays set afterwards so the parent's transcript is
+    /// not deleted before the fork has one of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from: Option<String>,
+    /// The `seq` of the prompt that carried another conversation's context
+    /// into this tab (Continue in New Session). Should the CLI never have
+    /// taken it, it is the tab's whole brief, and the next launch sends it
+    /// again rather than leave the agent without it (#663).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<u64>,
+    /// Its agent was stopped because nothing was using it (#696): showing
+    /// the tab does not start it again, its next prompt does. Kept here so
+    /// a runtime that starts again knows it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parked: bool,
     #[serde(flatten, default)]
     pub follow: Follow,
     #[serde(flatten, default)]
@@ -358,6 +369,22 @@ pub struct ChatLink {
     pub branch: Option<String>,
 }
 
+/// What the archive knows of a session beyond whether it is in it (#718).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMark {
+    /// Archived by the idle sweep, not by a person. Such a session was not
+    /// set aside on purpose: whatever lets go of idle sessions (quick chat
+    /// retention) still may.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_archived: bool,
+    /// When it last came back from the archive. Its idle time counts from
+    /// here as well as from its last message, so a session brought back is
+    /// not archived again at the next sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unarchived_at: Option<String>,
+}
+
 /// What a session belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -432,6 +459,11 @@ pub struct SessionEntry {
     pub modified: String,
     #[serde(default)]
     pub archived: bool,
+    /// How it came to be archived, or back (#718). Flattened and left out
+    /// while it says nothing, so an entry nobody archived is written exactly
+    /// as before.
+    #[serde(flatten, default)]
+    pub archive: ArchiveMark,
     #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
@@ -777,6 +809,18 @@ pub fn update_session<R>(session_id: &str, f: impl FnOnce(&mut SessionEntry) -> 
     })
 }
 
+/// Mark a tab's agent as stopped for sitting idle, or as in use again
+/// ([`TabEntry::parked`]). Neither is something done in the session, so
+/// neither changes when it was last modified.
+pub fn set_parked(session_id: &str, tab_id: &str, parked: bool) -> Result<()> {
+    update(|sessions| {
+        if let Some(tab) = sessions.iter_mut().find(|session| session.id == session_id).and_then(|session| session.tab_mut(tab_id)) {
+            tab.parked = parked;
+        }
+        Ok(())
+    })
+}
+
 pub fn update_tab<R>(session_id: &str, tab_id: &str, f: impl FnOnce(&mut TabEntry) -> Result<R>) -> Result<R> {
     update_session(session_id, |s| {
         let t = s.tab_mut(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -853,6 +897,7 @@ mod tests {
             created: now(),
             modified: now(),
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: vec![],
             active_tab: None,
@@ -1286,7 +1331,7 @@ mod tests {
             modified: "now".into(),
             context_used: None,
             context_max: None,
-            fork_from: None,
+            fork_from: None, continuation: None, parked: false,
             follow: Follow::default(),
             unknown: BTreeMap::new(),
         });

@@ -73,6 +73,20 @@ async function shown() {
 }
 
 describe("WebGL contexts, with the real addon", () => {
+  it("diagnoses the upstream restoration timer retained after a lost renderer is disposed", async () => {
+    vi.useFakeTimers();
+    const memory = await import("./terminalMemory");
+    memory.startTerminalMemoryProbe();
+    const { webgl, term } = await shown();
+    const gl = [...term.element!.querySelectorAll("canvas")].find((canvas) => !canvas.classList.contains("xterm-link-layer"))!;
+    gl.dispatchEvent(new Event("webglcontextlost"));
+    webgl.dropWebgl(term);
+    term.dispose();
+    expect(memory.terminalMemorySnapshot()?.contextRestoreTimers).toBe(1);
+    vi.advanceTimersByTime(3001);
+    expect(memory.terminalMemorySnapshot(true)?.contextRestoreTimers).toBe(0);
+  });
+
   it("finds the addon's WebGL canvas, which is not the first one it adds", async () => {
     const { counters, term } = await shown();
     expect(counters.rendererOf(term)).toBe("webgl");

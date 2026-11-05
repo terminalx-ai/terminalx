@@ -44,6 +44,30 @@ pub fn unclaimed(taken: &[String]) -> String {
     format!("{}-{}", pick(&b.as_bytes()[..3]), b.as_bytes()[4])
 }
 
+/// Words that say nothing about the work, as `worktreeNameFromPrompt` in
+/// `src/lib/worktreeNames.ts` skips them; a test keeps the two the same.
+const FILLER: [&str; 41] = [
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "at", "by", "from", "into", "is", "are", "be", "it", "this", "that",
+    "i", "we", "you", "me", "my", "our", "please", "can", "could", "would", "should", "let", "lets", "let's", "need", "want", "like", "just", "some", "so",
+];
+
+/// A worktree name from what a session is asked to do, as the desktop's new
+/// session view draws one (`worktreeNameFromPrompt`): its first few words that
+/// say something, at most 40 characters. Empty when the prompt has none.
+pub fn from_prompt(prompt: &str) -> String {
+    let words = prompt.to_lowercase();
+    let words = words.split_whitespace()
+        .map(|word| word.chars().filter(char::is_ascii_alphanumeric).collect::<String>())
+        .filter(|word| !word.is_empty() && !FILLER.contains(&word.as_str()));
+    let mut name = String::new();
+    for word in words.take(5) {
+        let next = if name.is_empty() { word } else { format!("{name}-{word}") };
+        if next.len() > 40 { break; }
+        name = next;
+    }
+    name
+}
+
 /// A reader-provided worktree name made safe for a branch and folder.
 /// Names are lowercase ASCII slugs, limited to 40 characters, and receive a
 /// numeric suffix when the requested slug is already claimed.
@@ -108,6 +132,15 @@ mod tests {
         assert_eq!(words("ADJECTIVES"), ADJECTIVES);
         assert_eq!(words("COLORS"), COLORS);
         assert_eq!(words("ANIMALS"), ANIMALS);
+        assert_eq!(words("FILLER"), FILLER);
+    }
+
+    #[test]
+    fn a_prompt_names_its_worktree_as_the_desktop_does() {
+        assert_eq!(from_prompt("Please fix the login redirect on Safari"), "fix-login-redirect-safari");
+        assert_eq!(from_prompt("Let's add  an ENG-42 retry"), "add-eng42-retry");
+        assert_eq!(from_prompt("a the of"), "");
+        assert_eq!(from_prompt("supercalifragilisticexpialidocious anotherverylongwordhere"), "supercalifragilisticexpialidocious");
     }
 
     #[test]

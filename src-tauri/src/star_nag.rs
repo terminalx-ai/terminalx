@@ -116,6 +116,18 @@ impl Core {
         Ok(())
     }
 
+    /// The runtime's count, once the app is attached to it (#767). Work it did
+    /// while no window was open is not usage of this launch, so this never
+    /// makes the reminder eligible: only a live start does (`work_started`).
+    fn counted(&mut self, total_work_starts: u64) -> Result<()> {
+        if self.saved.completed || total_work_starts <= self.saved.launches {
+            return Ok(());
+        }
+        let mut next = self.saved.clone();
+        next.launches = total_work_starts;
+        self.save(next)
+    }
+
     fn suppressed(&self, now: i64) -> bool {
         self.saved.completed || now < self.saved.cooldown_until
     }
@@ -279,10 +291,14 @@ fn now() -> i64 {
 }
 
 impl StarNag {
+    /// The count comes from the saved snapshot, as the runtime is not attached
+    /// yet and the app never opens the activity writer (#767); `counted`
+    /// takes the runtime's own count once it is.
     pub fn load(version: &str) -> Self {
         let load = || -> Result<Core> {
-            let total = store::activity::summary()?.agents_spawned as u64;
-            Core::load(store::root()?.join("star-reminder.json"), version, total, now())
+            let root = store::root()?;
+            let total = store::activity::saved_summary(&root)?.map_or(0, |saved| saved.agents_spawned as u64);
+            Core::load(root.join("star-reminder.json"), version, total, now())
         };
         let core = load().unwrap_or_else(|e| {
             // A reminder must never prevent startup or overwrite corrupt state.
@@ -296,6 +312,13 @@ impl StarNag {
         core.view.revision += 1;
         let _ = app.emit(EVENT, &core.view);
         core.view.clone()
+    }
+
+    /// The lifetime count as the runtime reports it on attaching.
+    pub fn counted(&self, total_work_starts: u64) {
+        if let Err(e) = self.core.lock().unwrap().counted(total_work_starts) {
+            log::warn!("star reminder count: {e:#}");
+        }
     }
 
     pub fn work_started(self: &Arc<Self>, app: &AppHandle, total_work_starts: u64) {

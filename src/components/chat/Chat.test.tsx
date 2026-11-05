@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Chat } from "./Chat";
+import { Chat, visibleTurns } from "./Chat";
 import { buildTranscript } from "@/lib/transcript";
 import { syntheticLog } from "@/demo/synthetic";
 import type { StreamBlock } from "@/lib/agentEvents";
@@ -24,6 +24,8 @@ let dispatchedTop = 0;
 const observers: ResizeObserverCallback[] = [];
 
 const heightOf = (el: Element) => {
+  // A spacer standing for turns that are not drawn is as tall as its style says.
+  if (el.hasAttribute("data-spacer")) return parseFloat((el as HTMLElement).style.height) || 0;
   const key = el.getAttribute("data-turn");
   return key ? heights.get(key) ?? TURN : OTHER;
 };
@@ -72,10 +74,20 @@ function wheel(deltaY: number) {
 }
 
 const distFromBottom = () => maxTop() - top;
+/** How many pixels of the view lie over the space that stands for turns not drawn. */
+const overSpacer = () =>
+  [...content.querySelectorAll<HTMLElement>(":scope > [data-spacer]")].reduce((sum, spacer) => {
+    const { top: from, bottom: to } = spacer.getBoundingClientRect();
+    return sum + Math.max(0, Math.min(to, VIEWPORT) - Math.max(from, 0));
+  }, 0);
+/** Turns of 180–540 px. */
+const shortTurn = (index: number) => 180 + (index % 7) * 60;
+/** Every third turn 3000–6000 px, far taller than the drawn band reaches past the view (#771). */
+const tallTurn = (index: number) => (index % 3 === 1 ? 3000 + (index % 4) * 1000 : shortTurn(index));
 const latestShown = () => screen.getByRole("button", { name: /latest/i }).parentElement!.classList.contains("opacity-100");
 
-function setup(turnCount: number) {
-  const transcript = buildTranscript(syntheticLog(turnCount, true), true);
+function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
+  const transcript = buildTranscript(log, true);
   const lastKey = transcript.turns[transcript.turns.length - 1].key;
   const props = {
     sessionId: "s",
@@ -134,6 +146,9 @@ describe("chat scroll follow", () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       let y = 0;
       if (this !== content) {
+        // Something inside a turn is taken to be at the turn's top.
+        const turn = this.parentElement?.closest<HTMLElement>("[data-turn]");
+        if (turn && content.contains(turn)) return turn.getBoundingClientRect();
         if (this.parentElement !== content) return new DOMRect(0, 0, 0, 0);
         for (let c = this.previousElementSibling; c; c = c.previousElementSibling) y += heightOf(c);
       }
@@ -279,37 +294,138 @@ describe("chat scroll follow", () => {
     expect(distFromBottom()).toBe(0);
   });
 
-  it("holds the reader's paragraph while older turns backfill above, including scrolling during a step", () => {
-    vi.useFakeTimers();
-    const { transcript, turnTop } = setup(40);
-    const reading = transcript.turns[transcript.turns.length - 3].key;
-    wheel(-400);
-    const seen = turnTop(reading);
+  // #727: only the turns near the view are drawn. One drawn for the first
+  // time is rarely as tall as its spacer took it to be; the turn the reader
+  // is on stays exactly where their scrolling put it.
+  // #771: a turn taller than the overscan is drawn the whole time it is on
+  // screen, its first screen too, not left out of the band for a spacer.
+  it.each([
+    ["of 180–540 px", shortTurn],
+    ["up to 6000 px, taller than the overscan", tallTurn],
+  ])("draws only the turns near the view, and holds the reader's turn as turns above are drawn: turns %s", (_, turnHeight) => {
+    const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
+    keys.forEach((key, index) => heights.set(key, turnHeight(index)));
+    const { turnTop } = setup(200);
+    const drawn = () => content.querySelectorAll("[data-turn]").length;
+    expect(drawn()).toBeLessThan(25);
+    expect(content.querySelector(`[data-turn="${keys.at(-1)}"]`)).not.toBeNull();
+    expect(distFromBottom()).toBe(0);
 
-    act(() => {
-      vi.advanceTimersByTime(0);
-      // The reader keeps scrolling while the step renders.
-      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -50 }));
-      setTop(top - 50);
-    });
-    frame();
-    act(() => {
-      vi.advanceTimersToNextFrame();
-    });
-    expect(turnTop(reading)).toBe(seen + 50);
+    for (let step = 0; step < 30; step++) {
+      // The turn at the view's top: the first drawn one with any of it on screen.
+      const node = [...content.querySelectorAll<HTMLElement>("[data-turn]")].find((turn) => turn.getBoundingClientRect().bottom > 0);
+      expect(node?.getBoundingClientRect().top, `step ${step}: a drawn turn at the view's top`).toBeLessThan(VIEWPORT);
+      const reading = node!.dataset.turn!;
+      const seen = turnTop(reading);
+      wheel(-250);
+      expect(turnTop(reading), `step ${step}`).toBe(seen + 250);
+      expect(overSpacer(), `step ${step}: the view over spacers`).toBe(0);
+      expect(drawn()).toBeLessThan(25);
+    }
+    expect(content.querySelector(`[data-turn="${keys.at(-1)}"]`)).toBeNull();
+    expect(latestShown()).toBe(true);
+  });
 
-    for (let i = 0; i < 4; i++) {
-      act(() => {
-        vi.advanceTimersByTime(0);
-      });
-      frame();
-      act(() => {
-        vi.advanceTimersToNextFrame();
+  // #771: the band is worked out on the heights just measured, and runs
+  // through the turn holding its lower edge, so a reply taller than the
+  // overscan never leaves the view empty, scrolling either way, right after
+  // a step or once the reader holds still. Its 510 steps redraw a 200-turn
+  // chat four times each: about 2 s alone, 6–7 s in CI's full run, so it gets
+  // more than the default 5 s.
+  it("never leaves the view over spacers while scrolling past turns taller than the overscan", () => {
+    const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
+    keys.forEach((key, index) => heights.set(key, tallTurn(index)));
+    setup(200);
+    // A fixed sequence, so a failing step can be told apart and replayed.
+    let seed = 771;
+    const random = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
+    const runs: [string, number[]][] = [
+      ["small steps up", Array.from({ length: 150 }, () => -120)],
+      ["large steps, mostly up", Array.from({ length: 150 }, () => (random() < 0.7 ? -1 : 1) * Math.round(200 + random() * 1300))],
+      ["small steps both ways", Array.from({ length: 150 }, () => (random() < 0.5 ? -1 : 1) * Math.round(40 + random() * 300))],
+      ["large steps down", Array.from({ length: 60 }, () => Math.round(200 + random() * 1300))],
+    ];
+    for (const [run, steps] of runs) {
+      steps.forEach((delta, step) => {
+        wheel(delta);
+        expect(overSpacer(), `${run}, step ${step} (${delta} px) at ${top}: right after it`).toBe(0);
+        frame();
+        frame();
+        frame();
+        expect(overSpacer(), `${run}, step ${step} (${delta} px) at ${top}: settled`).toBe(0);
       });
     }
-    expect(content.querySelectorAll("[data-turn]")).toHaveLength(40);
-    expect(turnTop(reading)).toBe(seen + 50);
+  }, 30_000);
+
+  // #727: a turn scrolled far from the view is not drawn. What the reader
+  // opened in it is the chat's to keep, so it comes back as they left it.
+  it("keeps a turn's tool calls unfolded after it was scrolled out of the drawn band and back", () => {
+    const { transcript } = setup(200);
+    const key = transcript.turns.at(-2)!.key;
+    const fold = () => content.querySelector<HTMLElement>(`[data-turn="${key}"]`)?.querySelector<HTMLElement>("button[aria-expanded]") ?? null;
+    expect(fold()!.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(fold()!);
+    expect(fold()!.getAttribute("aria-expanded")).toBe("true");
+    for (let step = 0; step < 40 && fold(); step++) wheel(-400);
+    expect(fold(), "scrolled out of the drawn band").toBeNull();
+    setTop(maxTop());
+    frame();
+    frame();
+    expect(fold()!.getAttribute("aria-expanded")).toBe("true");
+    // Another turn's fold was never opened, and is not now.
+    const other = content.querySelector<HTMLElement>(`[data-turn="${transcript.turns.at(-3)!.key}"] button[aria-expanded]`)!;
+    expect(other.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  // #727: a link to a place in a turn that is not drawn draws every turn to
+  // find it, brings it to the top, and goes back to drawing the turns near it.
+  it("follows a link to a place in a turn that is not drawn", () => {
+    const log = syntheticLog(200, true);
+    const answers = log.flatMap((event, index) => (event.payload.type === "assistant_text" ? [index] : []));
+    const place = (index: number, text: string) => {
+      log[index] = { ...log[index], payload: { type: "assistant_text", text } };
+    };
+    place(answers[3], 'The plan is <span id="the-plan">here</span>.');
+    place(answers.at(-1)!, "As [the plan](#the-plan) says.");
+    const { transcript } = setup(200, log);
+    scroller.style.overflowY = "auto";
+    const far = transcript.turns[3].key;
+    const drawn = () => content.querySelectorAll("[data-turn]").length;
+    expect(content.querySelector(`[data-turn="${far}"]`)).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: "the plan" }));
+    expect(content.querySelector("#the-plan")).not.toBeNull();
+    expect(content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top).toBe(0);
+    expect(drawn()).toBeLessThan(25);
+    frame();
+    expect(content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top).toBe(0);
     expect(latestShown()).toBe(true);
+  });
+});
+
+// #771: the band of turns drawn runs through the turn holding its lower
+// edge, which is on screen when it is taller than the overscan.
+describe("the turns drawn for a view", () => {
+  it("draws a turn taller than the overscan while the view is wholly inside it", () => {
+    const { start, end } = visibleTurns([0, 500, 5500, 6000], 1000, 600, false);
+    expect(start).toBeLessThanOrEqual(1);
+    expect(end).toBeGreaterThan(1);
+  });
+
+  it("draws every turn on screen, wherever the view is over turns of 1500, 3000 and 6000 px", () => {
+    const sizes = [300, 1500, 220, 3000, 6000, 180, 1500, 400, 6000, 3000, 260, 1500, 6000];
+    const tops = sizes.reduce((list, size) => [...list, list[list.length - 1] + size], [0]);
+    const listEnd = tops[sizes.length];
+    const missed: string[] = [];
+    for (const viewport of [200, 600, 900, 2000]) {
+      for (let top = 0; top + viewport <= listEnd; top += 10) {
+        const { start, end } = visibleTurns(tops, top, viewport, false);
+        for (let turn = 0; turn < sizes.length; turn++) {
+          const onScreen = tops[turn] < top + viewport && tops[turn + 1] > top;
+          if (onScreen && (turn < start || turn >= end)) missed.push(`turn ${turn}, view of ${viewport} px at ${top}: drew [${start}, ${end})`);
+        }
+      }
+    }
+    expect(missed.slice(0, 10)).toEqual([]);
   });
 });
 

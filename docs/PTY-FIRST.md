@@ -53,6 +53,30 @@ The rest of the command line is `--model`, `--effort`, `--permission-mode`
 (`--dangerously-skip-permissions` for bypass, the default launch mode),
 `--name` (so the tab is recognisable in the CLI's own picker) and `--settings`.
 
+The CLI writes the transcript only once it takes a prompt, so an id is not a
+conversation (#663). A tab opened and never prompted, or one whose first
+prompt never reached the CLI, holds an id with no file, and `--resume` of it
+exits at once ("No conversation found with session ID", probed on 2.1.314).
+So a tab resumes only a transcript that exists. Without one it starts again
+with `--session-id <same id>`, and a fork is made from its parent again while
+the parent's file exists. What starting afresh cost is read from the tab's own
+log (`session_unsent.rs`): nothing when nothing was said; the prompts the CLI
+never took when its agent never answered; the conversation, said as "no longer
+on this machine", when it answered and the file has gone since. A prompt that
+carried another conversation's context in (`TabEntry.continuation`) is sent
+again at once, ahead of whatever prompt relaunched the tab: prompts reach a
+pane in the order they were sent (`PaneWriter`). Any other prompt the CLI
+never took is offered back with the recovery banner's **Resend last prompt**,
+which sends it as it was sent, images included.
+
+A CLI that exits before it said it was up, within 15 s of being started, is
+named with its last printed lines ("Claude Code exited: No conversation found
+…"), read from what that program printed and not from what the pane held
+before it, and redacted as an agent's own words always are (`recovery::redact`,
+#667), whole and before it is cut to length: the chat is kept, forked and
+broadcast, so credentials, addresses and home folders are cut out. A CLI the
+reader quits after it was up is only said to have exited.
+
 The pane's environment carries `RACCOON_TAB_ID`, `RACCOON_SESSION_ID`,
 `RACCOON_HOOK_SOCKET` and `RACCOON_HOOK_TOKEN`, all of which the CLI passes on
 to every hook it runs. It also carries `TERMINALX_NEXT_SOCKET` and
@@ -208,7 +232,25 @@ Waiting status so the reader knows to look at the terminal view.
 `send_message` on a Claude tab writes into the pane, on its own thread under a
 per-pane lock:
 
-1. `Ctrl+U`, so a half-typed line in the terminal view is not glued to the front.
+1. Nothing, until the CLI's input box is empty (#722). The app keeps the screen
+   every pane has drawn (`vt100`), a shell tab's too, since the reader can
+   start a CLI there by hand (#437), and reads the box from it
+   (`claude::pty::composer`, `codex::pty::composer`): what is drawn faint is the
+   box's own suggestion, anything else is text in it. If it holds something —
+   a line the reader typed in the terminal view, or a prompt Claude Code put
+   back after dropping a turn before its first reply — the message waits, the
+   chat says so (`input_occupied`) of it and of every message sent behind it,
+   and it goes in once the reader has sent or cleared that text. A stop the
+   reader makes meanwhile withdraws the messages still waiting
+   (`prompt_withdrawn`, offered again with "Send again") rather than typing
+   them whenever the box next empties. A `/model` or `/effort` the app types
+   for itself is nobody's message, so it does not wait: the change is refused
+   with the reason. A wait the log leaves open with no delivery behind it (the
+   app quit mid-wait) is ended when the log is read. The app used to clear the
+   box with `Ctrl+U`, but that deletes only back to the start of the cursor's
+   row: a wrapped prompt lost its last row, and the rest went with the next
+   message glued to it. A box that cannot be seen at all (a CLI drawing
+   something else) is typed into.
 2. Any image attachments, each as its own bracketed paste of its path — a typed
    path is read as prose, only a paste becomes an attachment.
 3. The body, as a bracketed paste (`\x1b[200~` … `\x1b[201~`), with newlines
@@ -329,6 +371,26 @@ reader's message where the agent read it, and never folded away with the
 tool calls; `turn_started` naming it for one that starts the next turn. A
 log from before `prompt_absorbed` does not say a message was taken mid-turn,
 so there it is shown as it was sent.
+
+Claude Code can also drop a turn before its first reply and put the prompt
+back in its input box (#722; Escape does it, and so did something unrecorded
+on 2026-11-01). It keeps the dropped prompt's record, and the next prompt it
+records follows the same record (`parentUuid`) the dropped one did. The
+transcript reader keeps each prompt's place (`tui::Lineage`), and a prompt
+that follows the same record as an earlier one the agent did no work on took
+its place: the chat is told `prompt_replaced` for the earlier message, drawn
+as never answered with "Send again" (`resend_message`). One that says the
+same words is that message sent again from the box, and is not drawn twice,
+unless a message sent from the chat says them: that one is a message of its
+own. A prompt the agent did work on is not replaced by one that follows the
+same record: that is the reader rewinding the conversation. And composer
+messages whose words turn up, one after another, inside a recorded prompt
+reached the agent there, and each queued bubble clears. A record that is
+nothing but them shows each as it was sent. Otherwise the first is told
+`prompt_changed` with the recorded text, which it shows once, in that
+message's place, with what was sent behind it, and the rest `prompt_joined`
+into it. The prompt just submitted to an idle CLI, recorded shorter or
+edited but keeping at least half its words in order, is `prompt_changed` too.
 
 The headless agents (ACP and OpenCode, still driven for the tabs that have
 them) have no screen and no queue. Their interrupt is their protocol's own
@@ -649,7 +711,9 @@ the reader's copy is left exactly as it was. Resuming a copied rollout was
 verified against the installed CLI — the conversation replays in full, so the
 sqlite thread history is not needed. If the id cannot be found in either home
 the tab says so in the chat and starts a new conversation, because
-`codex resume <unknown>` fails the launch outright.
+`codex resume <unknown>` fails the launch outright. That, and a tab whose
+first prompt Codex never took (it has no id until one does), go through the
+same reading of the tab's log as a Claude tab with no transcript.
 
 ### The rollout is the conversation
 

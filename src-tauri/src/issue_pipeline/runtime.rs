@@ -63,6 +63,13 @@ impl SessionObserver for RuntimeObserver {
         let detail = engine::turn_failure(message.contains("interrupted"));
         self.off_thread(session_id, tab_id, move |host| engine::turn_failed(host, &session, &tab, detail));
     }
+
+    /// Off the sender's thread, which may hold the checkout's admission or a
+    /// pipeline's own step: the answer is taken once that step is done.
+    fn answered(&self, session_id: &str, tab_id: &str) {
+        let (session, tab) = (session_id.to_string(), tab_id.to_string());
+        self.off_thread(session_id, tab_id, move |host| engine::answered(host, &session, &tab));
+    }
 }
 
 /// Pick up the workspace's pipelines where they were and watch the pull
@@ -83,8 +90,10 @@ pub fn start(host: Arc<LocalHost>, interrupted: Vec<(String, String)>) {
 
 /// A new local owner means the old process really ended. Reopening a window
 /// never enters this path. Preserve interrupted work for explicit recovery.
-pub(crate) fn start_local(host: Arc<LocalHost>) {
-    engine::recover(&*host);
+/// `handed_over`: this runtime took over from the one it replaced (#765), so
+/// nothing it ran was cut short and every pipeline goes on where it was.
+pub(crate) fn start_local(host: Arc<LocalHost>, handed_over: bool) {
+    if handed_over { engine::handed_over(&*host) } else { engine::recover(&*host) }
     let spawned = std::thread::Builder::new().name("local-issue-pipeline-poll".into()).spawn(move || loop {
         std::thread::sleep(engine::POLL_EVERY);
         engine::poll(&*host);
@@ -121,11 +130,13 @@ mod tests {
             state: State::Working,
             reason: None,
             note: None,
+            answered: None,
             pr: None,
             round: 0,
             max_rounds: 3,
             review_commit: None,
             review_requested_at: None,
+            review_pending_since: None,
             findings_sent_round: 0,
             verdict: None,
             failed_local_checks: Vec::new(),
@@ -138,6 +149,7 @@ mod tests {
             merge_requested: None,
             merge_refused: None,
             merged: None,
+            releasing: Vec::new(),
             events: Vec::new(),
             created: "2026-10-18T00:00:00Z".into(),
             modified: "2026-10-18T00:00:00Z".into(),

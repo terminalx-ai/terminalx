@@ -10,7 +10,7 @@ vi.mock("@/components/ui/tooltip", () => ({
   TooltipContent: ({ children }: { children: ReactNode }) => <div role="tooltip">{children}</div>,
 }));
 
-const { IssueWorkChip, TakenIssueDialog } = await import("./IssueWork");
+const { IssueWorkChip, IssueWorkPanel, TakenIssueDialog } = await import("./IssueWork");
 
 async function cleanupIssueDialogs() {
   // Radix dispatches this event on the retained dialog in its deferred
@@ -69,6 +69,15 @@ describe("the work chip", () => {
   it("fades work that went quiet", () => {
     render(<IssueWorkChip now={NOW} workers={[worker({ phase: "faded", lastActive: NOW - 3 * 3600000 })]} />);
     expect(screen.getByTestId("issue-work-chip").textContent).toBe("Alice · 3 hours ago");
+    // Not in its hover card, over the rows below (#713): the line says so.
+    const row = screen.getByTestId("issue-worker");
+    expect(row.className).not.toContain("opacity-70");
+    expect(row.textContent).toContain("Was working on this, 3 hours ago");
+  });
+
+  it("dims work that went quiet in the detail pane", () => {
+    render(<IssueWorkPanel now={NOW} workers={[worker({ phase: "faded", lastActive: NOW - 3 * 3600000 })]} />);
+    expect(screen.getByTestId("issue-worker").className).toContain("opacity-70");
   });
 });
 

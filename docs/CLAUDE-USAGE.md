@@ -31,10 +31,13 @@ Changed percentages or reset deadlines publish immediately. Identical samples
 remain deduplicated, including across tabs. Partial live and OAuth responses keep
 omitted weekly/Fable windows.
 
-For the same account/window key, a later reset deadline wins over an earlier one.
-Within the same deadline, the newer observation wins; OAuth observation time is
-request start. Live data wins a timestamp tie against OAuth. Snapshot revisions
-prevent delayed command responses or events from rolling back the frontend store.
+For the same account/window key, a later reset deadline wins over an earlier one,
+except an earlier endpoint deadline still ahead when the request started (#737).
+Deadlines within 60 seconds are the same window (#729), and there the newer
+observation wins; OAuth observation time is request start. Live data wins a
+timestamp tie against OAuth. See "Matching and refresh outcomes" below. Snapshot revisions
+prevent delayed command responses or events from rolling back the frontend store,
+within one runtime only (see "When the runtime changes" below).
 All three usage surfaces subscribe to that store. Claude refresh results publish
 before waiting for the separate Codex app-server refresh.
 
@@ -50,16 +53,32 @@ four hours; Retry-After seconds and HTTP dates can extend that deadline. The
 popover explains retry pauses and transport failures. No credential refresh,
 login, account switching, CLI usage generation or new provider source is added.
 
-Expired Claude windows keep their last-known percentage, show an expired/stale
-label and muted meter, and remain stale even when recently received. Receiving
-that expired window again does not advance its confirmation timestamp. Each
-detail window has its own freshness label. No elapsed-time path invents 0%.
+Reading Claude Code's login is local (#664): on macOS, `/usr/bin/security
+find-generic-password -w` for `Claude Code-credentials`, then
+`~/.claude/.credentials.json`. Claude Code writes that item with `security`, so
+reading it through `security` raises no Keychain prompt for TerminalX. The item
+holds an entry per MCP server Claude Code has signed in to and can reach
+several kilobytes, so its output is drained while `security` runs; read only
+after exit, a payload larger than the pipe buffer blocked it until the
+three-second deadline. A failed read is reported as timed out, failed with its
+exit code, not found (`security` exit 44), or holding no access token (with the
+payload's size), never with the payload. Such a failure backs off the timer as
+any other, but manual Refresh clears that backoff and tries again at once; a
+failure of the request itself, or a provider's Retry-After, still holds it.
+
+Expired windows keep their last-known percentage, show an expired/stale
+label and muted meter, and remain stale even when recently received; since
+#772 that holds for Codex as for Claude. A Claude status
+line or endpoint reply repeating that expired window replaces nothing (#738).
+Each detail window has its own freshness label. No elapsed-time path invents
+0%: only the provider's answer shows a window as not started (below).
 
 Usage attribution hashes the canonical Claude config path, account UUID and
 organization UUID. It is captured before CLI launch, checked against the
 status-line forwarder's current identity, and compared with the system account.
 Account changes clear only Claude data and fence in-flight OAuth responses by
-generation. Unknown or mismatched attribution is not merged. A custom
+generation. Unknown or mismatched attribution is not merged, and the detail
+card says so (below). A custom
 `CLAUDE_CONFIG_DIR` uses its own credentials file and cannot fall back to another
 account's default Keychain entry. Missing attribution/credentials yields visible
 refresh feedback; it does not trigger authentication changes.
@@ -85,11 +104,124 @@ indicator is hidden the timer stops and the fifteen-minute floor applies, as it
 does with the timer Off. The first tick is timed from the boot refresh.
 
 The interval is a normal cadence only. Failure backoff and Retry-After still
-gate every request, manual ones included, and an account change starts its own
-cadence. A failure keeps the last windows. Snapshots carry `lastSuccessAt` for
+gate every request, manual ones included (except after a local credential read
+failure, above), and an account change starts its own cadence. A failure keeps the last windows. Snapshots carry `lastSuccessAt` for
 Claude and a `codexRefresh` block (`retryAt`, `error`, `lastSuccessAt`); the
 agent detail panel shows "Last refreshed …" and, while paused or failed, that
-the values are last known.
+the values are last known. Since #729 "Last refreshed" counts only answers that
+replaced a window; see below.
+
+## Matching and refresh outcomes (#729)
+
+A refresh could report success, set "Last refreshed just now", and change no
+window, with nothing saying why. The two Claude sources write one deadline
+differently: the status line in whole epoch seconds, the usage endpoint as an
+RFC 3339 time with fractions that moves between requests. A strict comparison
+read the endpoint's window, a fraction of a second earlier, as the previous
+window and dropped it on every refresh; the next turn's whole seconds could be
+dropped the same way against it.
+
+Each received window now gets a verdict against the window shown under its key
+(`judge` in `status/usage.rs`):
+
+- **Taken**: nothing shown under the key; a deadline more than 60 s later (the
+  next window); the same window (deadlines within 60 s) observed later; no
+  deadline once the shown window's deadline has passed (a window not started);
+  or an endpoint deadline more than 60 s earlier that was still ahead when the
+  request started, observed later than the shown window (#737).
+- **Refused**: a deadline more than 60 s earlier from a status line (a late
+  receipt of the previous window, such as an idle tab's last sample) or from an
+  endpoint window already over when the request started; the same window
+  observed no later; a deadline that had passed when the shown window was
+  observed; the same window observed after its deadline (`endedWindow`, #738:
+  it does not confirm a reset); no deadline from a status line while the shown
+  window still runs (only the endpoint's fresh answer may say a running window
+  has none); or a later status-line deadline before a window the endpoint saw
+  running has ended.
+
+An earlier deadline is not always the previous window (#737). Windows under
+one key follow each other and never overlap. If the endpoint says at request
+start T that a window runs until D, with D after T, no later window had started
+at T, so a shown window with a later deadline is the wrong one. Before this
+fix the reply was refused until the shown deadline passed, up to a week for a
+7d window. A status line's time is when its sample arrived, not when it was
+taken, so its earlier deadline is still refused. If a sample arrived while the
+request was out, the reply is the older observation and the next request
+decides.
+
+The same reasoning holds the other way. While a window the endpoint saw running
+has not ended (more than 60 s before its deadline), a status line's later
+deadline is not the next window: any tab may still be repeating the window that
+reply replaced. Taking it would put the old number back on every turn. A turn
+that reports the endpoint's own window updates it and keeps that knowledge. A
+window with no endpoint answer behind it still moves to a later status-line
+deadline at once. If the provider really moved a window later, the endpoint's
+next answer says so and is taken, so the status line waits at most one refresh.
+
+The endpoint names an account window with nothing running (`five_hour`,
+`seven_day`) as `null`, or with neither utilization nor deadline. That is read as
+a window not yet started, 0% with no countdown, and it replaces an expired one.
+An endpoint window whose deadline had already passed more than 60 s before the
+request is shown the same way: none of its usage still counts. Within 60 s of
+its deadline it may not have rolled yet, so it is refused as `endedWindow`: the
+shown window stays as it was, the answer is not an update (the card says
+"Checked … · no newer usage" and "5h kept: the reply still had the window that
+just expired"), and the follow-up check a minute later settles it.
+
+The snapshot carries the outcome. `claude.lastUpdatedAt` is the last answer
+that replaced at least one window; `lastSuccessAt` the last answer at all. The
+card's "Last refreshed" is the later of `lastUpdatedAt` and the newest window
+(a runtime that sends no `lastUpdatedAt` falls back to `lastSuccessAt`). When
+the provider answered after that and replaced nothing, the card adds "Checked
+just now · no newer usage", and `claude.refused` gives each kept window's
+reason; the card lists those that leave an older window up.
+
+Live usage refused for attribution (the system account cannot be identified,
+`unidentified`; the tab captured no account when it started, for example before
+Claude Code was signed in, `launchUnknown` (#738); the tab started under another
+account, `launchMismatch`; or the status line reported another,
+`statuslineMismatch`) is `claude.liveRefused` while it is newer than any live
+sample used. The card shows it as a warning; it is not shown beside newer live
+data.
+
+A manual refresh that does not reach the provider records `skipped` (`reason`:
+`inFlight`, `retryPending`, `recent`, `resetInFlight`; and `nextAt`, when the
+button will fetch again). The popover says so: "Codex was refreshed 2m ago ·
+Next refresh available in 3m", or that a refresh is already out. A retry pause
+keeps its own notice. Automatic skips are routine and are not recorded.
+
+Every refresh is logged at info: each received window (key, percent, reset
+deadline), what became of it and why, the result ("updated 2 of 3", "no newer
+usage", or the failure with its retry pause), and any shown window the reply
+left out, which stays as it was. Account refusals of live
+usage are logged when they start; manual skips at info, automatic ones at
+debug.
+
+## When the runtime changes (#772)
+
+`revision` is a counter in the runtime's memory, one up for every snapshot, and
+a runtime that replaced another counts from 1 again. A window that first
+attached to a runtime up for days, then saw it replaced (#730's Restart now,
+Restart runtime, a restart after a crash, a #765 handover), held that runtime's
+high revision. Every snapshot from the new runtime was older by that measure
+and dropped, events, timer, focus and the button alike, while each refresh
+succeeded. The window showed the old runtime's last values for as long as the
+old one had run.
+
+Each snapshot now carries `runtime`, an id its usage store draws when it is
+made, so one per runtime process. The window compares revisions only between
+snapshots naming the same one, and a snapshot from another replaces the one
+held whatever its revision. A runtime older than #772 names none, and its
+snapshots compare among themselves. `local_runtime_reattached` (a new
+attachment, or events missed) asks for a refresh at once, after any already out.
+
+The window also ages what it holds. The runtime sets `stale` when it builds a
+snapshot; the window applies the same rule as time passes, so a window whose
+`updatedAt` is 30 minutes old (`STALE_MS`) or whose reset has passed reads as
+last known in the bar and the popover alike, with no new snapshot needed: grey
+meter, "stale" or "expired" beside its percentage, "(last known)" in the
+details. A Codex window past its reset reads "Window expired — awaiting update",
+never "100% used · Resets in now".
 
 ## Validation and remaining live check
 

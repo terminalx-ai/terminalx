@@ -138,11 +138,13 @@ try {
           cleanup: pane.textContent.includes("Delete the workspace after merge:"),
         };
       });
-      assert.deepEqual(startRow.switches, [["Resolve conflicts automatically", "false"], ["Merge when green", "false"]]);
+      // An issue starts set to resolve conflicts and merge when green (#700).
+      assert.deepEqual(startRow.switches, [["Resolve conflicts automatically", "true"], ["Merge when green", "true"]]);
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "both automation switches and cleanup setting fit without overlaps": startRow.inside && startRow.inViewport && !startRow.overlaps && !startRow.scrolls && startRow.cleanup,
       }, startRow);
-      await automation.getByRole("switch", { name: "Resolve conflicts automatically", exact: true }).click();
+      // Turned off for this launch only; resolving conflicts stays on.
+      await automation.getByRole("switch", { name: "Merge when green", exact: true }).click();
       await page.keyboard.press("Escape");
       // The thread sits under the description, inside the same pane, without a sideways scroll.
       await page.getByText("Synthetic comment: keep Home and End working too.", { exact: true }).waitFor();
@@ -190,6 +192,7 @@ try {
           pr: { number: 7, url: "https://example.test/pull/7", base: "main" },
           verdict: {
             commit, decision: "changes", securityPass: "flagged", round: 3, at: "2026-10-01T00:10:00Z",
+            checks: "notRun", checksNote: "the build waited on a file lock held by a cargo check that outlived its editor, so no test ran",
             findings: [
               { severity: "high", title: "Focus is lost when the list re-renders after a selection", file: "src/components/demo/VeryLongDirectoryName/AnotherDirectory/DemoListWithKeyboardNavigation.tsx", line: 128, detail: "The selected row is re-created, so document.activeElement falls back to the body and the next arrow key does nothing.", security: false },
               { severity: "medium", title: "Token read from localStorage without a check", file: "src/lib/demoAuth.ts", line: 9, security: true },
@@ -240,12 +243,14 @@ try {
           stages: node.querySelectorAll('ol[aria-label="Stages"] > li').length,
           findings: [...node.querySelectorAll("ul > li")].map((item) => item.textContent.slice(0, 14)),
           switches: document.querySelectorAll('[role="switch"][aria-label="Merge when green"]').length,
+          checks: node.querySelector('[data-testid="pipeline-review-checks"]')?.textContent ?? null,
         };
       });
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "the pipeline panel fits the detail pane with its findings and record open": !pipelineLayout.scrolls && pipelineLayout.inside && !pipelineLayout.overlaps,
         "it shows the five stages and the open findings, worst first": pipelineLayout.stages === 5 && pipelineLayout.findings.join("|") === "highFocus is l|medium · secur|nitUnused impo",
         "the issue has one merge switch, the pipeline's": pipelineLayout.switches === 1,
+        "it says the review was by reading only": pipelineLayout.checks?.startsWith("Reviewed by reading only, tests not run: the build waited") === true,
         "it says Needs you, in the list and on the page": (await page.getByText("Needs you", { exact: true }).count()) === 2,
         "the way forward is offered and a merge is not": (await panel.getByRole("button", { name: "Review once more", exact: true }).count()) === 1 && (await panel.getByRole("button", { name: "Merge", exact: true }).count()) === 0,
       }, pipelineLayout);
@@ -263,12 +268,14 @@ try {
       const saved = await page.evaluate(() => window.__PROJECT_PATCH__);
       assert.equal(saved.path, "/repos/p0");
       assert.deepEqual(saved.patch.issuePipeline, {
-        enabled: true, autoMerge: false, resolveConflicts: false, maxResolutions: 3, requirePerson: true, maxRounds: 3, mergeMethod: "merge",
+        enabled: true, maxResolutions: 3, requirePerson: true, maxRounds: 3, mergeMethod: "merge",
         protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [],
       });
       const dialogLayout = await dialog.evaluate((node) => {
         const bounds = node.getBoundingClientRect();
         const switches = Object.fromEntries([...node.querySelectorAll('[role="switch"]')].map((toggle) => [toggle.getAttribute("aria-label"), `${toggle.getAttribute("aria-checked")}${toggle.disabled ? " disabled" : ""}`]));
+        // Which sessions each launch switch starts on in: a choice of three, not a switch.
+        const defaults = Object.fromEntries([...node.querySelectorAll('[role="radiogroup"][aria-label$="by default"]')].map((group) => [group.getAttribute("aria-label"), `${group.querySelector('[aria-checked="true"]')?.textContent}${group.getAttribute("aria-disabled") === "true" ? " disabled" : ""}`]));
         const controls = [...node.querySelectorAll('[role="switch"], [role="radiogroup"], textarea, input')].map((child) => child.getBoundingClientRect());
         return {
           inWindow: bounds.left >= 0 && bounds.right <= window.innerWidth && bounds.top >= 0 && bounds.bottom <= window.innerHeight,
@@ -276,6 +283,7 @@ try {
           scrollsSideways: node.scrollWidth > node.clientWidth,
           controls: controls.length,
           switches,
+          defaults,
         };
       });
       if (shots) await page.screenshot({ path: join(shots, `issue-pipeline-settings-${mode}-${provider}-${width}.png`) });
@@ -286,7 +294,8 @@ try {
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "the project's pipeline settings open from its menu, fit the window and save each change": dialogLayout.inWindow && dialogLayout.inside && !dialogLayout.scrollsSideways && dialogLayout.controls === 15 && dialogLayout.switches["Agents comment and change status without asking"] === "false",
         // Saved, and shown as saved: the switch that was turned on is on, and the default it overrides is held off.
-        "the switch that was turned on reads on, and the default it overrides is held": dialogLayout.switches["A person does the merge"] === "true" && dialogLayout.switches["Merge automatically by default"] === "false disabled",
+        "the switch that was turned on reads on, and the default it overrides is held": dialogLayout.switches["A person does the merge"] === "true" && dialogLayout.defaults["Merge automatically by default"] === "Off disabled",
+        "conflicts are still resolved for sessions from issues": dialogLayout.defaults["Resolve conflicts automatically by default"] === "From issues",
         "closing the settings leaves the page usable": released,
       }, { ...dialogLayout, released });
 

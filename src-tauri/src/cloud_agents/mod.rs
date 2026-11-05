@@ -68,6 +68,10 @@ pub struct AgentTabInfo {
     pub tab_id: String,
     pub title: Option<String>,
     pub harness: String,
+    /// How the runtime reaches the agent: absent for its CLI in the tab's
+    /// terminal; native Codex (#644) moves there when the terminal is opened.
+    #[serde(skip_serializing_if = "crate::store::index::AgentTransport::is_default")]
+    pub transport: crate::store::index::AgentTransport,
     pub model: String,
     pub effort: Option<String>,
     /// A model or effort asked for that the agent is not running yet
@@ -248,6 +252,7 @@ impl AgentOps for ManagerOps {
                     tab_id: tab.id.clone(),
                     title: tab_title(entry.tabs.first().is_some_and(|first| first.id == tab.id), tab.title.as_deref(), &entry.title),
                     harness: tab.harness.clone(),
+                    transport: tab.transport,
                     model: tab.model.clone(),
                     effort: tab.effort.clone(),
                     requested_model: tab.requested_model.clone(),
@@ -299,9 +304,13 @@ impl AgentOps for ManagerOps {
     fn busy(&self, session_id: &str, tab_id: &str) -> bool {
         // A tab left `waiting` by a lapsed request after a restart has no
         // process and no turn: it is not busy, and a prompt goes straight in.
+        // Nor is a native Codex, ACP or OpenCode tab still running whose turn
+        // ended on a failure it shows, a refused sign-in say (#644): nothing
+        // would end that wait, and what was queued behind it never went.
         self.manager.turn_open(session_id, tab_id)
             || (self.manager.is_running(session_id, tab_id)
-                && matches!(self.manager.status_of(session_id, tab_id), TabStatus::InProgress | TabStatus::Waiting))
+                && matches!(self.manager.status_of(session_id, tab_id), TabStatus::InProgress | TabStatus::Waiting)
+                && !self.manager.waits_only_on_recovery(session_id, tab_id))
     }
 
     fn send(&self, session_id: &str, tab_id: &str, text: &str) -> Result<()> {
@@ -673,7 +682,8 @@ impl CloudAgents {
                 .map(|follow_up| FollowUpView { client_command_id: follow_up.client_command_id, text: follow_up.text, actor_id: follow_up.actor_id })
                 .collect();
             if let Some(collab) = self.collab.get() {
-                let busy = matches!(tab.status, TabStatus::InProgress | TabStatus::Waiting) && tab.process == "running";
+                // Busy as the mailbox and the workspace RPC judge a lease.
+                let busy = self.ops.busy(&tab.session_id, &tab.tab_id);
                 tab.lease = collab.lease(&tab.tab_id, now_ms(), busy);
             }
         }
@@ -827,7 +837,14 @@ impl CloudAgents {
                     let (Some(agents), Ok(event)) = (weak.upgrade(), serde_json::from_str::<Event>(payload)) else { return };
                     match event.payload.kind.as_str() {
                         "delta" | "usage_update" | "model_request_started" => {}
-                        "turn_completed" | "permission_requested" | "questions_asked" | "permission_decided" => {
+                        // A turn can end with the tab's status unchanged: one
+                        // that failed while it waited on an ask stays waiting
+                        // on the failure (#644). Its end nudges as well.
+                        "turn_completed" => {
+                            agents.nudge_follow_ups(&event.tab_id);
+                            agents.checkpoints.mark(&event.tab_id, true)
+                        }
+                        "permission_requested" | "questions_asked" | "permission_decided" => {
                             agents.checkpoints.mark(&event.tab_id, true)
                         }
                         _ => agents.checkpoints.mark(&event.tab_id, false),

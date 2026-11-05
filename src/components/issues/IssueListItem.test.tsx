@@ -70,3 +70,19 @@ describe("pipeline row worker identity", () => {
     expect(screen.queryByTestId("issue-work-chip")).toBeNull();
   });
 });
+
+describe("pipeline chip (#725)", () => {
+  const linear: Issue = { ...issue, provider: "linear", id: "uuid-114", identifier: "PRO-114", number: 114, url: "https://linear.app/acme/issue/PRO-114", state: "In Progress", stateType: "started" };
+
+  it.each([issue, linear])("leaves Needs you as soon as a person answers the author of $identifier, and shows it again if the turn ends not done", (tracked) => {
+    const stopped: IssuePipeline = { ...pipeline(false), issue: tracked, stage: "pullRequest", state: "needsYou", reason: { kind: "uncommittedChanges", files: ["notes.txt"] } };
+    const view = render(<IssueListItem issue={tracked} pipeline={stopped} now={now} />);
+    expect(screen.getByText("Needs you")).toBeTruthy();
+    // The pipeline the engine announces when the answer reaches the author.
+    view.rerender(<IssueListItem issue={tracked} pipeline={{ ...stopped, state: "working", reason: null, note: "Answered; waiting for the author session to report.", answered: stopped.reason }} now={now} />);
+    expect(screen.queryByText("Needs you")).toBeNull();
+    expect(screen.getByText("Working")).toBeTruthy();
+    view.rerender(<IssueListItem issue={tracked} pipeline={stopped} now={now} />);
+    expect(screen.getByText("Needs you")).toBeTruthy();
+  });
+});

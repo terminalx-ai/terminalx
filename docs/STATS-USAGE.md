@@ -7,15 +7,16 @@ renderer reload. An app restart reads the persisted result.
 
 `stats_usage_snapshot` returns the saved snapshot, scope, generation, refresh
 status, independent lifetime activity, and last error. It loads a compact file once per data scope and thereafter
-reads memory. Every read/refresh response also overlays the current durable app
-activity summary, independently of the provider snapshot generation. It does not load the scanner cache, discover sources, run Git, or
+reads memory. Every read/refresh response also overlays the current app activity
+summary, read from the runtime (`runtime.session.activity`), independently of the
+provider snapshot generation. It does not load the scanner cache, discover sources, run Git, or
 wait for scanning. `stats_usage_refresh` takes the reader's observed scope and
 generation and starts or joins work immediately. Requests with an older generation
 return the current state, including when they arrive just after completion. The
 frontend polls every 500 ms while work is active, even without page subscribers.
 
-The worker builds a candidate from all supported provider histories and the
-existing app-stat collector. It reuses `stats-usage-cache.json` projections by
+The worker builds a candidate from all supported provider histories; app
+activity is attached separately. It reuses `stats-usage-cache.json` projections by
 path, modification time, and size. Discovery, transcript I/O, worktree/scope reads,
 app reads, and persistence must succeed before publication. Confirmed missing
 sources retain their compact accounting projections; other I/O errors abort the candidate. Existing parser rules
@@ -25,16 +26,39 @@ this page is closed; its durable ledger is independent of either usage cache.
 
 Only after the complete result is saved does the backend replace the snapshot and
 its success timestamp. The frontend replaces provider metrics and charts together.
-Lifetime app counters are refreshed from `stats-activity.json` on every backend
-response and render separately, even when no provider snapshot exists or provider
-refresh fails or remains in flight. A failed ledger
-read exposes an error and preserves the last valid displayed counters.
-While refreshing, saved content stays undimmed and interactive, with a spinning
-Refresh button and live status. Errors retain the snapshot and timestamp and offer
-Retry. The initial scan-loading panel appears only after a cached read confirms
+Lifetime app counters are refreshed from the runtime on every backend response
+and render separately, even when no provider snapshot exists or provider refresh
+fails or remains in flight. A failed read (no runtime attached, an unreadable
+ledger) exposes an error and preserves the last valid displayed counters, or the
+saved ones. While refreshing, saved content stays undimmed and interactive, with a
+spinning Refresh button and live status. Errors retain the snapshot and timestamp
+and offer Retry. An accounting notice that a new read cannot fix, such as another
+process holding activity history, is shown once without Retry. The initial scan-loading panel appears only after a cached read confirms
 there is no usable snapshot. The heatmap's date range uses the snapshot timestamp,
 so even its padding remains stable until the next successful refresh. A new scan
 recomputes the local-day cutoff even when all transcript projections are reused.
+
+## Activity history has one writer
+
+Only the runtime writes `stats-activity.json` (#767): `serve::start` claims the
+role with `store::activity::claim()`, which takes the exclusive lease on
+`stats-activity.lock`. The app never opens it. Its star reminder reads the saved
+snapshot at launch (`saved_summary`) and then takes the runtime's count once
+attached; Stats asks the runtime. A PR the app creates or discovers is kept in
+`stats-activity-pending/` for the runtime, which counts it on its next write.
+
+When another process holds the lease, the runtime keeps following its tabs and
+keeps each work start, stop and PR in the same inbox. Its summary stays current
+(saved totals plus what is kept) with one notice naming the holder, found from the
+processes that have the lock file open and named by their executable and arguments
+(the app's binary also runs the CLI and hooks). The lookup runs once per holder,
+not on every read. A waiter retries the lease every 500 ms and takes it as soon as
+the holder lets go, without a tab transition. The runtime then counts each kept
+record once: a snapshot remembers the names it counted until their files are
+removed, so a crash in between counts nothing twice. A history created after work
+was kept aside (its first open failed) recovers the session logs only up to when
+the keeping runtime claimed it, so that work is not also counted from the logs.
+One failure is one log line until a write succeeds again, whichever write meets it.
 
 ## Persistence and scope
 

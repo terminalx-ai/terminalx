@@ -141,6 +141,15 @@ describe("an issue's pipeline on its page", () => {
     await waitFor(() => expect(acts()).toEqual([["issue_pipeline_act", { id: "p1", action: "advance" }]]));
   });
 
+  it("says when the review was by reading only, and nothing for a verdict that did not say", () => {
+    const reading = pipeline({ verdict: { commit: C1, decision: "merge", securityPass: "notNeeded", findings: [], checks: "notRun", checksNote: "the build waits on a file lock", round: 1, at: "2026-10-12T10:05:00.000Z" } });
+    render(<IssuePipelinePanel pipeline={reading} />);
+    expect(screen.getByTestId("pipeline-review-checks").textContent).toBe("Reviewed by reading only, tests not run: the build waits on a file lock.");
+    cleanup();
+    render(<IssuePipelinePanel pipeline={pipeline()} />);
+    expect(screen.queryByTestId("pipeline-review-checks")).toBeNull();
+  });
+
   it("keeps the record behind a toggle, with its links to the pull request and the sessions that still exist", () => {
     render(<IssuePipelinePanel pipeline={pipeline()} />);
     expect(screen.queryByRole("list", { name: "Record" })).toBeNull();

@@ -24,7 +24,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { startUpdateChecks } from "@/lib/updates";
-import { bootSessions, closeNewSession, openNewSession, openAgents, openAutomations, openIssues, openSkills, openStats, useSessionStore } from "@/lib/sessions";
+import { bootSessions, closeNewSession, openNewSession, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -32,6 +32,7 @@ import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
+import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
@@ -48,6 +49,7 @@ import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialo
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
 import { bootStatus, useStatus } from "@/lib/status";
+import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
@@ -92,6 +94,8 @@ export const TITLEBAR_INSET = 78; // traffic-light clearance, px
 export function AppShell() {
   const prefs = usePrefs();
   const status = useStatus();
+  // A runtime the app is moving to shows in the status bar, even a hidden one (#766).
+  const runtimeSwitch = useRuntimeSwitch();
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
@@ -105,6 +109,8 @@ export function AppShell() {
     void subscribeAgentEvents();
     void subscribeTabPty();
     void bootSessions();
+    // Conversations nobody has written in for the limit in Settings go to the archive (#718).
+    startIdleArchive();
     void bootAutomations();
     void bootIssuePipelines();
     void loadModels();
@@ -204,6 +210,7 @@ export function AppShell() {
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <StarReminder />
         <MergedCleanupNotices />
+        <CloseUndoNotices />
         <Toasts />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
@@ -294,7 +301,7 @@ export function AppShell() {
         )}
       </div>
 
-      {status.settings.visible ? (
+      {status.settings.visible || runtimeSwitch ? (
         <ErrorBoundary label="the status bar" fallback={null}>
           <Suspense fallback={statusBarFallback}>
             <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />

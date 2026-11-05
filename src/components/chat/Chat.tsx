@@ -1,20 +1,64 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import type { Transcript } from "@/lib/transcript";
+import { COMPACTING_LINE, type Transcript } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
-import { TurnBlock } from "./TurnBlock";
+import { SendingMessage, TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
 import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
-import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
+import { READER_SCROLL_EVENT, scrollToInOwnScroller } from "@/lib/shellScroll";
+import { elementWithId, SEEK_ANCHOR_EVENT } from "@/lib/chatLinks";
+import { DisclosureMemory, type Disclosures } from "./disclosures";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
 import { turnDivider } from "@/lib/turnDivider";
 
 const NEAR_BOTTOM_PX = 40;
+/** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
 const FIRST_MOUNT = 12;
-const MOUNT_STEP = 12;
+/** Drawn beyond each edge of the view, so a scroll shows turns that are already laid out. */
+const OVERSCAN_PX = 1200;
+/** What a turn not drawn yet is taken to be, until turns have been measured. */
+const ESTIMATED_TURN_PX = 240;
+/** The stream of a turn that is not the live one: one array, so a memoised row is not drawn again for a new `[]`. */
+const NO_STREAM: StreamBlock[] = [];
+
+/** The first index whose value is past `at` in an ascending list. */
+function firstAfter(values: number[], at: number): number {
+  let lo = 0;
+  let hi = values.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (values[mid] > at) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+/** Each turn's top in the list, and, last, the list's end. */
+function topsOf(turns: Transcript["turns"], measured: Map<string, number>): number[] {
+  const tops = [0];
+  for (const turn of turns) tops.push(tops[tops.length - 1] + (measured.get(turn.key) ?? ESTIMATED_TURN_PX));
+  return tops;
+}
+
+/**
+ * The turns to draw for a view of `viewport` pixels whose top is `top` pixels
+ * into the list: those it shows, and `OVERSCAN_PX` either side (#727).
+ * `tops` holds each turn's top and, last, the list's end.
+ */
+export function visibleTurns(tops: number[], top: number, viewport: number, tail: boolean): { start: number; end: number } {
+  const count = tops.length - 1;
+  if (viewport <= 0) return { start: Math.max(0, count - FIRST_MOUNT), end: count };
+  const from = tail ? Math.max(0, tops[count] - viewport) : top;
+  // The first turn whose bottom is below the band's top, through the last whose top is above its bottom.
+  // The turn holding an edge is the one before `firstAfter` the edge: the start takes it, and so does the
+  // end, which is exclusive. A turn taller than the overscan holds the lower edge while it is on screen (#771).
+  const start = Math.min(Math.max(0, firstAfter(tops, from - OVERSCAN_PX) - 1), Math.max(0, count - 1));
+  const end = tail ? count : Math.min(count, Math.max(start + 1, firstAfter(tops, from + viewport + OVERSCAN_PX)));
+  return { start, end: Math.max(start, end) };
+}
 
 /**
  * The transcript scroller.
@@ -30,8 +74,14 @@ const MOUNT_STEP = 12;
  * workspace is followed exactly like the reader's own.
  * A ResizeObserver on both the scroller and its content re-takes the bottom
  * after async growth (highlighting, images) with no React commit involved.
- * Long logs mount the newest turns first and backfill above in idle steps,
- * shifting scrollTop by exactly the inserted height so the reader's view never moves.
+ *
+ * Only the turns in and near the view are drawn (#727): spacers stand for the
+ * rest, at the heights the turns had when they were last drawn (or an
+ * estimate for one never drawn). A turn that comes into view at a height
+ * other than its spacer's moves the turn the reader is on by exactly that
+ * much, so scrollTop is shifted to keep it where it was. What the reader
+ * opened or folded in a turn is kept by the chat, not the turn, and a link to
+ * a place in a turn not drawn draws every turn once to find it.
  */
 export function Chat({
   sessionId,
@@ -48,6 +98,8 @@ export function Chat({
   loading = false,
   footer,
   onSendQueuedNow,
+  sending = null,
+  onSendAgain,
 }: {
   sessionId: string;
   transcript: Transcript;
@@ -67,6 +119,10 @@ export function Chat({
   footer: React.ReactNode;
   /** Send a message queued behind the running turn now, where the backend can (local). */
   onSendQueuedNow?: (seq: number) => void;
+  /** A message sent from the composer that the runtime has not recorded yet: drawn last, as sending (#727). */
+  sending?: { text: string; images: { url: string; name?: string }[]; pressedAt: number } | null;
+  /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
+  onSendAgain?: (seq: number) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -75,8 +131,18 @@ export function Chat({
   const lastTop = useRef(0);
   const [atBottom, setAtBottom] = useState(true);
   const turns = transcript.turns;
-  const [oldestMounted, setOldestMounted] = useState(() => Math.max(0, turns.length - FIRST_MOUNT));
-  const backfillAnchor = useRef<{ node: HTMLElement; offset: number } | null>(null);
+  /** Each drawn turn's height as last measured, by key; one never drawn is taken to be `ESTIMATED_TURN_PX`. */
+  const heights = useRef(new Map<string, number>());
+  /** The turns drawn while the reader is off the bottom, and the scroller's height. */
+  const [band, setBand] = useState({ start: 0, end: 0, height: 0 });
+  const topSpacer = useRef<HTMLDivElement>(null);
+  /** Each turn's top and the list's end, on the heights in `heights`: worked out again whenever one changes. */
+  const tops = useRef<number[]>([0]);
+  /** The turns this render drew from, for working `tops` out again between renders. */
+  const turnList = useRef(turns);
+  const [disclosures] = useState<Disclosures>(() => new Map());
+  /** The id a link asked for that no drawn turn holds: every turn is drawn until it has been looked for. */
+  const [seeking, setSeeking] = useState<string | null>(null);
 
   const follow = useCallback((on: boolean) => {
     pinned.current = on;
@@ -94,33 +160,72 @@ export function Chat({
     }
   }, []);
 
-  /** A node's offset within the content, which the reader's scrolling doesn't change. */
-  const offsetInContent = useCallback((node: HTMLElement) => {
-    return node.getBoundingClientRect().top - (content.current?.getBoundingClientRect().top ?? 0);
+  // Each turn's top in the list, and the list's end. A fixed estimate for
+  // the turns never drawn keeps the spacer above the view from changing
+  // while the view stays where it is.
+  const turnTops = topsOf(turns, heights.current);
+  tops.current = turnTops;
+  turnList.current = turns;
+  // A new prompt is followed from the render it arrives in, not one later;
+  // so is the reader's own message while it is being sent.
+  const lastPrompt = `${turns[turns.length - 1]?.prompt?.seq ?? ""}:${sending?.pressedAt ?? ""}`;
+  const followedPrompt = useRef(lastPrompt);
+  const tail = pinned.current || followedPrompt.current !== lastPrompt;
+  // Off the bottom, the band the view last asked for; one not worked out yet (or for a list since cut short) is the tail's.
+  const known = band.end > band.start && band.end <= turns.length;
+  const { start, end } = seeking != null ? { start: 0, end: turns.length } : tail || !known ? visibleTurns(turnTops, 0, band.height, true) : band;
+
+  /** Which turns the view needs drawn, from where it is over the list now. */
+  const readView = useCallback(() => {
+    const el = scroller.current;
+    const spacer = topSpacer.current;
+    if (!el || !spacer) return;
+    // The list starts below the content's padding and anything drawn ahead of it.
+    const listTop = spacer.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+    const height = el.clientHeight;
+    const next = visibleTurns(tops.current, Math.max(0, el.scrollTop - listTop), height, false);
+    setBand((was) => (was.start === next.start && was.end === next.end && was.height === height ? was : { ...next, height }));
   }, []);
 
-  // Backfill older turns above, one step per macrotask. The step notes where the
-  // top turn sits in the content; the commit below moves scrollTop by what landed
-  // above it, so scrolling done while the step renders is kept, not undone.
-  useEffect(() => {
-    if (oldestMounted <= 0) return;
-    const id = window.setTimeout(() => {
-      const node = content.current?.querySelector<HTMLElement>("[data-turn]");
-      backfillAnchor.current = node ? { node, offset: offsetInContent(node) } : null;
-      setOldestMounted((o) => Math.max(0, o - MOUNT_STEP));
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, [oldestMounted, offsetInContent]);
-
-  // After a backfill commit, before paint. Pinned views are re-pinned below.
-  useLayoutEffect(() => {
-    const anchor = backfillAnchor.current;
-    backfillAnchor.current = null;
+  /**
+   * Measure the turns drawn. One wholly above the view that is taller or
+   * shorter than was taken for it (a turn drawn for the first time, or one
+   * still settling) moved the turn the reader is on by the difference, so
+   * scrollTop takes that back. A height that changed changes the turns'
+   * tops, so they are worked out again here, before anything picks a band
+   * from them: a band picked on the estimate a turn was drawn at can leave
+   * the view over a spacer, and nothing picks again while the reader holds
+   * still (#771). Says whether any height changed.
+   */
+  const measure = useCallback((): boolean => {
     const el = scroller.current;
-    if (!anchor || !el || pinned.current) return;
-    el.scrollTop += offsetInContent(anchor.node) - anchor.offset;
-    lastTop.current = el.scrollTop;
-  }, [oldestMounted, offsetInContent]);
+    const c = content.current;
+    if (!el || !c) return false;
+    const box = el.getBoundingClientRect();
+    let shift = 0;
+    let changed = false;
+    for (const node of c.querySelectorAll<HTMLElement>(":scope > [data-turn]")) {
+      const rect = node.getBoundingClientRect();
+      const key = node.dataset.turn!;
+      const was = heights.current.get(key);
+      if (rect.height <= 0 || rect.height === was) continue;
+      heights.current.set(key, rect.height);
+      changed = true;
+      if (rect.bottom <= box.top) shift += rect.height - (was ?? ESTIMATED_TURN_PX);
+    }
+    if (changed) tops.current = topsOf(turnList.current, heights.current);
+    if (shift && !pinned.current) {
+      el.scrollTop += shift;
+      lastTop.current = el.scrollTop;
+    }
+    return changed;
+  }, []);
+
+  // After every commit, before paint: what was drawn is measured, and the
+  // band worked out again on the heights it really has.
+  useLayoutEffect(() => {
+    if (measure()) readView();
+  });
 
   // Wheel up unpins before the scroll lands, and so do the keys that scroll
   // up and a link that jumps within the transcript. A scroll only unpins while
@@ -141,6 +246,7 @@ export function Chat({
       if (up && el.scrollTop > 0) follow(false);
     };
     const onReaderScroll = () => follow(false);
+    const onSeek = (e: Event) => setSeeking((e as CustomEvent<string>).detail);
     const onPointerDown = () => {
       dragging = true;
     };
@@ -156,10 +262,12 @@ export function Chat({
       else if (moved > 0 && dist < NEAR_BOTTOM_PX) follow(true);
       // Not the reader's doing (they would be unpinned by now): back to the bottom.
       else if (moved < 0 && pinned.current && dist >= 1) pinToBottom();
+      readView();
     };
     el.addEventListener("wheel", onWheel, { passive: true });
     el.addEventListener("keydown", onKeyDown);
     el.addEventListener(READER_SCROLL_EVENT, onReaderScroll);
+    el.addEventListener(SEEK_ANCHOR_EVENT, onSeek);
     el.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
@@ -168,12 +276,13 @@ export function Chat({
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener(READER_SCROLL_EVENT, onReaderScroll);
+      el.removeEventListener(SEEK_ANCHOR_EVENT, onSeek);
       el.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
       el.removeEventListener("scroll", onScroll);
     };
-  }, [follow, pinToBottom]);
+  }, [follow, pinToBottom, readView]);
 
   // Heights change without a commit: re-pin after layout, before paint.
   useLayoutEffect(() => {
@@ -181,52 +290,88 @@ export function Chat({
     const c = content.current;
     if (!el || !c) return;
     const ro = new ResizeObserver(() => {
+      measure();
       if (pinned.current) pinToBottom();
+      // The scroller gained a size (its tab came on screen) or changed it.
+      readView();
     });
     ro.observe(el);
     ro.observe(c);
     return () => ro.disconnect();
-  }, [pinToBottom]);
+  }, [pinToBottom, readView, measure]);
 
   // New content while pinned keeps the bottom in view.
   useLayoutEffect(() => {
     if (pinned.current) pinToBottom();
   });
 
-  const lastPromptSeq = turns[turns.length - 1]?.prompt?.seq;
   useLayoutEffect(() => {
+    followedPrompt.current = lastPrompt;
     follow(true);
     pinToBottom();
-  }, [lastPromptSeq, follow, pinToBottom]);
+  }, [lastPrompt, follow, pinToBottom]);
+
+  // Every turn is drawn and measured now (the effects above ran first, and
+  // measuring worked the tops out again): the place a link asked for is
+  // brought to the top if a turn holds it, and the band is worked out around
+  // it on heights that are all real.
+  useLayoutEffect(() => {
+    if (seeking == null) return;
+    const el = scroller.current;
+    const target = el && elementWithId(el, seeking);
+    if (el && target) {
+      scrollToInOwnScroller(target);
+      lastTop.current = el.scrollTop;
+      readView();
+    }
+    setSeeking(null);
+  }, [seeking, readView]);
+
+  /** Where the list of turns starts inside the scroller's content, in scroll coordinates. */
+  const listTop = useCallback((el: HTMLElement) => {
+    const spacer = topSpacer.current;
+    return spacer ? spacer.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop : 0;
+  }, []);
 
   // A prompt's mark was clicked: its turn's top under the top of the view.
-  // A turn still waiting to be backfilled is mounted first, then gone to.
+  // A turn not drawn is gone to where the list has it, then settled on
+  // exactly once it is drawn and measured.
   const pendingJump = useRef<string | null>(null);
-  const goToTurn = useCallback(
-    (key: string) => {
-      const el = scroller.current;
-      const node = el?.querySelector<HTMLElement>(`[data-turn="${CSS.escape(key)}"]`);
-      if (!el || !node) return false;
-      follow(false);
-      el.scrollTo({ top: el.scrollTop + node.getBoundingClientRect().top - el.getBoundingClientRect().top - 12, behavior: "smooth" });
-      return true;
-    },
-    [follow],
-  );
   const jumpTo = useCallback(
     (key: string) => {
-      if (goToTurn(key)) return;
-      const index = turns.findIndex((t) => t.key === key);
-      if (index < 0) return;
+      const el = scroller.current;
+      const index = turnList.current.findIndex((t) => t.key === key);
+      if (!el || index < 0) return;
+      follow(false);
+      const node = el.querySelector<HTMLElement>(`[data-turn="${CSS.escape(key)}"]`);
+      if (node) {
+        el.scrollTo({ top: el.scrollTop + node.getBoundingClientRect().top - el.getBoundingClientRect().top - 12, behavior: "smooth" });
+        return;
+      }
       pendingJump.current = key;
-      setOldestMounted((o) => Math.min(o, index));
+      el.scrollTop = listTop(el) + tops.current[index] - 12;
+      lastTop.current = el.scrollTop;
+      readView();
     },
-    [goToTurn, turns],
+    [follow, readView, listTop],
   );
   useLayoutEffect(() => {
     const key = pendingJump.current;
-    if (key && goToTurn(key)) pendingJump.current = null;
-  }, [oldestMounted, goToTurn]);
+    const el = scroller.current;
+    const node = key && el?.querySelector<HTMLElement>(`[data-turn="${CSS.escape(key)}"]`);
+    if (!el || !node) return;
+    pendingJump.current = null;
+    el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+    lastTop.current = el.scrollTop;
+    readView();
+  });
+  /** The turn under the reading line, a third down the view, from the list's tops: most turns are not drawn. */
+  const readingTurn = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return 0;
+    const line = el.scrollTop + el.clientHeight / 3 - listTop(el);
+    return Math.max(0, Math.min(turnList.current.length - 1, firstAfter(tops.current, line) - 1));
+  }, [listTop]);
   const { promptMap } = usePrefs();
 
   // The footer floats over the transcript's foot; the transcript ends in a spacer as tall as it.
@@ -235,9 +380,9 @@ export function Chat({
   useLayoutEffect(() => {
     const el = footerRef.current;
     if (!el) return;
-    const measure = () => setFooterHeight(el.offsetHeight);
-    measure();
-    const ro = new ResizeObserver(measure);
+    const measureFooter = () => setFooterHeight(el.offsetHeight);
+    measureFooter();
+    const ro = new ResizeObserver(measureFooter);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -248,70 +393,71 @@ export function Chat({
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
-          <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
-            {oldestMounted > 0 && (
-              <div className="mb-4 text-center text-xs text-faint">Loading earlier turns…</div>
-            )}
-            {!turns.length && !live && loading && (
-              // Loading is a label alone; the scene is for a conversation that really is empty.
-              <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
-                <Loader2 className="size-3 animate-spin" aria-hidden />
-                Loading the conversation…
-              </p>
-            )}
-            {!turns.length && !live && !loading && (
-              <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
-                <RaccoonScene />
-                <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
-              </div>
-            )}
-            {turns.slice(oldestMounted).map((t, i, arr) => {
-              const isLast = i === arr.length - 1;
-              const divider = turnDivider(turns[oldestMounted + i - 1], t);
-              return (
-                <Fragment key={t.key}>
-                {divider && <TurnDivider label={divider} />}
-                <TurnBlock
-                  turn={t}
-                  cwd={cwd}
-                  sessionId={sessionId}
-                  stream={isLast && live ? stream : []}
-                  working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
-                  streamingTool={isLast && live ? streamingTool : undefined}
-                  // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
-                  onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
-                />
-                </Fragment>
-              );
-            })}
-            {transcript.compacting && (
-              <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">Compacting context…</div>
-            )}
-            {transcript.retry && progressing && (
-              <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-warning">
-                Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
-                {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
-              </div>
-            )}
-            {transcript.pendingAsks.map((ask) => (
-              <div key={ask.requestId} className="mb-3">
-                {ask.kind === "permission" ? (
-                  <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
-                ) : (
-                  <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
-                )}
-              </div>
-            ))}
-            {/* Room to scroll the last of the transcript out from under the footer. Inside the content, so growing it re-pins. */}
-            <div aria-hidden style={{ height: footerHeight }} />
-          </div>
+      <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
+        <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
+          <DisclosureMemory value={disclosures}>
+          {!turns.length && !live && !sending && loading && (
+            // Loading is a label alone; the scene is for a conversation that really is empty.
+            <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
+              <Loader2 className="size-3 animate-spin" aria-hidden />
+              Loading the conversation…
+            </p>
+          )}
+          {!turns.length && !live && !sending && !loading && (
+            <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
+              <RaccoonScene />
+              <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
+            </div>
+          )}
+          <div ref={topSpacer} data-spacer aria-hidden style={{ height: turnTops[start] }} />
+          {turns.slice(start, end).map((t, i) => {
+            const isLast = start + i === turns.length - 1;
+            return (
+              <TurnBlock
+                key={t.key}
+                turn={t}
+                cwd={cwd}
+                sessionId={sessionId}
+                stream={isLast && live ? stream : NO_STREAM}
+                working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
+                streamingTool={isLast && live ? streamingTool : undefined}
+                // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
+                onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
+                onSendAgain={live ? onSendAgain : undefined}
+                divider={turnDivider(turns[start + i - 1], t)}
+              />
+            );
+          })}
+          <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
+          {sending && <SendingMessage message={sending} cwd={cwd} />}
+          {transcript.compacting && (
+            <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
+          )}
+          {transcript.retry && progressing && (
+            <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-warning">
+              Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
+              {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
+            </div>
+          )}
+          {transcript.pendingAsks.map((ask) => (
+            <div key={ask.requestId} className="mb-3">
+              {ask.kind === "permission" ? (
+                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
+              ) : (
+                <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
+              )}
+            </div>
+          ))}
+          {/* Room to scroll the last of the transcript out from under the footer. Inside the content, so growing it re-pins. */}
+          <div aria-hidden style={{ height: footerHeight }} />
+          </DisclosureMemory>
         </div>
-        {promptMap && (
-          <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: footerHeight }}>
-            <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} />
-          </div>
-        )}
+      </div>
+      {promptMap && (
+        <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: footerHeight }}>
+          <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} locate={readingTurn} />
+        </div>
+      )}
       </div>
       {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes. */}
       <div ref={footerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-10 [&>*]:pointer-events-auto">
@@ -340,17 +486,6 @@ export function Chat({
         <RaccoonRunner active={progressing} obstacle={!atBottom} />
         {footer}
       </div>
-    </div>
-  );
-}
-
-/** The time above a turn that opens a new sitting: a hairline each side, the day and time between. */
-function TurnDivider({ label }: { label: string }) {
-  return (
-    <div role="separator" aria-label={label} className="mb-6 flex items-center gap-3 text-[11px] text-faint" data-testid="turn-divider">
-      <span className="h-px flex-1 bg-hairline" />
-      <span className="shrink-0">{label}</span>
-      <span className="h-px flex-1 bg-hairline" />
     </div>
   );
 }

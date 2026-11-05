@@ -68,7 +68,6 @@ function TabPositionShortcut({ action, open }: { action: ShortcutId; open: () =>
 }
 
 function LocalTabActions({ session, selected }: { session: SessionEntry; selected: SelectedSessionTab | null }) {
-  const store = useSessionStore();
   // The whole workspace's row: the shortcuts count and step through the tabs the strip shows, in its order.
   const row = useTabRow(session);
   const editors = useEditors();
@@ -100,10 +99,6 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
   const moveRight = useCallback(() => move("right"), [move]);
   const reopen = useCallback(() => void reopenClosedTab(now.current.row).catch((error) => console.error("reopening the tab failed", error)), []);
   const positions = useMemo(() => TAB_POSITION_SHORTCUTS.map((action, index) => ({ action, open: () => void openTabAt(now.current.row, index + 1) })), []);
-  const add = async (harness: string) => {
-    const prefs = getPrefs();
-    await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
-  };
   useShortcut("session.newTab", openMenu);
   useShortcut("session.closeTab", closeActive);
   useShortcut("session.nextTab", next);
@@ -118,20 +113,34 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
       {positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />)}
       <NewTabTrigger trigger={picker.trigger} />
       <DropdownMenuContent align="end">
-        <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
-        {store.harnesses.map((harness) => <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
-          <AgentMark id={harness.id} decorative /><span>{harness.name}</span>
-          {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
-        </DropdownMenuItem>)}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)} aria-label="Terminal on this computer">
-          <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">on this computer</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void openBrowserTab(session.id, session.cwd).catch((error) => console.error("browser open failed", error))}>
-          <Globe /><span>Browser</span>
-        </DropdownMenuItem>
+        <LocalNewTabItems session={session} />
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** What a local session's "New tab" offers: an agent tab with any installed agent, a terminal, a browser page. */
+export function LocalNewTabItems({ session }: { session: SessionEntry }) {
+  const store = useSessionStore();
+  const add = async (harness: string) => {
+    const prefs = getPrefs();
+    await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
+  };
+  return (
+    <>
+      <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
+      {store.harnesses.map((harness) => <DropdownMenuItem key={harness.id} disabled={!harness.available} onSelect={() => void add(harness.id)}>
+        <AgentMark id={harness.id} decorative /><span>{harness.name}</span>
+        {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
+      </DropdownMenuItem>)}
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)} aria-label="Terminal on this computer">
+        <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">on this computer</span>
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => void openBrowserTab(session.id, session.cwd).catch((error) => console.error("browser open failed", error))}>
+        <Globe /><span>Browser</span>
+      </DropdownMenuItem>
+    </>
   );
 }
 

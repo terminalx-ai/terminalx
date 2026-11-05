@@ -249,3 +249,49 @@ describe("personal sections of cloud projects (PRO-23)", () => {
     expect(getPrefs().cloudSections).toEqual({ "a@example.com": { "org-a": [{ id: "s1", name: "Active", projects: ["x"] }] } });
   });
 });
+
+// #700. A cloud project's launch switches were saved `false` with every other
+// change before an issue session started with them on: that was no choice.
+describe("cloud pipeline switches saved before they were a choice", () => {
+  const KEY = "raccoon.prefs";
+  const legacy = (patch: Record<string, unknown>) => ({
+    enabled: true, autoMerge: false, resolveConflicts: false, maxResolutions: 3, requirePerson: false, maxRounds: 5, mergeMethod: "merge",
+    protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [], ...patch,
+  });
+
+  it("forgets a saved off once, keeps a switch turned on and everything else, and is not migrated again", async () => {
+    localStorage.setItem(KEY, JSON.stringify({ sounds: false, cloudIssuePipelines: { "cloud:o:a": legacy({}), "cloud:o:b": legacy({ resolveConflicts: true }) } }));
+    const { getPrefs, setPrefs } = await import("./prefs");
+    const { cloudIssuePipelines } = getPrefs();
+    expect(cloudIssuePipelines["cloud:o:a"]).not.toHaveProperty("autoMerge");
+    expect(cloudIssuePipelines["cloud:o:a"]).not.toHaveProperty("resolveConflicts");
+    expect(cloudIssuePipelines["cloud:o:a"].maxRounds).toBe(5);
+    expect(cloudIssuePipelines["cloud:o:b"].resolveConflicts).toBe(true);
+    expect(JSON.parse(localStorage.getItem(KEY)!)).toMatchObject({ cloudIssuePipelinesVersion: 1, sounds: false });
+
+    // Turned off since, it stays off through a restart.
+    setPrefs({ cloudIssuePipelines: { ...cloudIssuePipelines, "cloud:o:a": { ...cloudIssuePipelines["cloud:o:a"], resolveConflicts: false } } });
+    vi.resetModules();
+    const again = await import("./prefs");
+    expect(again.getPrefs().cloudIssuePipelines["cloud:o:a"].resolveConflicts).toBe(false);
+  });
+
+  it("writes nothing when there is nothing to forget", async () => {
+    localStorage.setItem(KEY, JSON.stringify({ sounds: false, cloudIssuePipelines: { "cloud:o:b": legacy({ autoMerge: undefined, resolveConflicts: true }) } }));
+    const write = vi.spyOn(Storage.prototype, "setItem");
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs().cloudIssuePipelines["cloud:o:b"].resolveConflicts).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe("cloud pipeline switches saved by a newer version", () => {
+  it("are left as they are, and the newer version is not lowered", async () => {
+    const off = { enabled: true, resolveConflicts: false, requirePerson: false, maxRounds: 3, mergeMethod: "merge", protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [] };
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ cloudIssuePipelinesVersion: 2, cloudIssuePipelines: { "cloud:o:a": off } }));
+    const { getPrefs, setPrefs } = await import("./prefs");
+    expect(getPrefs().cloudIssuePipelines["cloud:o:a"].resolveConflicts).toBe(false);
+    setPrefs({ sounds: false });
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).cloudIssuePipelinesVersion).toBe(2);
+  });
+});

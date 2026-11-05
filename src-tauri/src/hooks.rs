@@ -104,7 +104,8 @@ pub struct Origin {
 /// named for this conversation has to exist there. A frame cannot adopt a
 /// folder by naming a file that is not there, so it cannot walk the tail
 /// into some other checkout's conversations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationFile {
     /// `~/.claude/projects`: the file is in a folder directly inside it.
     projects: PathBuf,
@@ -218,6 +219,13 @@ pub struct ControlEndpoint {
 }
 
 impl ControlEndpoint {
+    /// The endpoint the runtime this process was served on, handed over with
+    /// it (#765): the same socket path and token its agents were given.
+    #[cfg(unix)]
+    pub fn adopted(socket: PathBuf, token: String) -> Self {
+        Self { socket, token, published: Default::default() }
+    }
+
     /// Whether this launch currently owns the home's published socket and
     /// token. It changes over a launch's life: a launch that started beside
     /// another takes the home over when that one goes.
@@ -443,6 +451,12 @@ pub(crate) struct Caller {
 }
 
 impl Caller {
+    /// The connection a handed-over frame waits on (#765).
+    #[cfg(unix)]
+    pub(crate) fn of(stream: std::sync::Arc<std::os::unix::net::UnixStream>) -> Self {
+        Self { stream: Some(stream) }
+    }
+
     pub(crate) fn current() -> Self {
         #[cfg(unix)]
         return Self { stream: CALLER.with(|caller| caller.borrow().clone()) };
@@ -493,21 +507,55 @@ type Dispatch = std::sync::Arc<dyn Fn(&str) -> Value + Send + Sync>;
 /// home's published socket is a second listener over the same handlers, held
 /// by one launch at a time and passed on when its holder goes, so a shell
 /// always has a launch to reach while any is running.
-pub fn serve<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<PathBuf>
+pub fn serve<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<(PathBuf, std::sync::Arc<Bridge>)>
+where
+    F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
+    C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
+{
+    serve_from(endpoint, None, hook_handler, control_handler)
+}
+
+/// [`serve`], on the sockets the runtime this one replaced listened on and
+/// handed over with its process (#765). It starts frozen: what was queued
+/// on them meanwhile, and the frames that were read and never answered, are
+/// answered once [`Bridge::thaw`] says this runtime is ready to.
+#[cfg(unix)]
+pub fn serve_adopted<F, C>(endpoint: ControlEndpoint, adopted: Adopted, hook_handler: F, control_handler: C) -> anyhow::Result<(PathBuf, std::sync::Arc<Bridge>)>
+where
+    F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
+    C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
+{
+    serve_from(endpoint, Some(adopted), hook_handler, control_handler)
+}
+
+#[cfg(unix)]
+type Inherited = Option<Adopted>;
+#[cfg(not(unix))]
+type Inherited = Option<std::convert::Infallible>;
+
+fn serve_from<F, C>(endpoint: ControlEndpoint, adopted: Inherited, hook_handler: F, control_handler: C) -> anyhow::Result<(PathBuf, std::sync::Arc<Bridge>)>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
     C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
 {
     let socket = endpoint.socket.clone();
-    let mut publisher = listen(endpoint, hook_handler, control_handler)?;
+    let mut publisher = listen_from(endpoint, adopted, hook_handler, control_handler)?;
     // Once before returning, so a launch alone on its home is reachable by a
     // shell as soon as it says it is up.
     publisher.tick();
+    let publisher = std::sync::Arc::new(std::sync::Mutex::new(publisher));
+    let ticking = publisher.clone();
     std::thread::Builder::new().name("hook-socket-publish".into()).spawn(move || loop {
         std::thread::sleep(PUBLISH_RETRY);
-        publisher.tick();
+        ticking.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).tick();
     })?;
-    Ok(socket)
+    #[cfg(unix)]
+    let gate = publisher.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames.gate.clone();
+    Ok((socket, std::sync::Arc::new(Bridge {
+        publisher,
+        #[cfg(unix)]
+        gate,
+    })))
 }
 
 /// Serve window-only services without ever competing for home discovery.
@@ -519,7 +567,7 @@ where
     C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
 {
     let socket = endpoint.socket.clone();
-    drop(listen(endpoint, hook_handler, control_handler)?);
+    drop(listen_from(endpoint, None, hook_handler, control_handler)?);
     Ok(socket)
 }
 
@@ -527,7 +575,18 @@ where
 /// one. Nothing is published until the publisher is asked to look: `serve`
 /// asks once and then on a timer, and that timer is the only clock in any of
 /// this, so everything a look does can be had by asking for one.
+#[cfg(test)]
 fn listen<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<Publisher>
+where
+    F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
+    C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
+{
+    listen_from(endpoint, None, hook_handler, control_handler)
+}
+
+/// [`listen`], on the sockets handed over by the runtime this one replaced
+/// when `adopted` names them.
+fn listen_from<F, C>(endpoint: ControlEndpoint, adopted: Inherited, hook_handler: F, control_handler: C) -> anyhow::Result<Publisher>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
     C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
@@ -535,14 +594,44 @@ where
     let control_token = endpoint.token.clone();
     let dispatch: Dispatch = std::sync::Arc::new(move |line: &str| dispatch_line(line, &control_token, &hook_handler, &control_handler));
     #[cfg(unix)]
-    {
-        // The file at this path is named for this process, so whatever is
-        // there was left by a dead one and would only refuse the bind.
-        let _ = std::fs::remove_file(&endpoint.socket);
-        accept(bind(&endpoint.socket)?, dispatch.clone())?;
-    }
+    let frames = Frames::new(MAX_FRAMES)?;
+    #[cfg(unix)]
+    let (own, claim) = match adopted {
+        Some(Adopted { own, published, held }) => {
+            {
+                let mut gate = frames.gate.lock();
+                gate.frozen = true;
+                gate.held = held;
+            }
+            let claim = match published {
+                Some((listener, lock)) => {
+                    let listener = std::os::unix::net::UnixListener::from(listener);
+                    let socket = socket_path()?;
+                    let identity = file_identity(&socket)?;
+                    accept(listener.try_clone()?, dispatch.clone(), frames.clone())?;
+                    endpoint.published.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Some(Claim { _lock: std::fs::File::from(lock), identity, listener })
+                }
+                None => None,
+            };
+            (std::os::unix::net::UnixListener::from(own), claim)
+        }
+        None => {
+            // The file at this path is named for this process, so whatever is
+            // there was left by a dead one and would only refuse the bind.
+            let _ = std::fs::remove_file(&endpoint.socket);
+            (bind(&endpoint.socket)?, None)
+        }
+    };
+    #[cfg(unix)]
+    let own = {
+        let kept = own.try_clone()?;
+        accept(own, dispatch.clone(), frames.clone())?;
+        kept
+    };
     #[cfg(windows)]
     {
+        let _ = adopted;
         let dispatch = dispatch.clone();
         crate::pipe_transport::serve(endpoint.socket.clone(), move |line| format!("{}\n", dispatch(&line)))?;
     }
@@ -555,9 +644,16 @@ where
         own: endpoint.socket.clone(),
         token: endpoint.token,
         dispatch,
+        #[cfg(unix)]
+        frames,
         published: endpoint.published,
+        #[cfg(unix)]
+        held: claim,
+        #[cfg(windows)]
         held: None,
         waiting_on: None,
+        #[cfg(unix)]
+        listener: own,
         #[cfg(windows)]
         pipe_up: false,
     })
@@ -572,15 +668,147 @@ fn bind(path: &Path) -> std::io::Result<std::os::unix::net::UnixListener> {
     Ok(listener)
 }
 
+/// How many frames a launch handles at once, on all its sockets together.
+/// Each has a thread, and a frame
+/// held up behind a wedged owner may never return, so without a bound one
+/// stuck dispatch gathers hundreds of threads (#661). Past it a frame is
+/// refused with [`busy_reply`].
 #[cfg(unix)]
-fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch) -> std::io::Result<()> {
+const MAX_FRAMES: usize = 256;
+
+/// A launch's frame places, shared by its own socket and the published one,
+/// and where frames past them go to be refused.
+#[cfg(unix)]
+#[derive(Clone)]
+struct Frames {
+    count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    limit: usize,
+    refuse: std::sync::mpsc::SyncSender<std::os::unix::net::UnixStream>,
+    gate: std::sync::Arc<Gate>,
+}
+
+#[cfg(unix)]
+impl Frames {
+    fn new(limit: usize) -> std::io::Result<Self> {
+        Ok(Self { count: Default::default(), limit, refuse: refuser()?, gate: Default::default() })
+    }
+
+    fn take(&self) -> Option<FrameSlot> {
+        crate::local_runtime::permissions::increment_bounded(&self.count, self.limit).then(|| FrameSlot(self.count.clone()))
+    }
+}
+
+/// One frame place, given back when the frame's thread ends.
+#[cfg(unix)]
+struct FrameSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(unix)]
+impl Drop for FrameSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What a frame refused for want of a place is told: a control request that
+/// the owner is busy, a hook nothing to act on (so a deciding hook fails
+/// closed) and why, for its CLI's hook log.
+#[cfg(unix)]
+fn busy_reply(line: &str) -> Value {
+    const BUSY: &str = "TerminalX is handling too many requests at once, so this one was refused.";
+    match serde_json::from_str::<Value>(line) {
+        Ok(value) if value.get("command").is_some() => {
+            let id = value.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+            serde_json::to_value(crate::control::ControlResponse::failure(id, crate::control::ControlError::new(
+                "busy", BUSY, Some("Retry shortly. If it keeps happening, restart the TerminalX runtime from the app.".into()),
+            ))).unwrap_or_default()
+        }
+        _ => serde_json::to_value(HookReply::refused(BUSY)).unwrap_or_default(),
+    }
+}
+
+/// Answer refused frames on one thread of their own, never the accepting one:
+/// reading a refused caller's line must not hold up the next connection.
+#[cfg(unix)]
+fn refuser() -> std::io::Result<std::sync::mpsc::SyncSender<std::os::unix::net::UnixStream>> {
+    let (refuse, refused) = std::sync::mpsc::sync_channel::<std::os::unix::net::UnixStream>(32);
+    std::thread::Builder::new().name("hook-refuse".into()).spawn(move || {
+        for stream in refused {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+            let mut line = String::new();
+            let Ok(reader) = stream.try_clone() else { continue };
+            if BufReader::new(reader).take(1024 * 1024).read_line(&mut line).is_err() || line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(mut bytes) = serde_json::to_vec(&busy_reply(&line)) {
+                bytes.push(b'\n');
+                let mut stream = stream;
+                let _ = stream.write_all(&bytes);
+            }
+        }
+    })?;
+    Ok(refuse)
+}
+
+#[cfg(unix)]
+fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames: Frames) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // Accepted only while the bridge is not being handed over (#765): a
+    // connection made meanwhile waits in the socket's queue, which goes over
+    // with the socket, for the runtime that takes it to accept.
+    listener.set_nonblocking(true)?;
     std::thread::Builder::new().name("hook-socket".into()).spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+        let mut refusing = false;
+        loop {
+            let accepted = {
+                let mut gate = frames.gate.thawed();
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        gate.busy += 1;
+                        Some(stream)
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+                    Err(error) => {
+                        drop(gate);
+                        // Out of descriptors, say: the queue keeps the caller.
+                        log::warn!("accept on the hook socket: {error}");
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                }
+            };
+            let Some(stream) = accepted else {
+                if !readable(listener.as_raw_fd()) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                continue;
+            };
+            // A socket accepted from a non-blocking listener is non-blocking
+            // itself on macOS; each frame thread reads and writes plainly.
+            let _ = stream.set_nonblocking(false);
+            let busy = Busy(frames.gate.clone());
+            let Some(slot) = frames.take() else {
+                if !refusing {
+                    log::warn!("{} socket frames are already in progress; refusing new ones until some finish", frames.limit);
+                    refusing = true;
+                }
+                // A full refusal queue closes the connection unanswered.
+                let _ = frames.refuse.try_send(stream);
+                drop(busy);
+                continue;
+            };
+            if refusing {
+                log::info!("socket frames are being accepted again");
+                refusing = false;
+            }
             let dispatch = dispatch.clone();
             // One thread per hook: a permission frame parks until it is
             // answered, and the next hook must not queue behind it.
             let _ = std::thread::Builder::new().name("hook-frame".into()).spawn(move || {
+                let _slot = slot;
+                // A hook writes its frame as soon as it connects.
+                let _ = stream.set_read_timeout(Some(FRAME_READ));
                 let mut reader = BufReader::new(match stream.try_clone() {
                     Ok(s) => s,
                     Err(_) => return,
@@ -589,20 +817,393 @@ fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch) -> std
                 if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
                     return;
                 }
-                let Ok(connection) = stream.try_clone() else { return };
-                CALLER.with(|caller| *caller.borrow_mut() = Some(std::sync::Arc::new(connection)));
-                let reply = dispatch(&line);
-                CALLER.with(|caller| *caller.borrow_mut() = None);
-                let mut stream = stream;
-                if let Ok(mut bytes) = serde_json::to_vec(&reply) {
-                    bytes.push(b'\n');
-                    let _ = stream.write_all(&bytes);
-                    let _ = stream.flush();
-                }
+                let _ = stream.set_read_timeout(None);
+                answer_frame(stream, busy, |_| dispatch(&line), Some(line.clone()));
             });
         }
     })?;
     Ok(())
+}
+
+/// How long a connection has to send its frame. A hook writes it at once.
+#[cfg(unix)]
+const FRAME_READ: Duration = Duration::from_secs(5);
+
+/// Whether `fd` became readable; false when it could not be asked.
+#[cfg(unix)]
+fn readable(fd: std::os::fd::RawFd) -> bool {
+    let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    loop {
+        // SAFETY: one pollfd that lives across the call.
+        match unsafe { libc::poll(&mut poll, 1, -1) } {
+            count if count >= 0 => return true,
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Answer one frame on `stream` with what `answer` makes of it, `line`
+/// being the frame as read. A frame read while the bridge is being handed
+/// over is held for the runtime that takes it, unanswered (#765).
+#[cfg(unix)]
+fn answer_frame(stream: std::os::unix::net::UnixStream, busy: Busy, answer: impl FnOnce(&std::os::unix::net::UnixStream) -> Value, line: Option<String>) {
+    if let Some(line) = &line {
+        let mut gate = busy.0.lock();
+        if gate.frozen {
+            gate.held.push((stream, line.clone()));
+            return;
+        }
+    }
+    let Ok(connection) = stream.try_clone() else { return };
+    CALLER.with(|caller| *caller.borrow_mut() = Some(std::sync::Arc::new(connection)));
+    FRAME.with(|frame| *frame.borrow_mut() = Some((busy.0.clone(), line)));
+    let reply = answer(&stream);
+    CALLER.with(|caller| *caller.borrow_mut() = None);
+    FRAME.with(|frame| *frame.borrow_mut() = None);
+    let then = AFTER_REPLY.with(|after| after.borrow_mut().take());
+    drop(busy);
+    let mut stream = stream;
+    if let Ok(mut bytes) = serde_json::to_vec(&reply) {
+        bytes.push(b'\n');
+        let _ = stream.write_all(&bytes);
+        let _ = stream.flush();
+    }
+    if let Some(then) = then {
+        then();
+    }
+}
+
+/// What the hook bridge holds off on while the runtime is handed over (#765).
+#[cfg(unix)]
+#[derive(Default)]
+struct Gate {
+    state: std::sync::Mutex<GateState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct GateState {
+    frozen: bool,
+    /// Frames being read or answered, not waiting on a person.
+    busy: usize,
+    /// Frames read while frozen and not answered: the next owner answers them.
+    held: Vec<(std::os::unix::net::UnixStream, String)>,
+    /// Frames waiting on a person's decision, by that decision's request id.
+    parked: std::collections::HashMap<String, std::os::unix::net::UnixStream>,
+    /// Frames that only wait and read, which the next owner answers afresh.
+    resumable: std::collections::HashMap<u64, (std::os::unix::net::UnixStream, String)>,
+    next: u64,
+    /// What is frozen has been handed over ([`Bridge::take`]): a waiting
+    /// frame that wakes now has gone over too, and waits for the handover to
+    /// be called off.
+    taken: bool,
+}
+
+#[cfg(unix)]
+impl Gate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn thawed(&self) -> std::sync::MutexGuard<'_, GateState> {
+        let mut state = self.lock();
+        while state.frozen {
+            state = self.changed.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        state
+    }
+
+    /// The state once no handover holds what is frozen as taken.
+    fn untaken(&self) -> std::sync::MutexGuard<'_, GateState> {
+        let mut state = self.lock();
+        while state.taken {
+            state = self.changed.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        state
+    }
+}
+
+/// One frame being read or answered; given back when it is done or held.
+#[cfg(unix)]
+struct Busy(std::sync::Arc<Gate>);
+
+#[cfg(unix)]
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.lock().busy -= 1;
+        self.0.changed.notify_all();
+    }
+}
+
+#[cfg(unix)]
+thread_local! {
+    /// The bridge the frame this thread is answering came in on, and the
+    /// frame as it was read.
+    static FRAME: std::cell::RefCell<Option<(std::sync::Arc<Gate>, Option<String>)>> = const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    /// What to do once this thread's reply has been written.
+    static AFTER_REPLY: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Do `then` once the reply to the frame this thread is answering has been
+/// written: at once, for a direct call that has no frame.
+pub(crate) fn after_reply(then: Box<dyn FnOnce() + Send>) {
+    #[cfg(unix)]
+    if FRAME.with(|frame| frame.borrow().is_some()) {
+        AFTER_REPLY.with(|after| *after.borrow_mut() = Some(then));
+        return;
+    }
+    then();
+}
+
+/// The frame this thread is answering may be answered again from the start
+/// by the runtime that replaces this one (#765): it only waits and reads,
+/// like `terminalx wait`. Until this is dropped it is no frame a handover
+/// waits for, and it goes over unanswered with what was read; dropped during
+/// a handover, it waits for the handover to be called off.
+pub(crate) struct Resumable {
+    #[cfg(unix)]
+    gate: Option<(std::sync::Arc<Gate>, u64)>,
+}
+
+pub(crate) fn resumable() -> Resumable {
+    #[cfg(unix)]
+    {
+        let frame = FRAME.with(|frame| frame.borrow().clone());
+        let stream = CALLER.with(|caller| caller.borrow().as_ref().and_then(|stream| stream.try_clone().ok()));
+        let (Some((gate, Some(line))), Some(stream)) = (frame, stream) else { return Resumable { gate: None } };
+        let ticket = {
+            let mut state = gate.lock();
+            state.busy -= 1;
+            state.next += 1;
+            let ticket = state.next;
+            state.resumable.insert(ticket, (stream, line));
+            ticket
+        };
+        gate.changed.notify_all();
+        Resumable { gate: Some((gate, ticket)) }
+    }
+    #[cfg(not(unix))]
+    Resumable {}
+}
+
+#[cfg(unix)]
+impl Drop for Resumable {
+    fn drop(&mut self) {
+        let Some((gate, ticket)) = self.gate.take() else { return };
+        let mut state = gate.untaken();
+        state.resumable.remove(&ticket);
+        state.busy += 1;
+    }
+}
+
+/// The frame this thread is answering is the handover itself: a freeze does
+/// not wait for it, and it is answered while frozen (#765).
+pub(crate) struct Aside {
+    #[cfg(unix)]
+    gate: Option<std::sync::Arc<Gate>>,
+}
+
+pub(crate) fn step_aside() -> Aside {
+    #[cfg(unix)]
+    {
+        let gate = FRAME.with(|frame| frame.borrow().as_ref().map(|(gate, _)| gate.clone()));
+        if let Some(gate) = &gate {
+            gate.lock().busy -= 1;
+            gate.changed.notify_all();
+        }
+        Aside { gate }
+    }
+    #[cfg(not(unix))]
+    Aside {}
+}
+
+#[cfg(unix)]
+impl Drop for Aside {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.lock().busy += 1;
+        }
+    }
+}
+
+/// The frame this thread is answering waits on a person's decision, filed
+/// under `request_id`, until this is dropped. Waiting, it is no frame a
+/// handover waits for: it goes over with the runtime, and the runtime that
+/// takes it waits on for the decision (#765). Dropped while a handover is
+/// under way, it waits for the handover to be called off.
+pub(crate) struct Parked {
+    #[cfg(unix)]
+    gate: Option<(std::sync::Arc<Gate>, String)>,
+}
+
+/// Park the frame this thread is answering; nothing for a direct call.
+pub(crate) fn park(request_id: &str) -> Parked {
+    #[cfg(unix)]
+    {
+        let gate = FRAME.with(|frame| frame.borrow().as_ref().map(|(gate, _)| gate.clone()));
+        let stream = CALLER.with(|caller| caller.borrow().as_ref().and_then(|stream| stream.try_clone().ok()));
+        let (Some(gate), Some(stream)) = (gate, stream) else { return Parked { gate: None } };
+        {
+            let mut state = gate.lock();
+            state.busy -= 1;
+            state.parked.insert(request_id.to_string(), stream);
+        }
+        gate.changed.notify_all();
+        Parked { gate: Some((gate, request_id.to_string())) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = request_id;
+        Parked {}
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Parked {
+    fn drop(&mut self) {
+        let Some((gate, request_id)) = self.gate.take() else { return };
+        // Answered before the handover took the bridge: the frame is answered
+        // here, and counts as under way again, which the handover waits for
+        // or is called off for; still parked, its card is one no tab waits
+        // on, which calls the handover off too (`Bridge::take`). Once taken
+        // it went over with the runtime.
+        let mut state = gate.untaken();
+        state.parked.remove(&request_id);
+        state.busy += 1;
+    }
+}
+
+/// A launch's hook and control sockets, as `serve` left them listening.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct Bridge {
+    publisher: std::sync::Arc<std::sync::Mutex<Publisher>>,
+    /// The publisher's gate, held here so that nothing takes the gate and
+    /// then the publisher: the publisher's tick takes them the other way.
+    #[cfg(unix)]
+    gate: std::sync::Arc<Gate>,
+}
+
+/// The hook bridge as it is handed over: its sockets, and the frames on
+/// them that have yet to be answered (#765).
+#[cfg(unix)]
+pub(crate) struct Frozen {
+    /// The launch's own socket, which its tabs dial.
+    pub own: std::os::fd::OwnedFd,
+    /// The home's published socket and its lock, while this launch holds them.
+    pub published: Option<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)>,
+    /// Frames read and not yet answered, with what was read.
+    pub held: Vec<(std::os::fd::OwnedFd, String)>,
+    /// Frames waiting on a decision, by its request id.
+    pub parked: Vec<(String, std::os::fd::OwnedFd)>,
+}
+
+/// What a runtime takes over of its predecessor's hook bridge.
+#[cfg(unix)]
+pub struct Adopted {
+    pub own: std::os::fd::OwnedFd,
+    pub published: Option<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)>,
+    pub held: Vec<(std::os::unix::net::UnixStream, String)>,
+}
+
+#[cfg(unix)]
+impl Bridge {
+    /// Stop answering frames, once every frame under way has been answered,
+    /// has parked on a decision or only waits ([`Resumable`]): a new one
+    /// waits in its socket's queue, or, read already, is held. A frame still
+    /// under way after `within` calls the freeze off. What is frozen is
+    /// taken with [`Self::take`].
+    pub(crate) fn freeze(&self, within: Duration) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now() + within;
+        let mut state = self.gate.lock();
+        state.frozen = true;
+        while state.busy > 0 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                drop(state);
+                self.thaw();
+                anyhow::bail!("A hook or control request did not finish in time.");
+            }
+            state = self.gate.changed.wait_timeout(state, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+        Ok(())
+    }
+
+    /// Hand over what is frozen: the sockets, and the frames not yet
+    /// answered. Taken once every tab is held, when no waiting frame can be
+    /// answered any more: an answer is given under its tab's lock, by taking
+    /// the card's sender from the tab. `awaited` says whether a held tab
+    /// still waits on a card. A frame answered before the tabs were held
+    /// calls this off, to be answered here and the handover tried again:
+    /// one under way again, and one whose thread has yet to wake, which is
+    /// still parked on a card no tab waits on. Taken with the handover, the
+    /// runtime that takes over would find no card for it.
+    pub(crate) fn take(&self, awaited: impl Fn(&str) -> bool) -> anyhow::Result<Frozen> {
+        use anyhow::Context;
+        use std::os::fd::OwnedFd;
+        // The publisher first, and let go: its tick takes the gate under it.
+        // Nothing changes its claim meanwhile, as a tick does nothing frozen.
+        let (own, published) = {
+            let publisher = self.publisher.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let own = OwnedFd::from(publisher.listener.try_clone().context("duplicate the hook socket")?);
+            let published = match &publisher.held {
+                Some(claim) => Some((OwnedFd::from(claim.listener.try_clone()?), OwnedFd::from(claim._lock.try_clone()?))),
+                None => None,
+            };
+            (own, published)
+        };
+        let mut state = self.gate.lock();
+        anyhow::ensure!(state.frozen, "the hook bridge is not frozen");
+        if state.busy > 0 || state.parked.keys().any(|request_id| !awaited(request_id)) {
+            anyhow::bail!("A permission was answered as the runtime came to rest.");
+        }
+        let held = state.held.iter().chain(state.resumable.values())
+            .map(|(stream, line)| Ok((OwnedFd::from(stream.try_clone()?), line.clone()))).collect::<std::io::Result<_>>()?;
+        let parked = state.parked.iter().map(|(id, stream)| Ok((id.clone(), OwnedFd::from(stream.try_clone()?)))).collect::<std::io::Result<_>>()?;
+        state.taken = true;
+        Ok(Frozen { own, published, held, parked })
+    }
+
+    /// Answer frames again: the handover was called off. Frames held
+    /// meanwhile are answered now.
+    pub(crate) fn thaw(&self) {
+        let held = {
+            let mut state = self.gate.lock();
+            state.frozen = false;
+            state.taken = false;
+            std::mem::take(&mut state.held)
+        };
+        self.gate.changed.notify_all();
+        for (stream, line) in held {
+            self.dispatch(stream, line);
+        }
+    }
+
+    /// Answer `line`, read from `stream`, as any frame is answered.
+    fn dispatch(&self, stream: std::os::unix::net::UnixStream, line: String) {
+        let dispatch = self.publisher.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).dispatch.clone();
+        self.gate.lock().busy += 1;
+        let busy = Busy(self.gate.clone());
+        let spawned = std::thread::Builder::new().name("hook-frame".into()).spawn(move || {
+            answer_frame(stream, busy, |_| dispatch(&line), Some(line.clone()));
+        });
+        if let Err(error) = spawned { log::warn!("answer a held hook frame: {error}"); }
+    }
+
+    /// Answer a frame the runtime this one replaced had parked on a
+    /// decision: `answer` waits on for it, as the frame's own thread did.
+    pub(crate) fn resume(&self, stream: std::os::unix::net::UnixStream, answer: impl FnOnce() -> HookReply + Send + 'static) {
+        self.gate.lock().busy += 1;
+        let busy = Busy(self.gate.clone());
+        let spawned = std::thread::Builder::new().name("hook-frame".into()).spawn(move || {
+            answer_frame(stream, busy, |_| serde_json::to_value(answer()).unwrap_or_default(), None);
+        });
+        if let Err(error) = spawned { log::warn!("wait on a handed-over decision: {error}"); }
+    }
 }
 
 /// Whether a live listener holds the socket at `path`.
@@ -655,6 +1256,9 @@ struct Claim {
     _lock: std::fs::File,
     #[cfg(unix)]
     identity: (u64, u64),
+    /// The published socket's listener, as a handover passes it on (#765).
+    #[cfg(unix)]
+    listener: std::os::unix::net::UnixListener,
 }
 
 /// Keeps one launch on the home's published socket.
@@ -671,11 +1275,16 @@ struct Publisher {
     own: PathBuf,
     token: String,
     dispatch: Dispatch,
+    #[cfg(unix)]
+    frames: Frames,
     published: std::sync::Arc<std::sync::atomic::AtomicBool>,
     held: Option<Claim>,
     /// Why the last attempt did not publish, so a standing reason is logged
     /// once and not every few seconds.
     waiting_on: Option<String>,
+    /// The launch's own socket's listener, as a handover passes it on (#765).
+    #[cfg(unix)]
+    listener: std::os::unix::net::UnixListener,
     /// A named pipe cannot be taken from the process serving it, so once this
     /// launch serves the shared pipe it does for good.
     #[cfg(windows)]
@@ -684,6 +1293,11 @@ struct Publisher {
 
 impl Publisher {
     fn tick(&mut self) {
+        // The home's socket and lock go over with a handover as they are.
+        #[cfg(unix)]
+        if self.frames.gate.lock().frozen {
+            return;
+        }
         if self.held.as_ref().is_some_and(|claim| self.still_ours(claim)) {
             return;
         }
@@ -751,8 +1365,9 @@ impl Publisher {
                 let _ = std::fs::remove_file(&self.socket);
                 return Err(error.context("write the control token"));
             }
-            accept(listener, self.dispatch.clone())?;
-            Ok(Claim { _lock: lock, identity })
+            let kept = listener.try_clone()?;
+            accept(listener, self.dispatch.clone(), self.frames.clone())?;
+            Ok(Claim { _lock: lock, identity, listener: kept })
         }
         #[cfg(windows)]
         {
@@ -1264,6 +1879,61 @@ mod tests {
         serde_json::from_str(&reply).unwrap()
     }
 
+    /// Frames held up behind a wedged owner take every place; the next ones
+    /// are answered at once instead of each getting a thread that never
+    /// returns (#661). A deciding hook gets nothing to act on.
+    #[cfg(unix)]
+    #[test]
+    fn frames_past_the_limit_are_refused_without_a_thread_each() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::{mpsc, Arc, Condvar, Mutex};
+        let dir = tempfile::Builder::new().prefix("tx").tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let held = Arc::new((Mutex::new(true), Condvar::new()));
+        let (entered, inside) = mpsc::channel::<()>();
+        let entered = Mutex::new(entered);
+        let gate = held.clone();
+        let dispatch: Dispatch = Arc::new(move |line: &str| {
+            if line.contains("\"command\"") {
+                return json!({"ok": true});
+            }
+            entered.lock().unwrap().send(()).unwrap();
+            let (lock, released) = &*gate;
+            // A regression must fail rather than hang the test runner.
+            let _ = released.wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |held| *held).unwrap();
+            json!({"output": {"answered": true}})
+        });
+        accept(bind(&socket).unwrap(), dispatch, Frames::new(2).unwrap()).unwrap();
+        let hook = json!({"tab": "t", "session": "s", "token": "t", "event": "PreToolUse", "payload": {}});
+        let parked: Vec<_> = (0..2).map(|_| {
+            let mut stream = UnixStream::connect(&socket).unwrap();
+            stream.write_all(format!("{hook}\n").as_bytes()).unwrap();
+            inside.recv_timeout(Duration::from_secs(5)).unwrap();
+            stream
+        }).collect();
+
+        let control = send(&socket, &json!({"id": "busy-check", "command": "status", "token": "x", "params": {}}));
+        assert_eq!(control["ok"], false, "{control}");
+        assert_eq!(control["id"], "busy-check");
+        assert_eq!(control["error"]["code"], "busy");
+        let refused = send(&socket, &hook);
+        assert!(refused.get("output").is_none(), "a refused deciding hook must not authorize anything: {refused}");
+        assert!(refused["refused"].as_str().is_some_and(|reason| reason.contains("too many requests")), "{refused}");
+
+        *held.0.lock().unwrap() = false;
+        held.1.notify_all();
+        for stream in parked {
+            let mut reply = String::new();
+            BufReader::new(stream).read_line(&mut reply).unwrap();
+            assert!(reply.contains("answered"), "{reply}");
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while send(&socket, &json!({"id": "again", "command": "status", "token": "x", "params": {}}))["ok"] != true {
+            assert!(std::time::Instant::now() < deadline, "finished frames did not give their places back");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_second_instance_on_the_same_home_leaves_the_first_one_s_tabs_connected() {
@@ -1643,5 +2313,80 @@ mod tests {
         assert_eq!(origin.transcript(&frame("", named.to_str().unwrap())), Some(named.as_path()));
         let elsewhere = dir.path().join("real/elsewhere.jsonl");
         assert_eq!(origin.transcript(&frame("", elsewhere.to_str().unwrap())), None);
+    }
+
+    /// #765 review: a hook parked on a card answered after the bridge froze,
+    /// before it was taken, gets its answer here, and the handover is called
+    /// off for it: whether its thread is under way again, or has yet to wake
+    /// and is still parked on a card no tab waits on. One still waiting when
+    /// taken goes over with the handover, and is not answered here unless
+    /// the handover is called off.
+    #[cfg(unix)]
+    #[test]
+    fn a_waiting_hook_answered_as_a_handover_begins_is_answered_and_one_taken_goes_over() {
+        use std::sync::{mpsc, Mutex};
+        let _home = crate::store::temp_home();
+        let (answer, answered) = mpsc::channel::<&'static str>();
+        let (written, wrote) = mpsc::channel::<()>();
+        let answered = Mutex::new(answered);
+        let wrote = Mutex::new(wrote);
+        let endpoint = prepare_control().unwrap();
+        let (socket, bridge) = serve(endpoint, move |frame| {
+            let parked = park(&frame.tab);
+            let decision = answered.lock().unwrap().recv().unwrap();
+            drop(parked);
+            // The reply is still being made: the frame is under way.
+            if decision == "slow" { wrote.lock().unwrap().recv().unwrap(); }
+            HookReply { output: Some(json!({ "answered": frame.tab })), refused: None }
+        }, |request| crate::control::ControlResponse::success(request.id, json!({}))).unwrap();
+        let parked = |id: &str| bridge.gate.lock().parked.contains_key(id);
+        let ask = |tab: &'static str| {
+            let socket = socket.clone();
+            std::thread::spawn(move || send(&socket, &stop_hook(tab)))
+        };
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+
+        let first = ask("answered");
+        wait("the first hook parks", &|| parked("answered"));
+        bridge.freeze(Duration::from_secs(5)).expect("a parked hook does not hold a freeze up");
+        // Answered now, as a person's click lands just as the handover begins.
+        answer.send("slow").unwrap();
+        wait("the answered hook to be under way again", &|| !parked("answered"));
+        let refused = bridge.take(|_| true).err().expect("a hook under way calls the handover off");
+        assert!(format!("{refused:#}").contains("answered as the runtime came to rest"), "{refused:#}");
+        written.send(()).unwrap();
+        assert_eq!(first.join().unwrap()["output"]["answered"], "answered", "the answer reaches the agent");
+        bridge.thaw();
+
+        // Answered just before the tabs were held, its thread not woken yet:
+        // still parked, on a card no held tab waits on any more.
+        let unwoken = ask("unwoken");
+        wait("the unwoken hook parks", &|| parked("unwoken"));
+        bridge.freeze(Duration::from_secs(5)).unwrap();
+        let refused = bridge.take(|request_id| request_id != "unwoken").err().expect("a hook whose card was answered calls the handover off");
+        assert!(format!("{refused:#}").contains("answered as the runtime came to rest"), "{refused:#}");
+        assert!(!bridge.gate.lock().taken, "nothing was taken");
+        // It wakes, and nothing holds it up: the answer reaches the agent
+        // from here, while the bridge is still frozen.
+        answer.send("quick").unwrap();
+        assert_eq!(unwoken.join().unwrap()["output"]["answered"], "unwoken", "the answer reaches the agent");
+        bridge.thaw();
+
+        let second = ask("waiting");
+        wait("the second hook parks", &|| parked("waiting"));
+        bridge.freeze(Duration::from_secs(5)).unwrap();
+        let taken = bridge.take(|request_id| request_id == "waiting").expect("nothing is under way, and its card is still waited on");
+        assert_eq!(taken.parked.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["waiting"], "it goes over with the handover");
+        answer.send("quick").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!second.is_finished(), "once taken, it is the next runtime's to answer");
+        bridge.thaw();
+        assert_eq!(second.join().unwrap()["output"]["answered"], "waiting", "called off, it is answered here after all");
     }
 }

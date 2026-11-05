@@ -22,9 +22,6 @@ use crate::events::Payload;
 
 // ------------------------------------------------------------------ keystrokes
 
-/// Clears whatever is in the CLI's composer (Ctrl+U) before a prompt lands, so
-/// a half-typed line in the terminal view is not glued to the front of it.
-pub const CLEAR_LINE: &[u8] = b"\x15";
 pub const BRACKETED_PASTE_START: &str = "\x1b[200~";
 pub const BRACKETED_PASTE_END: &str = "\x1b[201~";
 /// Interrupt: both TUIs read a bare Escape as "stop what you are doing".
@@ -83,7 +80,8 @@ pub fn attachment_bytes(path: &str) -> Vec<u8> {
 /// the slope is how fast a pty ingests a paste, so a long prompt still gets
 /// its Enter after the last character has arrived. Counted from when the CLI
 /// has read the paste (`await_read`), not from when it was written: a busy
-/// CLI can leave a paste unread for longer than this.
+/// CLI can leave a paste unread for longer than this. Nor is it sent before
+/// the CLI has drawn since reading it (`await_drawn`).
 pub fn submit_delay(body_len: usize) -> Duration {
     Duration::from_millis(250 + (body_len / 4096) as u64)
 }
@@ -108,6 +106,45 @@ pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(20);
 /// the prompt in its input, where a second Enter sends it. On an input the
 /// CLI has already emptied, an Enter does nothing.
 pub const NUDGE_AFTER: Duration = Duration::from_secs(4);
+/// How many times the Enter is written again, `NUDGE_AFTER` apart. A CLI
+/// that has only just started can let a second Enter go by as well (#662).
+pub const NUDGES: u32 = 2;
+
+/// How long the Enter waits, once the CLI has read the paste, for it to draw.
+/// An idle CLI redraws its composer at once: Claude Code 2.1.314 drew its
+/// `[Pasted text #1 +33 lines]` 18 ms after a 6 KB paste, Codex 0.165.0 its
+/// `[Pasted Content 6143 chars]` in 2 ms. A CLI that has read the bytes but
+/// not drawn is still busy taking them in, and an Enter it reads then can be
+/// lost with nothing on screen to say so (#662). Past this the Enter goes
+/// anyway and the nudges are the fallback.
+pub const PASTE_DRAW_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// What a CLI's input box holds, as its screen shows it (#722).
+///
+/// Nothing is typed into an input box that holds something: the paste would
+/// join it, and the Enter after it would send the two as one prompt. The app
+/// used to clear the box first with Ctrl+U, which deletes only back to the
+/// start of the row the cursor is on. A prompt the CLI had put back in the
+/// box lost its last wrapped row that way, and the rest went with the next
+/// message glued to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Composer {
+    /// Nothing in it: what is typed now is the whole prompt.
+    Empty,
+    /// Something the app is not typing now, its words as drawn: what the
+    /// reader typed in the terminal, or a prompt the CLI put back there.
+    Holds(String),
+    /// The box is not on screen (a picker or dialog is in its place), or
+    /// this CLI's box cannot be read.
+    Unseen,
+}
+
+/// How often an input box that holds something is looked at again.
+pub const INPUT_POLL: Duration = Duration::from_millis(250);
+/// How long an input box may go on holding something before the prompt to be
+/// typed into it is said to be waiting. A CLI that has just taken the prompt
+/// before it is still drawing its box empty.
+pub const INPUT_SETTLE: Duration = Duration::from_secs(1);
 
 /// Whether the CLI read what was written into its pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,16 +169,98 @@ impl PasteRead {
 
 /// Wait until the CLI has read everything written into its pane. `unread` is
 /// how many bytes it has yet to take, or `None` where that cannot be asked.
-pub fn await_read(unread: impl Fn() -> Option<usize>, timeout: Duration) -> PasteRead {
-    let deadline = std::time::Instant::now() + timeout;
+///
+/// Also when it was last seen with something still to read, or when the
+/// wait began: it read the paste after that. Not when the wait ended, which
+/// can be a poll behind — a CLI quick to draw what it read (Codex, in 2 ms)
+/// would seem to have drawn before it had read anything.
+pub fn await_read(unread: impl Fn() -> Option<usize>, timeout: Duration) -> (PasteRead, std::time::Instant) {
+    let mut unread_at = std::time::Instant::now();
+    let deadline = unread_at + timeout;
     loop {
+        let asked = std::time::Instant::now();
         match unread() {
-            None => return PasteRead::Unknown,
-            Some(0) => return PasteRead::Read,
-            Some(_) if std::time::Instant::now() >= deadline => return PasteRead::Unread,
-            Some(_) => std::thread::sleep(Duration::from_millis(5)),
+            None => return (PasteRead::Unknown, unread_at),
+            Some(0) => return (PasteRead::Read, unread_at),
+            Some(_) if asked >= deadline => return (PasteRead::Unread, asked),
+            Some(_) => {
+                unread_at = asked;
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
     }
+}
+
+/// Wait until the pane has drawn after `since`, the moment the CLI read the
+/// paste. `drawn` says when it last drew. `false` when it had not by the
+/// timeout: the CLI read the paste but has yet to show it.
+pub fn await_drawn(drawn: impl Fn() -> Option<std::time::Instant>, since: std::time::Instant, timeout: Duration) -> bool {
+    let deadline = since + timeout;
+    loop {
+        if drawn().is_some_and(|at| at > since) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// How much of the newest output to look at: a dialog, or the composer, is
+/// among the last things drawn.
+const SCREEN_TAIL_BYTES: usize = 64 * 1024;
+
+/// Printable text of terminal output: escape sequences (CSI, OSC, and
+/// two-byte escapes) and all whitespace dropped. A TUI draws with cursor
+/// moves rather than spaces, so anything compared with this is compared with
+/// its whitespace removed too.
+pub fn screen_text(output: &[u8]) -> String {
+    let tail = &output[output.len().saturating_sub(SCREEN_TAIL_BYTES)..];
+    let text = String::from_utf8_lossy(tail);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            if !c.is_whitespace() && !c.is_control() {
+                out.push(c);
+            }
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // Parameters and intermediates, then one final byte.
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') | Some('P') | Some('_') | Some('^') => {
+                // A string, ended by BEL or ST (ESC \).
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether the newest output shows `placeholder`, the stand-in a CLI draws in
+/// its composer for a long paste. Asked only of a prompt the CLI has not
+/// acknowledged: there, it is a prompt still in the input, one Enter from
+/// being sent.
+pub fn shows_paste(output: &[u8], placeholder: &str) -> bool {
+    let placeholder: String = placeholder.chars().filter(|c| !c.is_whitespace()).collect();
+    screen_text(output).contains(&placeholder)
 }
 
 /// A TUI drops keystrokes while it is still painting its first frame, and the
@@ -185,6 +304,18 @@ impl Ready {
         self.announces_start
     }
 
+    /// How long ago the CLI said it was up, if it has: what a handover
+    /// carries (#765).
+    pub(crate) fn since(&self) -> Option<Duration> {
+        self.at.lock().unwrap().map(|at| at.elapsed())
+    }
+
+    /// One a handed-over CLI said it was up on, `since` ago (#765).
+    pub(crate) fn restored(announces_start: bool, since: Option<Duration>) -> Self {
+        let at = since.map(|since| std::time::Instant::now().checked_sub(since).unwrap_or_else(std::time::Instant::now));
+        Self { at: Mutex::new(at), announces_start }
+    }
+
     /// The `SessionStart` hook arrived. Only the first one counts: a CLI fires
     /// it again after a `/clear` or a compaction, and by then it is long since
     /// listening.
@@ -195,10 +326,234 @@ impl Ready {
         }
     }
 
+    /// Whether the `SessionStart` hook has arrived at all: the CLI got past
+    /// its own startup (its sign-in included).
+    pub fn marked(&self) -> bool {
+        self.at.lock().unwrap().is_some()
+    }
+
     /// Whether the CLI has been up long enough to have finished drawing.
     pub fn settled(&self) -> bool {
         self.at.lock().unwrap().is_some_and(|at| at.elapsed() >= READY_SETTLE)
     }
+
+    /// Whether the CLI has said it is up at all.
+    pub fn arrived(&self) -> bool {
+        self.at.lock().unwrap().is_some()
+    }
+}
+
+// ------------------------------------------------------------ its last words
+
+/// How many of the last lines a CLI printed are kept as why it went.
+const LAST_WORDS_LINES: usize = 3;
+/// And how much of them, the ellipsis included, so a CLI that printed a wall
+/// does not fill the chat: no more than it shows of an agent's own words
+/// anywhere else (#667).
+const LAST_WORDS_CHARS: usize = crate::recovery::DETAIL_CHARS;
+/// How far back to look: an exit message is the last thing printed.
+const LAST_WORDS_TAIL_BYTES: usize = 64 * 1024;
+
+/// Whether `line` ends on a credential's label with its value still to come:
+/// `Password:`, `"refresh_token":`, `token=`, `--password`, or an
+/// `Authorization` and its scheme.
+fn ends_on_a_label(line: &str) -> bool {
+    static LABEL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    LABEL
+        .get_or_init(|| {
+            let words = crate::recovery::CREDENTIAL_WORDS;
+            regex::Regex::new(&format!(r#"(?i)(?:\b[a-z0-9_.-]*(?:{words})[a-z0-9_.-]*["']?\s*(?:=>|[:=])|(?:^|\s)--?[a-z0-9_-]*(?:{words})[a-z0-9_-]*|\b(?:proxy-)?authorization["']?\s*[:=]\s*[a-z][a-z0-9._~+/-]*)\s*$"#)).expect("valid pattern")
+        })
+        .is_match(line)
+}
+
+/// Whether a credential's value on `line` opens a quote, an object or a
+/// list that the line does not close: a value that runs on into the next.
+/// Only separators `recovery::redact` cuts count, so a line merged on is
+/// cut as its own line would be; each character is read once.
+fn leaves_a_value_open(line: &str) -> bool {
+    static SEPARATOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let separator = SEPARATOR.get_or_init(|| {
+        let (words, ends) = (crate::recovery::CREDENTIAL_WORDS, crate::recovery::CREDENTIAL_ENDS);
+        regex::Regex::new(&format!(
+            r#"(?i)(?:\\?["'][a-z0-9_.-]*(?:{words})[a-z0-9_.-]*\\?["']\s*(?:=>|[:=])|\b[a-z0-9_.-]*(?:{words})[a-z0-9_.-]*\s*=>?|(?:^|[^\sa-z0-9_.:-]\s*|:\s+)\b[a-z0-9_.-]*(?:{ends})\s*:|\b(?:proxy-)?authorization["']?\s*[:=]|\b(?:set-)?cookie["']?\s*[:=])\s*"#
+        ))
+        .expect("valid pattern")
+    });
+    // Where the last value read ended: a separator inside it is its text.
+    let mut scanned = 0;
+    for found in separator.find_iter(line) {
+        if found.end() <= scanned {
+            continue;
+        }
+        let at = found.end();
+        let value = &line[at..];
+        if let Some(rest) = value.strip_prefix("\\\"") {
+            match rest.find("\\\"") {
+                Some(close) => scanned = at + 2 + close + 2,
+                None => return true,
+            }
+            continue;
+        }
+        let mut chars = value.char_indices().peekable();
+        let (mut quote, mut depth) = match chars.next() {
+            Some((_, c @ ('"' | '\''))) => (Some(c), 0usize),
+            Some((_, '{' | '[')) => (None, 1),
+            _ => continue,
+        };
+        let mut escaped = false;
+        let mut closed = None;
+        while let Some((index, c)) = chars.next() {
+            match quote {
+                Some(_) if escaped => escaped = false,
+                Some(_) if c == '\\' => escaped = true,
+                // An apostrophe inside a word (`You've`) closes nothing.
+                Some(open) if c == open && !(open == '\'' && chars.peek().is_some_and(|&(_, next)| next.is_alphanumeric() || next == '_')) => {
+                    quote = None;
+                    if depth == 0 {
+                        closed = Some(index + c.len_utf8());
+                        break;
+                    }
+                }
+                Some(_) => {}
+                None => match c {
+                    '"' | '\'' => quote = Some(c),
+                    '{' | '[' => depth += 1,
+                    '}' | ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            closed = Some(index + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+        match closed {
+            Some(end) => scanned = at + end,
+            None => return true,
+        }
+    }
+    false
+}
+
+/// A PEM armor line, `-----BEGIN PRIVATE KEY-----`: a key's value going on.
+fn is_armor(line: &str) -> bool {
+    static ARMOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    ARMOR.get_or_init(|| regex::Regex::new(r"^-----(?:BEGIN|END) [A-Z0-9 ]+-----$").expect("valid pattern")).is_match(line)
+}
+
+/// How many lines on a value left open may run to and still be read as one.
+const OPEN_VALUE_LINES: usize = 16;
+
+/// The last lines a CLI printed, as plain text: what it said as it exited
+/// when it went before it ever got going (#663), such as Claude Code's "No
+/// conversation found with session ID". Terminal controls are dropped, and a
+/// cursor moved right or to a column stands for the spaces a TUI draws that
+/// way. Redacted for the chat (`recovery::redact`, line by line), then cut
+/// to at most `LAST_WORDS_CHARS`. `None` when it printed nothing to read.
+pub fn last_words(output: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(&output[output.len().saturating_sub(LAST_WORDS_TAIL_BYTES)..]);
+    let mut lines = vec![String::new()];
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let line = lines.last_mut().expect("there is always a line");
+        match c {
+            '\n' | '\r' => lines.push(String::new()),
+            '\t' => line.push(' '),
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    // Parameters and intermediates, then the final byte that
+                    // says what the sequence does.
+                    let done = chars.by_ref().find(|c| ('@'..='~').contains(c));
+                    match done {
+                        Some('C' | 'G') => line.push(' '),
+                        // To another row: what follows is another line.
+                        Some('A' | 'B' | 'E' | 'F' | 'H' | 'f') => lines.push(String::new()),
+                        _ => {}
+                    }
+                }
+                Some(']' | 'P' | '_' | '^') => {
+                    // A string, ended by BEL or ST (ESC \).
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                // A character set chosen: one more character names it.
+                Some('(' | ')' | '*' | '+' | '-' | '.' | '/') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            c if c.is_control() => {}
+            c => line.push(c),
+        }
+    }
+    let lines: Vec<String> = lines.iter().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|line| !line.is_empty()).collect();
+    // A line that ends on a credential's label (`Password:`, `token=`,
+    // `--password`, `Authorization: Bearer`) reads on into the next one,
+    // where its value is; one whose value opens a quote, an object or a list
+    // reads on to the line that closes it. Each is then one line, for the
+    // window and for the redaction. A value that never closes takes the
+    // lines of one word after it, as a wrapped token, a key's base64 or a
+    // tail goes on, and leaves the first line of words, where the reason is.
+    let mut read: Vec<String> = Vec::new();
+    let mut next = 0;
+    while next < lines.len() {
+        let mut line = lines[next].clone();
+        next += 1;
+        loop {
+            if next < lines.len() && ends_on_a_label(&line) {
+                line = format!("{line} {}", lines[next]);
+                next += 1;
+            } else if leaves_a_value_open(&line) {
+                let mut joined = line.clone();
+                let closed = lines[next..].iter().take(OPEN_VALUE_LINES).position(|more| {
+                    joined.push(' ');
+                    joined.push_str(more);
+                    !leaves_a_value_open(&joined)
+                });
+                let Some(at) = closed else {
+                    while next < lines.len() && (!lines[next].contains(char::is_whitespace) || is_armor(&lines[next])) {
+                        line.push(' ');
+                        line.push_str(&lines[next]);
+                        next += 1;
+                    }
+                    break;
+                };
+                line = joined;
+                next += at + 1;
+            } else {
+                break;
+            }
+        }
+        read.push(line);
+    }
+    let lines = read;
+    // Redacted as an agent's own words always are (#667), and whole, before
+    // any of it is cut: a credential or a path cut in two is no longer
+    // recognisable as one, and its fragment would get through. Line by
+    // line first, as `recovery::redact` reads it: a quote one line leaves
+    // open does not take the next lines, where the reason usually is. Then
+    // joined, for anything else that runs from one line into the next;
+    // what the first pass cut stays as it was.
+    let said = lines[lines.len().saturating_sub(LAST_WORDS_LINES)..].iter().map(|line| crate::recovery::redact(line)).collect::<Vec<_>>().join(" ");
+    let said = crate::recovery::redact(&said);
+    let said = said.trim();
+    if said.is_empty() {
+        return None;
+    }
+    let count = said.chars().count();
+    if count <= LAST_WORDS_CHARS {
+        return Some(said.to_string());
+    }
+    // The end is where the reason is; what is cut is the start, and the
+    // ellipsis that says so counts toward the length.
+    let kept: String = said.chars().skip(count - (LAST_WORDS_CHARS - 1)).collect();
+    Some(format!("…{}", kept.trim_start()))
 }
 
 // ------------------------------------------------------------------ the tail
@@ -242,6 +597,9 @@ pub type Marker = fn(&str, &HashSet<String>, &mut Vec<Payload>) -> Option<TurnMa
 /// until its newline has arrived.
 pub struct Streamer {
     offset: u64,
+    /// Where it started reading this file: what came before is not this
+    /// CLI's, or is history.
+    began: u64,
     partial: Vec<u8>,
     decode: Decoder,
     /// Records the app has already logged under another id. A forked Claude
@@ -262,6 +620,7 @@ impl Streamer {
     pub fn skipping(offset: u64, decode: Decoder, skip: HashSet<String>) -> Self {
         Self {
             offset,
+            began: offset,
             partial: Vec::new(),
             decode,
             skip,
@@ -296,12 +655,17 @@ impl Streamer {
         self.offset
     }
 
+    /// Where it started reading its file.
+    pub fn began(&self) -> u64 {
+        self.began
+    }
+
     /// Feed the bytes read after `offset()`. Complete lines are decoded; the
     /// tail after the last newline is kept for the next chunk.
     #[cfg(test)]
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Payload> {
         let mut out = Vec::new();
-        for (payloads, mark, _) in self.push_records(chunk) {
+        for (payloads, mark, _, _) in self.push_records(chunk) {
             out.extend(payloads);
             if mark.is_some() {
                 self.mark = mark;
@@ -331,14 +695,15 @@ impl Streamer {
                         }
                     };
                     if !out.is_empty() || mark.is_some() {
+                        let record = serde_json::from_str::<serde_json::Value>(line).ok();
                         // Both supported transcript formats use an RFC3339 timestamp.
                         // Missing historical time stays unknown, never the import time.
-                        let ts = serde_json::from_str::<serde_json::Value>(line)
-                            .ok()
+                        let ts = record
+                            .as_ref()
                             .and_then(|record| record["timestamp"].as_str().map(str::to_owned))
                             .filter(|ts| chrono::DateTime::parse_from_rfc3339(ts).is_ok())
                             .unwrap_or_default();
-                        records.push((out, mark, ts));
+                        records.push((out, mark, ts, record.as_ref().and_then(Lineage::of)));
                     }
                 }
             }
@@ -347,8 +712,31 @@ impl Streamer {
     }
 }
 
-/// One transcript record: its payloads, turn mark, and source time (empty if unknown).
-pub type Record = (Vec<Payload>, Option<TurnMark>, String);
+/// One transcript record: its payloads, turn mark, source time (empty if
+/// unknown), and where it stands in its conversation.
+pub type Record = (Vec<Payload>, Option<TurnMark>, String, Option<Lineage>);
+
+/// Where a record stands in its conversation: its own id, and the id of the
+/// record it follows.
+///
+/// Claude Code chains each record to the one before it (`parentUuid`). When
+/// it drops a turn before answering it, it puts the prompt back in its input
+/// box, and the next prompt it records follows the same record the dropped
+/// one did (#722): a prompt with the same parent as an earlier one took that
+/// one's place. Codex records carry neither id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lineage {
+    pub uuid: String,
+    /// `None` for the first record of a conversation.
+    pub parent: Option<String>,
+}
+
+impl Lineage {
+    fn of(record: &serde_json::Value) -> Option<Self> {
+        let uuid = record["uuid"].as_str().filter(|uuid| !uuid.is_empty())?;
+        Some(Self { uuid: uuid.to_string(), parent: record["parentUuid"].as_str().map(str::to_owned) })
+    }
+}
 
 /// How long a `Stop` hook waits for the transcript to catch up with the reply
 /// the hook is already holding. Well inside the hook's own 10 s.
@@ -401,6 +789,22 @@ impl Tail {
         Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::at(offset, decode)), decode, marker: None }
     }
 
+    /// Where a handover leaves this tail (#765): the file, how far into it
+    /// every complete record has been read (a record still being written is
+    /// read again), where reading it began, and the records it drops.
+    pub(crate) fn position(&self) -> (PathBuf, u64, u64, HashSet<String>) {
+        let path = self.path.lock().unwrap().clone();
+        let stream = self.stream.lock().unwrap();
+        (path, stream.offset - stream.partial.len() as u64, stream.began, stream.skip.clone())
+    }
+
+    /// Follow on from where a handover left a tail (`position`).
+    pub(crate) fn resumed(path: PathBuf, offset: u64, began: u64, decode: Decoder, skip: HashSet<String>) -> Self {
+        let mut stream = Streamer::skipping(offset, decode, skip);
+        stream.began = began;
+        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(stream), decode, marker: None }
+    }
+
     /// Also report what the records say about the turn; see [`Self::drain_records`].
     pub fn marking(mut self, marker: Marker) -> Self {
         self.marker = Some(marker);
@@ -411,6 +815,23 @@ impl Tail {
     /// How far into the file the tail has read.
     pub fn offset(&self) -> u64 {
         self.stream.lock().unwrap().offset()
+    }
+
+    /// The file followed now, and where in it reading began: the records
+    /// before that are not the CLI's own, or are history. A retarget or a
+    /// `follow` changes both; a reader keeping up with what the CLI writes
+    /// (`claude::background::Watch`) moves when they do. Taken path first,
+    /// as `retarget` takes them, so the pair is one tail's.
+    pub fn reading(&self) -> (PathBuf, u64) {
+        let path = self.path.lock().unwrap();
+        let began = self.stream.lock().unwrap().began();
+        (path.clone(), began)
+    }
+
+    /// The records the tail drops as already logged elsewhere: a fork's copy
+    /// of its parent conversation, under the parent's uuids.
+    pub fn carried(&self) -> HashSet<String> {
+        self.stream.lock().unwrap().carried().clone()
     }
 
     /// Point at `path` and read on from `offset`, whatever was being
@@ -547,6 +968,16 @@ impl Default for TurnTail {
 }
 
 impl TurnTail {
+    /// What a handover carries of it (#765): the reply said, the replies
+    /// drawn ahead of their records, and whether the turn is closed.
+    pub(crate) fn parts(&self) -> (Option<String>, Vec<String>, bool) {
+        (self.said.clone(), self.anticipated.iter().cloned().collect(), self.closed)
+    }
+
+    pub(crate) fn from_parts(said: Option<String>, anticipated: Vec<String>, closed: bool) -> Self {
+        Self { said, anticipated: anticipated.into(), closed }
+    }
+
     /// The last reply already delivered for this turn. A watcher closing a
     /// turn uses it to complete an automation without publishing it again.
     pub fn last_assistant_message(&self) -> Option<&str> {
@@ -793,7 +1224,19 @@ mod tests {
     fn records_keep_source_timestamps_and_never_invent_missing_history() {
         let mut stream = Streamer::at(0, echo);
         let records = stream.push_records(b"{\"timestamp\":\"2026-10-22T23:59:00Z\"}\n{\"timestamp\":\"invalid\"}\n{}\n");
-        assert_eq!(records.iter().map(|(_, _, ts)| ts.as_str()).collect::<Vec<_>>(), ["2026-10-22T23:59:00Z", "", ""]);
+        assert_eq!(records.iter().map(|(_, _, ts, _)| ts.as_str()).collect::<Vec<_>>(), ["2026-10-22T23:59:00Z", "", ""]);
+    }
+
+    /// Claude Code chains each record to the one before it; Codex's records
+    /// name neither (#722).
+    #[test]
+    fn records_say_where_they_stand_in_their_conversation() {
+        let mut stream = Streamer::at(0, echo);
+        let records = stream.push_records(
+            b"{\"uuid\":\"u2\",\"parentUuid\":\"u1\"}\n{\"uuid\":\"u1\",\"parentUuid\":null}\n{\"type\":\"event_msg\"}\n{\"uuid\":\"\"}\n",
+        );
+        let lineage = |uuid: &str, parent: Option<&str>| Some(Lineage { uuid: uuid.into(), parent: parent.map(String::from) });
+        assert_eq!(records.into_iter().map(|(_, _, _, lineage)| lineage).collect::<Vec<_>>(), [lineage("u2", Some("u1")), lineage("u1", None), None, None]);
     }
 
     #[test]
@@ -820,12 +1263,38 @@ mod tests {
         // Read on the third look: the wait ends there, however long is left.
         let looks = AtomicUsize::new(0);
         let unread = || Some(if looks.fetch_add(1, Ordering::Relaxed) < 2 { 64 } else { 0 });
-        assert_eq!(await_read(unread, Duration::from_secs(60)), PasteRead::Read);
+        let began = std::time::Instant::now();
+        let (read, unread_at) = await_read(unread, Duration::from_secs(60));
+        assert_eq!(read, PasteRead::Read);
         assert_eq!(looks.load(Ordering::Relaxed), 3);
+        // It was read after the second look, which saw it still there.
+        assert!(unread_at > began && unread_at < std::time::Instant::now());
         // A CLI that never reads is given up on, and a PTY that cannot be
         // asked is not waited on at all.
-        assert_eq!(await_read(|| Some(64), Duration::from_millis(20)), PasteRead::Unread);
-        assert_eq!(await_read(|| None, Duration::from_secs(60)), PasteRead::Unknown);
+        assert_eq!(await_read(|| Some(64), Duration::from_millis(20)).0, PasteRead::Unread);
+        assert_eq!(await_read(|| None, Duration::from_secs(60)).0, PasteRead::Unknown);
+    }
+
+    /// Only a draw after the paste was read says the CLI has taken it in: one
+    /// from before, the startup screen say, is no answer.
+    #[test]
+    fn the_enter_waits_for_the_cli_to_draw_after_reading_the_paste() {
+        use std::time::Instant;
+        let before = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        let read = Instant::now();
+        let drawn = std::sync::Mutex::new(Some(before));
+        assert!(!await_drawn(|| *drawn.lock().unwrap(), read, Duration::from_millis(20)), "a draw from before the read");
+        assert!(!await_drawn(|| None, read, Duration::from_millis(20)), "a pane that never drew");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                *drawn.lock().unwrap() = Some(Instant::now());
+            });
+            let waited = Instant::now();
+            assert!(await_drawn(|| *drawn.lock().unwrap(), read, Duration::from_secs(60)));
+            assert!(waited.elapsed() < Duration::from_secs(10), "the wait ends at the draw, however long is left");
+        });
     }
 
     #[test]
@@ -898,6 +1367,114 @@ mod tests {
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"second\n").unwrap();
         assert!(matches!(&tail.drain()[0], Payload::Status { text } if text == "second"));
+    }
+
+    /// What Claude Code 2.1.314 printed, byte for byte, when it was resumed on
+    /// a conversation it never wrote (#663), then exited.
+    const NO_CONVERSATION: &[u8] = b"\x1b7\x1b[r\x1b8\x1b[?25h\x1b[38;2;255;107;128mNo conversation found with session ID: 0d5e7c1a-1111-4222-8333-944455556666\x1b[39m\r\r\n\x1b[?25h\x1b(B\x0f\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[>4m\x1b[?1004l\x1b[?2031l\x1b[?2004l\x1b[<u\x1b[?25h\x1b7\x1b[r\x1b8\x1b]0;\x07\x1b[?25h";
+
+    #[test]
+    fn a_cli_s_last_words_are_what_it_printed_less_the_terminal_s_controls() {
+        // A whole conversation id is as opaque as a token to the redactor (#667).
+        assert_eq!(last_words(NO_CONVERSATION).as_deref(), Some("No conversation found with session ID: [redacted]"));
+        // A TUI that draws its spaces as cursor moves still reads as words.
+        assert_eq!(last_words(b"\x1b[2GQuick\x1b[8Gsafety\x1b[15Gcheck:").as_deref(), Some("Quick safety check:"));
+        // A login shell's chatter before the CLI is not its last words.
+        let shell_first = [b"Last login: Thu Oct 29\r\n".as_slice(), b"zsh: warning\r\n", b"Error: unknown option '--frob'\r\n", b"Usage: claude [options]\r\n", b"Run claude --help for help\r\n"].concat();
+        assert_eq!(last_words(&shell_first).as_deref(), Some("Error: unknown option '--frob' Usage: claude [options] Run claude --help for help"));
+        // Nothing but controls is nothing said.
+        assert_eq!(last_words(b"\x1b[?25h\x1b]0;title\x07\r\n\r\n"), None);
+        assert_eq!(last_words(b""), None);
+    }
+
+    #[test]
+    fn a_long_last_word_keeps_its_end_where_the_reason_is() {
+        let long = format!("{} the reason", "x".repeat(LAST_WORDS_CHARS * 2));
+        let said = last_words(long.as_bytes()).unwrap();
+        assert!(said.starts_with('…') && said.ends_with("the reason"), "{said}");
+        assert_eq!(said.chars().count(), LAST_WORDS_CHARS);
+    }
+
+    /// A credential where the cut falls is redacted whole: cut first, its
+    /// tail would no longer look like one, and would reach the chat.
+    #[test]
+    fn a_credential_the_cut_falls_in_is_redacted_whole() {
+        let secret = "API_KEY=sk-ant-api03-Zx9Qw8Er7Ty6Ui5Op4As3Df2";
+        let after = format!(" {} the reason", "y".repeat(LAST_WORDS_CHARS - 20));
+        // The raw text's last LAST_WORDS_CHARS - 1 characters start inside the key.
+        assert!(after.chars().count() < LAST_WORDS_CHARS - 1 && after.chars().count() + secret.len() > LAST_WORDS_CHARS - 1);
+        let said = last_words(format!("apiKeyHelper failed: {secret}{after}").as_bytes()).unwrap();
+        assert!(said.ends_with("the reason") && said.chars().count() <= LAST_WORDS_CHARS, "{said}");
+        for fragment in ["Df2", "As3", "Op4", "sk-ant"] {
+            assert!(!said.contains(fragment), "{fragment} reached the chat: {said}");
+        }
+    }
+
+    /// A value one line leaves open is cut to the end of that line only: the
+    /// lines after it, with the reason, still reach the chat.
+    #[test]
+    fn a_quote_left_open_takes_its_own_line_not_the_reason_after_it() {
+        let said = last_words(b"auth: \"chatgpt\r\nError: Failed to refresh token: 401 Unauthorized\r\nPlease run codex login\r\n").unwrap();
+        assert_eq!(said, "auth: [redacted] Error: Failed to refresh token: 401 Unauthorized Please run codex login");
+    }
+
+    /// A value on the line after its label is cut all the same, and the
+    /// two count as one line of the window.
+    #[test]
+    fn a_secret_on_the_line_after_its_label_is_redacted() {
+        assert_eq!(last_words(b"Password:\r\nhunter2\r\n").as_deref(), Some("Password: [redacted]"));
+        assert_eq!(last_words(b"proxy refused Authorization: Bearer\r\nabc123\r\n").as_deref(), Some("proxy refused Authorization: [redacted]"));
+        assert_eq!(last_words(b"login --password\r\nhunter2\r\n").as_deref(), Some("login --password [redacted]"));
+        assert_eq!(last_words(b"a\r\nb\r\nc\r\nPassword:\r\nhunter2\r\n").as_deref(), Some("b c Password: [redacted]"));
+        // A flag that takes no value keeps the line after it whole.
+        assert_eq!(
+            last_words(b"usage: codex login --with-api-key\r\nError: stdin is not a terminal\r\n").as_deref(),
+            Some("usage: codex login --with-api-key Error: stdin is not a terminal")
+        );
+    }
+
+    /// A value that runs on over lines goes whole, up to the line that
+    /// closes it, and the reason after it stays.
+    #[test]
+    fn a_value_that_runs_over_lines_goes_whole() {
+        assert_eq!(last_words(b"password: \"hunter\r\n2 more\" and the reason\r\n").as_deref(), Some("password: [redacted] and the reason"));
+        assert_eq!(last_words(b"token=\"hunter\r\n2abc\" rest\r\n").as_deref(), Some("token=[redacted] rest"));
+        assert_eq!(
+            last_words(b"{\"refresh_token\": \"abc\r\ndef\", \"error\": \"invalid_grant\"}\r\n").as_deref(),
+            Some(r#"{"refresh_token": [redacted], "error": "invalid_grant"}"#)
+        );
+        assert_eq!(last_words(b"token: {\"a\": 1,\r\n\"b\": 2} then the reason\r\n").as_deref(), Some("token: [redacted] then the reason"));
+        // One that never closes takes the one-word lines after it, however
+        // many, and leaves the reason.
+        assert_eq!(last_words(b"password: \"hunter\r\n2more\r\n").as_deref(), Some("password: [redacted]"));
+        let key: Vec<u8> = ["private_key: \"-----BEGIN PRIVATE KEY-----\r\n".to_string()]
+            .into_iter()
+            .chain((0..20).map(|n| format!("MIIEv{n}QIBADANBgkqhkiG9w0BAQEFAASC\r\n")))
+            .chain(["Error: key rejected\r\n".to_string()])
+            .collect::<String>()
+            .into_bytes();
+        assert_eq!(last_words(&key).as_deref(), Some("private_key: [redacted] Error: key rejected"));
+        // A key's armor on the line after its label goes too.
+        let armored = b"private_key: \"\r\n-----BEGIN PRIVATE KEY-----\r\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\r\n-----END PRIVATE KEY-----\r\nError: key rejected\r\n";
+        assert_eq!(last_words(armored).as_deref(), Some("private_key: [redacted] Error: key rejected"));
+        // An escaped quote wraps as a plain one does.
+        assert_eq!(last_words(b"body: \"{\\\"password\\\":\\\"hunter\r\n2abc\\\"}\" rest\r\n").as_deref(), Some(r#"body: "{\"password\":[redacted]}" rest"#));
+        // A value closed on the next line leaves the label after it a
+        // phrase's start.
+        assert_eq!(last_words(b"auth: \"x\r\nx\" password: hunter2X\r\n").as_deref(), Some("auth: [redacted] password: [redacted]"));
+        // Only a value `redact` cuts runs on: an error's own `Unauthorized:`
+        // does not take the line after it, whose label is still cut.
+        assert_eq!(last_words(b"HTTP 401 Unauthorized: \"x\r\npassword: hunter2\"\r\n").as_deref(), Some("HTTP 401 Unauthorized: \"x password: [redacted]"));
+        // An apostrophe in the reason closes nothing.
+        assert_eq!(last_words(b"auth: 'chatgpt\r\nError: You've hit your usage limit\r\n").as_deref(), Some("auth: [redacted] Error: You've hit your usage limit"));
+        // A scheme of any name, its credential on the next line.
+        assert_eq!(last_words(b"proxy refused Authorization: Bot\r\nabc123\r\n").as_deref(), Some("proxy refused Authorization: [redacted]"));
+        // An address before the label, cut first, does not let the open
+        // quote take the reason either.
+        assert_eq!(
+            last_words(b"signed in as ada@example.com auth: \"chatgpt\r\nError: Failed to refresh token: 401 Unauthorized\r\nPlease run codex login\r\n").as_deref(),
+            Some("signed in as [email] auth: [redacted] Error: Failed to refresh token: 401 Unauthorized Please run codex login")
+        );
     }
 
     #[test]

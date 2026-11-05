@@ -128,9 +128,13 @@ pub struct Event {
     pub at: String,
     pub stage: Stage,
     /// `started`, `workDone`, `pullRequest`, `tracker`, `reviewRequested`,
-    /// `verdict`, `findingsPosted`, `findingsSent`, `pushed`, `reminder`,
-    /// `waiting`, `readyToMerge`, `needsYou`, `merged`, `stopped`, `resumed`,
-    /// `autoMerge`, `note`.
+    /// `reviewPending`, `verdict`, `findingsPosted`, `findingsSent`, `pushed`,
+    /// `reminder`, `waiting`, `readyToMerge`, `needsYou`, `answered`, `merged`,
+    /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`,
+    /// `resolutionRequested`, `resolutionPending` (a resolver waiting on work
+    /// it left running), `resolved`, `resolutionStopped`, `mergeAborted`
+    /// (a resolver's unfinished merge undone), `mergeLeft` (one left as it
+    /// is, and why), `note`.
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,6 +190,11 @@ pub struct Pipeline {
     /// What it is doing or waiting for, in a line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The stop a person answered the author out of (#725). The author is at
+    /// work on that answer, and the end of its turn settles the pipeline
+    /// again; a turn that settles nothing leaves it stopped for this once more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered: Option<StopReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PrLink>,
     /// Reviews asked for so far.
@@ -197,6 +206,11 @@ pub struct Pipeline {
     pub review_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_requested_at: Option<String>,
+    /// When the reviewer first said its checks for this review were still
+    /// running. Its verdict is waited for until [`engine::REVIEW_CHECKS_MINUTES`]
+    /// after this, and then asked for once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_pending_since: Option<String>,
     /// The last review whose findings reached the author.
     #[serde(default)]
     pub findings_sent_round: u32,
@@ -229,6 +243,10 @@ pub struct Pipeline {
     pub merge_refused: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<MergeRecord>,
+    /// Conversations told that the pipeline ended while they were in a turn.
+    /// Each one's agent is stopped when that turn ends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub releasing: Vec<SessionRef>,
     #[serde(default)]
     pub events: Vec<Event>,
     pub created: String,
@@ -258,6 +276,11 @@ pub struct Resolution {
     pub base: String,
     pub base_commit: String,
     pub return_stage: Stage,
+    /// When the resolver first ended a turn without its report while work it
+    /// started was still running. Its report is waited for until
+    /// [`engine::RESOLVE_CHECKS_MINUTES`] after this, and then asked for once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_since: Option<String>,
 }
 
 /// The newest lines of the record kept per pipeline.

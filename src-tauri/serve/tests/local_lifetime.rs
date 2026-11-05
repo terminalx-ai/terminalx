@@ -62,7 +62,13 @@ fn only_one_local_owner_can_touch_a_home() {
     let rejected = world.command().output().unwrap();
     assert!(!rejected.status.success());
     assert_eq!(std::fs::read(world.data.join("run/control.token")).unwrap(), token);
-    assert_eq!(serve.control("status", json!({}))["localRuntime"], before["localRuntime"]);
+    // The age of the loop's last pass moves on by itself (#661); nothing else may.
+    let owner = |status: serde_json::Value| {
+        let mut local = status["localRuntime"].clone();
+        local.as_object_mut().unwrap().remove("loopAgeMs");
+        local
+    };
+    assert_eq!(owner(serve.control("status", json!({}))), owner(before));
 }
 
 #[test]
@@ -197,7 +203,7 @@ fn native_client_pins_its_owner_and_cannot_send_to_a_replacement() {
     };
     let mut serve = start();
     let client = raccoon_lib::local_runtime::client::Client::connect(&world.data).unwrap();
-    let mut events = client.stream().unwrap();
+    let mut events = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     writeln!(events.writer().unwrap(), "{}", json!({"method":"ping"})).unwrap();
     assert_eq!(events.receive().unwrap()["type"], "pong");
     let status: serde_json::Value = client.call("status", json!({})).unwrap();
@@ -268,8 +274,8 @@ fn native_bridge_replays_bytes_and_releases_only_its_own_views() {
     });
     let client = Client::connect(&world.data).unwrap();
     let sink = Arc::new(raccoon_lib::sink::BroadcastSink::new(16));
-    let first = Bridge::connect(&client, sink.clone()).unwrap();
-    let second = Bridge::connect(&client, sink).unwrap();
+    let first = Bridge::connect_views(&client, sink.clone(), "first", None).unwrap();
+    let second = Bridge::connect_views(&client, sink, "second", None).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     first.attach(&id, "same-token", Box::new(move |bytes| tx.send(bytes.to_vec()).is_ok())).unwrap();
     let (tx2, rx2) = std::sync::mpsc::channel();
@@ -299,39 +305,47 @@ fn launcher_process_fixture() {
     let Some(home) = std::env::var_os("TERMINALX_LAUNCHER_FIXTURE_HOME") else { return };
     let source = std::env::var_os("TERMINALX_LAUNCHER_FIXTURE_BINARY").unwrap();
     let client = raccoon_lib::local_runtime::launch::connect_or_start(std::path::Path::new(&source), std::path::Path::new(&home)).unwrap();
-    let _connection = client.stream().unwrap();
+    let _connection = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     // Deliberately skip all Rust drops: actual UI process exit must release
     // its socket without sending stop-all or owning the runtime's lifetime.
     std::process::exit(0);
 }
 
-#[test]
-fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
-    use raccoon_lib::local_runtime::client::Client;
-    let world = AgentWorld::new();
-    struct StopPrivate(std::path::PathBuf);
-    impl Drop for StopPrivate {
-        fn drop(&mut self) {
-            if let Ok(client) = Client::connect(&self.0) {
-                let status = client.call::<serde_json::Value>("status", json!({})).ok();
-                let _ = client.stop_all();
-                if let Some(pid) = status.and_then(|status| status["pid"].as_u64()) {
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    while Instant::now() < deadline {
-                        let alive = std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).output().is_ok_and(|output| output.status.success());
-                        if !alive { break; }
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
+/// Asks whatever runtime owns a disposable home to stop, and waits for it,
+/// before the fixture is deleted, however the test ends.
+struct StopPrivate(std::path::PathBuf);
+
+impl Drop for StopPrivate {
+    fn drop(&mut self) {
+        if let Ok(client) = raccoon_lib::local_runtime::client::Client::connect(&self.0) {
+            let status = client.call::<serde_json::Value>("status", json!({})).ok();
+            let _ = client.stop_all();
+            if let Some(pid) = status.and_then(|status| status["pid"].as_u64()) {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    if !alive(pid) { break; }
+                    std::thread::sleep(Duration::from_millis(25));
                 }
             }
         }
     }
-    // Created before the launcher so even an attachment assertion failure
-    // asks only this disposable home's owner to stop before fixture deletion.
-    let _private_owner = StopPrivate(world.data.clone());
+}
+
+fn alive(pid: u64) -> bool {
+    std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).output().is_ok_and(|output| output.status.success())
+}
+
+/// A home with one project, and a bundled runtime to install from it.
+fn bundled(world: &AgentWorld) -> std::path::PathBuf {
     std::fs::write(world.data.join("projects.json"), serde_json::to_vec(&json!({"projects":[{"path":world.project,"name":"fixture"}]})).unwrap()).unwrap();
     let source = world.home.join("bundled-terminalx-serve");
     std::fs::copy(env!("CARGO_BIN_EXE_terminalx-serve"), &source).unwrap();
+    source
+}
+
+/// Discover or start the home's runtime from `source` as a desktop does, from
+/// a process with the fixture's environment, which then exits.
+fn launch_installed(world: &AgentWorld, source: &std::path::Path) {
     let mut launcher = std::process::Command::new(std::env::current_exe().unwrap());
     launcher.args(["--exact", "launcher_process_fixture", "--nocapture"])
         .env_clear().env("HOME", &world.home)
@@ -339,13 +353,24 @@ fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
         .env("CLAUDE_CONFIG_DIR", world.home.join(".claude"))
         .env("TERMINALX_HOME", &world.data)
         .env("TERMINALX_LAUNCHER_FIXTURE_HOME", &world.data)
-        .env("TERMINALX_LAUNCHER_FIXTURE_BINARY", &source);
+        .env("TERMINALX_LAUNCHER_FIXTURE_BINARY", source);
     assert!(launcher.status().unwrap().success());
+}
+
+#[test]
+fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
+    use raccoon_lib::local_runtime::client::Client;
+    let world = AgentWorld::new();
+    // Created before the launcher so even an attachment assertion failure
+    // asks only this disposable home's owner to stop before fixture deletion.
+    let _private_owner = StopPrivate(world.data.clone());
+    let source = bundled(&world);
+    launch_installed(&world, &source);
     let client = Client::connect(&world.data).unwrap();
     struct Stop(std::sync::Arc<Client>);
     impl Drop for Stop { fn drop(&mut self) { let _ = self.0.stop_all(); } }
     let cleanup = Stop(client.clone());
-    let _connection = client.stream().unwrap();
+    let _connection = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     let before: serde_json::Value = client.call("status", json!({})).unwrap();
     // Replace the bundle source inode, then remove it altogether. The signed
     // installed image and hook command paths must remain outside that source.
@@ -367,11 +392,100 @@ fn installed_runtime_survives_launcher_exit_and_bundle_source_replacement() {
     });
     client.stop_all().unwrap();
     let pid = before["pid"].as_u64().unwrap();
-    common::agent::wait_until("the installed owner to stop", || {
-        let alive = std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).output().unwrap().status.success();
-        (!alive).then_some(())
-    });
+    common::agent::wait_until("the installed owner to stop", || (!alive(pid)).then_some(()));
     drop(cleanup);
+}
+
+/// #730, against a real installed runtime: what a desktop needs to bring the
+/// runtime along with an update. The runtime says its build without being
+/// asked, says which agents are in the middle of a turn (what the switch
+/// waits for), and once retired as Stop All retires it, has gone, so the next
+/// launch starts another in its place, with the session there to resume.
+#[test]
+fn a_runtime_says_its_build_and_turns_and_a_retired_one_is_replaced_by_the_next_launch() {
+    use raccoon_lib::local_runtime::{client::{Client, Stream}, launch};
+    let world = AgentWorld::new();
+    let _private_owner = StopPrivate(world.data.clone());
+    let source = bundled(&world);
+    launch_installed(&world, &source);
+    let client = Client::connect(&world.data).unwrap();
+    let _connection = client.stream(&Stream::Events).unwrap();
+    let status: serde_json::Value = client.call("status", json!({})).unwrap();
+    assert_eq!(client.build().version.as_ref().map(ToString::to_string).as_deref(), status["appVersion"].as_str());
+    assert_eq!(serde_json::Value::Object(client.build().mobile.clone()), raccoon_lib::local_runtime::mobile::features());
+
+    let created: serde_json::Value = client.call("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"slow:30:200","useWorktree":false,"onMain":true,"mode":"manual"
+    })).unwrap();
+    let (session, tab) = (created["sessionId"].as_str().unwrap().to_string(), created["tabId"].as_str().unwrap().to_string());
+    let turn = |status: &serde_json::Value| status["runningTabs"].as_array().unwrap().iter()
+        .find(|running| running["tabId"] == tab.as_str()).map(|running| running["status"].as_str().unwrap().to_string());
+    common::agent::wait_until("the agent to be in the middle of its turn", || {
+        (turn(&client.call("status", json!({})).unwrap()).as_deref() == Some("in_progress")).then_some(())
+    });
+    common::agent::wait_until("its turn to end", || {
+        let events: serde_json::Value = client.call("read", json!({"target":tab})).unwrap();
+        (count(events["events"].as_array().unwrap(), "turn_completed") == 1).then_some(())
+    });
+    let status: serde_json::Value = client.call("status", json!({})).unwrap();
+    assert!(turn(&status).is_some_and(|status| status != "in_progress" && status != "waiting"), "nothing mid-turn: {status}");
+
+    let pid = status["pid"].as_u64().unwrap();
+    // As the desktop replacing it by itself does: stopped without asking only once it agreed to stop.
+    let stopping = || client.liveness(raccoon_lib::local_runtime::client::QUICK_TIMEOUT).is_ok_and(|liveness| liveness["localRuntime"]["stopping"] == true);
+    launch::retire(&world.data, || client.stop_all(), launch::Fallback::Agreed(&stopping)).unwrap();
+    // It has let go of its socket; the process itself may take a moment more.
+    common::agent::wait_until("the retired runtime to exit", || (!alive(pid)).then_some(()));
+    launch_installed(&world, &source);
+    let next = Client::connect(&world.data).unwrap();
+    assert_ne!(next.epoch(), client.epoch(), "a fresh runtime took its place");
+    let shown: serde_json::Value = next.call("sessions.show", json!({"session": session})).unwrap();
+    assert!(shown["tabs"].as_array().unwrap().iter().any(|shown| shown["id"] == tab.as_str()), "the session is there to resume: {shown}");
+    next.stop_all().unwrap();
+}
+
+/// #730 review: a runtime says what stopping it would cut short, by its own
+/// idle rule, and a stop that must cut nothing short is refused while any of
+/// it remains, decided under the lock that admits work: an agent mid-turn,
+/// then a terminal running a program. With only a settled agent left, it
+/// stops as Stop All does.
+#[test]
+fn a_runtime_names_what_stopping_it_would_cut_short_and_stops_by_itself_only_without_any() {
+    let world = AgentWorld::new();
+    let mut serve = Serve::start(world.command(), &world.data);
+    let epoch = serve.control("status", json!({}))["localRuntime"]["epoch"].clone();
+    let work = |serve: &Serve| -> Vec<String> {
+        serve.control("runtime.work", json!({}))["work"].as_array().unwrap().iter().map(|work| work["kind"].as_str().unwrap().to_string()).collect()
+    };
+    let refused = |serve: &Serve| {
+        let answer = serve.try_control("runtime.stopAllIfIdle", json!({"epoch": epoch}));
+        assert_eq!(answer["error"]["code"], "runtime_busy", "{answer}");
+    };
+    let created = serve.control("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"slow:40:200","useWorktree":false,"onMain":true,"mode":"manual"
+    }));
+    let (session, tab) = (created["sessionId"].as_str().unwrap(), created["tabId"].as_str().unwrap());
+    let turn = common::agent::wait_until("its turn to be under way", || {
+        let work = serve.control("runtime.work", json!({}))["work"].clone();
+        (work.as_array().unwrap().iter().map(|work| work["kind"].clone()).collect::<Vec<_>>() == [json!("turn")]).then_some(work)
+    });
+    assert_eq!((turn[0]["sessionId"].as_str(), turn[0]["tabId"].as_str(), turn[0]["harness"].as_str()), (Some(session), Some(tab), Some("claude")));
+    refused(&serve);
+    // A terminal running a program, as a dev server does.
+    let shell = format!("{session}:1");
+    serve.control("runtime.pty.spawn", json!({"id":shell,"cwd":world.project,"cols":80,"rows":24,"command":"sh -c 'sleep 600'","title":"server"}));
+    serve.wait_events(tab, "the turn to end", |events| count(events, "turn_completed") == 1);
+    let left = common::agent::wait_until("only the terminal to be left", || {
+        let work = serve.control("runtime.work", json!({}))["work"].clone();
+        (work.as_array().unwrap().len() == 1 && work[0]["kind"] == "terminal").then_some(work)
+    });
+    assert_eq!((left[0]["sessionId"].as_str(), left[0]["title"].as_str()), (Some(session), Some("server")));
+    refused(&serve);
+    assert!(serve.child.try_wait().unwrap().is_none(), "nothing was stopped");
+    serve.control("runtime.pty.kill", json!({"id": shell}));
+    common::agent::wait_until("nothing it would cut short", || work(&serve).is_empty().then_some(()));
+    assert_eq!(serve.control("runtime.stopAllIfIdle", json!({"epoch": epoch})), json!({"stopping": true}));
+    stopped(&mut serve);
 }
 
 #[test]
@@ -478,7 +592,7 @@ fn typed_session_adapter_reattaches_to_a_pending_turn_and_answers_without_recove
     let world = AgentWorld::new();
     let mut serve = Serve::start(world.command(), &world.data);
     let first_client = Client::connect(&world.data).unwrap();
-    let first_stream = first_client.stream().unwrap();
+    let first_stream = first_client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     let epoch = first_stream.attachment().epoch.clone();
     let created = serve.control("sessions.create", json!({
         "project":world.project,"agent":"claude","prompt":"ask:echo pending-while-detached",
@@ -490,7 +604,7 @@ fn typed_session_adapter_reattaches_to_a_pending_turn_and_answers_without_recove
     drop(first_client);
     assert_eq!(serve.control("wait", json!({"target":tab,"timeoutSeconds":10}))["reason"], "permission");
     let client = Client::connect(&world.data).unwrap();
-    let stream = client.stream().unwrap();
+    let stream = client.stream(&raccoon_lib::local_runtime::client::Stream::Events).unwrap();
     assert_eq!(stream.attachment().epoch, epoch);
     let sessions = Sessions::new(client.clone());
     let pending = sessions.pending_permissions().unwrap();
@@ -630,7 +744,7 @@ fn desktop_reconnect_revokes_old_views_without_replaying_or_replacing_the_owner(
     let sink = Arc::new(raccoon_lib::sink::BroadcastSink::new(32));
     let previous = Desktop::connect(client.clone(), sink).unwrap();
     let old_attachment = previous.attachment().unwrap();
-    let next = previous.reconnect().unwrap();
+    let next = previous.reconnect(client.clone()).unwrap();
     assert_eq!(next.attachment().unwrap().epoch, old_attachment.epoch);
     assert_ne!(next.attachment().unwrap().lease, old_attachment.lease);
     assert!(previous.sessions().is_err(), "retained old handles must not pretend their view is still connected");
@@ -644,8 +758,125 @@ fn desktop_reconnect_revokes_old_views_without_replaying_or_replacing_the_owner(
     stopped(&mut serve);
     drop(serve);
     let replacement = Serve::start(world.command(), &world.data);
-    assert!(next.reconnect().is_err(), "reconnect must not follow a replacement owner or replay an earlier request");
-    assert_ne!(replacement.control("status", json!({}))["localRuntime"]["epoch"], old_attachment.epoch);
+    assert!(next.reconnect(client.clone()).is_err(), "a pinned client must not follow a replacement owner or replay an earlier request");
+    // Only discovery finds the replacement, and only a new attachment reaches it.
+    let replaced = next.reconnect(Client::connect(&world.data).unwrap()).unwrap();
+    let epoch = replacement.control("status", json!({}))["localRuntime"]["epoch"].clone();
+    assert_ne!(epoch, old_attachment.epoch);
+    assert_eq!(replaced.attachment().unwrap().epoch, epoch);
+    assert!(replaced.generation() > next.generation());
+}
+
+#[test]
+fn a_hung_owner_is_noticed_and_attaching_again_neither_replaces_it_nor_replays() {
+    use raccoon_lib::local_runtime::{client::Client, desktop::{Desktop, Lost}};
+    use std::sync::Arc;
+    let world = AgentWorld::new();
+    let mut serve = Serve::start(world.command(), &world.data);
+    let created = serve.control("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"echo:once-before-hang",
+        "useWorktree":false,"onMain":true,"mode":"manual"
+    }));
+    let session = created["sessionId"].as_str().unwrap();
+    let tab = created["tabId"].as_str().unwrap();
+    serve.wait_events(tab, "initial turn completion", |events| count(events, "turn_completed") == 1);
+    let liveness = Duration::from_secs(2);
+    let client = Client::connect(&world.data).unwrap().with_liveness(Duration::from_millis(250), liveness);
+    let (lost_tx, lost_rx) = std::sync::mpsc::channel();
+    let desktop = Desktop::connect_watched(client, Arc::new(raccoon_lib::sink::BroadcastSink::new(32)),
+        Some(Arc::new(move |lost| { let _ = lost_tx.send(lost); }))).unwrap();
+    // Pings keep a quiet, healthy connection open past its deadline.
+    assert!(lost_rx.recv_timeout(liveness * 5 / 2).is_err(), "a healthy owner was taken for a hung one");
+    let old = desktop.attachment().unwrap();
+    let pid = serve.child.id().to_string();
+    let signal = |name: &str| assert!(std::process::Command::new("kill").args([name, pid.as_str()]).status().unwrap().success());
+    // A stopped owner keeps its sockets open: only the missing pongs show it.
+    signal("-STOP");
+    let lost = lost_rx.recv_timeout(liveness * 5);
+    signal("-CONT");
+    let Lost::Events { generation, reason } = lost.expect("a hung owner went unnoticed") else { panic!("the event connection was lost") };
+    assert_eq!(generation, desktop.generation());
+    assert_eq!(reason, "the background runtime sent nothing, not even a pong, for 2.0 s", "the log says why");
+    assert!(desktop.sessions().is_err(), "a hung owner's attachment must not look connected");
+    let next = desktop.reconnect(Client::connect(&world.data).unwrap()).unwrap();
+    assert_eq!(next.attachment().unwrap().epoch, old.epoch, "an owner that answers again is attached to, not replaced");
+    assert_ne!(next.attachment().unwrap().lease, old.lease);
+    let events: Vec<serde_json::Value> = next.sessions().unwrap().load_events(session, tab).unwrap().into_iter().map(|event| serde_json::to_value(event).unwrap()).collect();
+    assert_eq!(texts(&events, "user_message"), ["echo:once-before-hang"], "attaching again must not resend a prompt");
+    assert_eq!(count(&events, "turn_completed"), 1);
+    assert_eq!(serve.control("status", json!({}))["pid"], serve.child.id());
+    assert!(lost_rx.try_recv().is_err(), "replacing an attachment on purpose is not a loss");
+    next.stop_all().unwrap();
+    stopped(&mut serve);
+}
+
+/// #716: a view whose window has all but stopped reading falls behind on its
+/// own. Only that view is let go, and its window told to attach it again: the
+/// connection stays up, the other window's output keeps coming, and the view
+/// attached again starts from the pane's scrollback.
+#[test]
+fn a_window_view_that_stops_reading_is_let_go_alone_and_attached_again_on_the_same_connection() {
+    use raccoon_lib::local_runtime::{client::Client, desktop::Desktop};
+    use raccoon_lib::sink::EventSink;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let world = AgentWorld::new();
+    let mut serve = Serve::start(world.command(), &world.data);
+    let created = serve.control("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"echo:ready",
+        "useWorktree":false,"onMain":true,"mode":"manual"
+    }));
+    let session = created["sessionId"].as_str().unwrap();
+    let (quiet, flood) = (format!("{session}:11"), format!("{session}:12"));
+    serve.control("runtime.pty.spawn", json!({"id":quiet,"cwd":world.project,"cols":80,"rows":24,
+        "command":"sh -c 'stty -echo; printf quiet-ready; exec cat'"}));
+    let sink = Arc::new(raccoon_lib::sink::BroadcastSink::new(32));
+    let (lagged_tx, lagged_rx) = std::sync::mpsc::channel();
+    sink.listen("pty_view_lagged", Box::new(move |payload| { let _ = lagged_tx.send(payload.to_owned()); }));
+    let (lost_tx, lost_rx) = std::sync::mpsc::channel();
+    let desktop = Desktop::connect_watched(Client::connect(&world.data).unwrap(), sink,
+        Some(Arc::new(move |lost| { let _ = lost_tx.send(lost); }))).unwrap();
+    let text = |buffer: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+    type Tap = Box<dyn Fn(&[u8]) -> bool + Send>;
+    let collect = |buffer: &Arc<Mutex<Vec<u8>>>| -> Tap {
+        let buffer = buffer.clone();
+        Box::new(move |bytes| { buffer.lock().unwrap().extend_from_slice(bytes); true })
+    };
+    let floating = Arc::new(Mutex::new(Vec::new()));
+    desktop.attach("floating", &quiet, "floating-view", collect(&floating)).unwrap();
+    common::agent::wait_until("the floating window's replay", || text(&floating).contains("quiet-ready").then_some(()));
+    // The main window reads a piece every quarter of a second and never says
+    // what it drew, while its pane prints as fast as it can.
+    let slow = Arc::new(AtomicBool::new(true));
+    let drawing = slow.clone();
+    serve.control("runtime.pty.spawn", json!({"id":flood,"cwd":world.project,"cols":80,"rows":24,
+        "command":"sh -c 'exec yes output-that-no-one-reads'"}));
+    let main_quiet = Arc::new(Mutex::new(Vec::new()));
+    desktop.attach("main", &quiet, "main-quiet", collect(&main_quiet)).unwrap();
+    desktop.attach("main", &flood, "main-view", Box::new(move |_| {
+        if drawing.load(Ordering::Relaxed) { std::thread::sleep(Duration::from_millis(250)); }
+        true
+    })).unwrap();
+    let lagged = lagged_rx.recv_timeout(Duration::from_secs(90)).expect("the view that fell behind was never let go");
+    slow.store(false, Ordering::Relaxed);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&lagged).unwrap(), json!({"id":flood, "token":"main-view"}));
+    assert!(lost_rx.recv_timeout(Duration::from_millis(500)).is_err(), "no connection was lost: {:?}", lost_rx.try_recv());
+    assert_eq!(serve.control("runtime.pty.stats", json!({}))["views"], 2, "only the view that fell behind was let go");
+    assert!(desktop.sessions().is_ok(), "the app-wide event connection is unaffected");
+    // The other pane on the same connection, and the other window, keep receiving live output.
+    desktop.terminals().unwrap().write(&quiet, b"still-live\n").unwrap();
+    common::agent::wait_until("live output beside the view that fell behind", || text(&main_quiet).contains("still-live").then_some(()));
+    common::agent::wait_until("live output in the healthy window", || text(&floating).contains("still-live").then_some(()));
+    // Attached again over the same connection, the view starts from the pane's scrollback.
+    let main = Arc::new(Mutex::new(Vec::new()));
+    desktop.attach("main", &flood, "main-view-again", collect(&main)).unwrap();
+    common::agent::wait_until("the main window's replay after it attached again", || text(&main).contains("output-that-no-one-reads").then_some(()));
+    assert_eq!(desktop.renewed("main"), 0, "the window's connection was never replaced");
+    assert!(lost_rx.try_recv().is_err());
+    assert_eq!(serve.control("runtime.pty.output", json!({"id":flood}))["running"], true, "a view let go never stops its process");
+    desktop.terminals().unwrap().kill(&flood).unwrap();
+    desktop.stop_all().unwrap();
+    stopped(&mut serve);
 }
 
 #[test]
@@ -812,8 +1043,19 @@ fn resource_projection_and_stop_rules_are_checked_by_the_owner() {
     let sample = sessions.resource_sample().unwrap();
     let process = sample["processes"].as_array().unwrap().iter().find(|entry| entry["paneId"] == pane).unwrap();
     assert_eq!(process["tabId"], tab);
-    assert_eq!(process["killRule"], "none");
-    assert!(sessions.resource_kill(&pane, true).is_err(), "resource controls cannot bypass an agent tab's ordered Stop");
+    // An idle agent the app started can be stopped from App resources (#696):
+    // asked first, then stopped as its tab's own Stop would, never by ending
+    // its pane, so its conversation is kept and the note says why.
+    assert_eq!(process["killRule"], "stop");
+    let asked = sessions.resource_kill(&pane, false).unwrap();
+    assert_eq!(asked["killed"], false);
+    assert!(asked["confirmation"].as_str().is_some_and(|question| question.starts_with("Stop the agent in")), "{asked}");
+    assert_eq!(sessions.resource_overview().unwrap()["agentCount"], 1, "asking stops nothing");
+    assert_eq!(sessions.resource_kill(&pane, true).unwrap()["killed"], true);
+    serve.wait_events(tab, "the stop's note in the conversation", |events| {
+        events.iter().any(|event| event["payload"]["type"] == "status" && event["payload"]["text"].as_str().is_some_and(|text| text.starts_with("Stopped from App resources.")))
+    });
+    common::agent::wait_until("the agent stopped through its tab", || (sessions.resource_overview().unwrap()["agentCount"] == 0).then_some(()));
     let status = serve.control("status", json!({}));
     serve.control("runtime.stopAll", json!({"epoch":status["localRuntime"]["epoch"]}));
     stopped(&mut serve);
@@ -1011,10 +1253,18 @@ fn cli_workspace_deletion_confirms_owner_processes_and_keeps_the_project() {
     let shell = format!("{session}:cleanup-shell");
     serve.control("runtime.pty.spawn",json!({"id":shell,"cwd":cwd,"cols":80,"rows":24,"command":"sleep 60"}));
     let pid = serve.control("runtime.pty.output",json!({"id":shell}))["pid"].as_u64().unwrap();
-    assert_eq!(serve.try_control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true}))["ok"],false);
+    // Without --yes it says what would go, running agent and shell included (#719).
+    let refused = serve.try_control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true}));
+    assert_eq!((&refused["ok"],&refused["error"]["code"]),(&json!(false),&json!("confirmation_required")));
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains(session) && message.contains("still running, would be stopped: claude tab") && message.contains("1 shell"),"{message}");
+    let preview = serve.control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"dryRun":true}));
+    assert_eq!((&preview["sessions"][0]["id"],&preview["sessions"][0]["runningTabs"][0]["id"],&preview["sessions"][0]["runningShells"]),(&json!(session),&json!(tab),&json!(1)));
     assert!(std::path::Path::new(&cwd).is_dir(),"missing confirmation must leave the worktree alone");
-    let deleted = serve.control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true,"confirmed":true}));
+    assert_eq!(serve.control("runtime.pty.output",json!({"id":shell}))["running"],true,"a preview stops nothing");
+    let deleted = serve.control("worktrees.delete",json!({"project":world.project,"worktree":cwd,"force":true,"confirmed":true,"sessions":[session]}));
     assert_eq!(deleted["deleted"],cwd);
+    assert_eq!((&deleted["removedSessions"][0]["id"],&deleted["removedSessions"][0]["belongsTo"]),(&json!(session),&json!("thisProject")));
     assert!(!std::path::Path::new(&cwd).exists());
     assert!(!std::process::Command::new("/bin/kill").args(["-0",&pid.to_string()])
         .stderr(std::process::Stdio::null()).status().unwrap().success());
@@ -1132,7 +1382,7 @@ fn window_publication_process_fixture() {
             }
         }
     });
-    let first = Arc::new(Desktop::connect(client,Arc::new(raccoon_lib::sink::BroadcastSink::new(32))).unwrap());
+    let first = Arc::new(Desktop::connect(client.clone(),Arc::new(raccoon_lib::sink::BroadcastSink::new(32))).unwrap());
     let publish = |next: &Arc<Desktop>| -> anyhow::Result<()> {
         // A live caller must not reach the endpoint while its validator still
         // has no identity (or the previous identity during reconnection).
@@ -1143,7 +1393,7 @@ fn window_publication_process_fixture() {
     first.activate_window(endpoint.clone(),publish).unwrap();
     assert_eq!(serve.control("floating.show",json!({}))["delivered"],1);
     let old = first.attachment().unwrap();
-    let next = Arc::new(first.reconnect().unwrap());
+    let next = Arc::new(first.reconnect(client.clone()).unwrap());
     assert_eq!(serve.try_control("runtime.heartbeat",serde_json::to_value(&old).unwrap())["ok"],false,
         "reconnect returned before revoking its old owner lease");
     assert!(first.attachment().is_err());
@@ -1151,7 +1401,7 @@ fn window_publication_process_fixture() {
     assert_eq!(serve.control("floating.show",json!({}))["delivered"],2);
     responder.join().unwrap();
     let old = next.attachment().unwrap();
-    let failed = Arc::new(next.reconnect().unwrap());
+    let failed = Arc::new(next.reconnect(client.clone()).unwrap());
     assert_eq!(serve.try_control("runtime.heartbeat",serde_json::to_value(&old).unwrap())["ok"],false,
         "reconnect returned before revoking its old owner lease");
     endpoint.token = "invalid-registration".into();
@@ -1257,7 +1507,7 @@ fn history_larger_than_an_ipc_frame_loads_including_a_single_oversized_event() {
 fn linux_desktop_attaches_to_a_local_owner_without_a_macos_tray() {
     let world = AgentWorld::new();
     let mut serve = Serve::start(world.command(), &world.data);
-    let client = raccoon_lib::local_runtime::launch::connect_desktop(std::path::Path::new("unused-existing-owner"), &world.data,"com.terminalx.fixture").unwrap();
+    let client = raccoon_lib::local_runtime::launch::connect_desktop(std::path::Path::new("unused-existing-owner"), &world.data,"com.terminalx.fixture",None).unwrap();
     let status: serde_json::Value = client.call("status",json!({})).unwrap();
     assert_eq!(status["localRuntime"]["nativeTray"],false);
     client.stop_all().unwrap(); stopped(&mut serve);

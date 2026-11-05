@@ -3,7 +3,7 @@
 //! rust-v0.164.0 core/compact.rs and compact_remote_v2_installation.rs.
 use super::*;
 
-fn client() -> Stdio { Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into()) }
+fn client() -> Stdio { Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), None) }
 
 fn wire(actions: &[Action]) -> Vec<Value> {
     actions.iter().filter_map(|a| match a { Action::Write(line) => Some(serde_json::from_str(&line.line).unwrap()), _ => None }).collect()
@@ -31,6 +31,37 @@ fn item(method: &str, thread: &str) -> String {
 }
 
 #[test]
+fn a_prompt_is_accepted_once_by_whichever_of_its_result_or_start_comes_first() {
+    let accepted = |actions: &[Action]| actions.iter().filter(|action| matches!(action, Action::Accepted)).count();
+    let (mut client, actions) = ready("hello");
+    assert!(client.unaccepted());
+    let result = json!({"id": wire(&actions)[0]["id"], "result": {"turn": {"id": "turn"}}}).to_string();
+    assert_eq!(accepted(&client.handle(&result).unwrap()), 1);
+    assert!(!client.unaccepted());
+    assert_eq!(accepted(&turn(&mut client)), 0);
+
+    let (mut client, actions) = ready("hello");
+    let result = json!({"id": wire(&actions)[0]["id"], "result": {"turn": {"id": "turn"}}}).to_string();
+    let started = turn(&mut client);
+    assert!(matches!(started.first(), Some(Action::Accepted)), "taken before its turn is drawn");
+    assert_eq!(accepted(&client.handle(&result).unwrap()), 0);
+}
+
+#[test]
+fn a_refused_or_unanswered_prompt_stays_unaccepted_and_compaction_never_waits() {
+    let mut client = client();
+    client.start("hello".into(), vec![]).unwrap();
+    assert!(client.unaccepted(), "a prompt behind the handshake is not taken");
+    let (mut client, actions) = ready("hello");
+    let refused = json!({"id": wire(&actions)[0]["id"], "error": {"code": -32600, "message": "model not found"}}).to_string();
+    assert!(client.handle(&refused).is_err());
+    client.fail();
+    assert!(client.unaccepted() && client.failed(), "a refused prompt was never received");
+    let (client, _) = ready("/compact");
+    assert!(!client.unaccepted());
+}
+
+#[test]
 fn the_real_thread_is_bound_before_the_first_prompt_write() {
     let (client, actions) = ready("hello");
     assert_eq!(client.thread.as_deref(), Some("thread"));
@@ -40,6 +71,42 @@ fn the_real_thread_is_bound_before_the_first_prompt_write() {
     assert_eq!(requests[0]["method"], "turn/start");
     assert_eq!(requests[0]["params"]["threadId"], "thread");
     assert_eq!(requests[0]["params"]["input"][0]["text"], "hello");
+}
+
+#[test]
+fn a_known_thread_is_resumed_without_its_turns_before_the_first_prompt() {
+    let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
+    let start = wire(&client.start("hello again".into(), vec![]).unwrap());
+    let initialized = wire(&client.handle(&json!({"id": start[0]["id"], "result": {}}).to_string()).unwrap());
+    assert_eq!(initialized[1]["method"], "thread/resume");
+    let params = &initialized[1]["params"];
+    assert_eq!((&params["threadId"], &params["excludeTurns"]), (&json!("thread"), &json!(true)));
+    assert_eq!((&params["approvalPolicy"], &params["sandbox"], &params["cwd"]), (&json!("on-request"), &json!("workspace-write"), &json!("/tmp/terminalx-stdio-contract")));
+    let actions = client.handle(&json!({"id": initialized[1]["id"], "result": {"thread": {"id":"thread"}}}).to_string()).unwrap();
+    assert!(matches!(actions.first(), Some(Action::ThreadReady(id)) if id == "thread"));
+    let requests = wire(&actions);
+    assert_eq!(requests[0]["method"], "turn/start");
+    assert_eq!(requests[0]["params"]["input"][0]["text"], "hello again");
+}
+
+#[test]
+fn a_resume_answered_with_another_thread_sends_no_prompt() {
+    let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
+    client.start("hello again".into(), vec![]).unwrap();
+    client.handle(r#"{"id":1,"result":{}}"#).unwrap();
+    let error = client.handle(r#"{"id":2,"result":{"thread":{"id":"other"}}}"#).unwrap_err();
+    assert!(error.to_string().contains("different thread"), "{error:#}");
+    assert!(client.thread.is_none() && !client.ready);
+}
+
+#[test]
+fn codex_releases_from_the_verified_minimum_are_supported() {
+    for version in ["codex-cli 0.164.0", "codex-cli 0.166.0\n", "codex-cli 0.167.0-alpha.2", "codex-cli 1.0.0"] {
+        assert!(supported(version), "{version}");
+    }
+    for version in ["codex-cli 0.163.9", "codex-cli 0.99.0", "codex 0.166.0", "codex-cli", "codex-cli 0.166", ""] {
+        assert!(!supported(version), "{version}");
+    }
 }
 
 #[test]
@@ -205,4 +272,135 @@ fn every_terminal_turn_expires_visible_approval_cards() {
         assert!(expired < completed, "cards expire before terminal status is published");
         assert!(client.asks.is_empty());
     }
+}
+
+/// #667: a failed turn whose model request Codex was refused for ends as a
+/// refused sign-in; any other failure does not.
+#[test]
+fn a_turn_refused_for_its_sign_in_ends_with_auth_failed() {
+    let ended = |error: Value| {
+        let (mut client, _) = ready("hello");
+        turn(&mut client);
+        let actions = client.handle(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"failed","error":error}}}).to_string()).unwrap();
+        actions.into_iter().find_map(|action| match action { Action::Emit(Payload::TurnCompleted { auth_failed, final_text, .. }) => Some((auth_failed, final_text)), _ => None }).unwrap()
+    };
+    for refused in [
+        json!({"message": "unexpected status 401 Unauthorized", "codexErrorInfo": "unauthorized"}),
+        json!({"message": "request failed", "codexErrorInfo": {"responseStreamConnectionFailed": {"httpStatusCode": 401}}}),
+        json!({"message": "account/read failed: workspace routing discovery unauthorized (401)"}),
+        json!({"message": "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again."}),
+    ] {
+        assert!(ended(refused.clone()).0, "{refused}");
+    }
+    for other in [
+        json!({"message": "stream disconnected before completion", "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": null}}}),
+        json!({"message": "error sending request: connection refused", "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 503}}}),
+        json!({"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"}),
+    ] {
+        let (auth_failed, final_text) = ended(other.clone());
+        assert!(!auth_failed, "{other}");
+        assert_eq!(final_text.as_deref(), other["message"].as_str());
+    }
+    // A turn that ended well is never a refusal, whatever it says.
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    let actions = client.handle(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed","error":{"codexErrorInfo":"unauthorized"}}}}"#).unwrap();
+    assert!(actions.iter().any(|action| matches!(action, Action::Emit(Payload::TurnCompleted { auth_failed: false, .. }))));
+}
+
+fn emitted(actions: Vec<Action>) -> Vec<Payload> {
+    actions.into_iter().filter_map(|action| match action { Action::Emit(payload) => Some(payload), _ => None }).collect()
+}
+
+fn piece(method: &str, item: &str, delta: &str, part: i64) -> String {
+    json!({"method":method,"params":{"threadId":"thread","turnId":"turn","itemId":item,"delta":delta,"summaryIndex":part}}).to_string()
+}
+
+fn completed(item: Value) -> String {
+    json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","completedAtMs":0,"item":item}}).to_string()
+}
+
+fn ended(status: &str) -> String {
+    json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":status}}}).to_string()
+}
+
+/// #644: a reply arrives in many pieces. Each is a live preview of its block;
+/// the reply is committed once, whole, when its item completes.
+#[test]
+fn a_streamed_reply_is_previewed_piece_by_piece_and_committed_once() {
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    for text in ["One ", "reply, ", "streamed."] {
+        let shown = emitted(client.handle(&piece("item/agentMessage/delta", "msg_2", text, 0)).unwrap());
+        assert!(matches!(&shown[..], [Payload::Delta(Delta::TextDelta { block, text: preview })] if *block == super::block("msg_2") && preview == text), "{shown:?}");
+    }
+    assert!(emitted(client.handle(&piece("item/agentMessage/delta", "msg_2", "", 0)).unwrap()).is_empty(), "an empty piece shows nothing");
+    let commit = completed(json!({"type":"agentMessage","id":"msg_2","text":"One reply, streamed."}));
+    let told = emitted(client.handle(&commit).unwrap());
+    assert!(matches!(&told[..], [Payload::AssistantText { block: Some(block), text }] if *block == super::block("msg_2") && text == "One reply, streamed."), "{told:?}");
+    assert!(emitted(client.handle(&commit).unwrap()).is_empty(), "a repeated completion adds nothing");
+    assert!(emitted(client.handle(&piece("item/agentMessage/delta", "msg_2", "late", 0)).unwrap()).is_empty(), "nor does a late piece");
+    // A reply Codex did not stream is committed when it completes.
+    let told = emitted(client.handle(&completed(json!({"type":"agentMessage","id":"msg_3","text":"Whole."}))).unwrap());
+    assert!(matches!(&told[..], [Payload::AssistantText { text, .. }] if text == "Whole."), "{told:?}");
+    let end = emitted(client.handle(&ended("completed")).unwrap());
+    assert!(matches!(&end[..], [Payload::TurnCompleted { status: TurnStatus::Ok, .. }]), "nothing is committed twice: {end:?}");
+}
+
+/// A reasoning summary streams as thinking and is committed as one block, its
+/// parts a paragraph apart in the preview as in the completed summary.
+#[test]
+fn a_reasoning_summary_streams_as_thinking_and_is_committed_once() {
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    let mut preview = String::new();
+    for (text, part) in [("Reading ", 0), ("the brief.", 0), ("Writing ", 1), ("the reply.", 1)] {
+        let shown = emitted(client.handle(&piece("item/reasoning/summaryTextDelta", "rs_1", text, part)).unwrap());
+        let [Payload::Delta(Delta::ThinkingDelta { block, text })] = &shown[..] else { panic!("no thinking preview: {shown:?}") };
+        assert_eq!(*block, super::block("rs_1"));
+        preview.push_str(text);
+    }
+    assert_eq!(preview, "Reading the brief.\n\nWriting the reply.");
+    let told = emitted(client.handle(&completed(json!({"type":"reasoning","id":"rs_1","summary":["Reading the brief.","Writing the reply."],"content":[]}))).unwrap());
+    assert!(matches!(&told[..], [Payload::Reasoning { block: Some(block), text }] if *block == super::block("rs_1") && *text == preview), "{told:?}");
+    // Reasoning without a summary shows nothing.
+    assert!(emitted(client.handle(&completed(json!({"type":"reasoning","id":"rs_2","summary":[],"content":["hidden"]}))).unwrap()).is_empty());
+    assert!(matches!(&emitted(client.handle(&ended("completed")).unwrap())[..], [Payload::TurnCompleted { .. }]));
+}
+
+/// A turn that ends while a reply is still streaming, however it ends, keeps
+/// what the reader saw: committed once, before the turn's end.
+#[test]
+fn a_turn_that_ends_mid_reply_commits_what_it_streamed_once() {
+    for status in ["completed", "interrupted", "failed"] {
+        let (mut client, _) = ready("hello");
+        turn(&mut client);
+        client.handle(&piece("item/reasoning/summaryTextDelta", "rs_1", "Thinking", 0)).unwrap();
+        for text in ["Half ", "a reply"] {
+            client.handle(&piece("item/agentMessage/delta", "msg_2", text, 0)).unwrap();
+        }
+        let end = emitted(client.handle(&ended(status)).unwrap());
+        assert!(matches!(&end[..], [
+            Payload::Reasoning { block: Some(thought), text: thinking },
+            Payload::AssistantText { block: Some(reply), text },
+            Payload::TurnCompleted { .. },
+        ] if *thought == super::block("rs_1") && thinking == "Thinking" && *reply == super::block("msg_2") && text == "Half a reply"), "{status}: {end:?}");
+        assert!(emitted(client.handle(&completed(json!({"type":"agentMessage","id":"msg_2","text":"Half a reply, finished"}))).unwrap()).is_empty(), "{status}: a late completion adds nothing");
+        assert!(client.unfinished().is_empty());
+    }
+}
+
+/// A connection that ends mid-reply (Stop, a crash) leaves the session to
+/// commit what streamed: once, however often it asks.
+#[test]
+fn a_reply_cut_off_by_the_connection_is_handed_over_once() {
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    client.handle(&piece("item/agentMessage/delta", "msg_2", "Cut ", 0)).unwrap();
+    client.handle(&piece("item/agentMessage/delta", "msg_2", "off", 0)).unwrap();
+    client.exited = true;
+    assert!(client.handle(&piece("item/agentMessage/delta", "msg_2", " after exit", 0)).unwrap().is_empty());
+    let left = client.unfinished();
+    assert!(matches!(&left[..], [Payload::AssistantText { block: Some(block), text }] if *block == super::block("msg_2") && text == "Cut off"), "{left:?}");
+    assert!(client.unfinished().is_empty());
 }

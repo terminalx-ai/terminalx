@@ -2,10 +2,563 @@
 
 ## Unreleased
 
+## 0.2.24
+
+### Background sessions
+
+- Update without stopping anything. Installing an update used to stop every
+  agent and terminal the background runtime ran: a turn in progress was cut
+  off, terminals and whatever they ran (dev servers, builds) were killed, and
+  each agent started again only when its tab was next opened. The runtime is
+  now handed over in place: the newer one takes over its process, with the
+  same agents, terminals and processes, mid-turn or not. Turns finish,
+  follow-ups queued during them are delivered, permission cards stay
+  answerable, output written during the switch is kept, and no tab says
+  "Session closed". An agent the handover cannot carry (one driven over its
+  standard input and output, such as an ACP agent) is never stopped by itself:
+  the app names it, and Restart now stops only it. Restart runtime, for a
+  runtime that stopped answering, keeps what it runs the same way, and asks
+  before stopping anything when it cannot. Takes effect from the next update
+  after this one: a runtime from before this release cannot be handed over.
+  (#765)
+- Update and relaunch brings the background runtime along in the same step.
+  The relaunched app used to keep the runtime it found, older than itself,
+  and ask a second time ("TerminalX runtime is older than the app") after
+  the restart. Now the update asks first, once. When moving to the new
+  runtime would cut something short, the update card lists it before
+  installing (agents mid-turn, open terminals, commands their tools left
+  running) and offers **Update now**, which restarts them (each agent picks
+  up its conversation again when its tab starts), or **Update when they're
+  done**, which installs the app now and moves to the new runtime by itself
+  once nothing would be cut short. With nothing under way the update just
+  installs, and the relaunched app moves to its runtime as it starts. While a
+  move waits, the status bar shows the runtime's version and what it waits
+  for, with Restart now, even when the status bar is hidden; a floating
+  notice appears only when a move failed, with the reason and Try again. An
+  update from 0.2.23, which cannot ask first, waits in the status bar the
+  same way. (#766)
+
+### Chat
+
+- Keep the chat drawn while scrolling past a long reply. Since 0.2.23 the
+  chat draws only the turns near the view, and a reply taller than the 1200 px
+  it draws past the view (a big table, long code) could be left out while it
+  was on screen: the chat went empty but for the **Latest** button until the
+  next scroll. A turn on screen is now always drawn, and the view no longer
+  sits over the space that stands in for turns not drawn, scrolling either
+  way. (#771)
+
+### Stats & Usage
+
+- Agent work and PRs count again while the app is open. The app took the
+  activity-history lock at launch and held it until it quit, so the background
+  runtime, which records every turn and PR, could write none of them: agents
+  spawned, agent time and PRs created stopped counting, and the star reminder's
+  count froze. Now only the runtime writes activity history. The app reads what
+  the runtime saved, and the PRs the app finds or creates are kept aside for the
+  runtime to count. Turns that went unrecorded before this release are not
+  recovered. (#767)
+- While another process holds activity history (an older app, another runtime,
+  a command), the runtime keeps its turns and PRs aside. It takes the lock
+  within a second of that process quitting, without waiting for a tab to
+  change, and then counts what it kept once, with each turn's whole working
+  time. Stats keeps its counters current meanwhile and shows one notice naming
+  the holder: "The TerminalX app (pid …)", "Another runtime (pid …)" or "A
+  TerminalX command (pid …)". It no longer offers a Retry that cannot help;
+  Retry stays for a read that failed. The log gets one line for the episode
+  instead of one per tab status change, and PR discovery no longer reports a
+  failure on every pass. (#767)
+- Usage keeps updating after the background runtime is replaced (Restart
+  now, Restart runtime, a restart after a crash, an update). The window kept
+  whichever snapshot had the higher revision, a counter that starts again at 1
+  in each new runtime, so it threw away every snapshot from the new one and
+  went on showing the old runtime's last values as current while each refresh
+  succeeded. Snapshots now name the runtime that sent them, and a new
+  runtime's usage shows at once. A window not updated for 30 minutes, or past
+  its reset, reads as last known in the status bar and the popover, and a
+  Codex window past its reset reads as expired instead of "100% used · Resets
+  in now". (#772)
+
+### Development
+
+- Update rustls to 0.23.46 in the app and the background runtime. (#764)
+
+## 0.2.23
+
+### Offline dictation
+
+- Add opt-in local transcription context, scoped dictionary spellings,
+  replacements and snippets, conservative cleanup and learned corrections.
+  Settings → Transcription includes import/export, sensitive-tab exclusions,
+  language hints and a microphone test showing raw/final text and bias terms.
+  Whisper and Apple receive vocabulary hints; other models use deterministic
+  replacements. Apple refuses network fallback when on-device recognition is
+  unavailable. Dictation event logs retain lengths rather than spoken text.
+  Add an explicit-audio evaluation harness and recording protocol; recognition
+  improvement requires real-audio evidence. Add warmed paired/matrix scoring,
+  raw versus final scores, observed-correction evaluation and context timing.
+  Synthetic file-recognition results are kept separate from microphone acceptance.
+  Record isolated guest settings validation and public-runtime Whisper telemetry,
+  including quiet-speech failures that rule out a no-speech-only filter.
+  Retain a reproducible independent detector experiment and its negative controls;
+  its observed speech loss prevents adopting it as an automatic filter.
+  Compare strict CPU/Metal decoding with pinned fixtures; both reproduce the
+  noise failures, ruling out a backend switch as a remedy for those cases.
+  Add a pinned independent Whisper comparison using identical reference weights
+  to distinguish app-specific behavior from upstream recognition limitations.
+  Retain full-precision comparison failures and paired detector normalization
+  evidence with public speech controls; no experimental runtime is shipped.
+  Validate a static public-GGML detector prototype against multilingual speech
+  and environmental controls, preserving runtime-upgrade incompatibilities and
+  failed prototype evidence instead of changing existing recognition output.
+  Add an opt-in local-model noise guard using the verified native detector,
+  explicit auxiliary-model download/delete controls and detector diagnostics.
+  Detection preserves original recognition audio, keeps text on model errors,
+  and supports cancellation; Apple retains its platform speech detection.
+  Reject symlink and nonregular detector cache entries without blocking capture.
+  Learn a single word correction even when surrounding capitalization or terminal
+  punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
+- Dictating with a downloaded model that can stream, such as the recommended
+  Parakeet Unified EN 0.6B, shows the words in the composer while you speak,
+  as Built in does. Before, nothing appeared until you stopped. The words come
+  about a second at a time, roughly two seconds behind you. Whether a model
+  streams is the model's own answer, read from its weights. Stop finishes the
+  stream rather than transcribing the whole recording again, so a long
+  dictation settles sooner: after 30 seconds of speech, about 70 ms after Stop
+  instead of 250 ms on an Apple Silicon Mac. Under ten seconds the two are
+  about the same. The final text still goes through the dictionary, learned
+  corrections and the noise guard, and words streamed for noise the guard
+  rejects are taken back. Words you delete while they stream stay deleted.
+  Models that cannot stream (Whisper, Canary) say "Listening. Words appear
+  when you stop.", and each model's card in Settings → Transcription says
+  which kind it is. A stream that will not start, or breaks part way, falls
+  back to transcribing the recording at Stop, and the log says why. On the
+  first dictation after launch or a model change, "Opening the microphone…"
+  stays up for the moment the model takes to load (under a fifth of a second
+  for Parakeet here); what you say meanwhile is kept. (#754)
+
+### Issue pipelines
+
+- Answering the author of a pipeline at **Needs you** puts it back to
+  **Working** at once, and the Issues list chip changes with the session for
+  GitHub and Linear issues alike. Before, it kept saying **Needs you** until
+  the author's turn ended, often for minutes. This applies to stops the author
+  can act on: the work not done, failed checks, a pull request that could not
+  be opened, a turn that stopped short, and conflicts with the base branch.
+  Sending a message, answering a question or a permission request, or typing
+  into the agent's own terminal all count, and so does a message that was
+  queued behind the turn. If the turn still isn't done, the pipeline goes back
+  to **Needs you**. A required review, a closed pull request and other stops
+  that wait on someone else stay at **Needs you** until they are checked again.
+  (#725)
+- A conflict resolver that stops before committing its merge no longer leaves
+  the checkout half merged. Every file the base brought in used to show as the
+  branch's own uncommitted work: 23 files in Changes, and "23 uncommitted files
+  would be lost" when removing the workspace, though 22 came unchanged from
+  `main`. The resolver now commits the merge as soon as the conflicts are
+  resolved and amends any fix its checks call for into that one commit. When
+  its turn ends with nothing pushed, TerminalX aborts the unfinished merge it
+  asked for, and says so in the record. A pull request merged or closed while
+  the resolver works now ends the pipeline at once, and the resolver is told to
+  stop. A merge is left as it is when a person interrupted the resolver or
+  stopped the pipeline. (#736)
+- A conflict resolver that ends its turn to wait for its own checks is no
+  longer marked failed. On #733 the resolver had resolved and staged every
+  file and was waiting for a 7-minute test run in the background when the
+  pipeline recorded "The resolver ended without a status block." With the
+  merge clean-up from #736 it would also have aborted that merge under the
+  running tests. The pipeline now keeps the checkout reserved while the
+  resolver's tab has work running, for up to 30 minutes, and takes the report
+  from the turn that work wakes. Past that, the resolver is asked once for its
+  report. A resolver that ends a turn without its report and with nothing
+  running gets one reminder, as the author and reviewer do. Its merge is
+  never aborted while its checks still run, and Stop hands the checkout over
+  at once. Carrying a pipeline on from a failed resolution now checks the head
+  against the current base first, and resolves again if it conflicts, instead
+  of pushing a stale merge for review. (#753)
+- Start the conflict resolver whenever GitHub says the pull request conflicts
+  with its base or is behind it, even where the local merge check finds no
+  conflict. With criss-crossed history (two merge bases) the local check came
+  out clean while GitHub kept reporting a conflict, so the pipeline waited at
+  **conflicts** for good and no resolver ever started. The resolver's merge
+  leaves one merge base, so GitHub then agrees. (#748)
+
+### Changes panel
+
+- A merge left in progress in a local checkout is shown for what it is: what
+  is being merged, and the uncommitted files split into unresolved conflicts,
+  files changed here, and files exactly as Git merged them from the base.
+  **Commit merge** (once nothing is conflicted) and **Abort merge** (after a
+  confirmation) act on that merge only. The warning before removing a
+  workspace counts only what changed while merging as lost. The Repo panel's
+  **Commit** waits until conflicts are resolved, since it would otherwise
+  commit the conflict markers. (#736)
+
+### Sessions and tabs
+
+- Open the session you click. A session with no tabs open was swapped for
+  another session in the same folder that had tabs, a quick chat or another
+  project's included, so it could not be opened, and neither could its history
+  or its closed tabs. It now stays selected and shows its own page: its closed
+  tabs, newest first, each with Reopen to resume that conversation in this
+  session, plus New tab and Reopen closed tab. Opening a session no longer
+  starts a shell in it by itself; opening a checkout from the command palette
+  still does. (#721)
+- Keep a row of tabs to real siblings: with a branch's sessions shown as tabs,
+  a row holds the sessions of the same project and branch only, as the sidebar
+  lists them, never a quick chat or another project's session that runs in the
+  same folder. A session on that branch with no tab open has nothing in the
+  row of tabs to click, so it keeps a sidebar row of its own under the
+  branch's, and a browser page another session opened in the folder no longer
+  hides its page until it is picked. (#721)
+- Offer Undo when closing a session's last running tab. The notice says its
+  agent stopped, and Undo reopens the tab on the same conversation. (#721)
+- Archive conversations nobody has written in for a week (Settings → Agents:
+  a day to a month, or never). Idle counts from the last message in any tab,
+  not from when the session was made. A conversation stays while it is pinned
+  or open, while a tab is working, waiting for you or holding a queued message,
+  while its last reply is unread, while its worktree has uncommitted or
+  unpushed work, and while its issue pipeline's pull request is open. A new
+  message to an archived session, from the app, the CLI, a phone or an
+  automation, brings it back. Archiving deletes nothing. (#718)
+- Find archived conversations again. View → Show archived lists each
+  project's archived conversations, and the chats', under an "Archived" fold,
+  with Unarchive on each row; a project taken out of TerminalX comes back there
+  with the conversations removing it archived. The command palette finds an
+  archived conversation by its title and says it is archived. (#718)
+- Select several conversations in the sidebar (⌘-click, Shift-click, or
+  Select in a row's menu), then archive, unarchive or delete them together.
+  (#718)
+- Native Codex now covers a new cloud workspace's first session. With
+  Settings → Experimental → Native Codex on, a workspace created with Codex
+  and a first prompt opens its first tab as native Codex, and the prompt is
+  sent once, as before. Before, only sessions and tabs started later in the
+  workspace did; the first one opened in Codex's terminal. Ask every time,
+  other agents and the switch off still start a terminal tab, and so does a
+  workspace whose runtime or server predates this. (#745)
+- Interrupt a Codex terminal tab right after changing its effort or permission
+  mode. Codex restarts to take the change, and an Interrupt sent afterwards,
+  from the desktop or a phone, let the running turn go on to its end. It now
+  stops the turn, and Stop withdraws a prompt not yet entered, whether it was
+  waiting for the restarted Codex to be ready, about to be typed or about to be
+  submitted, so it is never typed into the new Codex. (#746)
+
+### Chat
+
+- Show a sent message at once. Pressing Send puts the message in the chat,
+  marked as sending, and clears the composer for the next one; it is marked
+  as sent once the runtime has it. A message that could not be sent goes back
+  to the composer with the error, ahead of anything typed since, images and
+  all. (#727)
+- Keep long conversations quick. The chat is built on as events arrive instead
+  of being rebuilt for each one, and only the turns in and near the view are
+  drawn, so a message in a conversation of thousands of events appears as fast
+  as in a short one. (#727)
+- Never type a message into an agent's input box that already holds text. The
+  app used to clear the box with Ctrl+U, which deletes only the row the cursor
+  is on: when Claude Code had put a dropped prompt back in its box, the prompt
+  lost its last wrapped row and the rest was sent with the next message glued
+  to it. The app now reads the box from the agent's screen (Claude Code and
+  Codex), and a message waits while the box holds something, saying so in the
+  chat, until that text is sent or cleared in the terminal. (#722)
+- Show a prompt Claude Code dropped before answering as not answered, with Send
+  again, when it takes another prompt in its place; one sent again from its
+  input box stays the one message. A message the agent received inside a longer
+  prompt is shown once, as received, with what was sent behind it, and its
+  queued bubble clears. (#722)
+- Read the input box of an agent started by hand in a shell tab too, before
+  typing into it; it had no check and no Ctrl+U, so a half-typed line or a
+  prompt put back in the box went out glued to the next message. Every
+  message waiting behind a full input box says so, not only the first. Stop
+  withdraws a message still waiting on the box, marked as not sent with Send
+  again, instead of typing it whenever the box next empties. A model or effort
+  change made while the box holds text is refused with the reason rather than
+  typed later. Queued messages the agent receives as one prompt all clear, and
+  a message sent from the chat with a dropped prompt's words is shown as its
+  own. A prompt an idle agent recorded shorter or edited is shown once, as
+  changed, and a waiting note left behind when the app quit mid-wait is
+  cleared on load. (#722)
+- Cut more credentials from the redacted detail line that a refused sign-in or
+  an agent that exits early shows in the chat: `key: value` and JSON forms,
+  escaped JSON, every pair of a cookie, any `Authorization` scheme and a flag's
+  secret-looking value, including one that runs on over lines. Errors such as
+  `HTTP 401 Unauthorized:` and Codex's `Failed to refresh token:` stay
+  readable. (#717)
+- Show a native Codex reply as one message while it streams. Each piece Codex
+  sent was recorded as a message of its own, so a real reply showed as dozens
+  of fragments, each with its own time, and was saved that way. The reply now
+  grows in place and is saved once, whole, with the time its first piece came;
+  Codex's reasoning summary does the same. What streamed of a reply that never
+  finished, because the turn was interrupted, failed or stopped, or the
+  connection was lost, is kept as it was shown. (#644)
+- Draw a streaming reply as it grows. The desktop chat showed the first piece
+  of a streamed reply and then nothing new until the reply was complete, in
+  local and cloud tabs alike, for every agent that streams previews (ACP
+  agents, OpenCode and native Codex). Streaming thoughts, a tool call's input
+  as it is written, and the end of a thought had the same problem. Each now
+  redraws at the next frame. The phone shows replies once they are complete,
+  as before. (#644)
+
+### Cloud workspaces
+
+- Show a compaction in a cloud workspace's agent tab as **Compacting
+  context…** while it runs, then **Context compacted**. The tab said
+  "Compaction status unknown" the whole time, even while connected. A tab
+  counts as caught up once its live connection has replayed the workspace's
+  saved history; while that connection is down or reconnecting, a compaction
+  still shows as unknown, never as running or done. (#644)
+- Say why a native Codex tab in a cloud workspace did not move to its terminal.
+  The workspace's own reason (a turn still running, someone else driving the
+  tab, no right to type in it) shows above the chat, with Dismiss, also when
+  the composer already says why it is off. It used to say "The agent
+  encountered an error", or nothing at all while someone else drove the tab.
+  Local tabs are unchanged. (#644)
+- A waiting native Codex tab no longer says to check the terminal, which it
+  does not have until it moves there: it points to the conversation above, to
+  send a message or stop the session. Its recovery banner for an expired
+  permission request or an unconfirmed prompt no longer sends it there
+  either. Tabs whose agent runs in a terminal are unchanged. (#644)
+- Deliver a message sent from the command line, a phone or another member to a
+  native Codex tab whose last turn failed, for example on a revoked sign-in.
+  The workspace said it was sent, but the message sat in the queue for good:
+  the tab was taken as busy while it showed the failure, and no turn was left
+  to end and send it. It now goes straight in and clears the failure, as a
+  message sent from the desktop does, and a message queued while that turn
+  ran goes once it ends. ACP and OpenCode tabs get the same fix. A Claude Code
+  or Codex terminal tab that is waiting still holds the message, since its
+  CLI may be showing a prompt of its own. (#644)
+- Let a native Codex tab work again once its sign-in is restored. Codex reads
+  its sign-in only when it starts, so after a turn refused for a revoked login
+  every later turn was refused as well, even after the login was granted
+  again. Codex now stops after such a turn, and the tab keeps saying it is
+  signed out. The next message starts Codex again on the same conversation
+  with the sign-in in place then, and nothing is sent twice. This applies on a
+  Mac too. (#644)
+- Leave the workspace user's own `~/.codex` as it is. Checking the Codex version
+  before a native Codex tab starts made Codex write temporary files there; the
+  check now runs in the tab's own Codex home. (#644)
+- Take an issue session in a cloud workspace through to its pull request,
+  review and merge. The workspace never cloned its repository, because one
+  folder was compared under two different paths, and an issue session in the
+  repository folder got no pipeline, because that folder was never registered
+  as a project. A GitHub refusal over the app installation's permissions or
+  repository access now says that an organization admin must approve or review
+  them on GitHub and refresh the installation in TerminalX Settings, and the
+  request is not retried by itself. (#461)
+
 ### Mobile
 
+- Show a compaction on the phone as on the desktop, in cloud workspace tabs
+  and in tabs on a paired Mac: **Compacting context…** while it runs, then
+  **Context compacted**, **Compaction stopped** or **Compaction status
+  unknown**. Every compaction used to read "Context compacted", even while it
+  ran or after the phone lost track of it. A compaction shows as running only
+  once the phone has read the conversation to its end over a live connection.
+  While disconnected, reconnecting or just back from the background, it shows
+  as unknown. A stopped workspace's saved conversation never shows one as
+  running. (#644)
+- A native Codex tab's recovery card on the phone no longer says to check the
+  terminal (an expired permission request, an unconfirmed prompt); it says
+  what to do in the chat instead, as the desktop now does too. The Mac tells
+  the phone which tabs run native Codex; an older Mac keeps the old wording.
+  (#644)
+- Open sessions on the phone again. The session screen crashed on load,
+  because the terminal emulator it loads reads the browser's user agent and
+  platform, which React Native does not have. (#726)
+- Offer on the phone only what the Mac's background runtime can do. A Mac
+  updated to a new app but still running an older runtime used to offer the
+  Terminal view, session controls, new sessions and Mac settings, which that
+  runtime then refused as "Unsupported paired-device owner operation.". The
+  phone now reads what the runtime serves and shows or hides those features
+  when the Mac switches runtimes, without a restart; a refusal that still
+  happens says "TerminalX on your Mac needs updating or restarting to do
+  this." (#730)
+
+### Background sessions
+
+- Never hold a send behind slow work. Merged-workspace cleanup, Settings →
+  Storage (scanning, sizing and removal), workspace and session removal,
+  `terminalx worktrees delete` and stopping an idle agent no longer hold the
+  lock every send takes; each closes only the sessions it changes, and a send
+  to any other tab goes through at once. Checking the worktree's tree before a
+  prompt, which reads the whole checkout, now happens before the send waits
+  for anything. A send to a session that is being removed or moved is refused
+  with the reason, and one to an agent being stopped for sitting idle waits
+  for that stop and starts it again. (#727)
+- Time every send. Each tab's diagnostics note when Send was pressed, when the
+  runtime received the send and how long it waited, when the agent took the
+  prompt, and when the window showed it, so a slow send can be traced to the
+  step that took the time. (#727)
+- Keep the live connection up when a window falls behind. A terminal that
+  cannot keep up is redrawn from its scrollback on its own, while the others
+  in the window keep streaming. Events the window missed are read again,
+  without reconnecting. Each window's terminal connection now carries terminal
+  output only. Every lost connection is now logged: which connection, why, how
+  long it was down and how many attempts it took to reconnect. The log is
+  `desktop.log`, beside `runtime.log` in `~/Library/Logs`. (#716)
+- Replace an older background runtime after an update. The runtime outlives the
+  app, so an updated TerminalX went on using the runtime of the version before
+  it. The app now replaces a runtime older than itself with its own, by itself,
+  once nothing the runtime runs would be cut short: no agent mid-turn, prompt
+  waiting to be delivered, agent started by hand, open terminal, command an
+  agent left running or issue pipeline step, and none for 15 seconds. Until
+  then every window says the runtime is older than the app, lists what it is
+  waiting for, and offers **Restart now**. Agents pick up their conversation
+  again when their tab next starts. A runtime of the app's version or newer is
+  kept, so two builds sharing one home never replace each other's. (#730)
+
+### Usage
+
+- A refresh that says it succeeded now changes the usage it shows. The status
+  line and the usage endpoint write a window's reset time differently (whole
+  seconds against fractions that move between requests), so the endpoint's
+  window was read as the previous one and dropped on every refresh, and old
+  Claude (sometimes Codex) limits stayed up. Reset times within 60 seconds are
+  now the same window, and a window the provider says has not started shows
+  as 0% with no countdown. (#729)
+- An endpoint window whose reset time is earlier than the one shown, but was
+  still ahead when the request started, replaces it. It was refused as an
+  earlier window until the shown reset time passed, up to a week for the 7-day
+  window. A status line's earlier window is still refused. (#737)
+- "Last refreshed" counts only an answer that replaced a window. When the
+  provider answered and nothing changed, the card says "Checked … · no newer
+  usage" and why each window was kept, including a reply that repeats a window
+  that has just expired. A Codex refresh held back by its debounce says when it
+  will fetch again, a tab started before an account was known says so in its
+  own words, and every refresh is logged. (#729, #738)
+
+### Command line
+
+- `terminalx worktrees delete` no longer deletes sessions it never named. Without
+  `--yes`, or with `--dry-run`, it lists every session it would delete, marking
+  sessions of another project, quick chats and archived ones, with the tabs
+  still running in them and the git state, and removes nothing. `--sessions
+  ID,…` names the sessions you were shown: if the worktree holds any other set,
+  nothing is removed and the sessions that differ are named, as in the desktop
+  dialog. The result gives each deleted session's title and project, not only
+  its id. `terminalx sessions list --worktree` lists what the delete would take,
+  `worktrees list` gives each worktree's sessions, and `sessions list
+  --project` now finds a session that names its project through a symlink.
+  (#719)
+- `terminalx sessions archive|unarchive SESSION...` run the app's own
+  archive, so the sidebar updates at once. `sessions list` now lists what the
+  sidebar does, and `sessions list --archived` the archived sessions. (#718)
+
+### Development
+
+- Update vite to 7.3.7, fflate to 0.8.3 and linkify-it to 5.0.2 in the app,
+  the phone app and the shared portable package, and zod to 4.6.6 in the app
+  and the phone app. (#762)
+
+## 0.2.22
+
+### Background sessions
+
+- Reconnect to the background runtime automatically, with backoff and no attempt
+  limit, instead of after three tries per window. Recovery no longer reloads
+  windows: terminals re-attach in place from their retained output, and sessions,
+  history and pipelines are read again without restarting agents or resending
+  prompts. A hung runtime is now noticed, a restarted one is found again, and a
+  window whose terminal output alone dropped recovers without affecting others.
+  The notice stays quiet for short gaps and asks for action only when retrying
+  cannot help or has not helped for minutes. (#643)
+- Stop agents nobody is using. An agent the app started that has had nothing to
+  do for an hour (Settings → Agents: 30 minutes to a day, or never) is stopped
+  with its MCP servers, and its next message starts it again on the same
+  conversation; a reply nobody has read stays unread. An agent keeps running
+  while it is at work, waits for an answer, or waits on something it started:
+  a command, monitor or agent it ran in the background and has not heard back
+  from, a wakeup or cron job it scheduled, or a process one of its commands
+  left running. So does one started by hand in a terminal.
+  Agents in archived sessions, or whose workspace was removed, stop after 10
+  idle minutes, and opening such a session, or a tab whose agent was stopped
+  this way, no longer starts its agent. App resources can stop an idle agent,
+  after asking. (#696)
+- Set the conversations of removed workspaces apart from live work: each
+  project, and the chat list, folds them under "Removed workspaces", which
+  opens while it holds the open conversation. They stay readable and
+  resumable. Finishing a clean-up whose worktree was already gone stops the
+  agents of its sessions first. (#696)
+- End the MCP servers Claude Code starts while TerminalX reads its slash
+  commands and models. Each was left running under launchd; one Mac had thirty,
+  about 1 GB. (#696)
+- Merged workspaces of this repository are no longer kept for the CLI launcher
+  the build leaves in `src-tauri/binaries`. (#696)
+- A terminal that stops reading its input no longer locks up the background
+  runtime, and with it TerminalX, until the Mac restarts. A write gives up after
+  10 seconds, app commands that call the runtime run off the main thread with
+  15-second timeouts, and a runtime that stops answering offers **Restart
+  runtime**. The runtime keeps its log in
+  `~/Library/Logs/com.terminalx.next/runtime.log`. (#678)
+
+### Relay
+
+- Poll the account service for pairing grants and revocations once every 30
+  seconds while idle, over one kept-alive connection, instead of a new TLS
+  connection every two seconds. Back off on failures, honour `Retry-After`, use
+  a refreshed access token, and record failures in `relay-diagnostics.json`.
+  Report this Mac as live only while its Relay control channel is still hearing
+  from the cell, so a phone stops offering Pair for a Mac it cannot reach.
+  Accept a cell's `account-pairing-changed` hint, which polls at once and then
+  every two seconds for a minute. (#671)
+- Notice a Relay control connection that died without a close, after a network
+  change, a new address, a VPN change or sleep. Reconnect within 2 seconds of an
+  address change or wake, or after 45 seconds of silence, instead of showing
+  Connected until TerminalX restarts. Record each phone's Relay connection, and
+  how far it got, in `relay-diagnostics.json`. Run paired-device calls to the
+  local runtime off the workers Relay runs on, so a stalled runtime cannot stop
+  Relay reconnecting. (#666)
+- Keep Relay messages within the cell's 1 MiB limit, so long conversations load
+  on mobile data. Transcript pages are sized to the connection, an oversized
+  event is sent alone or shortened with a note, and larger messages, such as
+  5 MB attachments, cross in fragments once both ends support it. A message that
+  still cannot fit fails only its own request, and the connection stays up. (#679)
+
+### Mobile
+
+- Start sessions from the phone as the Mac's new-session view does: a project's
+  session in a new worktree (named for the work) or on its checkout, or a quick
+  chat, with the agent, model, effort, permission mode, title and first
+  message. Codex sessions follow Settings → Experimental → Native Codex. A
+  retry after a lost reply opens the first session instead of a second one.
+  Projects reach the phone by an id, never their path. Read-only and revoked
+  phones cannot start sessions.
+- Settings → This Mac on the phone turns Native Codex on or off for the Mac's
+  next Codex sessions; the Mac's own Settings follows it while open.
+- Open a tab's terminal view on the phone, as on the desktop. The agent's own
+  screen is emulated on the phone with the desktop's terminal (xterm.js) at the
+  size the Mac draws it, so full-screen CLIs like Codex and Claude Code show as
+  they do there. Type into it directly or send text whole, with Esc, Tab, Ctrl,
+  arrow and Enter keys sent as the desktop sends them. While the phone types,
+  desktop typing waits, and leaving the view gives it back. Opening the terminal
+  starts the tab's agent if it is not running, and moves a native Codex tab to
+  Codex's own terminal on the same conversation, as the desktop does. Shown only
+  for Macs that support it.
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
+- Sending a message or worktree note again after the connection dropped no
+  longer gives the agent the prompt twice or adds the note twice. Each draft
+  goes under one id, and a Mac that already has it answers as it did the first
+  time, so the phone reports it sent and clears the box. Older Macs behave as
+  before. (#675)
+- Control a session from the phone as from the desktop: Stop and Interrupt a
+  working agent; Retry safely, Resend last prompt, Continue here and Stop from
+  the recovery banner; change the model, effort and permission mode with the
+  desktop's choices, pending states and Bypass confirmation; and Continue in
+  new session with a chosen agent, settings and context. A read-only phone sees
+  the settings but cannot change them, and each control is checked against the
+  phone's access on the Mac. Shown only for a Mac that offers them.
+- Report each connection path's failure as it happens. A Relay refusal shows on
+  the Sessions card while LAN addresses are still pending, and LAN addresses that
+  have not answered get 3 more seconds once Relay has failed, not 15. Log
+  cancelled attempts and Relay director errors, race the paths again when the
+  phone changes network, and wait 1 second, rising, before reconnecting a
+  connection that keeps dropping straight after connecting. (#666)
+- Explain connection failures on the phone's conversation screen in plain words:
+  **Reconnecting…**, which keeps the saved transcript, or **Your Mac isn't
+  reachable**, with a Retry that reconnects at once. A failed send offers **Send
+  again**. A transcript page that drops the connection twice over the same path
+  is not requested again, and the Relay close code and reason are logged. (#674)
 
 ### Organizations
 
@@ -13,13 +566,106 @@
   organizations, with exact-name confirmation and guidance for remaining resources.
   Refresh membership and clear a deleted default selection without choosing a replacement.
 
+### Terminal
+
+- Release a tab's terminal view metadata when the tab is removed, and ignore
+  late start or adoption replies from its previous lifetime. Archived tabs,
+  retained conversation history and reattachment are unchanged. (#232)
+- Cancel xterm's pending buffer compaction when a terminal is disposed,
+  including buffers replaced by a reset, so a closed terminal's scrollback is
+  not kept alive by the timer. (#232)
+- Reuse one small canvas for terminal palette conversion instead of creating
+  two surfaces per palette. (#232)
+- Add an opt-in memory diagnostic to the terminal benchmark: weak inventories of
+  xterm buffers, parsers, renderers and canvases, Tauri callback counts, and
+  WebContent footprint in exact bytes. It reports typed-array spans without
+  materializing their backing buffers. (#232)
+
 ### Chat
 
+- Restart Claude Code tabs whose conversation the CLI never wrote (opened and
+  never prompted, or a first prompt that never reached it) under the same id
+  instead of resuming a conversation that does not exist, which exited at once.
+  Send a Continue in New Session handoff again, ahead of the next prompt, when
+  the CLI never took it. Offer any other prompt the agent never received with
+  **Resend last prompt**, images included. Say why a CLI that exits as it
+  starts went, from what it printed, with credentials and private paths cut
+  out. (#663)
+- Deliver Continue in New Session handoffs that the new agent left in its input.
+  The Enter waits until the agent has shown the paste, and is written again up
+  to twice. A handoff still in the input is offered as **Press Enter**, not
+  reported as a failure. The dialog shows each delivery step, finishes about
+  20 s after the last Enter instead of after 90 s, and turns a late delivery
+  into success. (#662)
 - Recognize completed Codex context compaction and preserve scoped compaction
   history and status across conversation changes. Add a default-off experimental
   owned-stdio connection for explicitly created new Codex sessions, with confirmed
   compaction start/completion events and retained interruption status. Existing
   PTY sessions keep their current behavior. (#644)
+- Experimental Codex sessions continue after the app restarts, after Stop or
+  after a lost connection: the next message resumes the same Codex thread, with
+  nothing replayed, and **Retry safely** works for them. They accept Codex 0.164.0
+  or newer instead of exactly 0.164.0. (#644)
+- Change the model, effort or permission mode of an experimental Codex session
+  instead of creating a new one. Model and effort apply from the next turn; a
+  permission mode is taken between turns by resuming the thread under it. (#644)
+- Opening the terminal view of an experimental Codex session moves it to Codex's
+  own terminal interface on the same thread, instead of an empty terminal. The
+  chat keeps its history without repeating it; the move is one-way and waits for
+  a running turn to finish. (#644)
+- Message an experimental Codex session from a paired phone or as a guest or host
+  of a shared session, including `/compact` from the phone, instead of being
+  refused as local-only. Each message is checked against its sender's access when
+  it is delivered, as for other agents; one whose access ended is not sent. (#644)
+- Continue in New Session can hand off to an experimental Codex session. Delivery
+  is confirmed once Codex starts the handoff's turn. A handoff, or any prompt,
+  that Codex never took because it failed or was stopped first is offered back
+  with **Resend last prompt**, after a restart too, and is never sent again on
+  its own. (#644)
+- Add Settings → Experimental with a **Native Codex** switch, off by default. When
+  it is on, new Codex sessions and tabs started from the app or the `terminalx`
+  command line connect to Codex directly, for reliable compaction status. Sessions
+  from issues, automations and Ask every time keep the terminal.
+  A tab whose Codex is older than 0.164.0 when it first starts switches to the
+  terminal and sends as usual, with no error. Existing sessions are unchanged. (#644)
+- Native Codex in cloud workspaces: with the switch on, Codex sessions and tabs
+  the app starts in an existing workspace connect to Codex directly too. Codex
+  signs in with the workspace's credential and takes the creator's route and the
+  workspace's variables, secrets, instructions and MCP servers, in a home of its
+  own where no TerminalX hook runs; sign-in problems are reported as for other
+  sessions, and the terminal view moves the tab as on a Mac. (#644)
+- Add **Continue here** to the recovery banner and the Session closed bar. It
+  sends "continue" in the same session, without stopping it, after a failure,
+  a capacity error, a dropped connection, a sign-out or a usage limit that has
+  reset. (#673)
+- Recognise a revoked or expired Codex or Claude Code login. The turn ends as
+  signed out with a redacted detail line, the tab offers **Sign in again**, and
+  Agent logins shows Sign-in required. Cloud runtimes report the refused login
+  and sync again, so Start agent works once you have signed in. (#683)
+- Settings → Agents and the New Session form show whether each local agent is
+  installed and signed in (Not installed, Installed · sign in required, Ready ·
+  local login found, or Login not checked), with its version, path and the
+  command that installs it or signs in. Create and Ask refuse to start only when
+  the agent is known to be missing or signed out, and keep the draft and
+  attachments; a check that cannot be read never blocks. (#715)
+- A Codex tab that opens on Codex's sign-in menu is blocked with a **Sign in**
+  banner that opens `codex login`, instead of having the first prompt typed into
+  the menu and timing out as delivery unconfirmed; the next launch offers the
+  prompt back. Claude Code's first-run screens keep their banner instead of
+  setting the tab to Idle. (#715)
+- Question-card options whose label contains a comma show as selected, and
+  multi-select choices no longer overwrite one another. Options with the same
+  label, and questions with the same text, no longer share a selection. (#708)
+
+### Status bar
+
+- Claude usage keeps refreshing when Claude Code's keychain login is large.
+  The read no longer stalls until its deadline once the item outgrew the pipe
+  buffer, as it did as MCP sign-ins accumulated, and then reported "OAuth
+  credentials were not found". A failure now says whether the keychain read
+  timed out, failed (with its exit code), or found no login, and Refresh
+  retries a failed credential read at once instead of waiting out a backoff
+  of up to four hours. A provider's Retry-After still holds it. (#664)
 
 ### Issue work status
 
@@ -27,6 +673,14 @@
   capabilities, and republish actual linked sessions after support returns.
   Explain when the account service has not reported support; shared activity
   still requires a supported backend. (#642)
+- Name each Mac by its computer name (System Settings → General → About), so
+  work on another of your Macs reads "You · on Studio" instead of
+  "You · on This Mac". Macs that saved "This Mac" get their real name without
+  renaming, and a name chosen earlier is kept. Settings → Account shows this
+  Mac's name with a Rename button, with or without Relay. (#686)
+- The work chip's hover card in the issues list holds its contents: long titles
+  and branches end in … at its edge, it stays opaque in macOS glass mode, and it
+  no longer dims rows for work that went quiet. (#714)
 
 ### Cloud workspaces
 
@@ -37,6 +691,69 @@
   checkout sessions visible. Require the runtime's `session-repository/1`
   capability; refuse unavailable or mismatched checkouts instead of using the
   blank workspace root. (#656)
+
+### Issue pipelines
+
+- Start a session from a GitHub or Linear issue with **Resolve conflicts
+  automatically** and **Merge when green** on: from the Issues page, an issue
+  picked in New Session, the command palette, and `terminalx sessions create
+  --issue` without `--auto-merge` or `--no-auto-merge`. Each launch can still
+  turn either off. Merge stays off where a person does the merge, where the
+  pipeline is off or unavailable, and in a cloud workspace. A merge still needs
+  the reviewed commit with its checks passed, and protected categories still
+  hold it. Other sessions start with both off, as before. In a project's
+  **Issue pipeline…** settings, each default is now **From issues**, **All
+  sessions** or **Off**, and a project set to Off keeps its issue sessions off.
+  A switch an older version saved as off whenever another setting was saved is
+  read once as **From issues**; one an older version saves after that reads as
+  Off. Continuing a session keeps its pipeline's switches as they are, and
+  starting an issue again takes the switches its pipeline holds. (#700)
+- When a pipeline's pull request is merged or closed, or the pipeline is
+  stopped, stop the idle agents of its reviewer and conflict resolver (and,
+  after a merge or close, its author), with the background commands and watches
+  they left running. A reviewer or resolver still in a turn is told the pipeline
+  ended and is stopped when that turn ends; an author in a turn is left alone.
+  Conversations can be resumed. A reply that arrives after the end is noted on
+  the issue page and ignored. (#689)
+- A reviewer can answer that its own checks are still running instead of giving
+  a verdict. TerminalX waits up to 20 minutes, then asks once for a verdict on
+  what it has. (#689)
+- Verdicts say whether the reviewer's checks passed, failed or did not run. The
+  issue page and the pull request comment say so. Failed checks stop the
+  pipeline for a person. A review by reading alone no longer merges a project
+  without CI by itself. (#689)
+- Removing a workspace stops leftover Rust builds and checks still working in
+  it, such as a `cargo check` that outlived rust-analyzer, and lists any other
+  process there by name. Programs detached on purpose (`screen`, `tmux`,
+  `nohup`, tunnels) are never stopped. (#689)
+
+### Issues
+
+- Create and edit issues from a project whose `origin` still uses a renamed
+  GitHub repository's old name. Writes go to the repository's current name; a
+  write GitHub still redirects names the new repository and the
+  `git remote set-url` command that updates the remote. (#710)
+
+### Command line
+
+- `terminalx wait` reports `permission` only when there is a request or question
+  to answer. A failed agent is reported as `recovery` with its kind, and right
+  after a send it waits for the new turn instead of returning the status from
+  before it. (#677)
+
+### Development
+
+- Build the dev and test profiles without incremental caches and with line-table
+  debug info only, so each checkout's `src-tauri/target` stays far smaller. Set
+  `CARGO_PROFILE_DEV_DEBUG=2` for full debug info or `CARGO_INCREMENTAL=1` for
+  incremental builds. (#697)
+- Ignore the `rustc*` scratch folder a killed launcher build leaves in
+  `src-tauri/binaries`, which stopped this repository's issue pipelines at
+  "uncommitted changes". (#693)
+- Keep three idle-agent tests and a store lock test from failing on a loaded
+  machine, as they did on main's CI: they measured quiet before the pane's first
+  draw or the tail's read, or retried a lock with no wait. A runtime test now
+  expects App resources to stop an idle agent after asking, as #696 made it.
 
 ## 0.2.21
 

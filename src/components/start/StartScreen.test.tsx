@@ -187,8 +187,9 @@ describe("the start screen", () => {
 
     const notice = screen.getByTestId("start-no-agent");
     expect(notice.textContent).toContain("No agent is installed");
-    fireEvent.click(screen.getByRole("button", { name: /Get Codex/ }));
-    expect(openUrl).toHaveBeenCalledWith("https://example.com/codex");
+    fireEvent.click(screen.getByRole("button", { name: /Set up Codex/ }));
+    expect(onOpenSettings).toHaveBeenCalledWith("agents");
+    expect(openUrl).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /Check again/ }));
     expect(sessions.refreshHarnesses).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));

@@ -10,6 +10,8 @@ import { cn } from "@/lib/cn";
 import { errorMessage, transcription, type DownloadProgress, type TranscriptionModel, type TranscriptionPreferences } from "@/lib/api";
 import { refreshDictationEngine } from "@/lib/dictation";
 
+import { TranscriptionPersonalization } from "./TranscriptionPersonalization";
+
 const APPLE = "apple";
 
 function mb(bytes: number): string {
@@ -127,6 +129,7 @@ export function TranscriptionTab() {
           name="Built in"
           description="Apple's speech recognition, on-device where your language allows. Nothing to download."
           meta="System languages"
+          live
           onUse={() => void choose(APPLE)}
           action={null}
         />
@@ -140,6 +143,7 @@ export function TranscriptionTab() {
               name={m.name}
               badge={m.recommended ? "Recommended" : undefined}
               description={m.description}
+              live={m.liveWords}
               meta={
                 <>
                   <button type="button" className="inline-flex items-center gap-1 underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => void openUrl(m.page)}>
@@ -216,6 +220,7 @@ export function TranscriptionTab() {
           }
         />
       </div>
+      <TranscriptionPersonalization />
     </div>
   );
 }
@@ -226,6 +231,7 @@ function ModelCard({
   badge,
   description,
   meta,
+  live,
   scores,
   onUse,
   action,
@@ -235,6 +241,8 @@ function ModelCard({
   badge?: string;
   description: string;
   meta: React.ReactNode;
+  /** Words appear while the reader speaks, or only once they stop. */
+  live: boolean;
   scores?: React.ReactNode;
   /** Absent while the weights are not on disk. */
   onUse?: () => void;
@@ -266,6 +274,7 @@ function ModelCard({
           </div>
           <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
           <div className="mt-1 text-xs text-muted-foreground">{meta}</div>
+          <div className="mt-1 text-xs text-muted-foreground">{live ? "Words appear as you speak." : "Words appear when you stop."}</div>
           {(scores || action) && (
             <div className="mt-2 flex items-center gap-4">
               {scores}

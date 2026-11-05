@@ -6,6 +6,9 @@ import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { AgentMark } from "@/components/AgentMark";
+import { AgentSetup } from "@/components/session/AgentSetup";
+import { useAgentReadiness } from "@/lib/agentReadiness";
+import type { HarnessInfo } from "@/types/session";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
@@ -23,13 +26,16 @@ import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
+import { AgentIdleSettings } from "./AgentIdleSettings";
+import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
+import { ExperimentalTab } from "./ExperimentalSettings";
 
-const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "experimental", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
@@ -45,6 +51,7 @@ const TAB_LABEL: Record<Tab, string> = {
   integrations: "Integrations",
   storage: "Storage",
   shortcuts: "Shortcuts",
+  experimental: "Experimental",
   about: "About",
 };
 
@@ -136,6 +143,7 @@ export function SettingsPage({
               </>
             )}
             {tab === "shortcuts" && <ShortcutsTab />}
+            {tab === "experimental" && <ExperimentalTab />}
             {tab === "about" && <AboutTab />}
           </div>
         </section>
@@ -502,10 +510,18 @@ function BrowserRuntimeRow() {
   );
 }
 
+function AgentSetupRow({ harness }: { harness: HarnessInfo }) {
+  const readiness = useAgentReadiness(harness.id);
+  return <AgentSetup harness={harness} value={readiness.value} checking={readiness.checking} onRefresh={() => {
+    void refreshHarnesses().then(() => readiness.refresh()).catch(() => readiness.refresh());
+  }} />;
+}
+
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
 function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
+  const [checkRun, setCheckRun] = useState(0);
   const [skill, setSkill] = useState<SkillInstallStatus | null>(null);
   const [skillBusy, setSkillBusy] = useState(false);
   const [skillError, setSkillError] = useState<string | null>(null);
@@ -550,7 +566,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         </Button>
       </div>
       <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">TerminalX runs the agent CLIs you already have. Log in to each one in a terminal first.</p>
+        <p className="text-xs text-muted-foreground">Set up an agent on this computer. Local work does not require a TerminalX account.</p>
         <Button
           size="xs"
           variant="ghost"
@@ -559,6 +575,9 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
             setBusy(true);
             try {
               await refreshHarnesses();
+              setCheckRun((run) => run + 1);
+            } catch {
+              setSkillError("Could not re-check installed agents. Try again.");
             } finally {
               setBusy(false);
             }
@@ -584,7 +603,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
                   </span>
                 )}
               </div>
-              <div className="truncate font-mono text-[11px] text-faint">{h.available ? h.path : h.installHint}</div>
+              <div className="mt-2"><AgentSetupRow key={`${h.id}:${checkRun}`} harness={h} /></div>
               <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
                 {h.caps.images && <span>images</span>}
                 {h.caps.permissionModes && <span>permission modes</span>}
@@ -603,6 +622,8 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul>
+      <AgentIdleSettings />
+      <ArchiveIdleSettings />
     </div>
   );
 }
@@ -747,6 +768,9 @@ function AboutTab() {
               Install and relaunch
             </Button>
           </>
+        )}
+        {state.kind === "choosing" && (
+          <span className="text-xs text-foreground">Version {state.update.version} would stop work in progress: choose when to update in the card below.</span>
         )}
         {state.kind === "installing" && <span className="text-xs text-muted-foreground">Installing… {state.pct}%</span>}
       </div>

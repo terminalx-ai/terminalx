@@ -1,8 +1,14 @@
 # Session pipeline
 
 The shared launch settings offer **Resolve conflicts automatically** and **Merge
-when green** on Git worktree branches. Both default to the project's pipeline
-settings and can be changed from the session's pipeline panel. The read-only
+when green** on Git worktree branches. A session started from a GitHub or Linear
+issue (the Issues page, an issue picked in New Session, the command palette, or
+`terminalx sessions create --issue`) starts with both on; any other session
+starts with both off. A project can choose otherwise for either switch: **Off**
+for every session, or **All sessions**. Each launch can still change its own
+switches, and each pipeline keeps its own after that, on the session's pipeline
+panel. Merge stays off wherever it cannot apply: a project where a person does
+the merge, a disabled or unavailable pipeline, and a cloud workspace. The read-only
 cleanup line follows the existing merged-cleanup settings; its link opens those
 settings. There is no per-session cleanup override or second deletion engine.
 Continuing a session applies both launch switches even when both are off.
@@ -27,20 +33,82 @@ supplies the same explicit status-block handoff as issue work.
 ## Conflict resolution
 
 Opt-in pipelines are checked every 30 seconds, including before a PR exists.
-The watcher fetches origin and uses `git merge-tree` without modifying the
-checkout. With a PR, GitHub's `CONFLICTING`, `DIRTY`, or required-up-to-date
-`BEHIND` state triggers the comparison. It does nothing while an author or
-reviewer has an active or queued turn. Dirty workspaces stop for a person.
+The watcher fetches origin. Before a PR exists, `git merge-tree` decides,
+without modifying the checkout. With a PR, GitHub's `CONFLICTING`, `DIRTY`, or
+required-up-to-date `BEHIND` state decides, even where `git merge-tree` merges
+cleanly: with criss-crossed history (two merge bases) git merges the bases
+first and GitHub does not, so GitHub can see a conflict git does not. The
+resolver's merge then completes without conflicts and leaves one merge base.
+Nothing is resolved once the branch already contains its base. The watcher
+does nothing while an author or reviewer has an active or queued turn. Dirty
+workspaces stop for a person.
 
 A fresh resolver conversation reserves the checkout. App prompt admission and
 managed agents' tool hooks refuse another conversation while it is reserved.
-The resolver merges the pinned base commit, preserving both sides' intent,
-runs project checks, and makes one merge commit. TerminalX verifies the exact
-parents and unchanged remote head before a normal, never forced, push. A changed
-remote, unexpected commit, failed check, ambiguous resolution, or exhausted
-`maxResolutions` stops at **Needs you**. Direct external Git writes cannot be
-prevented; their changed heads invalidate verification. A restart discards an
-unfinished resolution/check result and asks for inspection before continuing.
+The resolver merges the pinned base commit (`git merge --no-ff --no-edit`),
+preserving both sides' intent, and commits the merge as soon as its conflicts
+are resolved, before any check runs. Then it runs the project's checks; a fix
+they call for is amended into that same merge commit, so there is still exactly
+one, with the original head and the pinned base as its parents. A turn cut
+short therefore leaves a clean checkout with one local merge commit, not a
+half-made merge. TerminalX verifies the exact parents and unchanged remote head
+before a normal, never forced, push. A changed remote, unexpected commit,
+failed check, ambiguous resolution, or exhausted `maxResolutions` stops at
+**Needs you**. Direct external Git writes cannot be prevented; their changed
+heads invalidate verification. A restart discards an unfinished
+resolution/check result and asks for inspection before continuing.
+
+A resolver is judged on its report, not on the first turn it ends. A turn
+that ends without the status block while the resolver's tab still has work
+it started running (a background command, monitor or agent it has not heard
+back from, a wakeup, a process it left behind; its own checks, most often) is
+not its report: the checkout stays reserved, a `resolutionPending` line says
+what it is waiting on, and the turn that work wakes is the one listened to.
+It is waited for up to 30 minutes from the first such turn; then, once it
+sits idle, it is asked once for its report on what it has. A turn that ends
+without the block with nothing left running gets the same single reminder
+the author and the reviewer get. A second turn without it is a resolution
+that did not work.
+
+A resolver whose turn ends with nothing pushed may still have left its merge
+unfinished: `MERGE_HEAD` set, and every file the base brought in uncommitted.
+When the checkout holds exactly the merge the pipeline asked for (HEAD at the
+original head, the pinned base the only commit being merged), TerminalX runs
+`git merge --abort` under checkout admission and records a `mergeAborted`
+line. It leaves the merge as it is, with a `mergeLeft` line saying why, when a
+person interrupted the resolver or stopped the pipeline (the checkout is then
+theirs to inspect), when another conversation is at work in the checkout,
+while the resolver is still waiting on work it left running, when the merge
+is not the one the pipeline asked for, or when Git refuses the abort
+because it would lose an edit it cannot put back. An agent that ended on its
+own is not a person's doing, and its merge is aborted.
+
+While the resolver works, the pull request is still read every 30 seconds,
+even with the switch turned off since. If it was merged or closed, the
+pipeline ends, the resolver is told to stop at once, without committing,
+pushing or undoing anything itself, and its unfinished merge is aborted when
+that turn ends. A resolver found idle with the checkout still reserved has it
+aborted there and then.
+
+Carrying a pipeline on from a resolution that did not work (**Inspect
+resolution**) compares the checkout's head with the base as it is now before
+anything is pushed: the resolution may have sat for hours while the base
+moved on. A head that no longer merges cleanly is resolved again (with the
+switch off, it stops at **Needs you** for the conflicts) instead of being
+pushed for a review the merge gate would refuse. While the head is still the
+pull request's (the resolver's merge was aborted), GitHub's conflict counts
+as it does for the watcher, even where `git merge-tree` merges cleanly.
+
+In the desktop app the Changes panel says when a merge is in progress in a
+local checkout: what is being merged, and the uncommitted files split into
+**unresolved conflicts**, **changed here** (different from what Git merges by
+itself, found with `git merge-tree --write-tree HEAD MERGE_HEAD`) and **from the
+base** (exactly as Git merged them). It offers **Commit merge** once nothing is
+conflicted and **Abort merge** after a confirmation, each for exactly the merge
+it read. The warning before a workspace is removed says the same: an
+unfinished merge would be lost, how many of its files the base still has, and
+what changed while merging, instead of counting the base's files as the
+workspace's own work.
 
 Every changed head gets an independent review and fresh checks. Prior findings
 and security verdicts remain recorded until that review explicitly replaces
@@ -50,7 +118,7 @@ default). The implementation uses merges, preserving published history.
 ## TerminalX-run local checks
 
 `localCheckCommand` runs through `/bin/sh` in the checkout, with a 30-minute
-timeout and checkout admission held for its duration. Success is bound to both
+timeout and the checkout reserved for its duration. Success is bound to both
 the head and command; a dirty or moved checkout invalidates it. GitHub and project
 policy are reread after the command finishes. By default these checks supplement
 hosted CI. `localChecksOnly` may replace optional hosted checks only when GitHub
@@ -80,8 +148,9 @@ some code". It now goes on through five stages, each shown on the issue's page:
 4. **Address.** Findings go back to the author session. It fixes and commits,
    TerminalX pushes, and the same reviewer reads the new head. At most three
    reviews by default.
-5. **Merge.** By default the pipeline stops at *Ready to merge*. With the
-   issue's switch on, TerminalX merges if every condition below holds.
+5. **Merge.** With the issue's switch on, as an issue's session starts unless
+   its project turned it off, TerminalX merges if every condition below holds.
+   With it off, the pipeline stops at *Ready to merge*.
 
 It applies to workspaces on this computer and to cloud workspaces. A cloud
 workspace carries the pipeline itself and stops at *Ready to merge*; see the
@@ -115,7 +184,7 @@ It is told to leave the checkout as it found it and to end with
 
 ````
 ```terminalx-review
-{"commit": "<sha>", "verdict": "merge", "securityPass": "not_needed", "findings": []}
+{"commit": "<sha>", "verdict": "merge", "securityPass": "not_needed", "checks": "passed", "checksNote": "cargo test", "findings": []}
 ```
 ````
 
@@ -124,6 +193,22 @@ Each finding has a `severity` (`critical`, `high`, `medium`, `low`, `nit`), a
 counts only for the commit it names, and only if the checkout is still at that
 commit with nothing uncommitted when the reviewer finishes: a reviewer that
 edited or committed has voided its review.
+
+`checks` says whether the reviewer ran the project's checks on that commit:
+`passed`, `failed`, or `not_run` when it judged by reading the code alone
+(anything else, the field left out included, is read as `not_run`), with a few
+words in `checksNote`. The record, the issue page and the pull request comment
+say "Reviewed by reading only, tests not run" for a `not_run` verdict. A
+reviewer whose checks failed stops the pipeline for a person, whatever its
+verdict says.
+
+A reviewer may end its turn to wait for checks it started, with
+`{"verdict": "pending", "reason": "…"}` in the same block. That is not a
+missing verdict: TerminalX waits up to 20 minutes for the verdict, through any
+number of turns, then asks once for a verdict on what the reviewer has. A
+reviewer still pending after that, or one that ends a turn without a block
+twice, is left to a person. Once it gives a verdict, its review is over, and it
+is told to stop the background commands and watches it started for it.
 
 When the diff touches authorization, secrets, billing, deletion or connection
 handling (judged from the changed paths and the added lines), the reviewer is
@@ -136,8 +221,8 @@ With **Merge automatically when the review is addressed** on for the issue, and
 only then, the pull request is merged if all of this is true of its current
 head:
 
-- The reviewer's last verdict is for that exact commit, says `merge`, and has
-  no finding of medium severity or higher.
+- The reviewer's last verdict is for that exact commit, says `merge`, has no
+  finding of medium severity or higher, and does not report its checks failed.
 - The checks on that commit have passed. Where branch protection names
   required checks, those are the ones that count; where it names none, every
   check reported on the commit counts, except ones the project lists as never
@@ -156,6 +241,9 @@ head:
   Empty validation never becomes successful simply because time has passed.
 - GitHub says the branch merges without conflicts and branch protection does
   not block it.
+- Something ran the tests: CI, TerminalX's own run of the project's local
+  check command, or the reviewer. A review by reading alone in a project with
+  no CI is left at *Ready to merge* for a person.
 - The change is not in a category the project marks as always needing a
   person.
 - The project does not require a person for every merge.
@@ -189,6 +277,23 @@ so its page and record stay within reach. The twenty most recent are shown;
 session's report is not acted on, and after **Resume** the stage's own button
 (open the pull request, review the changes) carries it on.
 
+When a pipeline ends (its pull request is merged or closed, or it is stopped),
+its conversations are released. An idle agent is stopped, together with the
+background commands and watches it left running, which could otherwise wake it
+for as long as they run; a note in its transcript says why, and its next
+message resumes the conversation. A reviewer or conflict resolver still in a
+turn is told the pipeline ended, and its agent is stopped when that turn ends.
+A conflict resolver part way through its merge is told to stop at once when
+the pull request was merged or closed, and its unfinished merge is aborted when
+the turn ends (see *Conflict resolution*); after **Stop** it is not told, and
+finishes its turn, leaving the checkout to the person who stopped the
+pipeline. One that sits idle waiting on its own checks is stopped with them,
+and the checkout is the person's at once, with its merge as it is. Stop
+releases the reviewer and the conflict resolver; a merge or close releases
+the author too, but only an idle one: an author in a
+turn is someone's own follow-up, and is neither told nor stopped. A reply that
+comes after the end is noted in the record and ignored.
+
 The switch can be turned off at any time. It is read again immediately before
 the merge is asked for, so turning it off stops a merge that had not yet been
 made. The one thing it cannot do is take back a merge GitHub has already
@@ -209,12 +314,13 @@ project was removed, or its file is damaged), nothing is merged automatically.
 
 The review is an agent's reading of the change, and its verdict is the block
 that agent wrote. It can be wrong, and text in the repository or the issue can
-try to steer it. That is why a verdict alone merges nothing: the switch is off
-unless you turn it on, the checks are GitHub's, the categories and the "a
-person does the merge" setting are the project's and no session can change
-them from inside its work, and the merge is pinned to the commit that was
-read. For a repository where a wrong merge is costly, leave the switch off or
-have a person do the merge.
+try to steer it. That is why a verdict alone merges nothing: the checks are
+GitHub's, the categories and the "a person does the merge" setting are the
+project's and no session can change them from inside its work, and the merge
+is pinned to the commit that was read. An issue's session starts with the
+switch on unless its project says otherwise. For a repository where a wrong
+merge is costly, set **Merge automatically by default** to **Off** or have a
+person do the merge.
 
 Any process that holds the app's control token, a session's agent included,
 can run `terminalx pipelines auto-merge <pipeline> on`. It could equally run
@@ -230,13 +336,29 @@ The issue's switch is per issue. Everything else is per project, under
 | Setting | Default |
 |---|---|
 | Open a pull request and review it | on |
-| Merge automatically by default (what a new issue's switch starts at) | off |
+| Resolve conflicts automatically by default (which new sessions start with it on) | from issues |
+| Merge automatically by default (which new sessions start with "Merge when green" on) | from issues |
 | A person does the merge, whatever the switch says | off |
 | Review rounds | 3 |
 | Merge method | merge commit |
 | Always left for a person: database migrations, deploy configuration, what the security pass flags | all on |
 | Paths of your own that are always left for a person (`.gitignore` syntax) | none |
 | Checks that never hold a merge, by a part of their name | none |
+
+The two launch defaults each take one of three values. **From issues**, the
+default, stores nothing: sessions started from an issue start with the switch
+on and other sessions with it off. **All sessions** and **Off** are the
+project's own choice, and every new session starts there. A project that turns
+a switch off keeps it off for its issue sessions too. Versions before #700
+saved both switches as `false` whenever any pipeline setting was saved, so a
+stored `false` from then was no choice. It is read once as **From issues**,
+and a switch saved as on keeps meaning **All sessions**. That the migration
+ran is recorded in `projects-migrations.json` beside `projects.json`. An older
+version rewrites `projects.json` whole on any save but never touches that
+file, so whatever an older version saves afterwards reads as **Off**, which
+never merges by itself, and not as no choice. A cloud project's settings,
+kept in the app's preferences, are migrated the same way; an older version
+keeps that marker when it saves them.
 
 A session on the project's own checkout (not a worktree) has no branch to open
 a pull request from, so it gets no pipeline.
@@ -248,7 +370,12 @@ commit it was about and a link to the pull request or the session. It is kept
 in `~/.raccoon/issue-pipelines.json` and shown under **Record** on the issue's
 page. A merge made somewhere else (GitHub, the PR panel) is noticed at
 whatever stage the pipeline was, and recorded as such; so is a pull request
-closed without merging.
+closed without merging. Releasing the conversations at the end is a
+`participantsReleased` line, a reply after it a `lateReply` line, a
+reviewer waiting on its own checks a `reviewPending` line, a conflict
+resolver waiting on work it left running a `resolutionPending` line, a conflict
+resolver's unfinished merge undone a `mergeAborted` line, and one left as it
+is a `mergeLeft` line.
 
 ## From the command line
 

@@ -14,29 +14,174 @@ use serde_json::{json, Value};
 use crate::control::{ControlRequest, ControlResponse};
 
 const MAX_RESPONSE: u64 = 32 * 1024 * 1024;
+/// How long a call waits for the owner unless it says otherwise. Some calls
+/// do real work: stopping an agent waits for its CLI to be gone.
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a read the window shows, or a quick control, waits. Long enough
+/// to outlast one terminal write that waits out [`crate::pty::INPUT_STALL`]
+/// under a tab's lock; short enough that a wedged owner shows up as not
+/// responding instead of as a window that hangs (#661).
+pub const QUICK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Discovery and attachment: an owner that cannot answer these promptly is
+/// not one a desktop can attach to, and a retry must not wait two minutes.
+pub const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The desktop pings each stream this often, and the owner answers every ping.
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// A hung owner never closes its socket. Silence this long, not even a pong,
+/// is the only sign of it.
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Retrying cannot help until something outside this desktop changes: an
+/// owner from an incompatible build, or another desktop serving its windows.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Blocked(pub String);
+
+/// The owner took a request and did not answer it in time. It may still be
+/// working on it, so the request's effect is unknown, not refused.
+#[derive(Debug)]
+pub struct Unresponsive {
+    pub command: String,
+    pub waited: Duration,
+}
+
+impl std::fmt::Display for Unresponsive {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "The TerminalX runtime did not answer {} within {} seconds.", self.command, self.waited.as_secs())
+    }
+}
+
+impl std::error::Error for Unresponsive {}
+
+/// The owner answered with a refusal. `busy` means it is already handling as
+/// many requests as it will, all held up: to a caller, an owner that will not
+/// answer, whatever the request.
+#[derive(Debug)]
+pub struct Refused {
+    pub code: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Whether `error` says the owner holds its socket but will not answer: it
+/// timed out, or refused for want of a free request place.
+pub fn unanswered(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<Unresponsive>() || cause.downcast_ref::<Refused>().is_some_and(|refused| refused.code == "busy"))
+}
+
+/// What the owner says about itself without waiting on any of its work:
+/// `runtime.liveness`, or `status` from an owner too old to have it.
+fn liveness(socket: &Path, token: &str, timeout: Duration) -> Result<Value> {
+    match request(socket, token, "runtime.liveness", json!({}), timeout) {
+        Err(error) if error.downcast_ref::<Refused>().is_some_and(|refused| refused.code == "unsupported") => {
+            request(socket, token, "status", json!({}), timeout)
+        }
+        answered => answered,
+    }
+}
+
+/// What the owner says of its own build (#730).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Build {
+    /// Its TerminalX version, the same as the app it was bundled with. `None`
+    /// when it would not say.
+    pub version: Option<semver::Version>,
+    /// The phone features its owner operations serve: as it names them, or,
+    /// from an owner too old to name them, as its release served them.
+    pub mobile: serde_json::Map<String, Value>,
+    /// The handover record it writes, which a desktop needs to replace it
+    /// without stopping what it runs (#765). `None` from an owner that
+    /// cannot be handed over: TerminalX 0.2.23 and before.
+    pub handover: Option<u32>,
+}
+
+impl Build {
+    /// From the owner's answer to `runtime.liveness`, or to `status` from an
+    /// owner too old for that. `status` is asked of an owner whose answer
+    /// leaves its version out: TerminalX 0.2.22 says it only there.
+    fn read(answer: &Value, status: impl FnOnce() -> Result<Value>) -> Self {
+        let local = &answer["localRuntime"];
+        let said = |value: &Value| value.as_str().map(str::to_owned);
+        let text = said(&local["version"]).or_else(|| said(&answer["appVersion"])).or_else(|| match status() {
+            Ok(status) => said(&status["appVersion"]),
+            Err(error) => {
+                log::warn!("the local runtime did not say its version: {error:#}");
+                None
+            }
+        });
+        let version = text.and_then(|text| semver::Version::parse(&text)
+            .inspect_err(|error| log::warn!("the local runtime's version {text:?} is not one this desktop reads: {error}")).ok());
+        let mobile = local["mobileFeatures"].as_object().cloned()
+            .or_else(|| super::mobile::released_features(version.as_ref()).as_object().cloned())
+            .unwrap_or_default();
+        let handover = local["handover"].as_u64().and_then(|format| u32::try_from(format).ok());
+        Self { version, mobile, handover }
+    }
+
+    /// Whether this build is older than `app`. One that would not say its
+    /// version is: every runtime since #730 says it without being asked.
+    pub fn older_than(&self, app: &semver::Version) -> bool {
+        self.version.as_ref().is_none_or(|version| version < app)
+    }
+}
 
 pub struct Client {
     socket: PathBuf,
     token: zeroize::Zeroizing<String>,
     epoch: String,
     event_socket: PathBuf,
+    /// The owner's `streamVersion`: 1 from one too old to say.
+    streams: u64,
+    build: Build,
+    ping: Duration,
+    liveness: Duration,
 }
 
-fn request(socket: &Path, token: &str, command: &str, params: Value) -> Result<Value> {
+/// What one connection to the event socket carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stream {
+    /// The app's events.
+    Events,
+    /// The output of the terminals one window shows.
+    Terminals { window: String },
+}
+
+impl std::fmt::Display for Stream {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Events => write!(out, "the background runtime's event connection"),
+            Self::Terminals { window } => write!(out, "terminal output of window {window:?}"),
+        }
+    }
+}
+
+fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Duration) -> Result<Value> {
     let mut stream = UnixStream::connect(socket).context("connect to the local runtime")?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    stream.set_read_timeout(Some(timeout))?;
     let request = ControlRequest { id: uuid::Uuid::new_v4().to_string(), token: token.into(), command: command.into(), params };
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
     let mut line = String::new();
-    BufReader::new(stream).take(MAX_RESPONSE + 1).read_line(&mut line)?;
+    if let Err(error) = BufReader::new(stream).take(MAX_RESPONSE + 1).read_line(&mut line) {
+        if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) {
+            return Err(Unresponsive { command: command.into(), waited: timeout }.into());
+        }
+        return Err(error.into());
+    }
     if line.len() as u64 > MAX_RESPONSE { bail!("local runtime response exceeded its size limit"); }
     let response: ControlResponse = serde_json::from_str(&line).context("decode local runtime response")?;
     if response.id != request.id { bail!("local runtime response does not match its request"); }
     if !response.ok {
         let error = response.error.context("local runtime refused the request")?;
-        bail!("{}: {}", error.code, error.message);
+        return Err(Refused { code: error.code, message: error.message }.into());
     }
     Ok(response.result.unwrap_or(Value::Null))
 }
@@ -64,10 +209,10 @@ impl Client {
         file.read_to_string(&mut token)?;
         let token = zeroize::Zeroizing::new(token.trim().to_string());
         if token.is_empty() { bail!("local runtime credential is empty"); }
-        let status = request(&run.join("hooks.sock"), &token, "status", json!({}))?;
+        let status = liveness(&run.join("hooks.sock"), &token, LIFECYCLE_TIMEOUT)?;
         let local = &status["localRuntime"];
         if status["runtimeKind"] != "local" || local["protocol"].as_u64() != Some(super::PROTOCOL) {
-            bail!("the running owner does not support this desktop's local runtime protocol; its work was left running");
+            return Err(Blocked("the running owner does not support this desktop's local runtime protocol; its work was left running".into()).into());
         }
         let socket = PathBuf::from(status["socket"].as_str().context("runtime has no control endpoint")?);
         let event_socket = PathBuf::from(local["eventSocket"].as_str().context("runtime has no event endpoint")?);
@@ -75,38 +220,103 @@ impl Client {
             bail!("runtime endpoints are outside the selected home");
         }
         let epoch = local["epoch"].as_str().context("runtime has no epoch")?.to_string();
+        let streams = local["streamVersion"].as_u64().unwrap_or(1);
         // Pin discovery to this owner. A publisher change between reading the
         // token and status cannot authorize commands to the replacement.
-        let pinned = request(&socket, &token, "status", json!({}))?;
+        let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
-        Ok(Arc::new(Self { socket, event_socket, token, epoch }))
+        let build = Build::read(&pinned, || request(&socket, &token, "status", json!({}), LIFECYCLE_TIMEOUT));
+        Ok(Arc::new(Self { socket, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT }))
     }
 
-    pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
-        serde_json::from_value(request(&self.socket, &self.token, command, params)?).context("decode local runtime result")
+    /// A client of the event socket at `event_socket` alone, as discovery
+    /// would have found it: for tests that serve a stream in process.
+    #[cfg(test)]
+    pub(crate) fn for_stream(event_socket: PathBuf, token: &str, epoch: &str) -> Arc<Self> {
+        Arc::new(Self { socket: event_socket.with_file_name("unused.sock"), event_socket, token: token.to_string().into(),
+            epoch: epoch.into(), streams: super::STREAM_VERSION, build: Build::default(), ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT })
     }
+
+    /// The same owner, pinged every `ping` and given up on after `liveness`
+    /// of silence: a test hangs an owner without waiting the full deadline.
+    pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
+        Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
+            event_socket: self.event_socket.clone(), streams: self.streams, build: self.build.clone(), ping, liveness })
+    }
+
+    pub(crate) fn ping_interval(&self) -> Duration { self.ping }
+
+    pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
+        self.call_within(command, params, CALL_TIMEOUT)
+    }
+
+    /// A call that gives up with [`Unresponsive`] after `timeout`.
+    pub fn call_within<T: DeserializeOwned>(&self, command: &str, params: Value, timeout: Duration) -> Result<T> {
+        serde_json::from_value(request(&self.socket, &self.token, command, params, timeout)?).context("decode local runtime result")
+    }
+
+    /// A read the window shows or a quick control: see [`QUICK_TIMEOUT`].
+    pub fn quick<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
+        self.call_within(command, params, QUICK_TIMEOUT)
+    }
+
+    pub fn epoch(&self) -> &str { &self.epoch }
+
+    /// The owner's build, as it said when this client attached.
+    pub fn build(&self) -> &Build { &self.build }
+
+    /// The owner's full `status`, which every runtime answers: what it runs
+    /// (`runningTabs`) and its version. It may wait on the owner's sessions.
+    pub fn status(&self) -> Result<Value> { self.quick("status", json!({})) }
+
+    /// See [`liveness`]: answered while the owner's sessions are held up, so
+    /// asking never takes a request place that stays taken.
+    pub fn liveness(&self, timeout: Duration) -> Result<Value> { liveness(&self.socket, &self.token, timeout) }
 
     pub fn stop_all(&self) -> Result<()> {
         let _: Value = self.call("runtime.stopAll", json!({"epoch":self.epoch}))?;
         Ok(())
     }
 
-    pub fn stream(&self) -> Result<Connection> {
+    /// Whether the owner takes a connection for one stream, and says when a
+    /// view or events fall behind instead of closing it (#716).
+    pub fn names_streams(&self) -> bool { self.streams >= 2 }
+
+    /// A connection that carries `stream`. An owner too old to take one
+    /// stream at a time sends both, and the bridge drops what it was not after.
+    pub fn stream(&self, stream: &Stream) -> Result<Connection> {
         let mut socket = UnixStream::connect(&self.event_socket)?;
         socket.set_read_timeout(Some(Duration::from_secs(10)))?;
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
-        serde_json::to_writer(&mut socket, &json!({"protocol":super::PROTOCOL,"token":self.token.as_str()}))?;
+        serde_json::to_writer(&mut socket, &hello(self.token.as_str(), self.names_streams().then_some(stream)))?;
         socket.write_all(b"\n")?;
         let mut read = BufReader::new(socket.try_clone()?);
-        let hello = receive(&mut read)?;
+        let hello = receive(&mut read, Duration::from_secs(10))?;
         if hello["type"] != "ready" || hello["attachment"]["epoch"] != self.epoch {
             bail!("runtime changed before event attachment");
         }
         let attachment: AttachmentIdentity = serde_json::from_value(hello["attachment"].clone())?;
         if attachment.lease.is_empty() || attachment.lease.len() > 128 { bail!("invalid runtime attachment lease"); }
-        read.get_ref().set_read_timeout(None)?;
-        Ok(Connection { read, write: socket, attachment })
+        // The bridge pings every `ping` interval, so a live owner always has
+        // something to say well within this deadline.
+        read.get_ref().set_read_timeout(Some(self.liveness))?;
+        Ok(Connection { read, write: socket, attachment, silence: self.liveness })
     }
+}
+
+/// The first frame on the event socket. `stream` is left out for an owner
+/// that does not know it, which refuses a hello with fields it does not know.
+fn hello(token: &str, stream: Option<&Stream>) -> Value {
+    let mut hello = json!({"protocol":super::PROTOCOL, "token":token});
+    match stream {
+        Some(Stream::Events) => { hello["stream"] = json!("events"); }
+        Some(Stream::Terminals { window }) => {
+            hello["stream"] = json!("terminals");
+            hello["window"] = json!(window);
+        }
+        None => {}
+    }
+    hello
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -120,6 +330,8 @@ pub struct Connection {
     attachment: AttachmentIdentity,
     read: BufReader<UnixStream>,
     write: UnixStream,
+    /// How long the owner may say nothing before it is taken for hung.
+    silence: Duration,
 }
 
 impl Connection {
@@ -127,13 +339,146 @@ impl Connection {
 
     pub fn writer(&self) -> Result<UnixStream> { Ok(self.write.try_clone()?) }
 
-    pub fn receive(&mut self) -> Result<Value> { receive(&mut self.read) }
+    pub fn receive(&mut self) -> Result<Value> { receive(&mut self.read, self.silence) }
 }
 
-fn receive(read: &mut BufReader<UnixStream>) -> Result<Value> {
+/// One frame. Its errors say what happened, for the log of a lost connection.
+fn receive(read: &mut BufReader<UnixStream>, silence: Duration) -> Result<Value> {
     let mut line = String::new();
-    let count = read.take(1024 * 1024 + 1).read_line(&mut line)?;
-    if count == 0 { bail!("local event stream disconnected"); }
+    let count = match read.take(1024 * 1024 + 1).read_line(&mut line) {
+        Ok(count) => count,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            bail!("the background runtime sent nothing, not even a pong, for {}", super::log_file::span(silence)),
+        Err(error) => return Err(anyhow::Error::new(error).context("reading from the background runtime failed")),
+    };
+    if count == 0 { bail!("the background runtime closed the connection"); }
     if count > 1024 * 1024 { bail!("local event frame exceeded its size limit"); }
     Ok(serde_json::from_str(&line)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::ControlError;
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, Mutex};
+
+    /// An owner that answers each request as `answer` says, or holds it
+    /// unanswered (`None`). Returns its socket and the commands it was sent.
+    fn owner(dir: &Path, answer: fn(&ControlRequest) -> Option<ControlResponse>) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
+        let socket = dir.join("owner.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        std::thread::spawn(move || for stream in listener.incoming().flatten() {
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+                let request: ControlRequest = serde_json::from_str(&line).unwrap();
+                seen.lock().unwrap().push(request.command.clone());
+                match answer(&request) {
+                    Some(response) => { let _ = writeln!(&stream, "{}", serde_json::to_string(&response).unwrap()); }
+                    None => std::thread::sleep(Duration::from_secs(10)),
+                }
+            });
+        });
+        (socket, asked)
+    }
+
+    fn refusal(request: &ControlRequest, code: &str) -> Option<ControlResponse> {
+        Some(ControlResponse::failure(request.id.clone(), ControlError::new(code, "refused", None::<String>)))
+    }
+
+    #[test]
+    fn a_hello_names_its_stream_only_to_an_owner_that_knows_them() {
+        let main = Stream::Terminals { window: "main".into() };
+        assert_eq!(hello("t", Some(&main)), json!({"protocol": super::super::PROTOCOL, "token": "t", "stream": "terminals", "window": "main"}));
+        assert_eq!(hello("t", Some(&Stream::Events)), json!({"protocol": super::super::PROTOCOL, "token": "t", "stream": "events"}));
+        assert_eq!(hello("t", None), json!({"protocol": super::super::PROTOCOL, "token": "t"}), "what an owner from before #716 accepts");
+    }
+
+    #[test]
+    fn an_owner_too_old_for_liveness_is_asked_for_its_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket, asked) = owner(dir.path(), |request| match request.command.as_str() {
+            "runtime.liveness" => refusal(request, "unsupported"),
+            _ => Some(ControlResponse::success(request.id.clone(), json!({"localRuntime": {"epoch": "old"}}))),
+        });
+        assert_eq!(liveness(&socket, "token", QUICK_TIMEOUT).unwrap()["localRuntime"]["epoch"], "old");
+        assert_eq!(*asked.lock().unwrap(), ["runtime.liveness", "status"]);
+    }
+
+    #[test]
+    fn an_owner_that_answers_liveness_is_never_asked_for_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket, asked) = owner(dir.path(), |request| Some(ControlResponse::success(request.id.clone(), json!({"command": request.command}))));
+        assert_eq!(liveness(&socket, "token", QUICK_TIMEOUT).unwrap()["command"], "runtime.liveness");
+        assert_eq!(*asked.lock().unwrap(), ["runtime.liveness"]);
+    }
+
+    /// The review of #661: with every request place held by stuck work, an
+    /// owner answers `busy`, and a desktop must offer a restart for that just
+    /// as for an owner that never answers.
+    #[test]
+    fn an_owner_that_turns_requests_away_or_never_answers_is_not_answering() {
+        let dir = tempfile::tempdir().unwrap();
+        let (busy, _) = owner(&subdir(dir.path(), "busy"), |request| refusal(request, "busy"));
+        let error = request(&busy, "token", "runtime.liveness", json!({}), QUICK_TIMEOUT).unwrap_err();
+        assert!(unanswered(&error), "{error:#}");
+        assert_eq!(error.to_string(), "busy: refused", "a refusal still reads as it did");
+
+        let (silent, _) = owner(&subdir(dir.path(), "silent"), |_| None);
+        let error = request(&silent, "token", "runtime.liveness", json!({}), Duration::from_millis(200)).unwrap_err();
+        assert!(error.is::<Unresponsive>() && unanswered(&error), "{error:#}");
+
+        let (unauthorized, _) = owner(&subdir(dir.path(), "refuses"), |request| refusal(request, "unauthorized"));
+        let error = request(&unauthorized, "token", "runtime.liveness", json!({}), QUICK_TIMEOUT).unwrap_err();
+        assert!(!unanswered(&error), "an owner that answers with a reason is answering: {error:#}");
+    }
+
+    /// #730: what a desktop learns of each runtime still in use, from the
+    /// answer it attached with, and from `status` only when that leaves out
+    /// the version.
+    #[test]
+    fn each_runtimes_build_is_read_from_what_it_says() {
+        let app = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let unasked = || -> Result<Value> { panic!("an owner that said its version is not asked again") };
+        let five = super::super::mobile::released_features(Some(&semver::Version::new(0, 2, 22)));
+
+        // This build: it names both itself.
+        let current = super::super::Lifetime::new(super::super::IDLE_GRACE).status();
+        let build = Build::read(&json!({"localRuntime": current}), unasked);
+        assert_eq!(build.version.as_ref(), Some(&app));
+        assert_eq!(Value::Object(build.mobile.clone()), super::super::mobile::features());
+        assert!(!build.older_than(&app));
+        let named = Build::read(&json!({"localRuntime": {"version": "9.0.0", "mobileFeatures": {"terminal": 2}}}), unasked);
+        assert_eq!(Value::Object(named.mobile), json!({"terminal": 2}), "a runtime's own list, not its release's");
+
+        // 0.2.22 answers liveness without its version, which `status` has.
+        let asked = std::cell::Cell::new(false);
+        let build = Build::read(&json!({"localRuntime": {"epoch": "e"}}), || { asked.set(true); Ok(json!({"appVersion": "0.2.22"})) });
+        assert!(asked.get());
+        assert_eq!(build.version, Some(semver::Version::new(0, 2, 22)));
+        assert_eq!(Value::Object(build.mobile), five);
+
+        // 0.2.21 has no liveness: its `status` was the answer.
+        let build = Build::read(&json!({"appVersion": "0.2.21", "localRuntime": {"epoch": "e"}}), unasked);
+        assert_eq!(build.version, Some(semver::Version::new(0, 2, 21)));
+        assert!(build.mobile.is_empty(), "no terminal, session controls, new sessions, Mac settings or send ids");
+        assert!(build.older_than(&semver::Version::new(0, 2, 22)));
+
+        // One that will not say is taken for older, and offered nothing.
+        let build = Build::read(&json!({"localRuntime": {}}), || anyhow::bail!("timed out"));
+        assert_eq!(build.version, None);
+        assert!(build.mobile.is_empty() && build.older_than(&semver::Version::new(0, 0, 1)));
+        let build = Build::read(&json!({"appVersion": "not a version"}), unasked);
+        assert!(build.version.is_none() && build.mobile.is_empty());
+    }
+
+    fn subdir(parent: &Path, name: &str) -> PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
 }

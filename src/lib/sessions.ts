@@ -1,12 +1,13 @@
+import { forgetClosedTabViews } from "@/lib/tabViews";
 import { keepMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
-import { getPrefs } from "@/lib/prefs";
+import { getPrefs, setPrefs } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
-import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
+import { activateLatestTerminal, closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import { bootTabLayouts } from "@/lib/tabLayouts";
 import { isFloatingWindow } from "@/lib/appWindow";
@@ -130,7 +131,14 @@ function set(patch: Partial<State>) {
   ) {
     next.paletteIndex = buildPaletteIndex(next.sessions, next.projects, next.workspaces, next.harnesses);
   }
+  const activeTabs = patch.sessions ? new Set(next.sessions.flatMap((session) => session.tabs.map((tab) => tab.id))) : null;
+  const removedTabs = activeTabs ? state.sessions.flatMap((session) =>
+    session.tabs.filter((tab) => !activeTabs.has(tab.id)).map((tab) => tab.id),
+  ) : [];
+  const shownChanged = next.selectedSessionId !== state.selectedSessionId;
   state = next;
+  if (shownChanged) reportShownSession(next.selectedSessionId);
+  if (removedTabs.length) forgetClosedTabViews(removedTabs);
   if (patch.sessions) setArchivedTerminalSessions(patch.sessions.filter((session) => session.archived).map((session) => session.id));
   for (const l of listeners) l();
 }
@@ -158,12 +166,12 @@ export function subscribeSessionStore(listener: () => void): () => void {
 
 let booted = false;
 const workspaceRefreshVersions = new Map<string, number>();
+// Backfill can publish while the first list is being read. Subscribe first,
+// retaining only chronology until initialization supplies the session rows.
+const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
-  // Backfill can publish while the first list is being read. Subscribe first,
-  // retaining only chronology until initialization supplies the session rows.
-  const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
   try {
     await listen<SessionEntry>("session_updated", (e) => {
       if (state.loaded) upsertSession(e.payload);
@@ -171,14 +179,22 @@ export async function bootSessions() {
         { lastMessageAt: e.payload.lastMessageAt }, initialMessageTimes.get(e.payload.id),
       ));
     });
+    // A new live connection (#643): what changed during the gap was never
+    // heard of here, and a window that opened during it has read nothing yet.
+    await listen("local_runtime_reattached", () => void resyncSessions().catch(() => {}));
   } catch {
     /* outside a webview */
   }
-  // Projects and sessions are two file reads; the harness probe may shell out
-  // to a login shell and take seconds, so it lands on its own.
   // How the tabs are arranged is read alongside the sessions and not waited for: a window must never
   // fail to list its sessions over it. Until it lands, tabs are in the order they were opened.
   void bootTabLayouts();
+  await loadIndex();
+}
+
+let indexListened = false;
+async function loadIndex() {
+  // Projects and sessions are two file reads; the harness probe may shell out
+  // to a login shell and take seconds, so it lands on its own.
   const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
   set({ loaded: true, projects: projects.projects, lastProject: projects.lastSelected,
     sessions: sessions.map((session) => keepMessageTime(session, initialMessageTimes.get(session.id))),
@@ -186,6 +202,8 @@ export async function bootSessions() {
   initialMessageTimes.clear();
   void api.listHarnesses().then((harnesses) => set({ harnesses })).catch(() => {});
   void api.chatsDir().then((chatsPath) => set({ chatsPath })).catch(() => {});
+  if (indexListened) return;
+  indexListened = true;
   try {
     await listen<SessionEntry>("session_created", (e) => upsertSession(e.payload));
     await listen<string>("session_deleted", (e) => removeSessions([e.payload]));
@@ -197,6 +215,14 @@ export async function bootSessions() {
   } catch {
     /* outside a webview */
   }
+}
+
+/** Read the index again after a gap in the live connection: never send, start or stop anything. */
+async function resyncSessions() {
+  if (!state.loaded) return loadIndex();
+  await Promise.all([refreshSessions(), refreshHarnesses().catch(() => {})]);
+  await refreshProjects();
+  await Promise.all(state.projects.map((project) => refreshWorkspaces(project.path)));
 }
 
 export async function refreshSessions() {
@@ -398,7 +424,18 @@ export function startSessionIn(projectPath: string, cwd: string | null) {
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
 
-/** Open a checkout without starting an agent, reusing its open session. */
+/**
+ * Show a checkout opened without an agent: its session, on its shell, with
+ * the panel open on its files. Selecting a session opens nothing in it by
+ * itself (#721); opening a checkout is asking for its shell.
+ */
+function showCheckout(session: SessionEntry) {
+  selectSession(session.id);
+  if (!getPrefs().panelOpen) setPrefs({ panelOpen: true });
+  void activateLatestTerminal(session.id, session.cwd).catch((error) => console.error("terminal open failed", error));
+}
+
+/** Open a checkout without starting an agent, on its shell, reusing its open session. */
 export function openWorkspace(projectPath: string, cwd: string): Promise<SessionEntry> {
   const pathKey = cwd.replace(/\/+$/, "");
   const existing = state.sessions.find(
@@ -410,7 +447,7 @@ export function openWorkspace(projectPath: string, cwd: string): Promise<Session
       s.cwd.replace(/\/+$/, "") === pathKey,
   );
   if (existing) {
-    selectSession(existing.id);
+    showCheckout(existing);
     return Promise.resolve(existing);
   }
 
@@ -421,7 +458,7 @@ export function openWorkspace(projectPath: string, cwd: string): Promise<Session
     .createSession({ projectPath, cwd, useWorktree: false })
     .then((session) => {
       upsertSession(session);
-      selectSession(session.id);
+      showCheckout(session);
       return session;
     })
     .finally(() => openingWorkspaces.delete(key));
@@ -533,6 +570,7 @@ export function debug(message: string) {
   void invoke("frontend_log", { level: "info", message }).catch(() => {});
 }
 
+/** Show archived: each project's archived sessions, and the chats', under a fold of their own (#718). */
 export function setShowArchived(v: boolean) {
   set({ showArchived: v });
 }
@@ -594,6 +632,60 @@ export async function selectProject(path: string) {
 export async function archiveSession(id: string, archived: boolean) {
   await api.setSessionArchived(id, archived);
   patchSession(id, { archived });
+}
+
+/**
+ * Archive or bring back several sessions at once: all of them, or none when one is gone (#718). Archiving keeps a
+ * session whole (its transcript, its worktree, its agent's conversation) and lists it under Show archived.
+ */
+export async function archiveSessions(ids: string[], archived: boolean) {
+  if (!ids.length) return;
+  for (const session of await api.setSessionsArchived(ids, archived)) upsertSession(session);
+}
+
+/** The local session this window last said it shows. */
+let reportedShown: string | null = null;
+
+/**
+ * Tell the backend which local session this window shows, so the idle sweep leaves it in the list. Only a change of
+ * local session is said: a cloud session (`cloud:…`) is not the sweep's, and showing one asks nothing local (PRO-23).
+ * Best effort: a window that cannot say is still covered by `runIdleArchive`'s `keep`.
+ */
+function reportShownSession(id: string | null) {
+  const local = id && !id.startsWith("cloud:") ? id : null;
+  if (local === reportedShown) return;
+  reportedShown = local;
+  void Promise.resolve()
+    .then(() => api.setShownSession(local))
+    .catch(() => {});
+}
+
+/** How long after launch the first sweep runs: the runtime has its tabs back, and message times have been read by then. */
+const IDLE_ARCHIVE_FIRST = 60_000;
+/** How often after that. The limits are whole days, so a sweep every half hour is never late by much. */
+const IDLE_ARCHIVE_EVERY = 30 * 60_000;
+let idleArchiveStarted = false;
+
+/**
+ * Archive what nobody has written in for the limit in Settings (#718). The runtime decides, with what it knows of
+ * each session's tabs; this window adds the session it shows. What it archives reaches every window as an update.
+ */
+export async function runIdleArchive(): Promise<string[]> {
+  const shown = state.selectedSessionId && !state.selectedSessionId.startsWith("cloud:") ? [state.selectedSessionId] : [];
+  try {
+    return await api.archiveIdleSessions(shown);
+  } catch {
+    // An owner that is restarting, or an older one: the next sweep tries again.
+    return [];
+  }
+}
+
+/** The main window runs the idle sweep, once soon after launch and then every half hour. */
+export function startIdleArchive() {
+  if (idleArchiveStarted || isFloatingWindow()) return;
+  idleArchiveStarted = true;
+  const next = (delay: number) => setTimeout(() => void runIdleArchive().finally(() => next(IDLE_ARCHIVE_EVERY)), delay);
+  next(IDLE_ARCHIVE_FIRST);
 }
 
 export async function pinSession(id: string, pinned: boolean) {

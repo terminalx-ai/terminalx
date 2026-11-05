@@ -21,12 +21,23 @@ export function PromptMap({
   turns,
   scroller,
   onJump,
+  locate,
 }: {
   turns: Turn[];
   scroller: RefObject<HTMLDivElement | null>;
   onJump: (key: string) => void;
+  /**
+   * The index in `turns` of the turn under the reading line. A transcript
+   * that draws only the turns near the view says it from its own layout;
+   * without it, the drawn turns are measured.
+   */
+  locate?: () => number;
 }) {
   const prompts = turns.filter((t) => t.prompt?.text.trim());
+  const locateRef = useRef(locate);
+  locateRef.current = locate;
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
   const [current, setCurrent] = useState<string | null>(null);
   const [hovered, setHovered] = useState<{ key: string; top: number } | null>(
     null,
@@ -78,6 +89,15 @@ export function PromptMap({
     let frame = 0;
     const measure = () => {
       frame = 0;
+      const at = locateRef.current?.();
+      if (at != null) {
+        // The last prompt at or above the turn being read.
+        let found: string | null = null;
+        const list = turnsRef.current;
+        for (let i = 0; i <= Math.min(at, list.length - 1); i++) if (list[i].prompt?.text.trim()) found = list[i].key;
+        setCurrent(found ?? prompts[0]?.key ?? null);
+        return;
+      }
       const line = el.getBoundingClientRect().top + el.clientHeight / 3;
       let found: string | null = prompts[0]?.key ?? null;
       for (const turn of prompts) {

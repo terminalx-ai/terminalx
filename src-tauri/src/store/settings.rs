@@ -43,6 +43,104 @@ pub struct Settings {
     /// What this Mac says about the issues its sessions work on (#441,
     /// `work_claims.rs`). The Rust side publishes it, so it lives here.
     pub work_status: WorkStatusSettings,
+    /// This Mac's name as the user typed it in Settings → Account (#686).
+    /// None follows the computer's own name (`pairing::MachineName`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
+    /// When an agent nobody is using is stopped (`idle_agents.rs`). The
+    /// runtime that owns the agents reads it for itself.
+    pub agents: AgentSettings,
+    /// When a finished conversation is archived (`session_archive.rs`). The
+    /// runtime that knows what each session is doing reads it for itself.
+    pub conversations: ConversationSettings,
+    /// Settings → Experimental. Tabs are made by the Rust side, which reads
+    /// these when it makes one, so they live here.
+    pub experimental: ExperimentalSettings,
+}
+
+/// Agents the app started that sit idle are stopped after a while (#696),
+/// and their next message starts them again on the same conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentSettings {
+    /// Minutes an agent may sit idle before it is stopped; 0 never stops one
+    /// for that alone.
+    #[serde(deserialize_with = "idle_stop_minutes")]
+    pub idle_stop_minutes: u32,
+}
+
+/// The idle limits the settings control offers; 0 is "never".
+pub const IDLE_STOP_MINUTES: [u32; 7] = [0, 30, 60, 120, 240, 480, 1440];
+/// An hour: by then a model's prompt cache has gone cold, so resuming the
+/// conversation costs what keeping the agent up would have saved nothing on.
+const DEFAULT_IDLE_STOP_MINUTES: u32 = 60;
+
+/// A hand-edited or damaged value falls back to the default rather than
+/// stopping agents at a pace nobody chose.
+fn idle_stop_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    let minutes = serde_json::Value::deserialize(deserializer)?.as_u64().and_then(|value| u32::try_from(value).ok());
+    Ok(minutes.filter(|value| IDLE_STOP_MINUTES.contains(value)).unwrap_or(DEFAULT_IDLE_STOP_MINUTES))
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES }
+    }
+}
+
+impl AgentSettings {
+    /// How long an agent may sit idle, or `None` when it may for ever.
+    pub fn idle_limit(&self) -> Option<std::time::Duration> {
+        (self.idle_stop_minutes > 0).then(|| std::time::Duration::from_secs(u64::from(self.idle_stop_minutes) * 60))
+    }
+}
+
+/// Conversations nobody has written in for a while are archived (#718): out
+/// of the sidebar's list, under its Show archived, and back at their next
+/// message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ConversationSettings {
+    /// Days a conversation may go without a message before it is archived;
+    /// 0 never archives one by itself.
+    #[serde(deserialize_with = "archive_idle_days")]
+    pub archive_idle_days: u32,
+}
+
+/// The idle limits the settings control offers; 0 is "never".
+pub const ARCHIVE_IDLE_DAYS: [u32; 6] = [0, 1, 3, 7, 14, 30];
+/// A week: on 2026-11-01, 57 of 89 sessions were finished, idle for 2 to 58
+/// days (median 7), and nothing had taken any of them out of the list.
+const DEFAULT_ARCHIVE_IDLE_DAYS: u32 = 7;
+
+/// A hand-edited or damaged value falls back to the default rather than
+/// archiving at a pace nobody chose.
+fn archive_idle_days<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    let days = serde_json::Value::deserialize(deserializer)?.as_u64().and_then(|value| u32::try_from(value).ok());
+    Ok(days.filter(|value| ARCHIVE_IDLE_DAYS.contains(value)).unwrap_or(DEFAULT_ARCHIVE_IDLE_DAYS))
+}
+
+impl Default for ConversationSettings {
+    fn default() -> Self {
+        Self { archive_idle_days: DEFAULT_ARCHIVE_IDLE_DAYS }
+    }
+}
+
+impl ConversationSettings {
+    /// How long a conversation may go without a message, or `None` when it
+    /// is never archived for that.
+    pub fn archive_after(&self) -> Option<chrono::Duration> {
+        (self.archive_idle_days > 0).then(|| chrono::Duration::days(i64::from(self.archive_idle_days)))
+    }
+}
+
+/// Features that are on only when the reader turns them on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExperimentalSettings {
+    /// New Codex conversations a person starts go through Codex's app server
+    /// (#644) where it can serve them (`session_ops::prefer_native_codex`).
+    pub native_codex: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -214,6 +312,10 @@ impl Default for Settings {
             floating: FloatingSettings::default(),
             merged_cleanup: MergedCleanupSettings::default(),
             work_status: WorkStatusSettings::default(),
+            machine_name: None,
+            agents: AgentSettings::default(),
+            conversations: ConversationSettings::default(),
+            experimental: ExperimentalSettings::default(),
         }
     }
 }
@@ -265,6 +367,15 @@ mod tests {
     }
 
     #[test]
+    fn experimental_features_stay_off_until_turned_on() {
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(!legacy.experimental.native_codex);
+        let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
+        assert!(on.experimental.native_codex);
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true}));
+    }
+
+    #[test]
     fn the_floating_window_defaults_on_and_a_shortcut_turned_off_stays_off() {
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.floating, FloatingSettings::default());
@@ -305,6 +416,50 @@ mod tests {
         for invalid in ["0", "1", "-10", "7.5", "\"10\"", "null", "99999999999"] {
             let damaged: Settings = serde_json::from_str(&format!(r#"{{"mergedCleanup":{{"graceMinutes":{invalid}}}}}"#)).unwrap();
             assert_eq!(damaged.merged_cleanup.grace_minutes, 10, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn idle_agents_stop_after_an_hour_unless_another_offered_limit_is_chosen() {
+        let read = |raw: &str| serde_json::from_str::<Settings>(raw).unwrap().agents;
+        // A settings file written before the limit existed.
+        let older = read(r#"{"notifications":true}"#);
+        assert_eq!(older.idle_stop_minutes, 60);
+        assert_eq!(older.idle_limit(), Some(std::time::Duration::from_secs(3600)));
+
+        for minutes in IDLE_STOP_MINUTES {
+            let chosen = read(&format!(r#"{{"agents":{{"idleStopMinutes":{minutes}}}}}"#));
+            assert_eq!(chosen.idle_stop_minutes, minutes);
+            let written = serde_json::to_value(&Settings { agents: chosen.clone(), ..Settings::default() }).unwrap();
+            assert_eq!(serde_json::from_value::<Settings>(written).unwrap().agents, chosen);
+        }
+        assert_eq!(read(r#"{"agents":{"idleStopMinutes":0}}"#).idle_limit(), None);
+        assert_eq!(read(r#"{"agents":{"idleStopMinutes":240}}"#).idle_limit(), Some(std::time::Duration::from_secs(4 * 3600)));
+
+        for invalid in ["1", "-30", "59.5", "\"60\"", "null", "99999999999"] {
+            assert_eq!(read(&format!(r#"{{"agents":{{"idleStopMinutes":{invalid}}}}}"#)).idle_stop_minutes, 60, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn idle_conversations_are_archived_after_a_week_unless_another_offered_limit_is_chosen() {
+        let read = |raw: &str| serde_json::from_str::<Settings>(raw).unwrap().conversations;
+        // A settings file written before the limit existed.
+        let older = read(r#"{"notifications":true}"#);
+        assert_eq!(older.archive_idle_days, 7);
+        assert_eq!(older.archive_after(), Some(chrono::Duration::days(7)));
+
+        for days in ARCHIVE_IDLE_DAYS {
+            let chosen = read(&format!(r#"{{"conversations":{{"archiveIdleDays":{days}}}}}"#));
+            assert_eq!(chosen.archive_idle_days, days);
+            let written = serde_json::to_value(&Settings { conversations: chosen.clone(), ..Settings::default() }).unwrap();
+            assert_eq!(serde_json::from_value::<Settings>(written).unwrap().conversations, chosen);
+        }
+        assert_eq!(read(r#"{"conversations":{"archiveIdleDays":0}}"#).archive_after(), None, "Never");
+        assert_eq!(read(r#"{"conversations":{"archiveIdleDays":30}}"#).archive_after(), Some(chrono::Duration::days(30)));
+
+        for invalid in ["2", "-7", "7.5", "\"7\"", "null", "99999999999"] {
+            assert_eq!(read(&format!(r#"{{"conversations":{{"archiveIdleDays":{invalid}}}}}"#)).archive_idle_days, 7, "{invalid}");
         }
     }
 

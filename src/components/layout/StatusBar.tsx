@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
-import { ChevronRight, Cpu, History, Loader2, RefreshCw, RotateCcw, SquareTerminal, Trash2, TriangleAlert } from "@/icons";
+import { ChevronRight, Cpu, History, Loader2, RefreshCw, RotateCcw, Square, SquareTerminal, Trash2, TriangleAlert } from "@/icons";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
@@ -25,13 +25,26 @@ import {
 import { selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import { useResourceSampling } from "@/lib/statusPolling";
-import { errorMessage, statusBar, type ProcSample, type StatusBarSettings, type UsageSnapshot, type UsageWindow } from "@/lib/api";
+import { useRuntimeSwitch } from "@/lib/localRuntime";
+import { RuntimeStatus } from "./RuntimeStatus";
+import {
+  errorMessage,
+  statusBar,
+  type LiveUsageRefused,
+  type ProcSample,
+  type StatusBarSettings,
+  type UsageRefreshSkip,
+  type UsageRefusal,
+  type UsageSnapshot,
+  type UsageWindow,
+} from "@/lib/api";
 
 const COMPACT_AT = 900;
 const ICON_ONLY_AT = 500;
 type StatusTier = "full" | "compact" | "icon";
 
-/** The quiet, app-wide chrome beneath every column. */
+/** The quiet, app-wide chrome beneath every column. Hidden, it still shows a
+ * runtime the app is moving to (#766), and only that, until it has. */
 export function StatusBar({
   onOpenAgentSettings,
   onOpenUsageDetails,
@@ -40,6 +53,7 @@ export function StatusBar({
   onOpenUsageDetails?: () => void;
 } = {}) {
   const { settings } = useStatus();
+  const runtime = useRuntimeSwitch();
   const ref = useRef<HTMLDivElement>(null);
   const [tier, setTier] = useState<StatusTier>("full");
 
@@ -54,7 +68,7 @@ export function StatusBar({
     return () => observer.disconnect();
   }, []);
 
-  if (!settings.visible) return null;
+  if (!settings.visible && !runtime) return null;
 
   return (
     <ContextMenu>
@@ -66,10 +80,11 @@ export function StatusBar({
           className="flex h-[22px] shrink-0 items-center justify-between gap-1 overflow-hidden border-t border-hairline bg-background/70 px-2 text-[11px] leading-none text-muted-foreground"
         >
           <div className="flex min-w-0 flex-1 items-center overflow-hidden">
-            <UsageCluster tier={tier} onOpenAgentSettings={onOpenAgentSettings} onOpenUsageDetails={onOpenUsageDetails} />
+            {settings.visible ? <UsageCluster tier={tier} onOpenAgentSettings={onOpenAgentSettings} onOpenUsageDetails={onOpenUsageDetails} /> : null}
           </div>
           <div className="flex shrink-0 items-center">
-            <ResourceCluster narrow={tier !== "full"} />
+            <RuntimeStatus tier={tier} />
+            {settings.visible ? <ResourceCluster narrow={tier !== "full"} /> : null}
           </div>
         </div>
       </ContextMenuTrigger>
@@ -180,7 +195,9 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
     }
   };
 
-  const requestKill = (process: ProcSample) => kill(process, false, resourceGeneration, process.killRule === "confirm");
+  // Both are asked about before anything ends: a kill loses work, and a stop is the agent's whole process.
+  const requestKill = (process: ProcSample) => kill(process, false, resourceGeneration, process.killRule === "confirm" || process.killRule === "stop");
+  const stopping = pending?.process.killRule === "stop";
 
   return (
     <>
@@ -270,7 +287,8 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
                           {process.killRule !== "none" ? (
                             <button
                               type="button"
-                              aria-label={`Kill ${process.tabTitle}`}
+                              aria-label={`${process.killRule === "stop" ? "Stop" : "Kill"} ${process.tabTitle}`}
+                              title={process.killRule === "stop" ? "Stop this idle agent; its next message starts it again" : undefined}
                               disabled={killing === process.paneId}
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -278,7 +296,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
                               }}
                               className="rounded p-1 text-faint opacity-0 hover:bg-destructive/15 hover:text-destructive focus:opacity-100 group-hover/process:opacity-100"
                             >
-                              <Trash2 className="size-3" />
+                              {process.killRule === "stop" ? <Square className="size-3" /> : <Trash2 className="size-3" />}
                             </button>
                           ) : <span />}
                         </div>
@@ -315,7 +333,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
       <Dialog open={pending != null && pending.generation === resourceGeneration} onOpenChange={(next) => !next && setPending(null)}>
         <DialogContent width="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Kill process?</DialogTitle>
+            <DialogTitle>{stopping ? "Stop agent?" : "Kill process?"}</DialogTitle>
             <DialogDescription>{pending?.message}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -327,7 +345,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
                 void kill(pending.process, true, pending.generation);
               }}
             >
-              Kill process
+              {stopping ? "Stop agent" : "Kill process"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -368,17 +386,21 @@ function isAccountWindow(window: UsageWindow): boolean {
   return window.key === "five_hour" || window.key === "seven_day" || window.key === "weekly";
 }
 
-/**
- * What follows "N% used" in the bar. Account windows are told apart by their
- * reset countdown alone; a scoped window shows its name instead, so Fable
- * reads "2% used Fable".
- */
+/** The runtime's `STALE_MS` (`status/usage.rs`): a window not updated for this long is last known. */
+const USAGE_STALE_MS = 30 * 60_000;
+
+/** Past its reset, for either provider (#772): none of its usage still counts, and only an answer says what does now. */
 function usageExpired(window: UsageWindow, now: number): boolean {
-  return window.agent === "claude" && window.resetsAt != null && window.resetsAt <= now;
+  return window.resetsAt != null && window.resetsAt <= now;
 }
 
+/**
+ * The runtime marks `stale` when it builds a snapshot; the window ages what it
+ * holds by the same rule (#772), so a snapshot nothing has replaced since does
+ * not keep reading as current.
+ */
 function usageStale(window: UsageWindow, now: number): boolean {
-  return window.stale || usageExpired(window, now);
+  return window.stale || now - window.updatedAt >= USAGE_STALE_MS || usageExpired(window, now);
 }
 
 function usageMeterClass(window: UsageWindow, now: number): string {
@@ -389,15 +411,20 @@ function usageTextClass(window: UsageWindow, now: number): string {
   return usageStale(window, now) ? "text-muted-foreground" : urgencyText(window.usedPercent);
 }
 
-function usageResetLabel(agent: UsageAgent, reset: number, now: number): string {
-  return agent === "claude" && reset <= now
+function usageResetLabel(reset: number, now: number): string {
+  return reset <= now
     ? "Window expired — awaiting update"
     : `Resets in ${formatResetCountdown(reset, now, "")}`;
 }
 
+/**
+ * What follows "N% used" in the bar. Account windows are told apart by their
+ * reset countdown alone; a scoped window shows its name instead, so Fable
+ * reads "2% used Fable".
+ */
 function windowTrailer(window: UsageWindow, now: number): string | null {
   if (usageExpired(window, now)) return `${windowLabel(window)} expired`;
-  if (window.stale) return `${windowLabel(window)} stale`;
+  if (usageStale(window, now)) return `${windowLabel(window)} stale`;
   if (!isAccountWindow(window)) return windowLabel(window);
   return window.resetsAt == null ? null : formatResetCountdown(window.resetsAt, now, "");
 }
@@ -432,8 +459,9 @@ function orderedWindows(windows: UsageWindow[]): UsageWindow[] {
   return windows.slice().sort((a, b) => windowOrder(a) - windowOrder(b) || (a.windowMinutes ?? 0) - (b.windowMinutes ?? 0) || a.key.localeCompare(b.key));
 }
 
+/** An account window always counts: at 0% with no reset it is one not yet started (#729). */
 function hasUsageData(window: UsageWindow): boolean {
-  return window.usedPercent > 0 || window.resetsAt != null;
+  return window.usedPercent > 0 || window.resetsAt != null || isAccountWindow(window);
 }
 
 /**
@@ -474,7 +502,15 @@ function formatUpdatedAgo(updatedAt: number, now: number): string {
 }
 
 /** How one provider's own refreshes are going, apart from what its windows last said. */
-type ProviderRefresh = { retryAt: number | null; error: string | null; lastSuccessAt?: number | null };
+type ProviderRefresh = {
+  retryAt: number | null;
+  error: string | null;
+  lastSuccessAt?: number | null;
+  lastUpdatedAt?: number | null;
+  refused?: Array<{ key: string; label: string; reason: UsageRefusal }>;
+  skipped?: UsageRefreshSkip | null;
+  liveRefused?: LiveUsageRefused | null;
+};
 
 function providerRefresh(usage: UsageSnapshot, agent: UsageAgent): ProviderRefresh | undefined {
   return agent === "claude" ? usage.claude : usage.codexRefresh;
@@ -484,14 +520,48 @@ function refreshPaused(refresh: ProviderRefresh | undefined, now: number): refre
   return refresh?.retryAt != null && refresh.retryAt > now;
 }
 
+type RefreshNotice = { title: string; detail: string | null; raw: string; tone: "warning" | "info" };
+
+/**
+ * Why the button's last press did not ask the provider, while that still
+ * holds. A retry pause already has its own notice.
+ */
+function skipNotice(agent: UsageAgent, refresh: ProviderRefresh, now: number): RefreshNotice | null {
+  const skip = refresh.skipped;
+  if (!skip || skip.reason === "retryPending" || (skip.nextAt != null && skip.nextAt <= now)) return null;
+  const title = skip.reason === "recent"
+    ? `${agentName(agent)} was refreshed ${refresh.lastSuccessAt != null ? formatAgo(refresh.lastSuccessAt, now) : "recently"}`
+    : skip.reason === "resetInFlight"
+      ? "A Codex reset is in progress"
+      : `${agentName(agent)} usage is already refreshing`;
+  const detail = skip.nextAt != null ? `Next refresh available in ${formatResetCountdown(skip.nextAt, now, "")}` : null;
+  return { title, detail, raw: "", tone: "info" };
+}
+
 /** A provider's refresh trouble in a few words: what happened, then why, with the raw error kept for the tooltip. */
-function refreshNotice(agent: UsageAgent, refresh: ProviderRefresh | undefined, now: number): { title: string; detail: string | null; raw: string } | null {
+function refreshNotice(agent: UsageAgent, refresh: ProviderRefresh | undefined, now: number): RefreshNotice | null {
   if (!refresh) return null;
   if (refreshPaused(refresh, now)) {
-    return { title: `${agentName(agent)} refresh paused · retry in ${formatResetCountdown(refresh.retryAt, now, "")}`, detail: refresh.error ? errorReason(refresh.error) : null, raw: refresh.error ?? "" };
+    return { title: `${agentName(agent)} refresh paused · retry in ${formatResetCountdown(refresh.retryAt, now, "")}`, detail: refresh.error ? errorReason(refresh.error) : null, raw: refresh.error ?? "", tone: "warning" };
   }
-  return refresh.error ? { title: `Couldn't refresh ${agentName(agent)} usage`, detail: errorReason(refresh.error), raw: refresh.error } : null;
+  if (refresh.error) return { title: `Couldn't refresh ${agentName(agent)} usage`, detail: errorReason(refresh.error), raw: refresh.error, tone: "warning" };
+  return skipNotice(agent, refresh, now);
 }
+
+const REFUSAL_COPY: Record<UsageRefusal, string> = {
+  earlierWindow: "the reply's reset time is earlier than the shown window's",
+  olderObservation: "a newer value had already arrived",
+  noDeadline: "the reply had no reset time while the shown window runs",
+  notYetStarted: "the window the endpoint saw running had not ended",
+  endedWindow: "the reply still had the window that just expired",
+};
+
+const LIVE_REFUSAL_COPY: Record<LiveUsageRefused["reason"], string> = {
+  launchUnknown: "the tab's Claude account wasn't known when it started",
+  launchMismatch: "its tab started under a different Claude account than the one signed in now",
+  statuslineMismatch: "the status line reported a different Claude account",
+  unidentified: "the signed-in Claude account can't be identified",
+};
 
 /**
  * The cause at the end of a chained error, without the addresses before it:
@@ -530,7 +600,15 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
     .filter((window) => hasUsageData(window) && !isCodexSubLimit(window))
     .sort((a, b) => b.usedPercent - a.usedPercent);
   const compactMode = settings.usageMode === "compact";
-  const now = useCountdownNow([...windows.map((window) => window.resetsAt), usage.claude?.retryAt ?? null, usage.codexRefresh?.retryAt ?? null]);
+  const now = useCountdownNow([
+    ...windows.map((window) => window.resetsAt),
+    // Each window turns last known by itself, with no snapshot to say so (#772).
+    ...windows.map((window) => window.updatedAt + USAGE_STALE_MS),
+    usage.claude?.retryAt ?? null,
+    usage.codexRefresh?.retryAt ?? null,
+    usage.claude?.skipped?.nextAt ?? null,
+    usage.codexRefresh?.skipped?.nextAt ?? null,
+  ]);
   if (!settings.usage || (!providerProbePending && !available.has("claude") && !available.has("codex"))) return null;
 
   const groups = AGENTS.flatMap((agent) => {
@@ -544,8 +622,8 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
     : "Usage unavailable";
   const detailGroup = groups.find(({ agent }) => agent === detailAgent) ?? null;
   // Claude's notice also explains an empty popover; Codex's only matters beside its windows.
-  const notices = usageError
-    ? [{ key: "app", title: "Couldn't refresh usage", detail: errorReason(usageError), raw: usageError }]
+  const notices: Array<RefreshNotice & { key: string }> = usageError
+    ? [{ key: "app", title: "Couldn't refresh usage", detail: errorReason(usageError), raw: usageError, tone: "warning" }]
     : AGENTS.filter((agent) => agent === "claude" || groups.some((group) => group.agent === agent))
       .flatMap((agent) => {
         const notice = refreshNotice(agent, providerRefresh(usage, agent), now);
@@ -672,8 +750,18 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           {notices.length ? (
             <div role="status" className="mb-2.5 flex flex-col gap-1.5">
               {notices.map((notice) => (
-                <div key={notice.key} title={notice.raw} className="flex items-start gap-2 rounded-lg bg-warning/8 px-2.5 py-2 ring-1 ring-inset ring-warning/15">
-                  <TriangleAlert className="mt-px size-3.5 shrink-0 text-warning" aria-hidden />
+                <div
+                  key={notice.key}
+                  title={notice.raw || undefined}
+                  data-usage-notice={notice.tone}
+                  className={cn(
+                    "flex items-start gap-2 rounded-lg px-2.5 py-2 ring-1 ring-inset",
+                    notice.tone === "warning" ? "bg-warning/8 ring-warning/15" : "bg-well/60 ring-hairline",
+                  )}
+                >
+                  {notice.tone === "warning"
+                    ? <TriangleAlert className="mt-px size-3.5 shrink-0 text-warning" aria-hidden />
+                    : <History className="mt-px size-3.5 shrink-0 text-faint" aria-hidden />}
                   <div className="min-w-0 text-[11.5px] leading-snug">
                     <div className="text-foreground">{notice.title}</div>
                     {notice.detail ? <div className="mt-0.5 truncate text-muted-foreground">{notice.detail}</div> : null}
@@ -695,7 +783,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                       type="button"
                       data-usage-compact-agent={compactMode ? agent : undefined}
                       aria-expanded={detailAgent === agent}
-                      aria-label={`${agentName(agent)}${reset == null ? "" : `, ${usageResetLabel(agent, reset, now)}`}`}
+                      aria-label={`${agentName(agent)}${reset == null ? "" : `, ${usageResetLabel(reset, now)}`}`}
                       onClick={() => setDetailAgent((current) => current === agent ? null : agent)}
                       className={cn(
                         "group/agent flex w-full flex-col gap-2.5 px-3 py-2.5 text-left outline-none transition-colors hover:bg-veil-raised focus-visible:bg-veil-raised",
@@ -711,7 +799,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
                           </span>
                         ) : null}
                         <span className="ml-auto truncate text-[11px] tabular-nums text-faint">
-                          {reset != null ? usageResetLabel(agent, reset, now) : null}
+                          {reset != null ? usageResetLabel(reset, now) : null}
                         </span>
                         {compactMode ? (
                           <span className={cn("shrink-0 text-[12px] font-medium tabular-nums", usageTextClass(tightest, now))}>
@@ -845,8 +933,17 @@ function AgentUsageDetail({
   // the newest of either is when this usage was last current, and a failed
   // refresh under newer live values has not left them behind.
   const newest = Math.max(...windows.map((window) => window.updatedAt));
-  const refreshedAt = Math.max(refresh?.lastSuccessAt ?? 0, newest);
-  const lastKnown = newest > (refresh?.lastSuccessAt ?? 0) ? "" : " Showing last known usage.";
+  const answeredAt = refresh?.lastSuccessAt ?? 0;
+  // "Last refreshed" is when an answer changed what is shown (#729). A runtime
+  // before #729 sends no lastUpdatedAt, and there every answer did.
+  const updatedAt = refresh?.lastUpdatedAt === undefined ? answeredAt : refresh.lastUpdatedAt ?? 0;
+  const refreshedAt = Math.max(updatedAt, newest);
+  const lastKnown = newest > answeredAt ? "" : " Showing last known usage.";
+  // The provider answered after the newest values and replaced none of them.
+  const checkedOnly = answeredAt > refreshedAt;
+  // Refusals that leave an older window up: the shown one still predates the answer.
+  const stuck = (refresh?.refused ?? []).filter((refused) => refused.reason !== "olderObservation"
+    && windows.some((window) => window.key === refused.key && window.updatedAt <= answeredAt));
   return (
     <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
@@ -865,7 +962,7 @@ function AgentUsageDetail({
               </div>
               <div className="mt-1 flex items-center justify-between gap-3 text-[10.5px] tabular-nums text-muted-foreground">
                 <span>{shown}% {percent}{usageStale(window, now) ? " (last known)" : ""}</span>
-                {window.resetsAt != null ? <span>{usageResetLabel(agent, window.resetsAt, now)}</span> : null}
+                {window.resetsAt != null ? <span>{usageResetLabel(window.resetsAt, now)}</span> : null}
               </div>
               <div className="mt-0.5 text-[10px] text-faint">{formatUpdatedAgo(window.updatedAt, now)}</div>
             </div>
@@ -874,6 +971,21 @@ function AgentUsageDetail({
       </div>
       <div data-usage-freshness className="mt-3 border-t border-hairline pt-2.5 text-[10.5px] text-muted-foreground">
         <div>{refreshedAt > 0 ? `Last refreshed ${formatAgo(refreshedAt, now)}` : "Not refreshed yet"}</div>
+        {checkedOnly ? <div data-usage-checked className="mt-1">Checked {formatAgo(answeredAt, now)} · no newer usage</div> : null}
+        {stuck.map((refused) => (
+          <div key={refused.key} data-usage-refused={refused.key} className="mt-0.5 text-faint">
+            {refused.label} kept: {REFUSAL_COPY[refused.reason] ?? "the reply did not replace it"}
+          </div>
+        ))}
+        {refresh?.liveRefused ? (
+          <div data-usage-live-refused className="mt-1 flex items-start gap-1 text-warning">
+            <TriangleAlert className="mt-px size-3 shrink-0" aria-hidden />
+            <span>
+              Live usage from a turn was refused {formatAgo(refresh.liveRefused.at, now)}:{" "}
+              {LIVE_REFUSAL_COPY[refresh.liveRefused.reason] ?? "its account did not match"}.
+            </span>
+          </div>
+        ) : null}
         {refreshPaused(refresh, now) || refresh?.error || refreshFailed ? (
           <div className="mt-1 flex items-start gap-1 text-warning">
             <TriangleAlert className="mt-px size-3 shrink-0" aria-hidden />

@@ -17,7 +17,7 @@ fn prompt(text: &str, queued: bool) -> AgentEvent {
     event(Payload::UserMessage { author: None, text: text.into(), images: vec![], baseline: None, queued, cwd: None })
 }
 fn done(status: TurnStatus) -> AgentEvent {
-    event(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false })
+    event(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None })
 }
 fn show(core: &mut Core, status: StarStatus, now: i64) {
     let ticket = core.begin_check(now).expect("eligible");
@@ -266,12 +266,43 @@ fn lifetime_hydration_and_stale_notifications_do_not_trigger_usage() {
 #[test]
 fn repeated_live_cycles_in_one_tab_feed_the_reminder_from_the_activity_ledger() {
     let _home = store::temp_home();
+    let _runtime = store::activity::writer_for_test();
     let mut c = Core::load(store::root().unwrap().join("reminder.json"), "1", 0, 0).unwrap();
     for state in [TabStatus::InProgress, TabStatus::InProgress, TabStatus::Waiting, TabStatus::InProgress, TabStatus::Completed] {
-        if let Some(total) = store::activity::transition("same/tab", state, store::activity::Source::Live).unwrap() {
+        if let Some(total) = store::activity::transition("same/tab", state, store::activity::Source::Live) {
             c.work_started(total as u64, 0).unwrap();
         }
     }
     assert_eq!(store::activity::summary().unwrap().agents_spawned, 2);
     assert_eq!(c.saved.launches, 2);
+}
+
+#[test]
+fn the_reminder_takes_the_runtimes_count_without_opening_the_lease() {
+    use store::activity::tests::{finish, lease_held, spawn_child, wait_for};
+    let _home = store::temp_home();
+    let _app = store::activity::app_for_test();
+    let root = store::root().unwrap();
+    let mut runtime = spawn_child("runtime_child", &root, &[("ACTIVITY_TEST_TURNS", "40".into())]);
+    wait_for(&root.join("runtime-ready"), &mut runtime);
+    // The app launches while the runtime holds the lease.
+    let nag = StarNag::load("1");
+    {
+        let core = nag.core.lock().unwrap();
+        assert!(!core.saved.completed, "the reminder still works beside a runtime");
+        assert_eq!(core.saved.launches, 40);
+    }
+    assert!(lease_held(&root), "the runtime kept the lease");
+    // Once attached, the runtime's own count: never usage by itself.
+    nag.counted(42);
+    nag.counted(41);
+    {
+        let mut core = nag.core.lock().unwrap();
+        core.ready = true;
+        assert_eq!(core.saved.launches, 42);
+        assert_eq!(core.begin_check(0), None);
+        core.work_started(42 + INITIAL_THRESHOLD, 0).unwrap();
+        assert!(core.begin_check(0).is_some(), "live starts after it still count");
+    }
+    finish(&root.join("runtime-quit"), runtime);
 }

@@ -1,25 +1,20 @@
-import { useEffect, useState } from "react";
-import { Check, Loader2, Pencil } from "@/icons";
+import { useState } from "react";
+import { Loader2 } from "@/icons";
+import { MachineNameSettings } from "./MachineNameSettings";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
 import { WorkStatusSettings } from "./WorkStatusSettings";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
 import { signIn, signOut, useAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
-import { setPairingHostName, usePairing } from "@/lib/pairing";
+import { usePairing } from "@/lib/pairing";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
 
 export function AccountTab() {
   const account = useAccount();
   const pairing = usePairing();
   const [confirmingSignOut, setConfirmingSignOut] = useState(false);
-  const [editingHostName, setEditingHostName] = useState(false);
-  const [hostName, setHostName] = useState("");
   const { status } = account;
-
-  useEffect(() => {
-    if (!editingHostName && pairing.status.host) setHostName(pairing.status.host.displayName);
-  }, [editingHostName, pairing.status.host]);
 
   if (!account.ready) {
     return (
@@ -62,6 +57,7 @@ export function AccountTab() {
             </Button>
           </div>
         )}
+        <MachineNameSettings />
         <WorkStatusSettings />
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
@@ -74,37 +70,7 @@ export function AccountTab() {
               <dt className="text-faint">Public key</dt><dd className="truncate font-mono">{pairing.status.host.publicKey}</dd>
               <dt className="text-faint">Generation</dt><dd>{pairing.status.host.bindingGeneration}</dd>
               <dt className="text-faint">Display name</dt>
-              <dd className="min-w-0">
-                {editingHostName ? (
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      autoFocus
-                      aria-label="Mac display name"
-                      className="h-7 min-w-0 flex-1 rounded-md border border-hairline bg-background px-2 text-xs outline-none focus:border-border"
-                      maxLength={80}
-                      value={hostName}
-                      onChange={(event) => setHostName(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") setEditingHostName(false);
-                      }}
-                    />
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Save Mac display name"
-                      disabled={pairing.busy || !hostName.trim()}
-                      onClick={() => void setPairingHostName(hostName).then(() => setEditingHostName(false)).catch(() => {})}
-                    >
-                      {pairing.busy ? <Loader2 className="animate-spin" /> : <Check />}
-                    </Button>
-                  </div>
-                ) : (
-                  <button className="group flex max-w-full items-center gap-1.5 text-left" onClick={() => setEditingHostName(true)}>
-                    <span className="truncate">{pairing.status.host.displayName}</span>
-                    <Pencil className="size-3 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
-                  </button>
-                )}
-              </dd>
+              <dd className="truncate">{pairing.status.host.displayName}</dd>
               <dt className="text-faint">Platform</dt><dd>{pairing.status.host.platform}</dd>
               <dt className="text-faint">Environment</dt><dd>{pairing.status.host.environmentKind}</dd>
               <dt className="text-faint">Capability</dt><dd className="truncate font-mono">{pairing.status.host.capabilities.join(", ")}</dd>
