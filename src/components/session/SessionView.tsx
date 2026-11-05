@@ -112,6 +112,7 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       workspace={workspace}
       terminals
       computer
+      browser
     />
   );
 }
@@ -922,6 +923,7 @@ export function SessionView({
             workspace={workspace}
             terminals
             computer
+            browser
           />
         ))}
       {cloud ? (

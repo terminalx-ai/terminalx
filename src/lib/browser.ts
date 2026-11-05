@@ -132,6 +132,17 @@ export async function openBrowserTab(sessionId: string, cwd: string, url?: strin
   return opened.browserPageId;
 }
 
+/**
+ * Open a page in the workspace's browser without making it the session's
+ * shown tab: the side panel shows it beside the chat instead.
+ */
+export async function openBrowserPage(cwd: string, url?: string | null): Promise<string> {
+  await bootBrowser();
+  const opened = await browserApi.openTab(cwd, url ?? null);
+  await refreshBrowserPages().catch(() => undefined);
+  return opened.browserPageId;
+}
+
 export async function closeBrowserPage(sessionId: string, pageId: string) {
   clearSelectedBrowser(sessionId, pageId);
   await browserApi.closePage(pageId);
