@@ -85,6 +85,31 @@ authenticated control API. The hook token is minted per launch of the tab's
 CLI; the server drops any frame whose token does not match the live tab, and
 only accepts a `transcript_path` under that tab's own transcript directory.
 
+### New-chat composer (PRO-173)
+
+Sidebar **New chat**, a project's **New chat**, and a branch's start action
+open `NewSessionView`. Opening or closing the form creates no session,
+scratch folder, worktree, or running agent tab. The destination is a draft in
+`sessions.ts`; a project-less draft uses the same quick-chat creation as the
+floating window. A project or branch draft retains that destination until
+Send. Only the first send creates the session and delivers its prompt.
+
+`useSessionAgent` reads and writes the existing `prefs.ts` preferences for
+agent, per-agent model and effort, and permission mode. Local new-chat forms
+check all offered agents before choosing: a remembered signed-in agent wins,
+then another signed-in agent. A missing or signed-out agent is never selected.
+When neither can run, setup instructions stay beside the unsent draft.
+Unknown probes remain distinct from a known missing login: custom routes can
+work without an account the probe recognizes, so an installed unknown agent
+is a fallback only when no verified login exists, or an explicit choice.
+Cloud forms continue to use the workspace's agents and model catalog.
+
+Discovery and fallback never overwrite preferences; only explicit picker
+choices do. Send checks login again before creating anything. A refusal keeps
+the prompt and attachments, and Check again can pick up a completed login.
+The zero-, one-, and two-login cases are covered by `useSessionAgent.test.ts`,
+with asynchronous discovery and stale-probe tests in `agentReadiness.test.ts`.
+
 Opening a Claude tab starts its CLI (`ensure_tab_started`); it does not wait for
 a first prompt, because in this model the tab *is* the CLI.
 

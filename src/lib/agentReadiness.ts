@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { HarnessInfo } from "@/types/session";
 
 export interface AgentReadiness {
   state: "missing" | "signed_out" | "ready" | "unknown";
@@ -48,4 +49,39 @@ export function useAgentReadiness(harness: string | null) {
     return () => { generation.current++; };
   }, [refresh]);
   return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
+}
+
+export type AgentReadinessMap = Readonly<Record<string, AgentReadiness>>;
+
+/** Check all candidates before choosing a default, without persisting a fallback as a preference. */
+export function useAgentReadinessList(harnesses: readonly Pick<HarnessInfo, "id" | "available" | "path">[], enabled = true) {
+  // Discovery can return a fresh array on every render. Only a changed installation needs another check.
+  const key = JSON.stringify(enabled ? harnesses.map(({ id, available, path }) => [id, available, path]) : []);
+  const [answer, setAnswer] = useState<{ key: string; values: AgentReadinessMap } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const generation = useRef(0);
+  const refresh = useCallback(async () => {
+    const run = ++generation.current;
+    const candidates: [string, boolean, string | null][] = JSON.parse(key);
+    setChecking(true);
+    const entries = await Promise.all(candidates.map(async ([id, installed]) => [id, installed
+      ? await checkAgentReadiness(id)
+      : { state: "missing", checkedAt: null, version: null } satisfies AgentReadiness] as const));
+    const values: AgentReadinessMap = Object.fromEntries(entries);
+    if (run === generation.current) {
+      setAnswer({ key, values });
+      setChecking(false);
+    }
+    return values;
+  }, [key]);
+  useEffect(() => {
+    void refresh();
+    return () => { generation.current++; };
+  }, [refresh]);
+  return {
+    values: answer?.key === key ? answer.values : null,
+    checking: checking || answer?.key !== key,
+    refresh,
+    refreshAgent: async (id: string) => (await refresh())[id] ?? null,
+  };
 }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New chat opens the same composer from the sidebar and project menus, and
+  creates nothing until the first prompt is sent. Both use the same saved
+  agent, model, effort and permission mode, preferring an agent with a local
+  login. When neither agent is signed in, setup keeps the draft ready. (PRO-173)
+
 ## 0.2.24
 
 ### Background sessions
