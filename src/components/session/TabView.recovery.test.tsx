@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), answerPermission: (_request: string, _option: string): void => {}, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
@@ -14,7 +14,13 @@ vi.mock("@/lib/tabViews", () => ({
   clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => <div>Terminal output</div> }));
-vi.mock("@/components/chat/Chat", () => ({ Chat: ({ footer }: { footer: React.ReactNode }) => <div>{footer}</div> }));
+vi.mock("@/components/chat/Chat", async importOriginal => {
+  const { Chat } = await importOriginal<typeof import("@/components/chat/Chat")>();
+  return { Chat: (props: React.ComponentProps<typeof Chat>) => {
+    mocks.answerPermission = props.onAnswerPermission;
+    return <Chat {...props} />;
+  } };
+});
 vi.mock("@/components/chat/Composer", () => ({ Composer: ({ draft }: { draft: string }) => <textarea aria-label="Unsent prompt" value={draft} readOnly /> }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => <div>Continue dialog</div> }));
 
@@ -42,6 +48,7 @@ function Harness() {
   </TooltipProvider>;
 }
 beforeEach(() => {
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
   session = { id: `session${++seq}`, projectPath: "/workspace", cwd: "/workspace", title: "Recovery test", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
     tabs: [{ id: `tab${seq}`, harness: "codex", model: "original", permissionMode: "default", status: "in_progress", created: "", modified: "" }] };
   mocks.views.views = { [session.tabs[0].id]: "terminal" };
@@ -63,9 +70,61 @@ beforeEach(() => {
   selectSession(session.id);
   setDraft(session.tabs[0].id, "Keep this unsent prompt");
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("TabView recovery lifecycle", () => {
+  it.each([["allow", "chat"], ["deny", "chat"], ["allow", "terminal"], ["deny", "terminal"]])("retires a duplicate Codex request after %s in %s before the decision broadcast arrives (PRO-160)", async (option, mode) => {
+    mocks.views.views[session.tabs[0].id] = mode;
+    render(<Harness />);
+    const request: Payload = { type: "permission_requested", requestId: "codex-request", toolUseId: "", toolName: "Bash", input: { command: "pwd" }, options: [
+      { id: "allow", kind: "allow_once", label: "Allow" }, { id: "deny", kind: "deny", label: "Deny" },
+    ] };
+    emit(request);
+    emit(request);
+    act(() => setTabStatus(session.id, session.tabs[0].id, "waiting"));
+    expect(screen.getAllByText("Waiting for permission to run a command")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: option === "allow" ? /^Allow/ : "Deny" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull());
+    emit(request);
+    expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "respond_permission")).toHaveLength(1);
+  });
+
+  it("retires a request answered in the terminal immediately (PRO-160)", () => {
+    render(<Harness />);
+    emit({ type: "permission_requested", requestId: "terminal-request", toolUseId: "", toolName: "Bash", input: { command: "pwd" }, options: [{ id: "allow", kind: "allow_once", label: "Allow" }] });
+    act(() => setTabStatus(session.id, session.tabs[0].id, "waiting"));
+    expect(screen.getByRole("button", { name: /^Allow/ })).toBeTruthy();
+    emit({ type: "permission_decided", requestId: "terminal-request", allowed: true, label: "Allowed", automatic: false });
+    expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "respond_permission")).toHaveLength(0);
+  });
+
+  it("does nothing when a stale card's callback runs after a terminal answer, and explains why (PRO-160)", async () => {
+    mocks.views.views[session.tabs[0].id] = "chat";
+    render(<Harness />);
+    emit({ type: "permission_requested", requestId: "stale-request", toolUseId: "", toolName: "Bash", input: { command: "pwd" }, options: [{ id: "allow", kind: "allow_once", label: "Allow" }] });
+    act(() => setTabStatus(session.id, session.tabs[0].id, "waiting"));
+    const stale = mocks.answerPermission;
+    emit({ type: "permission_decided", requestId: "stale-request", allowed: true, label: "Allowed", automatic: false });
+    await act(async () => stale("stale-request", "allow"));
+    expect(screen.getByText("This request was already answered or is no longer open.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "respond_permission")).toHaveLength(0);
+  });
+
+  it("retires a stale card when another window wins the answer before the backend receives this one (PRO-160)", async () => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "respond_permission" ? Promise.reject("that request is no longer open") : original(command, args));
+    render(<Harness />);
+    emit({ type: "permission_requested", requestId: "stale-request", toolUseId: "", toolName: "Bash", input: { command: "pwd" }, options: [{ id: "allow", kind: "allow_once", label: "Allow" }] });
+    act(() => setTabStatus(session.id, session.tabs[0].id, "waiting"));
+    fireEvent.click(screen.getByRole("button", { name: /^Allow/ }));
+    await screen.findByText("This request was already answered or is no longer open.");
+    expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();
+    expect(screen.queryByText(/Retry safely/)).toBeNull();
+  });
+
   it("sends a prompt the agent never received again, as it was sent, and leaves the draft alone (#663)", async () => {
     const otherwise = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, args?: unknown) => command === "resend_unsent"

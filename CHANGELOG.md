@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Show each permission request once, and retire it as soon as Allow or Deny
+  is confirmed, including answers from the terminal or another card. Late
+  duplicate requests stay retired; clicking a stale card explains that the
+  request was already answered without submitting another decision. (PRO-160)
+
 ## 0.2.24
 
 ### Background sessions
