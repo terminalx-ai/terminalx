@@ -2846,24 +2846,43 @@ impl SessionManager {
 
     /// The tab as a process started now should see it: a change left waiting
     /// by a process that has since gone rides with this one.
-    fn launching(&self, rt: &mut TabRuntime, tab: &TabEntry) -> TabEntry {
+    fn launching(&self, rt: &mut TabRuntime, tab: &TabEntry) -> Result<(TabEntry, Vec<crate::data_privacy::RemoteWrite>)> {
+        let privacy = self.admit_pending_settings(rt)?;
+        let (_, now) = self.update_settings(rt, |s| s.settled_without_process())?;
         let mut tab = tab.clone();
-        if let Some(now) = self.settle_settings_without_process(rt) {
-            now.write(&mut tab);
+        now.write(&mut tab);
+        Ok((tab, privacy))
+    }
+
+    // ACP chooses a model during its asynchronous session-opening handshake,
+    // after the process was spawned. Revalidate just before handling each
+    // opening reply and retain admission through the resulting stdio writes.
+    // The provider's acknowledgement consumes the request via Settings::reported.
+    fn prepare_acp_opening_settings(&self, rt: &mut TabRuntime) -> Result<Vec<crate::data_privacy::RemoteWrite>> {
+        if !matches!(&rt.engine, Engine::Acp(a) if !a.ready) { return Ok(Vec::new()); }
+        let privacy = self.admit_pending_settings(rt)?;
+        let entry = index::get(&rt.session_id)?;
+        let tab = entry.tab(&rt.tab_id).context("tab not found")?;
+        if let Engine::Acp(a) = &mut rt.engine {
+            a.model = Some(tab.requested_model.as_ref().unwrap_or(&tab.model).clone()).filter(|m| !m.is_empty());
+            a.mode = tab.permission_mode.clone();
         }
-        tab
+        Ok(privacy)
     }
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
-        let tab = &self.launching(rt, tab);
+        let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
+        // Leave a remote model pending until the handshake actually asks
+        // the provider for it. The next reply rechecks its privacy ticket.
+        let _opening = self.prepare_acp_opening_settings(rt)?;
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).with_context(|| format!("start {binary}"))?;
         Ok(())
     }
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
-        let tab = &self.launching(rt, tab);
+        let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start OpenCode")?;
@@ -4162,11 +4181,6 @@ impl SessionManager {
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
-        // Only a successful spawn consumes deferred remote requests. A
-        // failed launch must leave their authority available for withdrawal.
-        if launching != waited {
-            self.update_settings(rt, |s| s.launched())?;
-        }
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             usage_account,
@@ -4208,17 +4222,28 @@ impl SessionManager {
         });
         rt.turn_open = false;
         self.announce_pane(rt);
-        if let Some(id) = launch.minted {
-            index::update_tab(&rt.session_id, &rt.tab_id, |t| {
-                t.provider_session_id = Some(id.clone());
-                // `fork_from` stays: the CLI has only just started, and until
-                // it has written the fork's own transcript the parent's is
-                // the only copy of the conversation, and the one a launch
-                // before then makes the fork from again.
-                Ok(())
-            })?;
-        }
         self.follow_transcript(rt_arc, tail, pane, generation);
+        // The process is now fully owned, including its hook token and
+        // transcript follower. No fallible persistence may leave a live CLI
+        // unregistered. An uncommitted request keeps its original ticket.
+        // Persistence failure requires Stop before retrying; the normal
+        // Stop path still owns this process.
+        let committed = (|| -> Result<()> {
+            if launching != waited { self.update_settings(rt, |s| s.launched())?; }
+            if let Some(id) = launch.minted {
+                index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                    t.provider_session_id = Some(id.clone());
+                    // Keep fork_from until the new CLI has its own transcript.
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = committed {
+            rt.stopping = true;
+            self.needs_recovery(rt, RecoveryKind::Disconnected);
+            return Err(error.context("The agent started, but its launch settings could not be saved. Stop the agent before retrying"));
+        }
         if let Some(restart) = launch.restart {
             self.restarted(rt, rt_arc, restart, prompting);
         }
@@ -6285,7 +6310,17 @@ impl SessionManager {
 
     fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) {
         let mut rt = rt_arc.lock().unwrap();
+        if rt.stopping && matches!(&rt.engine, Engine::Acp(_)) { return; }
         rt.last_activity = Instant::now();
+        let _privacy = match self.prepare_acp_opening_settings(&mut rt) {
+            Ok(privacy) => privacy,
+            Err(error) => {
+                rt.stopping = true;
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+                self.publish(&mut rt, Payload::Status { text: format!("Could not read the agent's launch settings. Stop the agent before retrying: {error:#}") }, None);
+                return;
+            }
+        };
         let actions = match &mut rt.engine {
             Engine::Acp(a) => a.handle(line),
             Engine::OpenCode(o) => o.handle(line),

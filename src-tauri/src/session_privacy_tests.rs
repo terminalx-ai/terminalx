@@ -378,3 +378,219 @@ fn deferred_child() {
     reloaded.launched();
     assert_eq!(reloaded, after, "a later launch cannot revive any withdrawn phone edit");
 }
+
+#[test]
+fn privacy_launch_lifecycle_preserves_ownership_and_acp_model_delivery() {
+    for case in ["cli-commit-failure", "acp-off", "acp-on-before-start", "acp-cycle-before-start",
+        "acp-on-before-delivery", "acp-cycle-before-delivery"] {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("child.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::watch_tests::prompts::privacy::lifecycle_child", "--nocapture"])
+            .env(CASE, case)
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
+        let until = Instant::now() + WAIT;
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() { break status; }
+            assert!(Instant::now() < until, "{case}: {}", std::fs::read_to_string(&log_path).unwrap());
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success(), "{case}: {}", std::fs::read_to_string(&log_path).unwrap());
+    }
+}
+
+fn lifecycle_phone(rig: &Rig) -> (Arc<crate::local_runtime::Lifetime>, crate::local_runtime::mobile::Actor) {
+    crate::data_privacy::refresh();
+    store::write_json(&store::root().unwrap().join("devices.json"), &json!({"devices":[{"id":"phone","label":"Phone","platform":"test",
+        "token":"fixture","scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()}]})).unwrap();
+    let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(120));
+    let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+    let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+    rig.manager.mobile.register(&lifetime, actor.clone(), "connection", "phone").unwrap();
+    (lifetime, actor)
+}
+
+fn lifecycle_privacy(enabled: bool) {
+    store::write_json(&store::root().unwrap().join("data-privacy.json"), &json!({"enabled":enabled})).unwrap();
+    assert_eq!(crate::data_privacy::refresh().enabled, enabled);
+}
+
+fn executable(path: &std::path::Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn lifecycle_child() {
+    let Ok(case) = std::env::var(CASE) else { return };
+    if case == "cli-commit-failure" { post_spawn_commit_failure(); }
+    else { acp_pending_model_restart(&case); }
+}
+
+fn post_spawn_commit_failure() {
+    let rig = Rig::on(CliKind::Codex, "original-model", Some("low"));
+    let (lifetime, actor) = lifecycle_phone(&rig);
+    let program = rig._dir.path().join("codex");
+    executable(&program, r#"#!/bin/sh
+case "$1" in
+  --help) printf '  --no-daemon  Run without the daemon\n'; exit 0;;
+  app-server) exit 1;;
+esac
+printf 'LAUNCH %s\n' "$*" >> "$0.launches"
+stty raw -echo
+exec cat
+"#);
+    let _program = codex::pty::codex_program_for_tests(program.clone());
+    rig.rt.lock().unwrap().engine = Engine::None;
+    rig.manager.ensure_started(SESSION, TAB).unwrap();
+    let launches = || std::fs::read_to_string(program.with_extension("launches")).unwrap_or_default();
+    wait_for("initial real CLI", || launches().lines().count() == 1);
+    rig.rt.lock().unwrap().turn_open = true;
+    crate::local_runtime::mobile::execute(&rig.manager, &lifetime, "setModel",
+        json!({"actor":actor,"connection":"connection","sessionId":SESSION,"tabId":TAB,"model":"remote-model"})).unwrap();
+    let pending = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+    assert_eq!(pending.requested_model.as_deref(), Some("remote-model"));
+    assert!(!pending.request_privacy.is_empty());
+    let index_path = store::sessions_dir().unwrap().join("index.json");
+    let backup = index_path.with_extension("before-failure");
+    let fail_path = index_path.clone();
+    let saved_path = backup.clone();
+    let terminals = rig.manager.terminals.clone();
+    let pane = rig.pane.clone();
+    let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let inject = injected.clone();
+    // The real pane announcement occurs after spawn. Replace only the test
+    // index with a directory so the subsequent settings read/write fails.
+    let listener = rig.manager.sink.listen("tab_pty", Box::new(move |_| {
+        if !inject.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            assert!(terminals.is_running(&pane));
+            std::fs::rename(&fail_path, &saved_path).unwrap();
+            std::fs::create_dir(&fail_path).unwrap();
+        }
+    }));
+    let tail = {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.turn_open = false;
+        match &rt.engine { Engine::Cli(p) => p.tail.clone(), _ => unreachable!() }
+    };
+    let work = rig.manager.begin_idle_restart_launch(&rig.rt, &tail).unwrap();
+    let error = rig.manager.complete_cli_restart(&rig.rt, work).unwrap_err();
+    assert!(error.to_string().contains("Stop the agent before retrying"), "{error:#}");
+    assert!(injected.load(std::sync::atomic::Ordering::SeqCst));
+    rig.manager.sink.unlisten(listener);
+    std::fs::remove_dir(&index_path).unwrap();
+    std::fs::rename(&backup, &index_path).unwrap();
+    wait_for("replacement really executed", || launches().lines().count() == 2);
+    assert!(launches().lines().nth(1).unwrap().contains("remote-model"));
+    let token = {
+        let rt = rig.rt.lock().unwrap();
+        assert!(rt.stopping && rt.recovery.is_some(), "a failed commit is explicitly recoverable");
+        let Engine::Cli(p) = &rt.engine else { panic!("a successfully spawned CLI must retain runtime ownership") };
+        assert!(rig.manager.terminals.is_running(&p.pane_id));
+        p.origin.token.clone()
+    };
+    assert_eq!(Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap()), pending,
+        "failed commit must not strip the pending request's authority");
+    let reply = rig.manager.on_hook(HookFrame { session:SESSION.into(),tab:TAB.into(),token:token.clone(),event:"SessionStart".into(),payload:json!({}) });
+    assert!(reply.refused.is_none(), "the live process's own hook is recognized: {:?}", reply.refused);
+    assert!(rig.manager.ensure_started(SESSION, TAB).is_err(), "retry cannot spawn another process before Stop");
+    assert_eq!(launches().lines().count(), 2);
+    let pid = rig.manager.terminals.panes().into_iter().find(|p| p.id == rig.pane).unwrap().pid.unwrap();
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert!(!rig.manager.terminals.is_running(&rig.pane));
+    assert!(!crate::harness::host::is_alive(pid), "normal Stop must confirm the owned process exited");
+    assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::None));
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().requested_model.as_deref(), Some("remote-model"));
+    lifecycle_privacy(true);
+    lifecycle_privacy(false);
+    rig.manager.ensure_started(SESSION, TAB).unwrap();
+    wait_for("retry after privacy cycle", || launches().lines().count() == 3);
+    assert!(launches().lines().nth(2).unwrap().contains("original-model"));
+    assert!(!launches().lines().nth(2).unwrap().contains("remote-model"));
+    assert!(index::get(SESSION).unwrap().tab(TAB).unwrap().requested_model.is_none());
+    let reply = rig.manager.on_hook(HookFrame { session:SESSION.into(),tab:TAB.into(),token,event:"SessionStart".into(),payload:json!({}) });
+    assert!(reply.refused.is_some(), "the prior launch's hook cannot attach to the replacement");
+    rig.manager.stop(SESSION, TAB).unwrap();
+}
+
+fn acp_pending_model_restart(case: &str) {
+    let rig = Rig::on(CliKind::Claude, "original-model", Some("low"));
+    index::update_tab(SESSION, TAB, |tab| { tab.harness = "cursor".into(); tab.permission_mode = "auto".into(); Ok(()) }).unwrap();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.harness = "cursor".into();
+        rt.engine = Engine::None;
+    }
+    let (lifetime, actor) = lifecycle_phone(&rig);
+    let program = rig._dir.path().join("acp-capture");
+    executable(&program, r#"#!/bin/sh
+while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
+"#);
+    let requests_path = program.with_extension("requests");
+    let requests = || store::read_lines::<serde_json::Value>(&requests_path).unwrap_or_default();
+    let launch = || {
+        let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
+        rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
+    };
+    let begin = || {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
+        let actions = a.start("local prompt".into(), vec![]);
+        rig.manager.apply_actions(&mut rt, actions);
+    };
+    let initialized = || rig.manager.on_line(&rig.rt, r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#);
+    let opened = || rig.manager.on_line(&rig.rt, r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"existing-session","models":{"currentModelId":"original-model"}}}"#);
+    launch();
+    begin();
+    initialized();
+    opened();
+    // An existing ACP session receives the phone request but has not replied.
+    crate::local_runtime::mobile::execute(&rig.manager, &lifetime, "setModel",
+        json!({"actor":actor,"connection":"connection","sessionId":SESSION,"tabId":TAB,"model":"remote-model"})).unwrap();
+    wait_for("first model request reached real stdio", || requests().iter().any(|v| v["method"] == "session/set_model" && v["params"]["modelId"] == "remote-model"));
+    // A separate local launch default must survive cancellation of the model.
+    rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap();
+    rig.manager.stop(SESSION, TAB).unwrap();
+    let stopped = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+    assert_eq!(stopped.model, "original-model");
+    assert_eq!(stopped.requested_model.as_deref(), Some("remote-model"));
+    assert!(!stopped.request_privacy.is_empty());
+    assert_eq!(stopped.permission_mode, "plan");
+    std::fs::write(&requests_path, b"").unwrap();
+    let toggle = || {
+        lifecycle_privacy(true);
+        if case.contains("cycle") { lifecycle_privacy(false); }
+    };
+    if case.ends_with("before-start") { toggle(); }
+    launch();
+    begin();
+    initialized();
+    if case.ends_with("before-delivery") { toggle(); }
+    opened();
+    // Waiting for the prompt frame proves the model-selection delivery step
+    // ran; the absence assertion below is not just an unscheduled writer.
+    wait_for("restarted ACP reached its prompt", || requests().iter().any(|v| v["method"] == "session/prompt"));
+    let frames = requests();
+    let models: Vec<_> = frames.iter().filter(|v| v["method"] == "session/set_model").collect();
+    if case == "acp-off" {
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["params"]["modelId"], "remote-model");
+        assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().requested_model.as_deref(), Some("remote-model"), "delivery still waits for the provider's response");
+        rig.manager.on_line(&rig.rt, &json!({"jsonrpc":"2.0","id":models[0]["id"],"result":{}}).to_string());
+    } else {
+        assert!(models.is_empty(), "an expired remote request must not reach the restarted provider: {frames:?}");
+    }
+    let after = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+    assert_eq!(after.model, if case == "acp-off" { "remote-model" } else { "original-model" });
+    assert!(after.requested_model.is_none());
+    assert!(after.request_privacy.is_empty());
+    assert_eq!(after.permission_mode, "plan");
+    let rt = rig.rt.lock().unwrap();
+    let Engine::Acp(a) = &rt.engine else { unreachable!() };
+    assert_eq!(a.model.as_deref(), Some(after.model.as_str()));
+    assert_eq!(a.mode, "plan");
+    drop(rt);
+    rig.manager.stop(SESSION, TAB).unwrap();
+}
