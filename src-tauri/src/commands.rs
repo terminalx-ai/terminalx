@@ -518,12 +518,21 @@ pub async fn cloud_provider(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.provider(provider))
 }
 
-enum ProviderPromptError { Cancelled, Empty, Unavailable }
+enum ProviderPromptError {
+    // Only the AppKit secure dialog can be cancelled or submit an empty field.
+    #[cfg(target_os = "macos")]
+    Cancelled,
+    #[cfg(target_os = "macos")]
+    Empty,
+    Unavailable,
+}
 
 impl ProviderPromptError {
     fn client_error(self) -> crate::cloud_workspaces::CloudWorkspaceClientError {
         let code = match self {
+            #[cfg(target_os = "macos")]
             Self::Cancelled => "cloud_provider_entry_cancelled",
+            #[cfg(target_os = "macos")]
             Self::Empty => "cloud_provider_credential_required",
             Self::Unavailable => "cloud_provider_secure_input_unavailable",
         };

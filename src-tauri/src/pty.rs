@@ -81,6 +81,7 @@ impl Input {
         let mut written = 0;
         let started = Instant::now();
         let mut progress = started;
+        let mut wait_expired = false;
         while written < data.len() {
             match self.writer.write(&data[written..]) {
                 Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
@@ -92,13 +93,17 @@ impl Input {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 #[cfg(unix)]
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    let left = if self.stalled { Duration::ZERO } else {
+                    let left = if self.stalled || wait_expired { Duration::ZERO } else {
                         INPUT_STALL.saturating_sub(progress.elapsed()).min(INPUT_DEADLINE.saturating_sub(started.elapsed()))
                     };
                     if left.is_zero() || !ready(&self.room, libc::POLLOUT, Some(left))? {
                         self.stalled = true;
                         return Err(InputStalled { written, total: data.len() }.into());
                     }
+                    // Linux can report writable only when poll's timeout
+                    // expires. Take any room it found without blocking, but
+                    // do not let that late progress renew either wait budget.
+                    wait_expired = progress.elapsed() >= INPUT_STALL || started.elapsed() >= INPUT_DEADLINE;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -2048,11 +2053,17 @@ mod tests {
         let terminals = Arc::new(Terminals::new());
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
         let dir = tempfile::tempdir().unwrap();
+        // Start measuring only once both programs are ready. Shell startup
+        // can otherwise change the PTY's queues while the stall is timed.
+        let (deaf_tap, deaf_output) = collector();
+        terminals.attach("main", "deaf", "view", deaf_tap);
         // Never reads: whole lines fill its input queue after about 1 KB.
-        pane(&terminals, &sink, &dir, "deaf", "sleep 600");
-        pane(&terminals, &sink, &dir, "other", "cat");
+        pane(&terminals, &sink, &dir, "deaf", "sh -c 'printf deaf-ready; exec sleep 600'");
+        read_until(&deaf_output, "deaf-ready");
+        pane(&terminals, &sink, &dir, "other", "sh -c 'printf other-ready; exec cat'");
         let (tap, output) = collector();
         terminals.attach("main", "other", "view", tap);
+        read_until(&output, "other-ready");
         let lines = "a line the program never reads\n".repeat(512);
 
         let started = Instant::now();

@@ -1067,6 +1067,8 @@ pub struct SessionManager {
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
     starts: Arc<std::sync::atomic::AtomicU64>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    /// Only callers hold this sender; its last drop wakes and ends the watcher.
+    watcher_lifetime: Option<std::sync::mpsc::Sender<()>>,
     stop_pids: Arc<Mutex<Vec<u32>>>,
     session_stop_pids: Arc<Mutex<HashMap<String, Vec<u32>>>>,
     /// Tabs following their terminal (#437); off until the desktop app asks.
@@ -1392,6 +1394,7 @@ impl SessionManager {
         status: Arc<crate::status::StatusState>,
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
+        let (watcher_lifetime, stop_watching) = std::sync::mpsc::channel();
         let manager = Self {
             mobile: Arc::new(crate::local_runtime::mobile::Registry::default()),
             sharing: Arc::new(Mutex::new(crate::local_sharing::Sharing::default())),
@@ -1406,18 +1409,23 @@ impl SessionManager {
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            watcher_lifetime: Some(watcher_lifetime),
             history_downloads: Arc::default(),
             typing: Arc::default(),
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
             follow: Arc::default(),
         };
-        let watcher = manager.clone();
-        std::thread::spawn(move || loop {
-            // Short, because an unacknowledged prompt is judged here and the
-            // reader is waiting on it; a pass only looks at each tab.
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+        let mut watcher = manager.clone();
+        // The polling copy must not keep its own lifetime alive. In particular,
+        // dropping a test fixture must release its thread and retained state.
+        drop(watcher.watcher_lifetime.take());
+        std::thread::spawn(move || {
+            // Preserve the five-second polling interval, but wake immediately
+            // when every caller has dropped its manager.
+            while matches!(stop_watching.recv_timeout(std::time::Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+            }
         });
         manager
     }

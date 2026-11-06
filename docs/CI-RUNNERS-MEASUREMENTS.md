@@ -84,20 +84,36 @@ Samples:
   checks, Swift helper tests/build, `cargo clippy --locked --all-targets -- -D
   warnings`, the full `pnpm test:webkit-layout` command and permission-details
   WebKit check.
-- Passed on macOS: full `cargo test --locked`, with 2,870 unit tests and eight
-  integration tests passing. The 24 existing ignored tests remain unchanged;
-  this change adds no ignored Rust test.
-- Frontend validation is **not green**: the default `pnpm check` run passed 4,126
-  tests but timed out in three unchanged tests. A two-worker full retry still
-  had two timeouts and a worker exit; an isolated one-worker retry passed 13 of
-  14 tests but timed out in `TranscriptReducer > never changes a transcript it
-  has handed out`. No assertions, test timeouts or CI checks were relaxed.
-- Linux validation is **blocked before compilation**: the existing TerminalX
-  Local VM failed dependency installation with `FATAL -> Failed to fork.`
-  Subsequent VM commands failed or hung. A working TerminalX Linux VM is needed
-  to execute the full desktop-feature Rust suite and Linux Clippy and fix any
-  platform assumptions they expose. A macOS pass is not a substitute.
+- Passed on macOS: full `cargo test --locked`, with 2,871 unit tests and eight
+  integration tests passing. The final full run used `RUST_TEST_THREADS=1`
+  while other builds were active on the host (743.99 seconds for unit tests).
+  Earlier runs hit timing-sensitive fixture failures; assertions and their
+  existing deadlines were retained. The 24 existing ignored tests remain
+  unchanged; this change adds no ignored Rust test.
+  The final unread-input fixture synchronization also passed a focused macOS
+  run after the full suite.
+- Passed on macOS: the headless server's all-target Clippy check and all 43
+  `local_handover`, `local_lifetime` and `owner_pretool` integration tests,
+  covering the session and terminal changes in the shared Rust library.
+- Passed on the follow-up run: the unmodified `pnpm check` command, including
+  TypeScript and all 4,129 Vitest tests across 339 files (88.91 seconds). Earlier
+  runs had timeouts and a worker exit; no assertions, test timeouts or CI checks
+  were relaxed to obtain this pass.
+- Passed in TerminalX Local VM (Debian 12, ARM64): desktop/mobile type checking,
+  all 4,129 Vitest tests in 339 files, frontend build, all five portable icon
+  tests and all 11 CI-helper tests. The three Apple icon decoders are exercised
+  by the macOS job. Vitest used one worker to fit the VM's 4 GB memory limit.
+- Passed on Linux: `cargo clippy --locked --all-targets -- -D warnings` with
+  default desktop features. No warning suppression was added.
+- Passed on Linux: full default-feature `cargo test --locked`, with 2,821 unit
+  tests and eight integration tests passing (206.69 seconds for unit tests).
+  The 17 existing ignored tests remain unchanged. Validation used Git 2.51.0,
+  two Cargo build jobs, two Rust test threads and two Tokio worker threads to
+  fit the VM; no test was filtered out. Linux failures led to the portability,
+  watcher-lifetime and PTY deadline fixes described in `CI-RUNNERS.md`.
 
-These local checks do not satisfy the Linux test acceptance criterion or either
-post-change ten-run measurement requirement. No Hetzner runner has been
-provisioned, activated or certified by this change.
+The Linux suite has now passed on a real Linux kernel, in an ARM64 VM. These
+local checks are correctness evidence, not CI performance measurements: they
+do not substitute for GitHub-hosted AMD64 CI or either post-change ten-run
+comparison. No Hetzner runner has been provisioned, activated or certified by
+this change.

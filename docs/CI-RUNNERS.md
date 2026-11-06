@@ -24,6 +24,37 @@ and Apple decoder classes: Linux runs all five portable tests; macOS still runs
 all eight source tests plus all packaged/compiled icon tests. No Rust tests have
 been ignored or removed by the split.
 
+The Linux build also exposed unused macOS-only secure-dialog and dictation
+code. Those implementations and real-model evaluation types now compile only
+on macOS. Audio resampling, live transcription logic and scoring still compile
+under `cfg(test)` and run on Linux; microphone device enumeration remains
+available in production on all platforms. These platform gates do not remove
+any Rust tests.
+
+Two test assumptions exposed by Linux are corrected: the device-login fixture
+reads mode bits with GNU or BSD `stat`, and the cloud-mirror test verifies the
+existing conservative case-folding rule on both filesystem types, including
+preservation of the person's own files. A shell-test fixture permits directory
+traversal for its sudo install step even in Linux containers where root lacks
+`CAP_DAC_OVERRIDE`; it contains only synthetic files. Assertions and timeouts
+are retained, with no new ignored or macOS-only tests.
+
+The full Linux run also exposed a session-watcher lifetime leak: each manager
+left a polling thread retaining its own manager clone after its callers were
+gone. The watcher now waits on a channel held only by caller clones, preserving
+the five-second interval and exiting when the last caller drops. A regression
+test verifies release of the retained observer after the last clone is dropped.
+
+The Linux PTY test exposed late readiness from `poll`: a writable result arriving
+after the stall deadline could permit progress and renew the wait for another
+ten seconds. Input now checks both deadlines after polling, preserving the
+existing timeout bounds. Its real-process test waits for fixture readiness
+before timing input; all original timing and independent-pane assertions remain.
+The unread-input watcher test also waits for the written byte to reach the
+slave's line discipline before exercising the nudge. Linux can finish the
+master write before that byte is visible to `FIONREAD`; the test still requires
+unread input and proves that neither nudge adds another byte.
+
 `check` keeps its original name so existing required-check rules continue to
 work. It requires success from every job, accepting a skipped `macos-rust` only
 when the successful selector explicitly returned `false`. Failure, cancellation,
@@ -101,7 +132,8 @@ The Step 2 implementation must provide and test this setup from scratch:
    Job labels cannot choose arbitrary images, scripts, networks or server sizes
    on the controller. Forks control their workflow YAML, including labels.
 2. A versioned clean snapshot containing Rust/Clippy, Node from `.nvmrc`, pnpm
-   from `package.json`, Python/Pillow and the Linux dependencies in `ci.yml`.
+   from `package.json`, Git supporting `merge-tree --write-tree --merge-base`,
+   Python/Pillow and the Linux dependencies in `ci.yml`.
    It contains no registered runner identity, tokens, SSH keys, checkout, caches
    or user data. Build and scan it before registering any runners.
 3. One newly created VM per job, starting with 16 dedicated vCPUs, with no warm

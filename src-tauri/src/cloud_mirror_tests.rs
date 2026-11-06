@@ -819,31 +819,28 @@ fn the_disk_has_the_last_word_after_a_publish() {
     f.remote_write("pkg/HEAD", "ref: refs/heads/main\n");
     f.remote_write("pkg/README.md", "looks harmless\n");
     f.remote_write("src/a.ts", "x\n");
-    let folds = f.mirror.case_insensitive();
     let plan = f.mirror.plan(&f.manifest()).unwrap();
     assert_eq!(plan.refused.git_directory, 0, "nothing in the manifest says Git directory");
 
     let published = f.sync().unwrap();
-    if folds {
-        // On a disk that folds case `pkg` IS `PKG`: HEAD landed beside
-        // objects/ and refs/. The check of the disk takes it back.
-        assert_eq!((published.written, published.taken_back), (3, 2));
-        assert!(!f.files().join("PKG/HEAD").exists());
-        assert!(!f.files().join("PKG/README.md").exists());
-        assert!(!git_sees_a_repository(&f.files().join("PKG")));
-        // The person's own file is not the mirror's to remove.
-        assert_eq!(f.local("PKG/objects/mine.txt").as_deref(), Some("the person's\n"));
-        assert_eq!(f.local("src/a.ts").as_deref(), Some("x\n"));
-        // And it is not written again on the next sync.
-        let plan = f.mirror.plan(&f.manifest()).unwrap();
-        assert_eq!((plan.fetch.len(), plan.refused.on_disk), (0, 2));
-        assert_eq!(f.sync().unwrap().written, 0);
-        assert!(!f.files().join("PKG/HEAD").exists());
-    } else {
-        // A disk that keeps `pkg` and `PKG` apart: two folders, no Git directory.
-        assert_eq!(published.taken_back, 0);
-        assert!(!git_sees_a_repository(&f.files().join("pkg")));
+    // The audit deliberately folds names on every filesystem. Even where
+    // `pkg` and `PKG` are separate directories, it errs toward excluding the
+    // combined Git metadata rather than relaxing the mirror's safety rules.
+    assert_eq!((published.written, published.taken_back), (3, 2));
+    for spelling in ["pkg", "PKG"] {
+        assert!(!f.files().join(spelling).join("HEAD").exists());
+        assert!(!f.files().join(spelling).join("README.md").exists());
+        assert!(!git_sees_a_repository(&f.files().join(spelling)));
     }
+    // The person's own file is not the mirror's to remove.
+    assert_eq!(f.local("PKG/objects/mine.txt").as_deref(), Some("the person's\n"));
+    assert_eq!(f.local("src/a.ts").as_deref(), Some("x\n"));
+    // And it is not written again on the next sync.
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!((plan.fetch.len(), plan.refused.on_disk), (0, 2));
+    assert_eq!(f.sync().unwrap().written, 0);
+    assert!(!f.files().join("pkg/HEAD").exists());
+    assert!(!f.files().join("PKG/HEAD").exists());
 }
 
 // #451: with the workspace unchanged, a discard left the edits on disk while the mirror read "Files synced".
