@@ -188,7 +188,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           </Button>
         )}
       </header>
-      {member && parsed && held && !locked && <SetupWorkspaceDraft key={`${account.status.identity?.email}:${workspaceKey}`} orgId={parsed.orgId} workspaceId={parsed.workspaceId} client={held.lease.client} ready={state.state === "connected" && state.authority === "manage" && running} />}
+      {member && parsed && held && !locked && <SetupWorkspaceDraft key={`${account.status.identity?.email}:${workspaceKey}`} orgId={parsed.orgId} workspaceId={parsed.workspaceId} client={held.lease.client} launch={item?.workspace.launch} ready={state.state === "connected" && state.authority === "manage" && running} />}
       {stopped && (
         <div className="shrink-0 border-b border-hairline bg-well px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="cloud-stopped-banner">
           Stopped. Saved agent conversations are shown; nothing runs until you resume it.

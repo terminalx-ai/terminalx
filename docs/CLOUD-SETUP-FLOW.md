@@ -40,3 +40,9 @@ and the guided creation path. `pnpm test:webkit-cloud-setup` exercises Enter,
 focused controls and Escape in WebKit against the normal built app and bridge
 fixture. The server route tests cover manager writes, member/nonmember refusal,
 invalid colors, and revoked authority at the write.
+
+The setup draft sends to the tab named by the workspace launch response, which already owns the selected repository checkout. It never creates another tab. A send remains owned by the account and setup record when the view closes. A changed account, profile or manager role fences late writes; an uncertain response retains the sending marker and directs the person to the normal session message queue instead of replaying the prompt.
+
+Member callouts read `cloudComputerReady` from the organization roster. The server checks whether the organization has a ready or suspended, undeleted workspace, independently of the member's access to its contents. An older server without this field supplies no readiness assertion.
+
+The paired server change includes the unchanged `0103_feature_flags` migration from PRO-252 before `0104_organization_computer_color`. Both incremental paths (PRO-252 first, or this complete chain first) must retain the feature-flag tables and color column. Deploy the server before the desktop.

@@ -163,29 +163,13 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
-  const openAccountSettings = useCallback(() => {
-    setSettingsTab("account");
-    setSettingsOpen(true);
-    setSettingsRequest((count) => count + 1);
-  }, []);
+  const openAccountSettings = useCallback(() => openSettings("account"), [openSettings]);
   // An organization's page (PRO-107): a message that names its Agent logins offers the way there, with the
   // organization it is about. The Organizations section opens that page, and the logins scroll themselves into view.
-  const openOrganizationsSettings = useCallback(() => {
-    setSettingsTab("organizations");
-    setSettingsOpen(true);
-    setSettingsRequest((count) => count + 1);
-  }, []);
+  const openOrganizationsSettings = useCallback(() => openSettings("organizations"), [openSettings]);
   useEffect(() => onOpenOrganizationSettings(openOrganizationsSettings), [openOrganizationsSettings]);
-  const openAgentSettings = useCallback(() => {
-    setSettingsTab("agents");
-    setSettingsOpen(true);
-    setSettingsRequest((count) => count + 1);
-  }, []);
-  const openStorageSettings = useCallback(() => {
-    setSettingsTab("storage");
-    setSettingsOpen(true);
-    setSettingsRequest((count) => count + 1);
-  }, []);
+  const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
+  const openStorageSettings = useCallback(() => openSettings("storage"), [openSettings]);
   const newSession = useCallback(() => openNewSession(), []);
   const showHome = useCallback(() => navigateFromEnvironment(() => {
     setSettingsOpen(false);
@@ -255,15 +239,15 @@ export function AppShell() {
             <SettingsPage
               initialTab={settingsTab}
               openRequest={settingsRequest}
-              onBack={() => setSettingsOpen(false)}
-              onOpenSkills={() => {
+              onBack={() => navigateFromEnvironment(() => setSettingsOpen(false))}
+              onOpenSkills={() => navigateFromEnvironment(() => {
                 setSettingsOpen(false);
                 showSkills();
-              }}
-              onOpenUsage={() => {
+              })}
+              onOpenUsage={() => navigateFromEnvironment(() => {
                 setSettingsOpen(false);
                 showStats();
-              }}
+              })}
             />
           </Suspense>
         ) : (

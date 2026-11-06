@@ -470,3 +470,18 @@ describe("welcome routing", () => {
     expect(screen.queryByTestId("welcome")).toBeNull();
   });
 });
+
+it.each([["Agent settings", "agents"], ["Show the leftover clean-up", "storage"]])("guards %s while environment edits are pending", async (action, section) => {
+  const { EnvironmentLeaveGuard } = await import("@/components/settings/EnvironmentLeaveGuard");
+  const view = render(<AppShell />);
+  act(() => shortcuts.get("app.settings")!());
+  await screen.findByTestId("settings-page");
+  view.rerender(<><AppShell /><EnvironmentLeaveGuard unbuilt unsaved /></>);
+  fireEvent.click(screen.getByRole("button", { name: action }));
+  expect(screen.getByRole("heading", { name: "Leave without building?" })).toBeTruthy();
+  fireEvent.click(screen.getByText("Keep editing"));
+  expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account");
+  fireEvent.click(screen.getByRole("button", { name: action }));
+  fireEvent.click(screen.getByRole("button", { name: "Leave without building" }));
+  expect(screen.getByTestId("settings-page").dataset.initialTab).toBe(section);
+});

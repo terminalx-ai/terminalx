@@ -708,6 +708,7 @@ export const api = {
 
 export interface OrganizationSummary {
   computerColor?: string | null;
+  cloudComputerReady?: boolean | null;
   id: string;
   name: string;
   role: string;

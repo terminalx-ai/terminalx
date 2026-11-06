@@ -320,14 +320,21 @@ fn failures_are_reported_with_their_category() {
     assert_eq!(api.completions.lock().unwrap()[0].category.as_deref(), Some("agent-sign-in-required"));
     assert!(starter.starts.lock().unwrap().is_empty());
     // Without a prompt there is nothing to lose: the tab is still made.
-    let mut quiet = claim(vec![repository(dir.path(), "no-prompt")]);
+    let quiet_repository = repository(dir.path(), "no-prompt");
+    let quiet_path = PathBuf::from(&quiet_repository.path);
+    let mut quiet = claim(vec![quiet_repository]);
     quiet.prompt = None;
     let api = FakeApi::new(Some(quiet));
     let starter = Arc::new(FakeStarter { signed_out: true, ..FakeStarter::default() });
     let launcher = make(&dir.path().join("q"), api.clone(), starter.clone(), "incarnation-qqqqqqqqqqqq");
     std::fs::create_dir_all(dir.path().join("q")).unwrap();
     assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
-    assert_eq!(starter.starts.lock().unwrap().len(), 1);
+    let quiet_starts = starter.starts.lock().unwrap().clone();
+    assert_eq!(quiet_starts.len(), 1);
+    assert_eq!(quiet_starts[0].0, quiet_path, "the unsent setup tab owns the nested checkout");
+    assert!(quiet_starts[0].2.is_none(), "the setup draft stays unsent");
+    assert_eq!(api.completions.lock().unwrap()[0].tab_id.as_deref(), Some("tab-1"));
+    assert_eq!(api.completions.lock().unwrap()[0].session_id.as_deref(), Some("session-1"));
 
     // A base ref the remote does not have.
     let mut missing = repository(dir.path(), "other");
