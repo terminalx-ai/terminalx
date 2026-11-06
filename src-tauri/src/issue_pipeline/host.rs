@@ -305,7 +305,24 @@ impl Host for LocalHost {
         std::thread::Builder::new().name("pipeline-local-checks".into()).spawn(move || super::engine::run_local_checks(&host, &id)).is_ok()
     }
 
-    fn run_local_check(&self, cwd: &Path, command: &str) -> Result<()> {
+    fn startup_blocker(&self, pipeline: &Pipeline, new_validation: bool) -> Result<Option<String>> {
+        if self.cloud() { return Ok(None); }
+        let state = crate::startup::snapshot()?;
+        let Some(incident) = state.active() else { return Ok(None) };
+        let affected = new_validation || incident.blocked_pipelines.contains(&pipeline.id) || state.launches.iter().any(|launch|
+            incident.launches.contains(&launch.id) && [Some(&pipeline.author), pipeline.reviewer.as_ref(), pipeline.resolver.as_ref()].into_iter().flatten().any(|who|
+                launch.pane == SessionManager::pane_id(&who.tab_id) || crate::pty::shell_session(&launch.pane) == Some(who.session_id.as_str())));
+        if affected { crate::startup::validation_blocker(Some(&pipeline.id)) } else { Ok(None) }
+    }
+
+    fn validation_pending(&self, pipeline: &Pipeline) -> Result<bool> {
+        if self.cloud() { Ok(false) } else { crate::startup::validation_pending(&pipeline.id) }
+    }
+
+    fn run_local_check(&self, pipeline: &Pipeline, cwd: &Path, command: &str) -> Result<()> {
+        if !self.cloud() {
+            return crate::startup::run_validation(&SessionManager::pane_id(&pipeline.author.tab_id), &pipeline.id, cwd, command);
+        }
         let mut process = std::process::Command::new("/bin/sh");
         process.args(["-c", command]).current_dir(cwd);
         crate::git::output_within(process, std::time::Duration::from_secs(1800))
