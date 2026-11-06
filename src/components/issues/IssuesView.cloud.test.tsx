@@ -306,6 +306,22 @@ describe("the Issues view for a cloud project", () => {
     }
   });
 
+  it("opens newly started cloud work ahead of an older pipeline", async () => {
+    pipelineStore.pipelines = [{
+      id: "older-pipeline", projectPath: PROJECT, cloud: true,
+      place: { orgId: "org-a", workspaceId: "ws-1", projectKey: PROJECT, repository: "acme/api", readAt: Date.now() },
+      issue: { provider: "github", id: "433", identifier: "#433", title: issue.title, url: issue.url },
+      branch: "older-work", author: { sessionId: "cloud:org-a:ws-1:old-session", tabId: "old-tab" },
+      autoMerge: false, stopped: false, stage: "work", state: "working", round: 0, maxRounds: 3,
+      events: [], securityAreas: [], created: "2026-10-18T00:00:00.000Z", modified: "2026-10-18T00:00:00.000Z",
+    }];
+    await openIssue();
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    await waitFor(() => expect(noteSessionStarted).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    expect(openCloudSession).toHaveBeenCalledWith("cloud:org-a:ws-1:s1", undefined);
+  });
+
   it("shows the issue's cloud pipeline and opens its session in the cloud", async () => {
     pipelineStore.pipelines = [
       {

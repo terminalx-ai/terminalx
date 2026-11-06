@@ -534,6 +534,49 @@ try {
   await batch.getByTestId("session-branch").waitFor();
   assert.ok((await batch.getByTestId("session-branch").getAttribute("title")).includes(latestCwd));
   failed += report("Linear batch", { "filter changes release retained rows and Open session targets Start anyway's newest local work after dismissing its notice": true });
+
+  for (const pipelinesEnabled of [false, true]) {
+    await batch.getByRole("button", { name: /^Issues/ }).click();
+    await batch.evaluate((pipelinesEnabled) => {
+      const stub = window.__PW_STUB__;
+      stub.answers.list_projects.projects[0].issuePipeline = { enabled: pipelinesEnabled };
+      stub.emit("projects_changed", null);
+      const old = window.__BATCH_CREATED__.find((session) => session.issue.id === "batch-30");
+      const pipeline = {
+        id: "older-batch-pipeline", projectPath: old.projectPath, issue: old.issue, branch: old.branch,
+        author: { sessionId: old.id, tabId: old.tabs[0].id }, reviewer: null,
+        autoMerge: false, stopped: false, stage: "work", state: "working", reason: null,
+        note: "An older pipeline still exists.", pr: null, round: 0, maxRounds: 3,
+        reviewCommit: null, verdict: null, securityAreas: [], merged: null, events: [],
+        created: old.created, modified: old.modified,
+      };
+      stub.answers.issue_pipelines_list = [pipeline];
+      stub.emit("issue_pipeline", pipeline);
+    }, pipelinesEnabled);
+    await batch.locator('[data-issue-row="linear:batch-30"]').click();
+    await batch.getByTestId("issue-pipeline").getByText("An older pipeline still exists.", { exact: true }).waitFor();
+    if (pipelinesEnabled) {
+      const worktree = batch.getByRole("switch", { name: "Start issue in a new worktree", exact: true });
+      if (await worktree.getAttribute("aria-checked") === "true") await worktree.click();
+      assert.equal(await worktree.getAttribute("aria-checked"), "false");
+    }
+    await batch.getByRole("button", { name: "Start session", exact: true }).click();
+    await batch.getByRole("button", { name: "Start anyway", exact: true }).click();
+    const notice = batch.getByRole("status").filter({ hasText: "BATCH-30 Batch issue 30" });
+    await notice.waitFor();
+    await notice.getByRole("button", { name: "Dismiss", exact: true }).click();
+    const created = await batch.evaluate(() => window.__BATCH_CREATED__.at(-1));
+    assert.equal(created.useWorktree, !pipelinesEnabled);
+    await batch.getByRole("button", { name: "Open session", exact: true }).click();
+    await batch.getByTestId("session-branch").waitFor();
+    assert.ok((await batch.getByTestId("session-branch").getAttribute("title")).includes(created.cwd));
+    await batch.getByRole("button", { name: /^Issues/ }).click();
+    await batch.locator('[data-issue-row="linear:batch-30"]').click();
+    await batch.getByRole("button", { name: "Open session", exact: true }).click();
+    await batch.getByTestId("session-branch").waitFor();
+    assert.ok((await batch.getByTestId("session-branch").getAttribute("title")).includes(created.cwd));
+    failed += report(`Linear batch, ${pipelinesEnabled ? "worktrees off" : "pipelines disabled"}`, { "Open session prefers the new work over an older pipeline, including after returning to Issues": true });
+  }
   await batch.close();
 } finally {
   await browser.close();

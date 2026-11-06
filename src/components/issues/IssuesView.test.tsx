@@ -1202,6 +1202,34 @@ describe("who is working on an issue (#441)", () => {
     expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
   });
 
+  it("opens newer issue work ahead of its older pipeline, excluding the newer reviewer", async () => {
+    pipelineStore.pipelines = [pipelineOf(listed[1], { author: { sessionId: "local-12", tabId: "author-tab" }, reviewer: { sessionId: "reviewer", tabId: "reviewer-tab" } })];
+    (sessionStore as { sessions: unknown[] }).sessions = [
+      localSession(),
+      localSession({ id: "new-work", created: new Date(NOW).toISOString() }),
+      localSession({ id: "reviewer", created: new Date(NOW + 1000).toISOString() }),
+    ];
+    render(<IssuesView />);
+    fireEvent.click(await row("Repair session target"));
+    await screen.findByText("Second issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    expect(selectSession).toHaveBeenCalledWith("new-work");
+  });
+
+  it("keeps a newer pipeline author eligible when its session has no issue metadata", async () => {
+    pipelineStore.pipelines = [pipelineOf(listed[1], { author: { sessionId: "author", tabId: "author-tab" }, reviewer: { sessionId: "reviewer", tabId: "reviewer-tab" } })];
+    (sessionStore as { sessions: unknown[] }).sessions = [
+      localSession(),
+      localSession({ id: "author", issue: null, created: new Date(NOW).toISOString() }),
+      localSession({ id: "reviewer", created: new Date(NOW + 1000).toISOString() }),
+    ];
+    render(<IssuesView />);
+    fireEvent.click(await row("Repair session target"));
+    await screen.findByText("Second issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    expect(selectSession).toHaveBeenCalledWith("author");
+  });
+
   it("hides the issues someone works on, or shows only the reader's", async () => {
     claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({})] };
     // The reader's own session on #12 was a while ago: theirs, but nobody works on it now.

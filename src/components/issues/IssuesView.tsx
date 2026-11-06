@@ -624,15 +624,16 @@ export function IssuesView({
   };
   // The editors are the open issue's own: a switch starts them afresh.
   const issueKey = selected ? `${projectPath}:${selected.provider}:${selected.id}` : "";
-  // The session working on the issue: the pipeline's author, never its reviewer. A cloud one is its workspace's.
-  // Creation time decides which work to open; a later append wins when two starts share a timestamp.
-  const latestSession = selected ? store.sessions.reduce<SessionEntry | null>((latest, session) => {
-    if (session.projectPath !== projectPath || session.issue?.url !== selected.url) return latest;
+  // Open the newest work, even when an older pipeline remains. Reviewer sessions are never candidates.
+  // Seed with the pipeline author: older sessions may have no issue metadata. A later append wins a timestamp tie.
+  const pipelineAuthor = store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? null;
+  const reviewers = new Set(pipelines.flatMap((value) => value.reviewer ? [value.reviewer.sessionId] : []));
+  const linkedSession = selected ? store.sessions.reduce<SessionEntry | null>((latest, session) => {
+    if (session.projectPath !== projectPath || session.issue?.url !== selected.url || reviewers.has(session.id)) return latest;
     return !latest || (Date.parse(session.created) || 0) >= (Date.parse(latest.created) || 0) ? session : latest;
-  }, null) : null;
-  const linkedSession = store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? latestSession;
+  }, pipelineAuthor) : null;
   const cloudLinked = selected ? work.byIssue.get(workKeyOf(selected))?.filter((worker) => worker.you && worker.cloudSession).sort((a, b) => b.since - a.since)[0]?.cloudSession : null;
-  const openLinked = linkedSession ? () => selectSession(linkedSession.id) : pipeline?.place ? () => openCloudSession(pipeline.author.sessionId, pipeline.author.tabId) : cloudLinked ? () => openCloudSession(cloudLinked.key, cloudLinked.tabId) : null;
+  const openLinked = linkedSession ? () => selectSession(linkedSession.id) : cloudLinked ? () => openCloudSession(cloudLinked.key, cloudLinked.tabId) : pipeline?.place ? () => openCloudSession(pipeline.author.sessionId, pipeline.author.tabId) : null;
 
   // Who has the issue shows once that is known: from the row, or from its details.
   const assigneeShown = !!current && !!(current.assignees || current.assignee || !detailLoading);
