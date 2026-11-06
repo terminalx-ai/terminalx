@@ -1,5 +1,6 @@
 import type { Terminal } from "@xterm/xterm";
 import { webglRefused } from "@/lib/terminalCounters";
+import { requestTerminalResize } from "@/lib/terminalOutput";
 
 /**
  * The size a terminal should have in its view's box, the same whichever
@@ -48,8 +49,38 @@ export function terminalSize(term: Terminal, box: HTMLElement): { cols: number; 
 /** Resize the terminal to its view's box, if that changes anything. */
 export function fitTerminal(term: Terminal, box: HTMLElement) {
   const size = terminalSize(term, box);
-  if (!size || (size.cols === term.cols && size.rows === term.rows)) return;
+  if (!size || requestTerminalResize(term, size) || (size.cols === term.cols && size.rows === term.rows)) return;
   // As the fit addon does: what is drawn at the old size must not linger.
   (term as unknown as { _core?: Core })._core?._renderService?.clear?.();
   term.resize(size.cols, size.rows);
+}
+
+/**
+ * During a drag, a shell can still be redrawing the previous size when the
+ * next observation arrives. Resize both xterm and its PTY only after the
+ * box settles. Wired terminals request a PTY size here; their output batches
+ * carry the size the parser must use, even when an earlier redraw arrives late.
+ */
+export function deferredTerminalFit(getTerminal: () => Terminal | undefined, box: HTMLElement) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+  const cancel = () => {
+    clearTimeout(timer);
+    generation++;
+  };
+  return {
+    schedule: () => {
+      cancel();
+      const request = generation;
+      timer = setTimeout(() => {
+        const term = getTerminal();
+        if (!term) return;
+        term.write("", () => {
+          if (request !== generation || getTerminal() !== term) return;
+          fitTerminal(term, box);
+        });
+      }, 100);
+    },
+    cancel,
+  };
 }
