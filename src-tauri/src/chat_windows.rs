@@ -30,18 +30,32 @@ pub async fn new_chat_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn chat_window_open_in_main(app: AppHandle, window: WebviewWindow, session_id: String, tab_id: Option<String>) -> Result<(), String> {
+pub async fn chat_window_open_in_main(app: AppHandle, window: WebviewWindow, session_id: String, tab_id: Option<String>, close_source: bool) -> Result<(), String> {
     if !is_chat_window(window.label()) {
         return Err("Only an independent chat window can move its view to the main window".into());
     }
     app.emit_to("main", "open_session", crate::floating::OpenTarget { session_id, tab_id }).map_err(|error| error.to_string())?;
     crate::account::focus_main_window(&app);
-    window.close().map_err(|error| error.to_string())
+    finish_handoff(close_source, || window.close().map_err(|error| error.to_string()))
+}
+
+/// Opening main must not destroy composer state which the frontend cannot transfer.
+fn finish_handoff(close_source: bool, close: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    if close_source { close() } else { Ok(()) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_only_closes_a_source_that_can_be_discarded() {
+        assert!(finish_handoff(false, || panic!("unsent composer state must stay alive")).is_ok());
+        let closed = std::cell::Cell::new(false);
+        finish_handoff(true, || { closed.set(true); Ok(()) }).unwrap();
+        assert!(closed.get());
+        assert_eq!(finish_handoff(true, || Err("close failed".into())), Err("close failed".into()));
+    }
 
     #[test]
     fn new_windows_have_distinct_identities_and_never_reuse_quick_chat() {

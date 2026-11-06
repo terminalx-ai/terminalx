@@ -62,7 +62,7 @@ describe("drafts moving from an independent window to main", () => {
     expect(bus.invoke).not.toHaveBeenCalled();
     releaseReply();
     await moving;
-    expect(bus.invoke).toHaveBeenCalledExactlyOnceWith("chat_window_open_in_main", { sessionId: "session", tabId: "active" });
+    expect(bus.invoke).toHaveBeenCalledExactlyOnceWith("chat_window_open_in_main", { sessionId: "session", tabId: "active", closeSource: true });
     expect(bus.listeners.has("chat-one:chat-window-drafts-result")).toBe(false);
   });
 

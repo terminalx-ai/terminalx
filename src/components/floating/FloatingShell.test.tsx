@@ -313,7 +313,7 @@ it("keeps an independent chat visible and hands off only that window", async () 
   fireEvent.keyDown(window, { key: "Escape" });
   expect(called("floating_hide")).toHaveLength(0);
   fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
-  expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab" }]);
+  expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab", closeSource: true }]);
   expect(called("floating_open_in_main")).toHaveLength(0);
 });
 
@@ -332,7 +332,7 @@ it("keeps the source window and its unsent drafts until the main window accepts 
   })));
   const request = mocks.emitTo.mock.lastCall![2];
   act(() => mocks.listeners.get("chat-window-drafts-result")?.({ payload: { id: request.id } }));
-  await waitFor(() => expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab" }]));
+  await waitFor(() => expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab", closeSource: true }]));
 });
 
 it("reports a failed draft transfer without closing the window", async () => {

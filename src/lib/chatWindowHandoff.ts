@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { appWindow } from "./appWindow";
 import { getDraft, setDraft, snapshotDrafts } from "./drafts";
+import { hasWindowDrafts } from "./windowDrafts";
 
 const REQUEST = "chat-window-drafts";
 const RESULT = "chat-window-drafts-result";
@@ -29,6 +30,13 @@ export function listenForChatWindowDrafts(): Promise<() => void> {
 
 /** Never destroy the only copy of a draft: the destination must acknowledge it first. */
 export async function openChatWindowInMain(sessionId: string, tabId: string | null): Promise<void> {
+  // A new-session form has no destination tab. Image queues, pending reads
+  // and unresolved sends also remain in their source composer. Open the
+  // workbench without closing that view or copying only part of its prompt.
+  if (!sessionId || hasWindowDrafts()) {
+    await invoke("chat_window_open_in_main", { sessionId, tabId, closeSource: false });
+    return;
+  }
   const drafts = snapshotDrafts();
   if (drafts.size) {
     const id = crypto.randomUUID();
@@ -52,5 +60,6 @@ export async function openChatWindowInMain(sessionId: string, tabId: string | nu
   if (current.size !== drafts.size || [...drafts].some(([key, text]) => current.get(key) !== text)) {
     throw new Error("Your draft changed while opening the main window. This window has been kept open with your edits; please try again.");
   }
-  await invoke("chat_window_open_in_main", { sessionId, tabId });
+  // An image may have arrived while main was acknowledging the text.
+  await invoke("chat_window_open_in_main", { sessionId, tabId, closeSource: !hasWindowDrafts() });
 }
