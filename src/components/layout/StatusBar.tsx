@@ -13,6 +13,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
+import { suppressNativeContextMenu } from "@/lib/contextMenu";
 import {
   refreshResourceSample,
   resourceGenerationIsCurrent,
@@ -220,7 +221,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
             align="end"
             sideOffset={5}
             data-status-context-exempt
-            onContextMenu={(event) => event.stopPropagation()}
+            onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
             className="z-(--z-menu) w-[26rem] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
           >
             <div className="mb-2.5 flex items-center gap-2">
@@ -719,7 +720,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           sideOffset={5}
           data-usage-popover
           data-status-context-exempt
-          onContextMenu={(event) => event.stopPropagation()}
+          onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
           className="relative z-(--z-menu) w-[380px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
         >
           <div className="flex items-center gap-2 px-1 pb-3">
