@@ -466,7 +466,7 @@ impl Stdio {
             ensure!(decisions.iter().any(|d| d == "accept") && decisions.iter().any(|d| d == "decline"), "Codex offers approval choices this experimental client cannot represent");
         }
         self.asks.insert(key.clone(), Ask { id: id.clone(), turn, method: method.clone() });
-        Ok(vec![Action::Emit(Payload::PermissionRequested { request_id: key, tool_use_id: required(p, "itemId")?, tool_name: method, input: p.clone(), cwd: p["cwd"].as_str().map(str::to_owned), title: Some("Codex requests approval".into()), description: p["reason"].as_str().map(str::to_owned), options: vec![PermissionOption { id: "allow".into(), label: "Allow once".into(), kind: PermissionOptionKind::AllowOnce }, PermissionOption { id: "deny".into(), label: "Deny".into(), kind: PermissionOptionKind::Deny }] })])
+        Ok(vec![Action::Emit(Payload::PermissionRequested { request_id: key, tool_use_id: required(p, "itemId")?, tool_name: method, input: p.clone(), cwd: p["cwd"].as_str().map(str::to_owned), title: Some("Codex requests approval".into()), description: p["reason"].as_str().map(str::to_owned), reason: None, options: vec![PermissionOption { id: "allow".into(), label: "Allow once".into(), kind: PermissionOptionKind::AllowOnce }, PermissionOption { id: "deny".into(), label: "Deny".into(), kind: PermissionOptionKind::Deny }] })])
     }
 }
 

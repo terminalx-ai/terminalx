@@ -141,6 +141,33 @@ describe("a finished turn with tool calls folded", () => {
   });
 });
 
+// #775: a finished turn folds the row that says Claude's safety check held a call; its summary line still says so.
+describe("a finished turn with a call an agent's safety check held", () => {
+  const held = (notes: string[]): Turn =>
+    ({
+      ...turn([]),
+      completed: { status: "ok", ts: "2026-10-03T00:01:00Z" },
+      toolCount: notes.length + 1,
+      work: [
+        { kind: "tool", key: "ca", call: { callId: "a", name: "Read", toolType: "read", input: { file_path: "a.txt" }, seq: 2, result: { text: "ok", isError: false } } },
+        ...notes.map((safetyCheck, i) => ({ kind: "tool", key: `cb${i}`, call: { callId: `b${i}`, name: "Bash", toolType: "shell", input: { command: "echo" }, seq: 3 + i, result: { text: "2", isError: false, safetyCheck } } })),
+        { kind: "text", key: "a9", seq: 9, text: "Counted." },
+      ],
+    }) as unknown as Turn;
+
+  it("says on its summary line which check held the call, or how many were held", () => {
+    setPrefs({ foldToolCalls: true });
+    render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check"])} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("2 tool calls · Approved past Claude's dangerous-removal check");
+    cleanup();
+    render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check", "Stopped at Claude's safety check"])} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("3 tool calls · 2 held by a safety check");
+    cleanup();
+    render(<TurnBlock turn={held([])} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("1 tool call");
+  });
+});
+
 describe("a compaction", () => {
   const summary = "This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. Primary Request and Intent:\n   Open an issue for the banner.";
   // Compacted while idle: the line is all the turn holds.

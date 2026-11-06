@@ -1325,6 +1325,30 @@ fn tool_key(tool_name: &str, input: &Value) -> String {
     format!("{tool_name}\u{1}{target}")
 }
 
+/// Why a permission hook's card is up, in TerminalX's words (#775): the
+/// gate that asked, which the agent's own description of the call never
+/// says. None when the session's own mode asked, which needs no telling.
+///
+/// Codex in Ask every time is asked by the app, at `PreToolUse`; its
+/// sandbox asks for itself at `PermissionRequest`, with the agent's
+/// justification. TerminalX's Claude hooks only ever deny, so a Claude
+/// `PermissionRequest` in bypass mode comes from a check bypass does not
+/// cover: Claude Code's own safety check. The hook's `permission_mode` is
+/// the mode Claude is in when it asks, and decides; the tab's is the
+/// fallback for a frame without it. The card is still shown: answering it
+/// unasked would switch off Claude's last guard against destructive
+/// commands.
+fn asked_because(kind: CliKind, gate: &str, payload: &Value, tab_mode: &str, tool_name: &str) -> Option<String> {
+    match kind {
+        CliKind::Codex => (gate == "PreToolUse" && codex::asks_every_tool(tab_mode))
+            .then(|| "Approval is required because this session is set to Ask every time.".into()),
+        CliKind::Claude => {
+            let mode = payload["permission_mode"].as_str().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(tab_mode);
+            (gate == "PermissionRequest" && mode == "bypassPermissions").then(|| claude::mapper::safety_check_reason(tool_name).into())
+        }
+    }
+}
+
 /// The reader's decision as the hook that asked has to print it.
 fn reply_for(kind: CliKind, event: &str, decision: Decision) -> HookReply {
     let allow = !matches!(decision, Decision::Deny);
@@ -5978,14 +6002,12 @@ impl SessionManager {
                     request_id: request_id.clone(),
                     tool_use_id: String::new(),
                     title: Some(claude::mapper::tool_title(&tool_name, &input)),
-                    // PreToolUse can reduce a Codex shell call to just Bash +
-                    // command. Explain our gate when no agent reason survived;
-                    // never invent a justification or change the tool input.
+                    // The agent's words only: never invent a justification or
+                    // change the tool input. Why the card is up is `reason`.
                     description: ["justification", "description"].iter()
                         .find_map(|field| input[*field].as_str().filter(|s| !s.trim().is_empty()))
-                        .map(String::from)
-                        .or_else(|| (kind == CliKind::Codex && gate == "PreToolUse" && codex::asks_every_tool(&p.mode))
-                            .then(|| "Approval is required because this session is set to Ask every time.".into())),
+                        .map(String::from),
+                    reason: asked_because(kind, gate, &frame.payload, &p.mode, &tool_name),
                     cwd: frame.payload["cwd"].as_str().filter(|s| !s.trim().is_empty()).map(String::from),
                     options: claude::mapper::build_options(&suggestions),
                     tool_name: tool_name.clone(),
