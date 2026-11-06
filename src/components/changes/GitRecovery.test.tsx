@@ -37,7 +37,7 @@ beforeEach(() => {
     }
   });
 });
-afterEach(() => { cleanup(); backend.invoke.mockReset(); backend.openUrl.mockReset(); backend.events.clear(); });
+afterEach(async () => { await act(async () => cleanup()); backend.invoke.mockReset(); backend.openUrl.mockReset(); backend.events.clear(); });
 function pr() { return render(<PrPanel cwd={cwd} branch="feature" active busy={false} />); }
 function repo() { return render(<TooltipProvider><RepoPanel cwd={cwd} active view="uncommitted" onViewChange={() => {}} /></TooltipProvider>); }
 
@@ -52,7 +52,8 @@ describe("local Git recovery", () => {
     await screen.findByTestId("login-terminal");
     const spawn = backend.invoke.mock.calls.find(([command]) => command === "gh_login_start")!;
     expect(spawn[1].id).toMatch(/^github-login-/);
-    expect(Object.keys(spawn[1])).toEqual(["id"]);
+    expect(spawn[1].hostname).toBe("github.com");
+    expect(backend.invoke).toHaveBeenCalledWith("gh_connection_status", { cwd });
     connection = { state: "connected", details: null };
     act(() => backend.events.get("pty_exit")?.({ payload: { id: spawn[1].id, code: 0 } }));
     await screen.findByRole("button", { name: "Create pull request" });
@@ -68,6 +69,22 @@ describe("local Git recovery", () => {
     await screen.findByRole("button", { name: "Connect GitHub" });
     expect(screen.queryByText(signedOut)).toBeNull();
     expect(backend.invoke.mock.calls.filter(([command]) => command === "pty_kill")).toHaveLength(1);
+  });
+
+  it.each([1, null])("retains failed login output until dismissed (exit %s)", async (code) => {
+    pr();
+    fireEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
+    const terminal = await screen.findByTestId("login-terminal");
+    const id = terminal.textContent;
+    act(() => backend.events.get("pty_exit")?.({ payload: { id, code } }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByText("GitHub sign-in did not finish. Check the command output before trying again.")).toBeTruthy();
+    expect(backend.invoke.mock.calls.some(([command]) => command === "pty_kill")).toBe(false);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Show details")!);
+    expect(screen.getByTestId("login-terminal").textContent).toBe(id);
+    fireEvent.click(screen.getByRole("button", { name: "Close sign-in" }));
+    await waitFor(() => expect(backend.invoke).toHaveBeenCalledWith("pty_kill", { id }));
   });
 
   it("cancels a login whose start finishes after its dialog has closed", async () => {
@@ -91,6 +108,26 @@ describe("local Git recovery", () => {
     pr();
     fireEvent.click(await screen.findByRole("button", { name: "Install GitHub CLI" }));
     expect(backend.openUrl).toHaveBeenCalledWith("https://cli.github.com/");
+    expect(backend.invoke.mock.calls.some(([command]) => command === "gh_login_start")).toBe(false);
+  });
+
+  it("connects to the repository's Enterprise host", async () => {
+    connection = { state: "signed_out", details: signedOut, hostname: "github.example.test" };
+    pr();
+    fireEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
+    await screen.findByTestId("login-terminal");
+    expect(backend.invoke).toHaveBeenCalledWith("gh_login_start", { id: expect.stringMatching(/^github-login-/), hostname: "github.example.test" });
+  });
+
+  it("offers connection recovery for a transport failure without starting login", async () => {
+    connection = { state: "unavailable", details: "proxyconnect tcp: connect: connection refused", hostname: "github.com" };
+    pr();
+    await screen.findByRole("heading", { name: "Could not check GitHub" });
+    expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
+    expect(screen.queryByText(connection.details!)).toBeNull();
+    const checks = backend.invoke.mock.calls.filter(([command]) => command === "gh_connection_status").length;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(backend.invoke.mock.calls.filter(([command]) => command === "gh_connection_status").length).toBeGreaterThan(checks));
     expect(backend.invoke.mock.calls.some(([command]) => command === "gh_login_start")).toBe(false);
   });
 

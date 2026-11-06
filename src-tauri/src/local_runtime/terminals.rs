@@ -25,8 +25,8 @@ impl Terminals {
     }
 
     /// Settings can connect GitHub before there is any project or session.
-    pub fn github_login(&self, id: &str) -> Result<()> {
-        self.0.call("runtime.pty.githubLogin", json!({"id":id}))
+    pub fn github_login(&self, id: &str, hostname: &str) -> Result<()> {
+        self.0.call("runtime.pty.githubLogin", json!({"id":id,"hostname":hostname}))
     }
 
     /// Run an agent's install or sign-in step in setup pane `id` (PRO-152).

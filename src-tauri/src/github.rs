@@ -745,7 +745,67 @@ pub fn available() -> bool {
     crate::binpath::resolve("gh").is_some()
 }
 
-pub const LOGIN_COMMAND: &str = "gh auth login --web";
+pub fn login_command(hostname: &str) -> Result<String> {
+    validate_hostname(hostname)?;
+    Ok(format!("gh auth login --web --hostname '{hostname}'"))
+}
+
+fn validate_hostname(hostname: &str) -> Result<()> {
+    if hostname.is_empty() || hostname.starts_with('-') || hostname.len() > 253
+        || !hostname.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b':'))
+        || url::Url::parse(&format!("https://{hostname}")).is_err() {
+        bail!("Invalid GitHub hostname.");
+    }
+    Ok(())
+}
+
+fn default_hostname() -> String {
+    std::env::var("GH_HOST").ok().filter(|host| !host.is_empty()).unwrap_or_else(|| "github.com".into())
+}
+
+fn hostname_from_remote(remote: &str) -> Option<String> {
+    let url = if remote.contains("://") { remote.to_string() }
+        else { format!("ssh://{}", remote.replacen(':', "/", 1)) };
+    let url = url::Url::parse(&url).ok()?;
+    let host = url.host_str()?;
+    Some(match (url.scheme(), url.port()) { ("https" | "http", Some(port)) => format!("{host}:{port}"), _ => host.to_string() })
+}
+
+/// Resolve the destination without an API call: an unauthenticated Enterprise
+/// host must still be identifiable. Honor gh's explicit base remote first.
+fn repository_hostname(cwd: &Path) -> Option<String> {
+    if let Ok(resolved) = crate::git::run(cwd, &["config", "--get-regexp", r"^remote\..*\.gh-resolved$"]) {
+        for line in resolved.lines() {
+            let Some((key, value)) = line.split_once(' ') else { continue };
+            if value != "base" { continue; }
+            let remote = key.strip_prefix("remote.")?.strip_suffix(".gh-resolved")?;
+            if let Ok(url) = crate::git::run(cwd, &["remote", "get-url", remote]) {
+                if let Some(host) = hostname_from_remote(url.trim()) { return Some(host); }
+            }
+        }
+    }
+    // This is gh's remote preference when no explicit base has been selected.
+    let names = crate::git::run(cwd, &["remote"]).ok()?;
+    let mut names: Vec<_> = names.lines().collect();
+    names.sort_by_key(|name| (match *name { "upstream" => 0, "github" => 1, "origin" => 2, _ => 3 }, *name));
+    names.into_iter().find_map(|name| {
+        let url = crate::git::run(cwd, &["remote", "get-url", name]).ok()?;
+        hostname_from_remote(url.trim())
+    })
+}
+
+fn connection_hostname(cwd: Option<&Path>) -> String {
+    if let Some(cwd) = cwd {
+        if let Ok(repo) = std::env::var("GH_REPO") {
+            if repo.contains("://") { if let Some(host) = hostname_from_remote(&repo) { return host; } }
+            else if repo.split('/').count() == 3 { return repo.split('/').next().unwrap().to_string(); }
+            else if repo.split('/').count() == 2 { return default_hostname(); }
+        }
+        if let Ok(host) = std::env::var("GH_HOST") { if !host.is_empty() { return host; } }
+        if let Some(host) = repository_hostname(cwd) { return host; }
+    }
+    default_hostname()
+}
 
 pub fn validate_login_pane(id: &str) -> Result<()> {
     let suffix = id.strip_prefix("github-login-").context("invalid GitHub login pane")?;
@@ -760,26 +820,61 @@ pub fn validate_login_pane(id: &str) -> Result<()> {
 pub struct ConnectionStatus {
     pub state: &'static str,
     pub details: Option<String>,
+    pub hostname: String,
 }
 
-pub fn connection_status() -> ConnectionStatus {
-    let Ok(command) = gh() else {
-        return ConnectionStatus { state: "missing", details: None };
-    };
-    connection_status_with(command)
+pub fn connection_status(cwd: Option<&Path>) -> ConnectionStatus {
+    connection_status_with(&connection_hostname(cwd), gh)
 }
 
-fn connection_status_with(mut command: Command) -> ConnectionStatus {
-    command.args(["auth", "status", "--active"]);
-    match crate::git::capture_within(command, std::time::Duration::from_secs(15)) {
-        Ok(output) if output.status.success() => ConnectionStatus { state: "connected", details: None },
+fn connection_status_with(hostname: &str, command: impl Fn() -> Result<Command>) -> ConnectionStatus {
+    let status = |state, details| ConnectionStatus { state, details, hostname: hostname.into() };
+    if let Err(error) = validate_hostname(hostname) { return status("unavailable", Some(error.to_string())); }
+    let Ok(mut check) = command() else { return status("missing", None); };
+    // Scope gh's account selection before any probe. In particular, an
+    // Enterprise environment token must not be sent to an unknown remote host.
+    check.args(["auth", "status", "--active", "--hostname", hostname]);
+    let timeout = std::time::Duration::from_secs(15);
+    match crate::git::capture_within(check, timeout) {
+        Ok(output) if output.status.success() => return status("connected", None),
         Ok(output) => {
             let details = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            let lower = details.to_ascii_lowercase();
-            let signed_out = lower.contains("gh auth login") || lower.contains("not logged into") || lower.contains("token") && lower.contains("invalid");
-            ConnectionStatus { state: if signed_out { "signed_out" } else { "unavailable" }, details: Some(details.trim().to_string()) }
+            if details.contains("not logged into") {
+                return status("signed_out", Some(details.trim().to_string()));
+            }
+            // auth status calls both rejected credentials and transport
+            // failures an invalid token. Only probe an account it selected.
+            if !details.contains("Active account: true") {
+                return status("unavailable", Some(details.trim().to_string()));
+            }
         }
-        Err(error) => ConnectionStatus { state: "unavailable", details: Some(error.to_string()) },
+        Err(error) => return status("unavailable", Some(error.to_string())),
+    }
+    let result = (|| -> Result<std::process::Output> {
+        let mut probe = command()?;
+        probe.args(["api", "--hostname", hostname, "--include", "--silent", "user"]);
+        Ok(crate::git::capture_within(probe, timeout)?)
+    })();
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let state = api_connection_state(output.status.success(), &stdout);
+            let details = (state != "connected").then(|| format!("{stdout}{}", String::from_utf8_lossy(&output.stderr)).trim().to_string());
+            status(state, details)
+        }
+        Err(error) => status("unavailable", Some(error.to_string())),
+    }
+}
+
+fn api_connection_state(success: bool, stdout: &str) -> &'static str {
+    let code = stdout.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        words.next()?.starts_with("HTTP/").then(|| words.next()?.parse::<u16>().ok()).flatten()
+    });
+    match code {
+        Some(200) if success => "connected",
+        Some(401) => "signed_out",
+        _ => "unavailable",
     }
 }
 
@@ -793,19 +888,157 @@ mod connection_tests {
         for id in ["tab:agent", "session:shell", "github-login-", "github-login-session:shell"] {
             assert!(validate_login_pane(id).is_err());
         }
-        assert_eq!(LOGIN_COMMAND, "gh auth login --web");
+        assert_eq!(login_command("github.example.test").unwrap(), "gh auth login --web --hostname 'github.example.test'");
+        for host in ["", "--web", "github.com;touch /tmp/bad", "$(whoami)", "github.com\nwhoami", "https://github.com"] {
+            assert!(login_command(host).is_err());
+        }
     }
 
     #[test]
     fn signed_out_cli_is_a_connection_state_with_optional_details() {
         let Some(path) = crate::binpath::resolve("gh") else { return; };
         let config = tempfile::tempdir().unwrap();
-        let mut command = Command::new(path);
-        command.env("GH_CONFIG_DIR", config.path()).env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
-            .env_remove("GH_ENTERPRISE_TOKEN").env_remove("GITHUB_ENTERPRISE_TOKEN").env_remove("GH_HOST");
-        let status = connection_status_with(command);
+        let status = connection_status_with("github.com", || {
+            let mut command = Command::new(&path);
+            command.env("GH_CONFIG_DIR", config.path()).env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
+                .env_remove("GH_ENTERPRISE_TOKEN").env_remove("GITHUB_ENTERPRISE_TOKEN").env_remove("GH_HOST");
+            Ok(command)
+        });
         assert_eq!(status.state, "signed_out");
-        assert!(status.details.unwrap().contains("gh auth login"));
+        assert!(status.details.unwrap().contains("not logged into"));
+    }
+
+    fn isolated_gh(config: &Path) -> Option<Command> {
+        let mut command = Command::new(crate::binpath::resolve("gh")?);
+        command.env("GH_CONFIG_DIR", config).env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1")
+            .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN").env_remove("GH_ENTERPRISE_TOKEN")
+            .env_remove("GITHUB_ENTERPRISE_TOKEN").env_remove("GH_HOST").env_remove("GH_REPO");
+        Some(command)
+    }
+
+    struct RejectingProxy {
+        url: String,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RejectingProxy {
+        fn new() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = stopped.clone();
+            let server = std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok((connection, _)) = listener.accept() { drop(connection); }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+            Self { url, stopped, server: Some(server) }
+        }
+
+        fn command(&self, config: &Path) -> Command {
+            let mut command = isolated_gh(config).unwrap();
+            command.env("GH_TOKEN", "pro166-test-token-not-a-credential").env("HTTPS_PROXY", &self.url)
+                .env("HTTP_PROXY", &self.url).env("ALL_PROXY", &self.url).env("NO_PROXY", "").env("no_proxy", "");
+            command
+        }
+    }
+
+    impl Drop for RejectingProxy {
+        fn drop(&mut self) {
+            self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.server.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    fn refused_proxy_is_unavailable_not_signed_out() {
+        if !available() { return; }
+        let config = tempfile::tempdir().unwrap();
+        let proxy = RejectingProxy::new();
+        // An unrelated expired Enterprise account cannot determine this result.
+        std::fs::write(config.path().join("hosts.yml"), "github.expired.test:\n  user: other\n  oauth_token: expired-test-token\n").unwrap();
+        let status = connection_status_with("github.com", || Ok(proxy.command(config.path())));
+        assert_eq!(status.state, "unavailable");
+        let details = status.details.unwrap();
+        assert!(details.contains("https://api.github.com/user"), "{details}");
+        assert!(!details.contains("pro166-test-token-not-a-credential"));
+    }
+
+    #[test]
+    fn credentials_for_another_host_do_not_count_as_connected() {
+        if !available() { return; }
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("hosts.yml"), "github.other.test:\n  user: other\n  oauth_token: not-a-real-token\n").unwrap();
+        let status = connection_status_with("github.missing.test", || {
+            let mut command = isolated_gh(config.path()).unwrap();
+            command.env("GH_ENTERPRISE_TOKEN", "test-not-a-credential").env("GH_HOST", "github.other.test");
+            Ok(command)
+        });
+        assert_eq!(status.hostname, "github.missing.test");
+        assert_eq!(status.state, "signed_out");
+        assert!(status.details.unwrap().contains("github.missing.test"));
+    }
+
+    #[test]
+    fn only_an_http_authentication_rejection_requests_login() {
+        assert_eq!(api_connection_state(true, "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n"), "connected");
+        assert_eq!(api_connection_state(false, "HTTP/2.0 401 Unauthorized\r\n"), "signed_out");
+        assert_eq!(api_connection_state(false, "HTTP/2.0 403 Forbidden\r\n"), "unavailable");
+        assert_eq!(api_connection_state(false, "HTTP/2.0 502 Bad Gateway\r\n"), "unavailable");
+        assert_eq!(api_connection_state(false, ""), "unavailable");
+        assert_eq!(api_connection_state(false, "The token is invalid."), "unavailable");
+    }
+
+    #[test]
+    fn repository_hostname_uses_remote_and_explicit_gh_base() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::git::run(dir.path(), &["init"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "origin", "git@github.com:owner/repo.git"]).unwrap();
+        assert_eq!(repository_hostname(dir.path()).as_deref(), Some("github.com"));
+        crate::git::run(dir.path(), &["remote", "add", "upstream", "https://github.enterprise.test/owner/repo.git"]).unwrap();
+        assert_eq!(repository_hostname(dir.path()).as_deref(), Some("github.enterprise.test"));
+        crate::git::run(dir.path(), &["config", "remote.origin.gh-resolved", "base"]).unwrap();
+        assert_eq!(repository_hostname(dir.path()).as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote("ssh://git@github.enterprise.test:2222/owner/repo.git").as_deref(), Some("github.enterprise.test"));
+        assert_eq!(hostname_from_remote("file:///tmp/repo.git"), None);
+    }
+
+    #[test]
+    fn creation_from_a_linked_worktree_uses_the_shared_primary_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("primary checkout");
+        let linked = dir.path().join("linked checkout");
+        std::fs::create_dir(&main).unwrap();
+        crate::git::run(&main, &["init"]).unwrap();
+        crate::git::run(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "Initial"]).unwrap();
+        crate::git::run(&main, &["worktree", "add", "-b", "feature", linked.to_str().unwrap()]).unwrap();
+        assert!(linked.join(".git").is_file());
+        create_repository_with(&linked, "owner/new-repo", true, |cwd, args| {
+            assert_eq!(cwd, linked);
+            assert_eq!(&args[..4], &["repo", "create", "owner/new-repo", "--private"]);
+            assert_eq!(args[4], "--source");
+            assert_eq!(canonical_path(Path::new(args[5])), canonical_path(&main));
+            assert_eq!(args[6], "--remote=origin");
+            assert!(!args.contains(&"--push"));
+            if available() {
+                let config = tempfile::tempdir().unwrap();
+                let proxy = RejectingProxy::new();
+                let mut command = proxy.command(config.path());
+                command.current_dir(cwd).args(args);
+                let output = crate::git::capture_within(command, std::time::Duration::from_secs(15)).unwrap();
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(!output.status.success());
+                assert!(!error.contains("not a git repository"), "{error}");
+                assert!(error.contains("https://api.github.com/users/owner"), "gh must accept the source and reach its owner lookup: {error}");
+            }
+            // This is the shared config gh modifies, observed from the actual
+            // linked checkout below; no GitHub repository is created in a test.
+            crate::git::add_remote(Path::new(args[5]), "https://github.com/owner/new-repo.git")
+        }).unwrap();
+        assert_eq!(crate::git::remote_url(&linked).as_deref(), Some("https://github.com/owner/new-repo.git"));
     }
 
     #[test]
@@ -819,6 +1052,18 @@ mod connection_tests {
 /// Create only on explicit submission, private by default in the UI. `gh`
 /// adds origin; publishing commits remains the separate Push action.
 pub fn create_repository(cwd: &Path, name: &str, private: bool) -> Result<()> {
+    create_repository_with(cwd, name, private, |cwd, args| {
+        let mut command = gh()?;
+        let hostname = default_hostname();
+        validate_hostname(&hostname)?;
+        command.env("GH_HOST", hostname).current_dir(cwd).args(args);
+        let output = output_within(command, GH_TIMEOUT)?;
+        if !output.status.success() { bail!("{}", String::from_utf8_lossy(&output.stderr).trim()); }
+        Ok(())
+    })
+}
+
+fn create_repository_with(cwd: &Path, name: &str, private: bool, run: impl FnOnce(&Path, &[&str]) -> Result<()>) -> Result<()> {
     if name.is_empty() || name.starts_with('-') || name.split('/').count() > 2
         || name.split('/').any(|part| part.is_empty() || part == "." || part == "..")
         || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')) {
@@ -827,7 +1072,12 @@ pub fn create_repository(cwd: &Path, name: &str, private: bool) -> Result<()> {
     if crate::git::has_remote(cwd)? {
         bail!("This repository already has a remote. Refresh before creating a repository.");
     }
-    run(cwd, &["repo", "create", name, if private { "--private" } else { "--public" }, "--source=.", "--remote=origin"])?;
+    // gh 2.70 rejects a linked checkout's .git file. Git lists the primary
+    // checkout (or bare repository) first; its config and remotes are shared
+    // with this worktree. -z preserves paths containing spaces or newlines.
+    let worktrees = crate::git::run(cwd, &["worktree", "list", "--porcelain", "-z"])?;
+    let source = worktrees.split('\0').next().and_then(|line| line.strip_prefix("worktree ")).context("Git did not identify the repository's primary checkout")?;
+    run(cwd, &["repo", "create", name, if private { "--private" } else { "--public" }, "--source", source, "--remote=origin"])?;
     Ok(())
 }
 

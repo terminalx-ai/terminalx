@@ -5,7 +5,10 @@
 - Connect GitHub from the PR tab or Settings → Integrations in an embedded
   sign-in terminal. Pushing a repository without a remote now offers a URL
   field, or creation of a GitHub repository when signed in. Git failures show
-  a readable explanation with command output behind **Show details**. (PRO-166)
+  a readable explanation with command output behind **Show details**. Connection
+  checks and login target the repository's host, connection failures offer retry,
+  failed login output stays available, and repository creation works from linked
+  worktrees. (PRO-166)
 - Install Claude Code or Codex and sign in to it without opening Terminal.
   **Install and sign in**, on the welcome screen, in Settings → Agents and in
   the new-session view, runs the provider's official native installer in an

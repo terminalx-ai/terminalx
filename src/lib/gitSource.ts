@@ -92,7 +92,7 @@ export function localGitSource(cwd: string): GitSource {
     commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
-    githubStatus: () => gh.connectionStatus(),
+    githubStatus: () => gh.connectionStatus(cwd),
     hasRemote: () => git.hasRemote(cwd),
     addRemote: (url) => git.addRemote(cwd, url),
     createRepository: (name, privateRepo) => gh.createRepository(cwd, name, privateRepo),

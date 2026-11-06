@@ -2134,11 +2134,12 @@ export interface PrAssociation {
 export interface GitHubConnectionStatus {
   state: "missing" | "signed_out" | "connected" | "unavailable";
   details: string | null;
+  hostname?: string;
 }
 
 export const gh = {
-  connectionStatus: () => invoke<GitHubConnectionStatus>("gh_connection_status"),
-  loginStart: (id: string) => invoke<void>("gh_login_start", { id }),
+  connectionStatus: (cwd?: string) => invoke<GitHubConnectionStatus>("gh_connection_status", { cwd: cwd ?? null }),
+  loginStart: (id: string, hostname: string) => invoke<void>("gh_login_start", { id, hostname }),
   createRepository: (cwd: string, name: string, privateRepo: boolean) => invoke<void>("gh_create_repository", { cwd, name, private: privateRepo }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),

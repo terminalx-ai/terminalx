@@ -20,9 +20,11 @@ export function CommandDetails({ details }: { details?: string | null }) {
 }
 
 /** Only this dialog's login process is owned here; closing it cancels that login. */
-function GitHubLogin({ onClose }: { onClose: () => void }) {
+function GitHubLogin({ hostname, onClose }: { hostname: string; onClose: () => void }) {
   const [pane, setPane] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [failedExit, setFailedExit] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
   const close = useRef(onClose);
   close.current = onClose;
   useEffect(() => {
@@ -31,10 +33,12 @@ function GitHubLogin({ onClose }: { onClose: () => void }) {
     let unlisten: (() => void) | undefined;
     const start = async () => {
       unlisten = await listen<{ id: string; code: number | null }>("pty_exit", ({ payload }) => {
-        if (payload.id === id && !cancelled) close.current();
+        if (payload.id !== id || cancelled) return;
+        if (payload.code === 0) close.current();
+        else setFailedExit(true);
       });
       if (cancelled) return;
-      await gh.loginStart(id);
+      await gh.loginStart(id, hostname);
       if (!cancelled) setPane(id);
     };
     const started = start().catch((error: unknown) => { if (!cancelled) setFailure(errorMessage(error)); });
@@ -47,15 +51,19 @@ function GitHubLogin({ onClose }: { onClose: () => void }) {
         void pty.kill(id).catch(() => {});
       });
     };
-  }, []);
+  }, [hostname]);
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
     <DialogContent width="max-w-[52rem]" onInteractOutside={(event) => event.preventDefault()}>
       <DialogTitle className="text-base font-medium">Connect GitHub</DialogTitle>
-      <DialogDescription className="mt-1 text-xs text-muted-foreground">Follow the GitHub prompts below and finish signing in in your browser. This panel refreshes when the command finishes.</DialogDescription>
-      {failure ? <div role="alert" className="mt-4 text-xs">Could not start GitHub sign-in.<CommandDetails details={failure} /></div> : <div className="mt-4 h-80 overflow-hidden rounded-md bg-background p-2" aria-label="GitHub sign-in terminal">
-        {pane ? <Suspense fallback={<p className="text-xs">Opening terminal…</p>}><TerminalView id={pane} visible /></Suspense> : <p className="text-xs">Opening terminal…</p>}
+      <DialogDescription className="mt-1 text-xs text-muted-foreground">Follow the prompts to connect to {hostname} and finish signing in in your browser. This panel refreshes after a successful sign-in or when you close it.</DialogDescription>
+      {failedExit && <div role="alert" className="mt-4 text-xs">
+        <p>GitHub sign-in did not finish. Check the command output before trying again.</p>
+        <button type="button" className="mt-2 underline underline-offset-2" aria-expanded={showDetails} onClick={() => setShowDetails(!showDetails)}>{showDetails ? "Hide details" : "Show details"}</button>
       </div>}
-      <div className="mt-3 flex justify-end"><Button size="sm" variant="ghost" onClick={onClose}>Cancel sign-in</Button></div>
+      {failure ? <div role="alert" className="mt-4 text-xs">Could not start GitHub sign-in.<CommandDetails details={failure} /></div> : <div hidden={failedExit && !showDetails} className="mt-4 h-80 overflow-hidden rounded-md bg-background p-2" aria-label="GitHub sign-in terminal">
+        {pane ? <Suspense fallback={<p className="text-xs">Opening terminal…</p>}><TerminalView id={pane} visible={!failedExit || showDetails} /></Suspense> : <p className="text-xs">Opening terminal…</p>}
+      </div>}
+      <div className="mt-3 flex justify-end"><Button size="sm" variant="ghost" onClick={onClose}>{failedExit || failure ? "Close sign-in" : "Cancel sign-in"}</Button></div>
     </DialogContent>
   </Dialog>;
 }
@@ -64,10 +72,11 @@ export function GitHubSetup({ status, onRefresh }: { status: GitHubConnectionSta
   const [connecting, setConnecting] = useState(false);
   const missing = status.state === "missing";
   const unavailable = status.state === "unavailable";
+  const hostname = status.hostname ?? "github.com";
   return <section aria-label="GitHub connection" className="m-3 rounded-lg border border-hairline p-5 text-center text-xs">
     <div className="mx-auto mb-3 grid size-9 place-items-center rounded-md bg-well"><GitPullRequest className="size-4" /></div>
     <h3 className="text-sm font-medium">{missing ? "Install GitHub CLI" : unavailable ? "Could not check GitHub" : "Connect GitHub to see pull requests"}</h3>
-    <p className="mt-1 text-muted-foreground">{missing ? "Install the GitHub CLI to connect your account and work with pull requests." : unavailable ? "Check your connection and try again." : "TerminalX uses the GitHub CLI on this computer. Connect your account to sign in through your browser."}</p>
+    <p className="mt-1 text-muted-foreground">{missing ? "Install the GitHub CLI to connect your account and work with pull requests." : unavailable ? `Check your connection to ${hostname} and try again.` : `Connect your account on ${hostname} through your browser using the GitHub CLI on this computer.`}</p>
     <div className="mt-3 flex flex-wrap justify-center gap-2">
       <Button size="sm" variant="accent" onClick={() => {
         if (missing) void openUrl("https://cli.github.com/");
@@ -77,7 +86,7 @@ export function GitHubSetup({ status, onRefresh }: { status: GitHubConnectionSta
       {!unavailable && <Button size="sm" variant="ghost" onClick={onRefresh}>Check again</Button>}
     </div>
     <CommandDetails key={status.details} details={status.details} />
-    {connecting && <GitHubLogin onClose={() => { setConnecting(false); onRefresh(); }} />}
+    {connecting && <GitHubLogin key={hostname} hostname={hostname} onClose={() => { setConnecting(false); onRefresh(); }} />}
   </section>;
 }
 

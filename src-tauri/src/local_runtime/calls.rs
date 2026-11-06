@@ -53,10 +53,11 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 // The sole sessionless setup command. Neither a caller-supplied
                 // shell command nor an agent pane id can enter through it.
                 crate::github::validate_login_pane(id)?;
+                let command = crate::github::login_command(string(&params, "hostname")?)?;
                 let cwd = dirs::home_dir().context("home directory is unavailable")?;
                 terminals.spawn(sink.clone(), id, crate::pty::PaneSpec {
                     cwd: cwd.to_str().context("home directory is not UTF-8")?, cols: 80, rows: 20,
-                    command: Some(crate::github::LOGIN_COMMAND), env: &[],
+                    command: Some(&command), env: &[],
                 })?;
                 Ok(Value::Null)
             }

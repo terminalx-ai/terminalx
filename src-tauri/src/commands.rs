@@ -2891,14 +2891,14 @@ pub async fn git_add_remote(cwd: String, url: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub async fn gh_connection_status() -> CmdResult<crate::github::ConnectionStatus> {
-    tauri::async_runtime::spawn_blocking(crate::github::connection_status).await.map_err(err)
+pub async fn gh_connection_status(cwd: Option<String>) -> CmdResult<crate::github::ConnectionStatus> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::connection_status(cwd.as_deref().map(Path::new))).await.map_err(err)
 }
 
 #[tauri::command]
-pub async fn gh_login_start(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn gh_login_start(state: State<'_, AppState>, id: String, hostname: String) -> CmdResult<()> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
-    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.github_login(&id)).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.github_login(&id, &hostname)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
