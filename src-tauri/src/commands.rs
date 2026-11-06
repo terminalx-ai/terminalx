@@ -2182,6 +2182,24 @@ pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
     tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
 }
 
+/// Install an agent's CLI or sign in to it (PRO-152) in setup pane `id`,
+/// which the webview shows; its exit code says how the step ended
+/// (`harness::setup::exit`).
+#[tauri::command]
+pub async fn agent_setup_start(state: State<'_, AppState>, id: String, harness: String, step: String, cols: u16, rows: u16) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.agent_setup(&id, &harness, &step, cols, rows)).await.map_err(err)?.map_err(err)
+}
+
+/// The setup step running for an agent, as `{pane, step}` or null: a window
+/// that did not start it (another one, or this one before a reload) shows it
+/// instead of starting another (PRO-152).
+#[tauri::command]
+pub async fn agent_setup_running(state: State<'_, AppState>, harness: String) -> CmdResult<serde_json::Value> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.agent_setup_running(&harness)).await.map_err(err)?.map_err(err)
+}
+
 #[tauri::command]
 pub async fn check_agent_readiness(harness: String) -> CmdResult<harness::readiness::Readiness> {
     crate::binpath::invalidate();

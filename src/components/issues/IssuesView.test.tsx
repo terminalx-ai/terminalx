@@ -72,7 +72,7 @@ vi.mock("@/lib/models", async (original) => ({
   useModels: (harness: string) => catalog.models.filter((m) => m.harness === harness),
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
-vi.mock("@/lib/notify", () => ({ notePipelineState: vi.fn() }));
+vi.mock("@/lib/notify", () => ({ notePipelineState: vi.fn(), noteSessionStarted: vi.fn() }));
 vi.mock("@/lib/issuePipeline", async (original) => ({
   // What a pipeline means stays real; which ones exist, and starting one, are the test's.
   ...(await original<typeof import("@/lib/issuePipeline")>()),
@@ -93,6 +93,7 @@ const { NewSessionView } = await import("@/components/session/NewSessionView");
 const { clearNewSessionPreset, selectSession, upsertSession } = await import("@/lib/sessions");
 const { refreshModels } = await import("@/lib/models");
 const { IssuesView } = await import("./IssuesView");
+const { noteSessionStarted } = await import("@/lib/notify");
 
 const issues = [
   {
@@ -233,6 +234,7 @@ beforeEach(() => {
   startPipeline.mockImplementation(async (_sessionId: string, _tabId: string, autoMerge: boolean | null) => ({ pipeline: pipelineOf(issues[0], { autoMerge: !!autoMerge }), authorBrief: BRIEF }));
   vi.mocked(upsertSession).mockClear();
   vi.mocked(selectSession).mockClear();
+  vi.mocked(noteSessionStarted).mockClear();
   vi.mocked(refreshModels).mockReset();
   catalog.models = models;
   mockBackend();
@@ -268,6 +270,8 @@ describe("issue session targets", () => {
     await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
     const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
     expect(args.req).toMatchObject({ useWorktree: true, worktreeName: "build-checkout-feature" });
+    await waitFor(() => expect(selectSession).toHaveBeenCalledWith("session-1"));
+    expect(noteSessionStarted).not.toHaveBeenCalled();
   });
 
   it("resets an issue's one-off worktree choice for the next issue", async () => {
@@ -432,6 +436,50 @@ async function startIssue() {
   return launchRequest();
 }
 
+describe("starting work without leaving Issues", () => {
+  it.each(["github", "linear"] as const)("keeps the selected %s issue, list, search, filters and scroll while delivering its prompt", async (provider) => {
+    const onCreated = vi.fn();
+    await openIssue(provider, onCreated);
+    const root = screen.getByTestId("issues-view");
+    const detail = screen.getByTestId("issue-detail");
+    const list = root.querySelector<HTMLElement>(".overflow-y-auto")!;
+    fireEvent.change(screen.getByRole("textbox", { name: "Search issues" }), { target: { value: "login" } });
+    await waitFor(() => expect(invoke.mock.calls.filter(([cmd]) => cmd === "issues_list").at(-1)?.[1]).toMatchObject({ filter: expect.objectContaining({ search: "login" }) }));
+    list.scrollTop = 160;
+    const filters = getPrefs().issueFilters;
+    const rows = list.textContent;
+
+    await startIssue();
+    await waitFor(() => expect(noteSessionStarted).toHaveBeenCalled());
+    expect(selectSession).not.toHaveBeenCalled();
+    expect(screen.getByTestId("issues-view")).toBe(root);
+    expect(screen.getByTestId("issue-detail")).toBe(detail);
+    expect(detail.textContent).toContain("First issue body.");
+    expect((screen.getByRole("textbox", { name: "Search issues" }) as HTMLInputElement).value).toBe("login");
+    expect(getPrefs().issueFilters).toEqual(filters);
+    expect(list.textContent).toBe(rows);
+    expect(list.scrollTop).toBe(160);
+    const issue = provider === "github" ? issues[0] : linearIssues[0];
+    expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", `${issuePrompt(issue)}\n\n${BRIEF}`);
+  });
+
+  it("shows a failed start on the panel without a notice or navigation", async () => {
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "create_session") throw new Error("Worktree creation failed");
+      return base(command, args);
+    });
+    const onCreated = vi.fn();
+    await openIssue("github", onCreated);
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    expect(await screen.findByText("Worktree creation failed")).toBeTruthy();
+    expect(screen.getByTestId("issue-detail").textContent).toContain("First issue body.");
+    expect(selectSession).not.toHaveBeenCalled();
+    expect(noteSessionStarted).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+});
+
 describe("the pipeline an issue session starts", () => {
   // A project that chose nothing for the launch switches.
   const settings = (patch: Partial<IssuePipelineSettings>): IssuePipelineSettings => ({
@@ -458,7 +506,7 @@ describe("the pipeline an issue session starts", () => {
   }
   async function start() {
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
-    await waitFor(() => expect(selectSession).toHaveBeenCalledWith("session-1"));
+    await waitFor(() => expect(noteSessionStarted).toHaveBeenCalled());
   }
 
   // #700: nobody has to remember to turn them on for each issue.
@@ -471,9 +519,11 @@ describe("the pipeline an issue session starts", () => {
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
     expect(resolveChoices()).toEqual([{ id: "pipeline-1", value: true }]);
     expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", `${issuePrompt(provider === "github" ? issues[0] : linearIssues[0])}\n\n${BRIEF}`);
-    // The pipeline is started for the session that exists, before the reader is taken to it.
+    expect(selectSession).not.toHaveBeenCalled();
+    expect(noteSessionStarted).toHaveBeenCalledWith("session-1", "tab-1", "claude", `${provider === "github" ? "#11" : "DEMO-1"} Fix login timeout`);
+    // The pipeline is started for the session that exists, before its first prompt is sent.
     expect(vi.mocked(upsertSession).mock.invocationCallOrder[0]).toBeLessThan(startPipeline.mock.invocationCallOrder[0]);
-    expect(startPipeline.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(selectSession).mock.invocationCallOrder[0]);
+    expect(startPipeline.mock.invocationCallOrder[0]).toBeLessThan(onCreated.mock.invocationCallOrder[0]);
   });
 
   it.each(["github", "linear"] as const)("starts a %s issue with a switch turned off for that launch only", async (provider) => {
@@ -756,7 +806,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
       issue: { provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url }, tab,
     });
     expect(upsertSession).toHaveBeenCalledWith(expect.objectContaining({ tabs: [{ id: "tab-1", ...tab }] }));
-    expect(selectSession).toHaveBeenCalledWith("session-1");
+    expect(selectSession).not.toHaveBeenCalled();
+    expect(noteSessionStarted).toHaveBeenCalledWith("session-1", "tab-1", "codex", `${issue.identifier} ${issue.title}`);
     // The issue itself, then how the pipeline wants the work handed over.
     expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", `${issuePrompt(issue)}\n\n${BRIEF}`);
     // Set to merge when green, as every issue starts unless its project says otherwise.
@@ -1131,7 +1182,9 @@ describe("who is working on an issue (#441)", () => {
     expect(screen.queryByRole("button", { name: "Open the existing session" })).toBeNull();
     expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Start anyway" }));
-    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
+    await waitFor(() => expect(noteSessionStarted).toHaveBeenCalledWith("session-1", "tab-1", "claude", "#11 Fix login timeout"));
+    expect(selectSession).not.toHaveBeenCalled();
+    expect(screen.getByTestId("issue-detail").textContent).toContain("First issue body.");
   });
 
   it("offers this Mac's session instead, and starts nothing on Cancel", async () => {
@@ -1147,6 +1200,34 @@ describe("who is working on an issue (#441)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open the existing session" }));
     expect(vi.mocked(selectSession)).toHaveBeenCalledWith("local-12");
     expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  });
+
+  it("opens newer issue work ahead of its older pipeline, excluding the newer reviewer", async () => {
+    pipelineStore.pipelines = [pipelineOf(listed[1], { author: { sessionId: "local-12", tabId: "author-tab" }, reviewer: { sessionId: "reviewer", tabId: "reviewer-tab" } })];
+    (sessionStore as { sessions: unknown[] }).sessions = [
+      localSession(),
+      localSession({ id: "new-work", created: new Date(NOW).toISOString() }),
+      localSession({ id: "reviewer", created: new Date(NOW + 1000).toISOString() }),
+    ];
+    render(<IssuesView />);
+    fireEvent.click(await row("Repair session target"));
+    await screen.findByText("Second issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    expect(selectSession).toHaveBeenCalledWith("new-work");
+  });
+
+  it("keeps a newer pipeline author eligible when its session has no issue metadata", async () => {
+    pipelineStore.pipelines = [pipelineOf(listed[1], { author: { sessionId: "author", tabId: "author-tab" }, reviewer: { sessionId: "reviewer", tabId: "reviewer-tab" } })];
+    (sessionStore as { sessions: unknown[] }).sessions = [
+      localSession(),
+      localSession({ id: "author", issue: null, created: new Date(NOW).toISOString() }),
+      localSession({ id: "reviewer", created: new Date(NOW + 1000).toISOString() }),
+    ];
+    render(<IssuesView />);
+    fireEvent.click(await row("Repair session target"));
+    await screen.findByText("Second issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    expect(selectSession).toHaveBeenCalledWith("author");
   });
 
   it("hides the issues someone works on, or shows only the reader's", async () => {

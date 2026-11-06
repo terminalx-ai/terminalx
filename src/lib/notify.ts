@@ -27,7 +27,8 @@ import type { IssuePipeline } from "@/types/issuePipeline";
  * the session the floating window shows brings that window back when the
  * reader returns to the app.
  */
-export type NoticeKind = "done" | "waiting" | "failed";
+export type NoticeKind = "started" | "done" | "waiting" | "failed";
+type AttentionKind = Exclude<NoticeKind, "started">;
 
 export interface Notice {
   id: string;
@@ -68,6 +69,17 @@ export function openNotice(n: Notice) {
   if (isCloudKey(n.sessionId)) openCloudSession(n.sessionId, n.tabId);
   else selectSession(n.sessionId);
   dismissNotice(n.id);
+}
+
+/** An issue started here: acknowledge it without moving the reader or raising a desktop banner. */
+export function noteSessionStarted(sessionId: string, tabId: string, harness: string, body: string) {
+  const at = Date.now();
+  const id = `started:${sessionId}:${tabId}:${at}`;
+  notices = [...notices.filter((n) => !(n.sessionId === sessionId && n.tabId === tabId)), {
+    id, sessionId, tabId, kind: "started", harness, title: "Session started", body, at,
+  }];
+  emit();
+  window.setTimeout(() => dismissNotice(id), 8000);
 }
 
 // ---- focus tracking
@@ -194,7 +206,7 @@ function tone(notes: { f: number; at: number; len: number }[], gain = 0.06) {
   }
 }
 
-export function playSound(kind: NoticeKind) {
+export function playSound(kind: AttentionKind) {
   if (!getPrefs().sounds) return;
   if (kind === "done") tone([{ f: 1046.5, at: 0, len: 0.18 }, { f: 1318.5, at: 0.12, len: 0.28 }]);
   else if (kind === "waiting") tone([{ f: 880, at: 0, len: 0.16 }, { f: 880, at: 0.22, len: 0.24 }]);
@@ -215,7 +227,7 @@ async function canNotify(): Promise<boolean> {
   return permission;
 }
 
-function summarise(_session: SessionEntry, tab: TabEntry, kind: NoticeKind): { title: string; body: string } {
+function summarise(_session: SessionEntry, tab: TabEntry, kind: AttentionKind): { title: string; body: string } {
   const agent = getSessions().harnesses.find((h) => h.id === tab.harness)?.name ?? "Agent";
   const status = kind === "waiting" ? `${agent} needs attention` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`;
   const title = `TerminalX — ${status}`;
@@ -224,7 +236,7 @@ function summarise(_session: SessionEntry, tab: TabEntry, kind: NoticeKind): { t
 
 /** Called for every tab status change; decides what, if anything, to raise. */
 export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: TabStatus, next: TabStatus) {
-  let kind: NoticeKind | null = null;
+  let kind: AttentionKind | null = null;
   if (next === "waiting" && prev !== "waiting") kind = "waiting";
   else if (next === "completed" && prev === "in_progress") kind = "done";
   if (!kind) return;
@@ -291,7 +303,7 @@ export function notePipelineState(pipeline: IssuePipeline) {
   }
   playSound(kind);
   const id = `pipeline:${pipeline.id}:${Date.now()}`;
-  notices = [...notices.filter((notice) => !notice.id.startsWith(`pipeline:${pipeline.id}:`)), { id, sessionId, tabId, kind, title, body, at: Date.now() }];
+  notices = [...notices.filter((notice) => !notice.id.startsWith(`pipeline:${pipeline.id}:`) && !(notice.kind === "started" && notice.sessionId === sessionId && notice.tabId === tabId)), { id, sessionId, tabId, kind, title, body, at: Date.now() }];
   emit();
   window.setTimeout(() => dismissNotice(id), 8000);
 }

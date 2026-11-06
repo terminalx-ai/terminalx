@@ -391,6 +391,32 @@ it("opening the main window preserves an unsent initial prompt in the source vie
 });
 
 describe("one new-chat composer (PRO-173)", () => {
+  it("updates setup and enables the installed agent after returning from Terminal without Check again (PRO-170)", async () => {
+    store.harnesses = [{ ...harness, id: "codex", name: "Codex", available: false }];
+    let readiness = "missing";
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: readiness, checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
+    await screen.findByText("Not installed");
+
+    readiness = "signed_out";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText("Installed · sign in required");
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+
+    readiness = "ready";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText("Ready · local login found");
+    expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Codex · Bypass");
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    expect(createQuickChat).not.toHaveBeenCalled();
+  });
+
   it.each([
     [false, "signed_out", "signed_out", null], [true, "signed_out", "signed_out", null],
     [false, "ready", "signed_out", "Claude"], [true, "ready", "signed_out", "Claude"],
