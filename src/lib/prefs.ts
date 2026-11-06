@@ -40,6 +40,8 @@ export interface Prefs {
   foldToolCalls: boolean;
   /** Under each finished turn, a chip per file it changed with the lines added and removed. */
   turnChanges: boolean;
+  /** A mark per prompt down the transcript's right edge: hover to read one, click to go to it. */
+  promptMap: boolean;
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -145,6 +147,7 @@ const DEFAULTS: Prefs = {
   transcriptLayout: "wide",
   foldToolCalls: true,
   turnChanges: true,
+  promptMap: true,
   autocorrect: false,
   lastProject: null,
   lastAgent: "claude",

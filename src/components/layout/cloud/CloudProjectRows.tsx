@@ -195,10 +195,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
       <div
         className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-2 rounded-md px-2", drafting ? "bg-selected" : "hover:bg-selected/50")}
         title={[project.blank ? `${project.fullName} · no repository` : project.identity, extra?.card].filter(Boolean).join("\n")}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          menu.setOpen(true);
-        }}
+        {...menu.surface}
       >
         <button
           type="button"
@@ -453,10 +450,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
       <div
         className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-2 rounded-md pl-2 pr-1 text-foreground/85", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
         title={[workspaceCard(node.item, activity), extra?.card].filter(Boolean).join("\n")}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          menu.setOpen(true);
-        }}
+        {...menu.surface}
       >
         <button
           type="button"
@@ -559,14 +553,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
         title={row.branch ? `${row.branch} · ${row.title}` : row.title}
         data-testid="cloud-session-row"
         data-session={row.key}
-        onContextMenu={
-          manage
-            ? (event) => {
-                event.preventDefault();
-                menu.setOpen(true);
-              }
-            : undefined
-        }
+        {...(manage ? menu.surface : {})}
       >
         {renaming ? (
           <input
@@ -714,10 +701,7 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
       <div
         className={cn(actionRow, "relative flex min-w-0 items-start gap-1 rounded-md pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
         title={[describeWorkspace(item), text.line, text.saved].filter(Boolean).join("\n")}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          menu.setOpen(true);
-        }}
+        {...menu.surface}
       >
         <button
           type="button"

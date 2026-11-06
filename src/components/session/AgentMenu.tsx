@@ -27,7 +27,7 @@ import type { useSessionAgent } from "@/lib/useSessionAgent";
  * marked as a warning and Plan in the composer's plan colour.
  */
 export function AgentMenu({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
-  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort } = selection;
+  const { harnesses, harness, readiness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort } = selection;
   const menu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const modelText = unavailableModel ? `Unavailable: ${unavailableModel}` : (model ? runningModelName(model) : (harness?.name ?? "Agent"));
   const effortText = effort ? (EFFORT_LABEL[effort] ?? effort) : null;
@@ -63,13 +63,16 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[15rem]">
         <DropdownMenuLabel>Agent</DropdownMenuLabel>
-        {harnesses.map((h) => (
-          <DropdownMenuItem key={h.id} disabled={here && !h.available} onSelect={() => selectHarness(h.id)}>
+        {harnesses.map((h) => {
+          const state = readiness?.[h.id]?.state;
+          const unavailable = here && (!h.available || (readiness !== undefined && (!state || state === "missing" || state === "signed_out")));
+          const hint = !h.available || state === "missing" ? "not installed" : state === "signed_out" ? "sign in required" : "checking…";
+          return <DropdownMenuItem key={h.id} disabled={unavailable} onSelect={() => selectHarness(h.id)}>
             <AgentMark id={h.id} decorative brand />
             <span>{h.name}</span>
-            {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : here && !h.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
+            {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}
           </DropdownMenuItem>
-        ))}
+        })}
 
         {harness && (model || unavailableModel || allowDefaultEffort) && (
           <>
