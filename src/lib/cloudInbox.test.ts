@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   subscribe: vi.fn(), stop: vi.fn(), markers: vi.fn(), refresh: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: mocks.status }), subscribeAccount: (fn: () => void) => mocks.listeners.push(fn) }));
-vi.mock("@/lib/cloudCatalog", () => ({ refreshCloudFeed: mocks.refresh, refreshCloudCatalog: mocks.refresh }));
+vi.mock("@/lib/cloudCatalog", () => ({ invalidateCloudCatalog: mocks.refresh }));
 vi.mock("@/lib/desktopInbox", () => ({ subscribeInbox: mocks.subscribe }));
 vi.mock("@/lib/cloudReadMarkers", () => ({ setReadMarkerAccount: mocks.markers, mergeReadMarkers: vi.fn(), flushReadMarkers: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ noteOrganizationEvent: vi.fn() }));
@@ -28,4 +28,29 @@ it("owns one subscriber per account, preserving it across organization switches 
   mocks.status = { state: "signed-out" } as AccountStatus; mocks.listeners[0]();
   expect(mocks.stop).toHaveBeenCalledTimes(2);
   expect(mocks.markers).toHaveBeenLastCalledWith(null);
+});
+
+it("retains and replays an event when its required catalog invalidation fails", async () => {
+  vi.useFakeTimers();
+  const { subscribeInbox } = await vi.importActual<typeof import("./desktopInbox")>("./desktopInbox");
+  mocks.status = { state: "signed-in", desktopInbox: true, catalogFeed: true, context: { account: "retry", scope: "org", revision: "1" } } as AccountStatus;
+  mocks.listeners[0]();
+  const effects = mocks.subscribe.mock.calls.at(-1)![1];
+  const batch = { cursor: "1", more: false, events: [{ id: "1", orgId: "org", workspaceId: "ws", type: "share.added", payload: {} }] };
+  const receipt = vi.fn().mockResolvedValue(undefined);
+  mocks.refresh.mockRejectedValueOnce(new Error("offline")).mockResolvedValue(undefined);
+  const cancel = subscribeInbox({
+    stream: async (_cursor, receive, signal) => {
+      receive(batch);
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
+    poll: vi.fn().mockResolvedValue(batch), receipt,
+  }, { ...effects, fallback: () => undefined });
+  try {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(receipt).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(receipt).toHaveBeenCalledWith("1");
+    expect(mocks.refresh).toHaveBeenCalledWith("org");
+  } finally { cancel(); vi.useRealTimers(); }
 });

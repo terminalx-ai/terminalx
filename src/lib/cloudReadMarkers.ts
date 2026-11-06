@@ -55,13 +55,22 @@ export async function flushReadMarkers() {
   let failed = false;
   try {
     for (const [k, marker] of [...pending]) {
-      const saved = await invoke<ReadMarker>("desktop_read_marker", { owner: account, marker });
-      if (run !== generation) return;
-      mergeReadMarkers([saved]);
-      if (pending.get(k) === marker) pending.delete(k);
+      try {
+        const saved = await invoke<ReadMarker>("desktop_read_marker", { owner: account, marker });
+        if (run !== generation) return;
+        mergeReadMarkers([saved]);
+        if (pending.get(k) === marker) pending.delete(k);
+      } catch (error) {
+        if (run !== generation) return;
+        // Revoked/deleted workspaces cannot accept this read. Other tabs still
+        // need to sync, including while this entry has a temporary failure.
+        if (/desktop_inbox_http_(400|403|404|410)\b/.test(String(error))) {
+          if (pending.get(k) === marker) pending.delete(k);
+        } else failed = true;
+      }
       persist();
     }
-  } catch { failed = true; /* offline: persist and retry for this account */ }
+  }
   finally {
     if (run === generation) {
       sending = false;

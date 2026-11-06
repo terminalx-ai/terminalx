@@ -525,7 +525,7 @@ export function findCloudWorkspace(catalog: CloudCatalogState, orgId: string, wo
 // ---- Refresh ---------------------------------------------------------------
 
 const REPOSITORIES_MAX_AGE_MS = 5 * 60 * 1000;
-const flights = new Map<string, Promise<void>>();
+const flights = new Map<string, Promise<boolean>>();
 
 function patchOrg(orgId: string, patch: Partial<OrgCatalog>) {
   const current = state.orgs[orgId] ?? emptyOrg(orgId);
@@ -557,27 +557,18 @@ export function catalogErrorText(error: string): string {
  * repositories). Only a live organization is listed: every cloud-enabled one
  * on a server with the capability, else the default one alone.
  */
-export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccount().status), now: () => number = Date.now): Promise<void> {
-  if (!orgId || !liveCloudOrgIds(getAccount().status).includes(orgId)) return Promise.resolve();
+function refreshCloudCatalogResult(orgId: string | null = defaultOrgId(getAccount().status), now: () => number = Date.now): Promise<boolean> {
+  if (!orgId || !liveCloudOrgIds(getAccount().status).includes(orgId)) return Promise.resolve(true);
   const running = flights.get(orgId);
   if (running) return running;
   const owner = state.owner;
   const flight = (async () => {
-    const current = state.orgs[orgId];
     const requestedAt = now();
-    // Its place among the role reads and the lists, which the clock cannot give within one millisecond.
     const roleAsk = roleAskStamp();
-    const wantRepositories = !current?.repositoriesAt || now() - current.repositoriesAt > REPOSITORIES_MAX_AGE_MS;
-    const [list, repositories] = await Promise.allSettled([
-      api.cloudWorkspaces(cloudOrgArg(orgId)),
-      wantRepositories ? api.cloudWorkspaceRepositories(cloudOrgArg(orgId)) : Promise.resolve(null),
-    ]);
-    // Signed out or another user while it ran, or (CS-18) the user left the organization: nothing lands.
-    if (state.owner !== owner) return;
-    if (isMultiOrg(getAccount().status) && !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
-    if (repositories.status === "fulfilled" && repositories.value) {
-      patchOrg(orgId, { repositories: repositories.value.repositories, repositoriesAt: now() });
-    }
+    void refreshRepositories(orgId, owner, now);
+    const [list] = await Promise.allSettled([api.cloudWorkspaces(cloudOrgArg(orgId))]);
+    if (state.owner !== owner) return true;
+    if (isMultiOrg(getAccount().status) && !liveCloudOrgIds(getAccount().status).includes(orgId)) return true;
     if (list.status === "fulfilled" && !Array.isArray(list.value?.workspaces)) {
       patchOrg(orgId, { error: "cloud_workspace_invalid_response" });
     } else if (list.status === "fulfilled") {
@@ -589,25 +580,43 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
         // A list named by its organization (CS-18) that answers for another is simply invalid.
         if (isMultiOrg(getAccount().status)) patchOrg(orgId, { error: "cloud_workspace_invalid_response" });
         else void refreshAccount();
-        return;
+        return false;
       }
       await ingestCloudList(list.value, orgId, now(), requestedAt);
       // The list is read every 30 s and names this person's role on every
       // workspace: a role changed by an owner shows here before the account
       // session is next renewed.
       noteListedOrgRole(orgId, listedOrgManages(list.value, getAccount().status.memberWorkspaces === true), roleAsk);
+      return true;
     } else {
       patchOrg(orgId, { error: errorText(list.reason) });
       // A list answers "not found" only to someone who is not a member of the
       // organization: the organizations held are older than the server's.
       if (errorText(list.reason) === "cloud_workspace_not_found") void refreshAccountRoles(true);
     }
+    return false;
   })().finally(() => {
     flights.delete(orgId);
     schedulePoll(orgId);
   });
   flights.set(orgId, flight);
   return flight;
+}
+
+export async function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccount().status), now: () => number = Date.now): Promise<void> {
+  await refreshCloudCatalogResult(orgId, now);
+}
+
+/** An inbox invalidation is durable until a list requested after it succeeds.
+ * Read the affected organization directly even when the catalog feed is paused. */
+export async function invalidateCloudCatalog(orgId?: string): Promise<void> {
+  const owner = state.owner;
+  const ids = orgId ? [orgId] : liveCloudOrgIds(getAccount().status);
+  for (const id of ids) {
+    await flights.get(id)?.catch(() => undefined);
+    if (state.owner !== owner) return;
+    if (!await refreshCloudCatalogResult(id)) throw new Error("cloud_catalog_invalidation_failed");
+  }
 }
 
 /**

@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getAccount, subscribeAccount } from "@/lib/account";
-import { refreshCloudCatalog, refreshCloudFeed } from "@/lib/cloudCatalog";
+import { invalidateCloudCatalog } from "@/lib/cloudCatalog";
 import { flushReadMarkers, mergeReadMarkers, setReadMarkerAccount, type ReadMarker } from "@/lib/cloudReadMarkers";
 import { subscribeInbox, type InboxBatch, type InboxEvent } from "@/lib/desktopInbox";
 import { noteOrganizationEvent } from "@/lib/notify";
@@ -23,15 +23,9 @@ function sync() {
   save(deviceKey, deviceId);
   let refresh = Promise.resolve();
   const refreshCatalog = (orgId?: string) => {
-    refresh = refresh.then(async () => {
-      if (active !== owner) return;
-      // A feed that started before the event may be stale. Await it, then
-      // request once more so coalescing cannot hide the invalidation.
-      await refreshCloudFeed();
-      if (active !== owner) return;
-      await refreshCloudFeed();
-      if (orgId && !getAccount().status.catalogFeed) await refreshCloudCatalog(orgId);
-    }).catch(() => undefined);
+    refresh = refresh.catch(() => undefined).then(async () => {
+      if (active === owner) await invalidateCloudCatalog(orgId);
+    });
     return refresh;
   };
   const event = async (e: InboxEvent) => {
@@ -53,7 +47,7 @@ function sync() {
     },
     poll: cursor => invoke("desktop_inbox_poll", { owner, cursor }),
     receipt: cursor => invoke("desktop_inbox_receipt", { owner, deviceId, cursor }),
-  }, { event, save: cursor => save(cursorKey, cursor), fallback: () => { void refreshCatalog(); } }, saved(cursorKey) ?? "0");
+  }, { event, save: cursor => save(cursorKey, cursor), fallback: () => { void refreshCatalog().catch(() => undefined); } }, saved(cursorKey) ?? "0");
 }
 export function bootCloudInbox() {
   if (started) return;

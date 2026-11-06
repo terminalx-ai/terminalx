@@ -46,6 +46,7 @@ import {
   flushCloudCatalogSave,
   getCloudCatalog,
   ingestCloudList,
+  invalidateCloudCatalog,
   lastKnownWorkspace,
   listedOrgManages,
   liveCloudOrgIds,
@@ -829,6 +830,30 @@ describe("the cross-organization catalog feed (PRO-74)", () => {
   const idsIn = (orgId: string) => getCloudCatalog().orgs[orgId]?.workspaces.map((w) => w.workspace.id);
   /** The server as it behaves: the whole catalog once, then 304 while the cursor is current. */
   const serve = (current: () => CloudCatalogFeed) => mocks.api.cloudCatalogFeed.mockImplementation(async (cursor: string | null) => (cursor === current().cursor ? unchanged(cursor!) : current()));
+
+  it.each(["paused", "refused"])("retries inbox invalidations while the advertised feed is %s", async (failure) => {
+    withFeed();
+    mocks.api.cloudWorkspaces.mockImplementation(async (orgId) => ({ workspaces: rows(orgId), tombstones: [] }));
+    mocks.api.cloudCatalogFeed.mockRejectedValue(failure === "refused" ? "cloud_catalog_feed_unsupported" : "offline");
+    for (let i = 0; i < FEED_FAILURES_BEFORE_FALLBACK; i++) await refreshCloudFeed();
+    // Wait for any automatic fallback lists before the event arrives.
+    await refreshCloudCatalog(ORG);
+    expect(mocks.account.status.catalogFeed).toBe(true);
+    expect(usesCatalogFeed()).toBe(false);
+    mocks.api.cloudWorkspaces.mockRejectedValueOnce(new Error("offline"));
+    await expect(invalidateCloudCatalog(ORG)).rejects.toThrow("cloud_catalog_invalidation_failed");
+    mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [item("shared-now")], tombstones: [] });
+    await invalidateCloudCatalog(ORG);
+    expect(idsIn(ORG)).toEqual(["shared-now"]);
+  });
+
+  it("does not wait for repositories when applying a durable inbox invalidation", async () => {
+    withFeed();
+    mocks.api.cloudWorkspaceRepositories.mockReturnValue(new Promise(() => {}));
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("shared-now")], tombstones: [] });
+    await invalidateCloudCatalog(ORG);
+    expect(idsIn(ORG)).toEqual(["shared-now"]);
+  });
 
   it("is used only on a server that advertises it, with every organization live", () => {
     signIn(orgs);

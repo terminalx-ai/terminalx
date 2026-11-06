@@ -44,4 +44,19 @@ describe("server read reconciliation", () => {
     expect(invoke).toHaveBeenLastCalledWith("desktop_read_marker", { owner: "A", marker: { ...marker, readSeq: 11 } });
   });
 
+  it.each(["desktop_inbox_http_403", "desktop_inbox_http_404", "offline"])("does not block other workspaces after %s", async (failure) => {
+    const other = { ...marker, workspaceId: "still-authorized" };
+    invoke.mockImplementation((_cmd, { marker: incoming }) => incoming.workspaceId === marker.workspaceId ? Promise.reject(new Error(failure)) : Promise.resolve(incoming));
+    queueReadMarker(marker);
+    queueReadMarker(other);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(invoke).toHaveBeenCalledWith("desktop_read_marker", { owner: "A", marker: other });
+    const persisted = JSON.parse(localStorage.getItem("terminalx.read-markers.A") ?? "[]");
+    expect(persisted).toEqual(failure === "offline" ? [marker] : []);
+    invoke.mockResolvedValue(marker);
+    setReadMarkerAccount(null); setReadMarkerAccount("A");
+    await flushReadMarkers();
+    expect(JSON.parse(localStorage.getItem("terminalx.read-markers.A") ?? "[]")).toEqual([]);
+  });
+
 });

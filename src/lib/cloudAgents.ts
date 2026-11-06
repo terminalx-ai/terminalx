@@ -328,8 +328,8 @@ function knownSeq(tab: CloudAgentTab): number {
 }
 
 /** A status change: a finished turn is unread until someone looks at it. */
-function noteStatus(tab: CloudAgentTab, status: AgentTabStatus) {
-  if (status === "completed" && tab.info.status !== "completed") {
+function noteStatus(tab: CloudAgentTab, status: AgentTabStatus, snapshotSeq = knownSeq(tab)) {
+  if (status === "completed" && (tab.info.status !== "completed" || snapshotSeq > knownSeq(tab))) {
     tab.unread = true;
     tab.completed = true;
   } else if (status === "in_progress") {
@@ -560,7 +560,7 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
   const upTo = p.events.length ? p.events[p.events.length - 1].seq : null;
   const upToDate = upTo !== null && upTo >= knownSeq(current);
   if (current.placeholder || (current.source !== "live" && upToDate)) {
-    noteStatus(current, p.status);
+    noteStatus(current, p.status, upTo ?? knownSeq(current));
     current.info = {
       ...current.info,
       sessionId: p.sessionId,
@@ -621,7 +621,7 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
     if (!existing) {
       s.tabs.set(info.tabId, newTab(info, "live"));
     } else {
-      noteStatus(existing, info.status);
+      noteStatus(existing, info.status, info.lastSeq);
       // Settings chosen here and not sent yet stay shown as chosen.
       existing.info = withPending({ ...keepMessageTime(info, existing.info),
         sessionLastMessageAt: newestMessageTime(info.sessionLastMessageAt, existing.info.sessionLastMessageAt),

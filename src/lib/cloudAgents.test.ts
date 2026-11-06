@@ -982,6 +982,21 @@ it("retains message presence from a legacy checkpoint with no verified time or r
 
 
 describe("account read markers in cloud rows", () => {
+  it.each(["live", "checkpoint"])("restores unread for a newer completed %s snapshot without an intervening running status", async (source) => {
+    setReadMarkerAccount("A");
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastSeq: 10 })]);
+    mergeReadMarkers([{ orgId: scope.organizationId, workspaceId: scope.workspaceId, sessionId: "s-1", tabId: "t-1", readSeq: 10 }]);
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastSeq: 10 })]);
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(false);
+    if (source === "live") applyLiveTabs(scope, [tabInfo({ status: "completed", lastSeq: 20 })]);
+    else {
+      markCloudAgentsOffline(scope);
+      backend.checkpoints["t-1"] = { epoch: 7, version: 5, projection: { ...tabInfo({ status: "completed" }), v: 1, events: [ev(20, { type: "assistant_text", text: "new reply" })], truncated: false, updatedAt: 20 } };
+      await refreshFromCheckpoint(scope, "t-1");
+    }
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(true);
+    setReadMarkerAccount(null);
+  });
   it("clears the finished row immediately and keeps the next reply unread", () => {
     setReadMarkerAccount("A");
     applyLiveTabs(scope, [tabInfo({ status: "completed", lastSeq: 10 })]);
