@@ -43,6 +43,7 @@ interface ActionDef {
 
 const ACTIONS = [
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },
+  { id: "app.home", label: "Home", group: "App", keys: [] },
   { id: "app.newSession", label: "New session", group: "App", keys: ["mod+n"] },
   { id: "app.issues", label: "Issues", group: "App", keys: ["mod+i"] },
   { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"] },

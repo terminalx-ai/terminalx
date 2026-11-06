@@ -296,6 +296,11 @@
   text-decoration-color: color-mix(in oklab, var(--accent-mention) 40%, transparent);
   text-underline-offset: 2px;
 }
+/* A file the agent handed over (#776) is a chip, not an underlined link. */
+.prose-chat a[data-file-chip] {
+  color: var(--foreground);
+  text-decoration: none;
+}
 .prose-chat code:not(pre code) {
   font-family: var(--font-mono);
   font-size: 0.92em;

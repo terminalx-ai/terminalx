@@ -24,7 +24,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { startUpdateChecks } from "@/lib/updates";
-import { bootSessions, closeNewSession, openNewSession, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
+import { bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -176,6 +176,10 @@ export function AppShell() {
     setSettingsRequest((count) => count + 1);
   }, []);
   const newSession = useCallback(() => openNewSession(), []);
+  const showHome = useCallback(() => {
+    setSettingsOpen(false);
+    openHome();
+  }, []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
   const showStats = useCallback(() => openStats(), []);
@@ -187,6 +191,7 @@ export function AppShell() {
   useShortcut("app.togglePanel", togglePanel);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
+  useShortcut("app.home", showHome);
   useShortcut("app.issues", showIssues);
   useShortcut("app.agentDashboard", showAgents);
   useShortcut("app.stats", showStats);
@@ -249,6 +254,7 @@ export function AppShell() {
                 onToggle={toggleSidebar}
                 onOpenSettings={openSettings}
                 onOpenAccount={openAccountSettings}
+                onOpenHome={showHome}
                 onOpenIssues={showIssues}
                 onOpenAgents={showAgents}
                 onOpenStats={showStats}
@@ -351,9 +357,10 @@ function UnselectedWorkspace({
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && view === "new" ? "branch" : useWorktree ? "base" : "branch";
+  // Home always offers the welcome actions, including after a project has been added.
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
   // Not before the projects are read, or over a cloud or project-less draft.
-  const startScreen = (view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionQuick);
+  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionQuick));
 
   return (
     <>

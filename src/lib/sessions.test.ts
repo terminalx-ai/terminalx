@@ -432,3 +432,36 @@ describe("a new live connection", () => {
     expect(fresh.getSessionStore().sessions).toEqual([]);
   });
 });
+
+describe("Home navigation (PRO-183)", () => {
+  it.each([
+    "session", "cloud session", "cloud workspace", "draft", "issues", "automation", "closed workspace",
+  ])("leaves the %s for Home and preserves projects and sessions", (from) => {
+    if (from === "session") sessions.selectSession(attached.id);
+    if (from === "cloud session") sessions.selectCloudSession("cloud:org-a:ws-1:session-1");
+    if (from === "cloud workspace") sessions.selectCloudWorkspace("cloud:org-a:ws-1");
+    if (from === "draft") sessions.startSessionIn(projectPath, worktreePath);
+    if (from === "issues") sessions.openIssues();
+    if (from === "automation") sessions.openAutomation("automation-1");
+    if (from === "closed workspace") sessions.openWelcome(attached.id);
+    const before = sessions.getSessionStore();
+
+    sessions.openHome();
+
+    expect(sessions.getSessionStore()).toMatchObject({
+      view: "home", selectedSessionId: null, selectedCloudWorkspace: null,
+      selectedAutomationId: null, closedWorkspaceSessionId: null,
+      newSessionPreset: null, cloudSessionPreset: null, newSessionReturn: null,
+      projects: before.projects, sessions: before.sessions,
+    });
+    sessions.selectSession(attached.id);
+    expect(sessions.getSessionStore().selectedSessionId).toBe(attached.id);
+  });
+
+  it("returns to Home when a new-session draft opened there is cancelled", () => {
+    sessions.openHome();
+    sessions.openNewSession();
+    sessions.closeNewSession();
+    expect(sessions.getSessionStore().view).toBe("home");
+  });
+});

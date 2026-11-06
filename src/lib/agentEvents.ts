@@ -37,6 +37,8 @@ export interface TabLog {
   stream: StreamBlock[];
   status: TabStatus;
   version: number;
+  /** Shared by every card for this tab; confirmed local answers outlive the answering component. */
+  permissionResponses?: ReadonlyMap<string, "sending" | "answered">;
 }
 
 const EMPTY: TabLog = { loaded: false, events: [], stream: [], status: "idle", version: 0 };
@@ -178,7 +180,7 @@ export function applyEvent(ev: AgentEvent) {
   if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
   // A reader's message is drawn in the frame it arrives in: the composer's own
   // stops being drawn as sending as soon as the runtime answers (#727).
-  const urgent = p.type === "recovery" || p.type === "permission_requested" || p.type === "questions_asked" || p.type === "turn_completed" || p.type === "user_message";
+  const urgent = p.type === "recovery" || p.type === "permission_requested" || p.type === "permission_decided" || p.type === "questions_asked" || p.type === "turn_completed" || p.type === "user_message";
   touch(k, urgent);
 }
 
@@ -207,6 +209,47 @@ export async function loadTab(sessionId: string, tabId: string) {
 /** The tab's log as it stands, outside React. */
 export function getTabLog(sessionId: string, tabId: string): TabLog {
   return logs.get(key(sessionId, tabId)) ?? EMPTY;
+}
+
+/**
+ * Claim a request before calling the backend, including clicks from a render
+ * that predates a terminal/other-card answer. The runtime remains the authority:
+ * only a confirmed response retires it; a cloud mailbox enqueue is not an answer.
+ */
+export async function respondPermissionOnce(
+  sessionId: string, tabId: string, requestId: string, send: () => Promise<void>, confirmed: boolean,
+): Promise<"sent" | "sending" | "already_answered"> {
+  const k = key(sessionId, tabId);
+  const log = getLog(k);
+  const current = log.permissionResponses?.get(requestId);
+  if (current === "answered" || log.events.some(ev => ev.payload.type === "permission_decided" && ev.payload.requestId === requestId)) return "already_answered";
+  if (current === "sending") return "sending";
+  if (!log.events.some(ev => ev.payload.type === "permission_requested" && ev.payload.requestId === requestId)) return "already_answered";
+  // flush replaces the log object, so update only the same cache incarnation.
+  const set = (state?: "sending" | "answered") => {
+    const latest = logs.get(k);
+    if (!latest || latest.admission !== log.admission) return;
+    const responses = new Map(latest.permissionResponses);
+    if (state) responses.set(requestId, state);
+    else responses.delete(requestId);
+    latest.permissionResponses = responses;
+    touch(k, true);
+  };
+  set("sending");
+  try {
+    await send();
+    set(confirmed ? "answered" : undefined);
+    return "sent";
+  } catch (error) {
+    // Another window or the terminal can win after our check but before the
+    // command reaches the owner. That refusal is final, not a retryable card.
+    if (/that request is no longer open|the agent stopped waiting for that request/i.test(String(error))) {
+      set("answered");
+      return "already_answered";
+    }
+    set();
+    throw error;
+  }
 }
 
 /**

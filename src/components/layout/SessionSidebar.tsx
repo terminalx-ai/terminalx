@@ -207,7 +207,7 @@ const PEEK = 3;
  * that belong to none. Workspaces and tabs are not levels here; a row names
  * its branch, and the full tree is one click away as the detailed sidebar.
  */
-export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
+export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const filter = useSidebarFilter();
   const [error, setError] = useState<string | null>(null);
@@ -264,7 +264,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       <SidebarTitlebar onHide={onHide} onSearch={onSearch} onNewChat={newChat} onAddProject={addAndStart} projects={projects} />
 
       <div className="shrink-0 px-2">
-        <div><AppDestinations onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} /></div>
+        <div><AppDestinations onOpenHome={onOpenHome} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} /></div>
       </div>
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}

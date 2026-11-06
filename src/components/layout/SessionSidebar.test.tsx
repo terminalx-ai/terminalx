@@ -47,7 +47,7 @@ beforeEach(async () => {
 });
 afterEach(cleanup);
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const rowsIn = (element: HTMLElement) => within(element).getAllByRole("listitem").map((row) => row.querySelector("[title]")?.getAttribute("title"));
 
 async function boot(list: SessionEntry[]) {
@@ -70,6 +70,24 @@ describe("new-chat entry points", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
     expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
+  });
+});
+
+describe("Home navigation (PRO-183)", () => {
+  it.each(["simple", "list"] as const)("returns from a session in the %s sidebar", async (sidebarLayout) => {
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    prefs.setPrefs({ sidebarLayout });
+    store.selectSession("here");
+    mount();
+    const home = screen.getByRole("button", { name: "Home" });
+    expect(home.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(home);
+
+    expect(store.getSessionStore().view).toBe("home");
+    expect(store.getSessionStore().selectedSessionId).toBeNull();
+    expect(home.getAttribute("aria-pressed")).toBe("true");
+    expect(store.getSessionStore().sessions).toHaveLength(1);
   });
 });
 
@@ -377,11 +395,11 @@ describe("the conversation list", () => {
     expect(within(screen.getByTestId("conversation-list")).getByRole("button", { name: /Start a chat/ })).toBeTruthy();
   });
 
-  it("names the app's destinations above the conversations, the dashboard first", async () => {
+  it("names the app's destinations above the conversations, Home first", async () => {
     await boot([]);
     mount();
     const destinations = screen.getByRole("toolbar", { name: "Destinations" });
-    expect(within(destinations).getAllByRole("button").map((button) => button.textContent)).toEqual(["Dashboard", "Issues", "Automations"]);
+    expect(within(destinations).getAllByRole("button").map((button) => button.textContent)).toEqual(["Home", "Dashboard", "Issues", "Automations"]);
     expect(destinations.compareDocumentPosition(screen.getByTestId("conversation-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

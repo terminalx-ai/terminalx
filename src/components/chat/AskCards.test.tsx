@@ -1,8 +1,10 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { QuestionCard } from "./AskCards";
+import { PermissionCard, QuestionCard } from "./AskCards";
 import { setPrefs } from "@/lib/prefs";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import type { PendingAsk } from "@/lib/transcript";
+import { ToolCallRow } from "./ToolCallRow";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/browser", () => ({ openBrowserTab: vi.fn() }));
@@ -89,4 +91,48 @@ it("chooses equal option labels, and questions with equal text, independently (#
   expect([pressed("Maybe"), pressed("Later")]).toEqual([["false", "false"], ["true", "false"]]);
   fireEvent.click(screen.getAllByRole("button", { name: "Maybe" })[1]);
   expect([pressed("Maybe"), pressed("Later")]).toEqual([["false", "true"], ["true", "false"]]);
+});
+
+// #775: in bypass mode a Claude card is Claude Code's own safety check asking. The card says so, and says the agent's description of the command is the agent's.
+const safetyReason = "Claude Code's safety check wants approval for this command. Bypass permissions doesn't cover commands it can't verify.";
+const bypassAsk: PendingAsk = {
+  requestId: "r", toolUseId: "", seq: 1, kind: "permission", toolName: "Bash",
+  input: { command: 'a=("${(@f)$(printf "x\\ny")}"); echo ${#a}', description: "Clear the composer and type the prompt" },
+  description: "Clear the composer and type the prompt", reason: safetyReason,
+  options: [{ id: "allow", label: "Allow", kind: "allow_once" }, { id: "deny", label: "Deny", kind: "deny" }],
+};
+
+it("says Claude's safety check asked in bypass mode, and labels the agent's description as the agent's (#775)", () => {
+  const answer = vi.fn();
+  render(<PermissionCard ask={bypassAsk} onAnswer={answer} />);
+  expect(screen.getByTestId("permission-reason").textContent).toBe(safetyReason);
+  expect(screen.getByTestId("permission-agent-note").textContent).toBe("Agent: Clear the composer and type the prompt");
+  expect(screen.getByTestId("permission-reason").textContent).not.toContain("Clear the composer");
+  // Still the reader's to answer: Allow is offered and goes to the agent.
+  fireEvent.click(screen.getByRole("button", { name: /^Allow/ }));
+  expect(answer).toHaveBeenCalledWith("allow");
+});
+
+it("gives a card in a mode that asks no safety-check explanation (#775)", () => {
+  render(<PermissionCard ask={{ ...bypassAsk, reason: undefined }} onAnswer={vi.fn()} />);
+  expect(screen.queryByTestId("permission-reason")).toBeNull();
+  expect(screen.queryByText(/safety check/)).toBeNull();
+  expect(screen.getByTestId("permission-agent-note").textContent).toBe("Agent: Clear the composer and type the prompt");
+});
+
+it("still says why a card is up when its details are not shown, and keeps a description the input does not hold unlabelled (#775)", () => {
+  const { rerender } = render(<PermissionCard ask={bypassAsk} onAnswer={vi.fn()} showDetail={false} />);
+  expect(screen.getByTestId("permission-reason").textContent).toBe(safetyReason);
+  expect(screen.queryByTestId("permission-agent-note")).toBeNull();
+  rerender(<PermissionCard ask={{ ...bypassAsk, input: { command: "ls" }, description: "Pattern: src/**", reason: undefined }} onAnswer={vi.fn()} />);
+  expect(screen.getByText("Pattern: src/**")).toBeTruthy();
+  expect(screen.queryByText(/^Agent:/)).toBeNull();
+});
+
+it("says on a tool row which of Claude's checks held the call (#775)", () => {
+  const call = { callId: "c", name: "Bash", toolType: "shell", input: { command: "ls" }, seq: 1 };
+  const { rerender } = render(<ToolCallRow call={{ ...call, result: { text: "2", isError: false, safetyCheck: "Approved past Claude's dangerous-removal check" } }} />);
+  expect(screen.getByTestId("tool-safety-check").textContent).toBe("Approved past Claude's dangerous-removal check");
+  rerender(<ToolCallRow call={{ ...call, result: { text: "2", isError: false } }} />);
+  expect(screen.queryByTestId("tool-safety-check")).toBeNull();
 });

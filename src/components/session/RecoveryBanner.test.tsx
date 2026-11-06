@@ -74,19 +74,20 @@ describe("session recovery UI smoke", () => {
       "id":"permission-event", "sessionId":"s", "tabId":"t", "harness":"codex", "seq":1, "ts":"2026-10-26T00:00:00Z",
       "payload":{"type":"permission_requested", "requestId":"r", "toolUseId":"", "toolName":"Bash",
         "input":{"command":"git status --short --branch"}, "cwd":"/workspace/app",
-        "description":"Approval is required because this session is set to Ask every time.", "options":[]}
+        "reason":"Approval is required because this session is set to Ask every time.", "options":[]}
     }`);
     const { rerender } = render(<RecoveryBanner {...props()} waiting asks={buildTranscript([event], true).pendingAsks} />);
     expect(screen.getByText("/workspace/app")).toBeTruthy();
     expect(screen.getByText(/Session directory:/)).toBeTruthy();
-    expect(screen.getByText("Approval is required because this session is set to Ask every time.")).toBeTruthy();
+    expect(screen.getByTestId("permission-reason").textContent).toBe("Approval is required because this session is set to Ask every time.");
+    expect(screen.queryByTestId("permission-agent-note")).toBeNull();
     if (event.payload.type !== "permission_requested") throw new Error("permission fixture");
     event.payload.input = { command: "pwd", workdir: "/workspace/other", justification: "Inspect the selected checkout" };
     rerender(<RecoveryBanner {...props()} waiting asks={buildTranscript([event], true).pendingAsks} />);
     expect(screen.getByText("/workspace/other")).toBeTruthy();
     expect(screen.getByText(/Working directory:/)).toBeTruthy();
     expect(screen.queryByText("/workspace/app")).toBeNull();
-    expect(screen.getByText("Inspect the selected checkout")).toBeTruthy();
+    expect(screen.getByTestId("permission-agent-note").textContent).toBe("Agent: Inspect the selected checkout");
   });
 
   it("shows the full local Codex command, working directory and reason before approval", () => {

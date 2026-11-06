@@ -13,7 +13,7 @@ export function AgentSetup({ harness, value, checking, onRefresh }: {
   onRefresh: () => void;
 }) {
   const [copyStatus, setCopyStatus] = useState("");
-  const state = value?.state ?? (harness.available ? "unknown" : "missing");
+  const state = value?.state ?? "unknown";
   const command = state === "missing" ? harness.installHint : harness.id === "codex" ? "codex login" : "claude auth login";
   return <section aria-label={`${harness.name} setup`} className="min-w-0 rounded-lg bg-well p-3 text-xs">
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

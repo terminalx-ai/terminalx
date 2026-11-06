@@ -16,7 +16,7 @@ const { sessionStore } = vi.hoisted(() => ({
     harnesses: [],
     selectedSessionId: null,
     selectedAutomationId: null as string | null,
-    view: "new" as "welcome" | "new" | "issues" | "agents" | "stats" | "automations" | "skills",
+    view: "new" as "home" | "welcome" | "new" | "issues" | "agents" | "stats" | "automations" | "skills",
     showArchived: false,
     selectedProject: "/repo" as string | null,
     workspaces: {
@@ -45,6 +45,7 @@ const { sessionStore } = vi.hoisted(() => ({
 
 vi.mock("@/lib/sessions", () => ({
   bootSessions: vi.fn(),
+  openHome: vi.fn(() => { sessionStore.view = "home"; sessionStore.selectedSessionId = null; }),
   openAgents: vi.fn(),
   openAutomations: vi.fn(),
   openIssues: vi.fn(),
@@ -421,6 +422,28 @@ describe("cloud followers at launch", () => {
 
 
 describe("welcome routing", () => {
+  it("shows all start actions on Home after a project exists, without checkout panels", () => {
+    sessionStore.view = "home";
+    render(<AppShell />);
+    expect(screen.getByTestId("start-screen")).toBeTruthy();
+    expect(screen.queryByTestId("welcome")).toBeNull();
+    expect(screen.queryByTestId("right-panel")).toBeNull();
+    expect(screen.queryByTestId("editor-split")).toBeNull();
+  });
+
+  it("opens Home from Settings with the sidebar hidden through the palette's action", async () => {
+    setPrefs({ sidebarOpen: false });
+    render(<AppShell />);
+    act(() => shortcuts.get("app.settings")!());
+    await screen.findByTestId("settings-page");
+
+    act(() => shortcuts.get("app.home")!());
+
+    expect(screen.getByTestId("start-screen")).toBeTruthy();
+    expect(screen.queryByTestId("settings-page")).toBeNull();
+    expect(screen.queryByTestId("sidebar")).toBeNull();
+  });
+
   it("shows the resting view without checkout panels and keeps the titlebar draggable", () => {
     sessionStore.view = "welcome";
     shortcuts.clear();

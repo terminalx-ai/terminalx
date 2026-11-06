@@ -1,10 +1,10 @@
 import { memo, useMemo, type ReactNode } from "react";
-import { ActionSheetIOS, Alert, Linking, Platform, Text, type TextProps } from "react-native";
+import { ActionSheetIOS, Alert, Linking, Platform, Text, type StyleProp, type TextProps, type TextStyle } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { isExternalChatUrl, textLinks } from "@terminalx/portable/textLinks";
 import { useTheme } from "./theme";
 
-export function ChatLink({ href, children }: { href: string; children: ReactNode }) {
+export function ChatLink({ href, children, style }: { href: string; children: ReactNode; style?: StyleProp<TextStyle> }) {
   const { palette } = useTheme();
   const external = isExternalChatUrl(href);
   const fail = (cause: unknown) => Alert.alert("Could not open link", cause instanceof Error ? cause.message : "Try again.");
@@ -26,7 +26,7 @@ export function ChatLink({ href, children }: { href: string; children: ReactNode
   return <Text accessibilityRole="link" accessibilityHint={external ? "Tap to open. Hold to copy the link." : "Tap to copy this file reference."}
     accessibilityActions={[{ name: "activate", label: external ? "Open link" : "Link actions" }, { name: "copy", label: "Copy link" }]}
     onAccessibilityAction={({ nativeEvent }) => { if (nativeEvent.actionName === "copy") copy(); else if (nativeEvent.actionName === "activate") { if (external) open(); else actions(); } }}
-    onPress={external ? open : actions} onLongPress={actions} style={{ color: palette.accent, textDecorationLine: "underline" }}>{children}</Text>;
+    onPress={external ? open : actions} onLongPress={actions} style={[{ color: palette.accent, textDecorationLine: "underline" }, style]}>{children}</Text>;
 }
 
 export function linkedText(text: string): ReactNode[] {

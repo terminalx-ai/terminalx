@@ -35,7 +35,7 @@ interface State {
   /** Explicit navigation also reveals a destination that was collapsed. */
   navigationVersion: number;
   /** What the workspace shows when no session is selected. */
-  view: "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "stats" | "project";
+  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "stats" | "project";
   /** The issues browser opens its new-issue form when it next shows; it sets this back. */
   newIssueRequested: boolean;
   /** A cross-workspace navigation request can open one automation directly. */
@@ -303,6 +303,11 @@ export function patchTab(sessionId: string, tabId: string, patch: Partial<TabEnt
 function focusProject(path: string | null, patch: Partial<State> = {}) {
   set({ ...patch, selectedProject: path });
   if (path) void refreshWorkspaces(path);
+}
+
+/** Open the welcome actions even when projects and sessions already exist. */
+export function openHome() {
+  set({ selectedSessionId: null, view: "home", selectedAutomationId: null });
 }
 
 /** Return to the resting screen without requesting a new session. */

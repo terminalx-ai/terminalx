@@ -15,10 +15,9 @@ const ICONS: Record<StartAction["id"], LucideIcon> = { local: FolderOpen, github
 const MOVES: Record<string, number> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
 
 /**
- * What the main area shows while there is no local project: the wordmark and
- * the three ways to get one. A folder dropped anywhere on it is opened like
- * "Open local project". It gives way to the new-session view as soon as a
- * project exists.
+ * Home and the first-run screen: the wordmark and three ways to open a project.
+ * A folder dropped anywhere on it is opened like "Open local project".
+ * Opening a project leads to its new-session view.
  */
 export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents") => void }) {
   const store = useSessionStore();

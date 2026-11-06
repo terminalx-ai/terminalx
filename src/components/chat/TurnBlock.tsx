@@ -125,7 +125,7 @@ function TurnBody({
         <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
           <CircleAlert className="mt-0.5 size-4 shrink-0" />
           <div className="min-w-0 select-text">
-            <div className="whitespace-pre-wrap"><LinkedText text={turn.finalText} context={linkContext} /></div>
+            <div className="whitespace-pre-wrap"><LinkedText text={turn.finalText} context={linkContext} citations /></div>
             {turn.detail && <AgentSaid text={turn.detail} />}
           </div>
         </div>
@@ -171,6 +171,10 @@ function outsideFold(item: WorkItem): boolean {
 function summarize(turn: Turn): string {
   const parts: string[] = [];
   if (turn.toolCount) parts.push(`${turn.toolCount} tool call${turn.toolCount === 1 ? "" : "s"}`);
+  // A call an agent's safety check held is why the turn waited on the reader (#775): said while its row is folded away.
+  const held = turn.work.flatMap((w) => (w.kind === "tool" && w.call.result?.safetyCheck ? [w.call.result.safetyCheck] : []));
+  if (held.length === 1) parts.push(held[0]);
+  else if (held.length > 1) parts.push(`${held.length} held by a safety check`);
   if (turn.editedFiles) parts.push(`${turn.editedFiles} file${turn.editedFiles === 1 ? "" : "s"} edited`);
   const thoughts = turn.work.filter((w) => w.kind === "reasoning").length;
   if (!parts.length && thoughts) parts.push("thought about it");
