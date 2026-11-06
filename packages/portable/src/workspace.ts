@@ -313,6 +313,7 @@ export type MergedPhase = "scheduled" | "kept" | "held" | "removed";
 
 /** Where one workspace whose pull request merged stands after a pass. */
 export interface MergedStatus {
+  archiveBlocked?: boolean;
   projectPath: string;
   path: string;
   name: string;
@@ -386,6 +387,8 @@ export interface CleanupProject {
 }
 
 export interface ArchiveFailure {
+  log?: string | null;
+  sessionsStopped?: boolean;
   token: string;
   pane: string;
   code: number | null;

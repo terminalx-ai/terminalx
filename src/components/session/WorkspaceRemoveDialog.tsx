@@ -74,7 +74,7 @@ export function WorkspaceRemoveDialog() {
   useEffect(() => {
     if (!host) return;
     setError(null);
-    setFailure(null);
+    setFailure(request?.archiveFailure ?? null);
     setShowLog(false);
     setDeleteConversations(false);
     setDeleteBranch(false);
@@ -83,7 +83,7 @@ export function WorkspaceRemoveDialog() {
     return () => {
       live = false;
     };
-  }, [host, check]);
+  }, [host, check, request?.archiveFailure]);
 
   if (!request || !host) return null;
   const settle = !deleteConversations;
@@ -238,11 +238,12 @@ export function WorkspaceRemoveDialog() {
           </label>
         )}
 
+        {!failure && request.archiveNotice && <p className="mt-3 text-xs text-warning">{request.archiveNotice}</p>}
         {failure && <div role="alert" className="mt-3 text-xs text-destructive">
           <p>{archiveFailureMessage(failure)}</p>
           <Button variant="outline" size="xs" onClick={() => setShowLog(!showLog)}>{showLog ? "Hide log" : "Open log"}</Button>
         </div>}
-        {(busy === "remove" && archivePane || showLog && failure?.pane) && <ArchiveTerminal pane={showLog && failure ? failure.pane : archivePane!} />}
+        {(busy === "remove" && archivePane || showLog && failure?.pane) && <ArchiveTerminal pane={showLog && failure ? failure.pane : archivePane!} output={showLog ? failure?.log : undefined} />}
         <DialogFooter className="mt-4">
           <Button variant="ghost" onClick={closeWorkspaceRemove} disabled={!!busy}>
             {settle ? "Keep as is" : "Cancel"}

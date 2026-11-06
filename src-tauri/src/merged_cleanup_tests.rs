@@ -54,6 +54,7 @@ struct Fixture {
     /// workspace, while it fetches and weighs the grace period unfenced.
     meanwhile: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     start: DateTime<Utc>,
+    archive: Option<(Arc<crate::pty::Terminals>, Arc<dyn EventSink>)>,
 }
 
 impl Fixture {
@@ -86,6 +87,7 @@ impl Fixture {
             stopped: Mutex::new(Vec::new()),
             meanwhile: Mutex::new(None),
             start: Utc::now().trunc_subsecs(0),
+            archive: None,
         };
         fixture.open(&path, "alpha");
         fixture
@@ -93,6 +95,14 @@ impl Fixture {
 
     fn open(&mut self, path: &Path, name: &str) {
         self.projects.push(serde_json::from_value(serde_json::json!({ "path": path, "name": name })).unwrap());
+    }
+
+    fn archive_script(&mut self, archive: &str) {
+        let project = crate::store::projects::add(self.alpha().to_str().unwrap()).unwrap();
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+        }).unwrap();
+        if self.archive.is_none() { self.archive = Some((Arc::new(crate::pty::Terminals::new()), Arc::new(crate::sink::BroadcastSink::new(64)))); }
     }
 
     fn alpha(&self) -> PathBuf {
@@ -212,7 +222,7 @@ impl Fixture {
             }
             live
         };
-        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None, archive: None })
+        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None, archive: self.archive.as_ref().map(|(terminals, sink)| crate::archive_script::Runner { terminals, sink, unattended: false }) })
     }
 
     fn sweep_scope(&self, scope: &Scope, minutes: i64) -> Vec<Status> {
@@ -886,4 +896,89 @@ fn turning_it_off_and_on_again_starts_the_grace_period_again() {
     let again = f.sweep(60);
     assert_eq!((of(&again, &wt).phase, of(&again, &wt).fresh, of(&again, &wt).due.clone()), (Phase::Scheduled, true, Some(stamp(f.at(70)))));
     assert!(wt.exists());
+}
+
+#[test]
+fn unattended_archive_failure_is_persisted_closed_and_removed_only_with_manual_consent() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-fails");
+    f.merge("archive-fails", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; echo archive-log; exit 17");
+    f.sweep(0);
+    let failed = f.sweep(11);
+    assert!(failed[0].archive_blocked);
+    assert!(failed[0].detail.as_ref().unwrap().contains("exit 17"));
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+    // A new pass, a watch gap and a new runtime all keep the durable pause.
+    f.sweep(12);
+    f.archive = Some((Arc::new(crate::pty::Terminals::new()), Arc::new(crate::sink::BroadcastSink::new(64))));
+    assert!(f.sweep(40)[0].archive_blocked);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    let (terminals, sink) = f.archive.as_ref().unwrap();
+    let project = f.alpha();
+    let mut request = WorkspaceRemoval {
+        project_path: project.to_str().unwrap(), path: tree.to_str().unwrap(), sessions: SessionsFate::Keep,
+        delete_branch: false, confirmation: Confirmation::Single, expected_sessions: Some(&[]), direct: git::DirectDelete::Never,
+        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }), archive_failure: None,
+    };
+    let error = session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap_err();
+    let failure = crate::archive_script::Failure::from_error(&error).unwrap();
+    assert!(failure.log.as_ref().unwrap().contains("archive-log"));
+    assert!(terminals.panes().is_empty(), "reading a saved log does not start a terminal");
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    request.archive_failure = Some(&failure.token);
+    session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap();
+    assert!(!tree.exists());
+}
+
+#[test]
+fn automatic_archive_budget_is_bounded_and_script_changes_allow_a_new_attempt() {
+    let mut f = Fixture::new();
+    let a = f.worktree("archive-a");
+    let b = f.worktree("archive-b");
+    f.merge("archive-a", 1);
+    f.merge("archive-b", 2);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; exit 9");
+    f.sweep(0);
+    let first = f.sweep(11);
+    assert_eq!(first.iter().filter(|status| status.archive_blocked).count(), 1);
+    assert_eq!(first.iter().filter(|status| status.phase == Phase::Scheduled).count(), 1);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap().lines().count(), ARCHIVES_PER_PASS);
+    assert!(f.sweep(12).iter().all(|status| status.archive_blocked));
+    f.sweep(13);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap().lines().count(), 2);
+    f.archive_script("exit 0");
+    f.sweep(14);
+    f.sweep(15);
+    assert!(!a.exists() && !b.exists());
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+}
+
+#[test]
+fn a_successful_archive_that_creates_local_data_is_not_repeated_automatically() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-data");
+    f.merge("archive-data", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; echo local-data > .env");
+    f.sweep(0);
+    assert!(f.sweep(11)[0].archive_blocked);
+    assert!(f.sweep(12)[0].archive_blocked);
+    assert!(tree.join(".env").exists());
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+}
+
+#[test]
+fn a_head_change_made_by_a_failed_archive_does_not_schedule_it_again() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-head");
+    f.merge("archive-head", 1);
+    let head = sh(&tree, &["rev-parse", "HEAD"]);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; git reset --hard HEAD^; exit 7");
+    f.sweep(0);
+    assert!(f.sweep(11)[0].archive_blocked);
+    assert_ne!(sh(&tree, &["rev-parse", "HEAD"]), head);
+    assert!(f.sweep(12)[0].archive_blocked);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
 }

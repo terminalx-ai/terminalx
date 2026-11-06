@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { CleanupStep } from "@terminalx/portable/workspace";
+import type { CleanupCandidate, CleanupStep } from "@terminalx/portable/workspace";
 import { holdQuit } from "@/lib/quitWarning";
 import { forgetWorkspaceSize } from "@/lib/workspaceSizes";
 import { LOCAL_HOST, candidateKey, runCleanup, totals, type CleanupHost, type CleanupOutcome, type CleanupSelection, type CleanupTotals } from "@/lib/worktreeCleanup";
@@ -114,6 +114,20 @@ export function startCleanupRun(hosts: CleanupHost[], selections: CleanupSelecti
   return true;
 }
 
+/** A failed cleanup may already have removed some of the reviewed ignored data. */
+function sameArchiveRemoval(before: CleanupCandidate, after: CleanupCandidate): boolean {
+  if (before.token === after.token) return true;
+  const removable = (candidate: CleanupCandidate) => candidate.verdict === "eligible" || candidate.verdict === "ignoredData";
+  const sessions = (candidate: CleanupCandidate) => candidate.sessions.map((session) => session.id).sort().join("\0");
+  // Both verdicts imply a clean Git status. Every other field of the backend
+  // confirmation token must match; added data still requires a fresh review.
+  return removable(before) && removable(after)
+    && before.path === after.path && before.projectPath === after.projectPath
+    && before.head === after.head && before.branch === after.branch && sessions(before) === sessions(after)
+    && after.ignoredData.length < before.ignoredData.length
+    && after.ignoredData.every((name) => before.ignoredData.includes(name));
+}
+
 /** Explicit consent for the failed hooks only; every workspace is scanned again. */
 export async function retryArchiveFailures(): Promise<void> {
   if (!run || run.status !== "done" || !retryContext) return;
@@ -128,7 +142,7 @@ export async function retryArchiveFailures(): Promise<void> {
     for (const failure of failures) {
       const original = context.selections.find((selection) => selection.hostId === host.id && selection.candidate.path === failure.path);
       const candidate = projects.flatMap((project) => project.candidates).find((candidate) => candidate.path === failure.path);
-      if (!original || !candidate || candidate.token !== original.candidate.token) throw new Error("A failed workspace changed. Scan again and review it before removal.");
+      if (!original || !candidate || !sameArchiveRemoval(original.candidate, candidate)) throw new Error("A failed workspace changed. Scan again and review it before removal.");
       selections.push({ ...original, candidate, archiveFailure: failure.archiveFailure!.token });
     }
   }

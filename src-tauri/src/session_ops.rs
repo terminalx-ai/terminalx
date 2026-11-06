@@ -1601,7 +1601,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let dir = repo();
         let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
-        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "echo archive-log; exit 19".into() };
+        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "printf 'session:%s\\n' \"$TERMINALX_SESSION_ID\"; printf 'attribution:%s\\n' \"${RACCOON_SESSION_ID:-none}\"; exit 19".into() };
         crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { scripts: Some(script.clone()), ..Default::default() }).unwrap();
         assert_eq!(crate::store::projects::scripts(dir.path()).unwrap(), script);
         let session = worktree_session(dir.path());
@@ -1610,10 +1610,14 @@ mod tests {
         let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
         // A caller without a runner cannot bypass a configured hook.
         assert!(remove_workspace(&*sink, &removal, &|_| {}).unwrap_err().contains("archive script"));
-        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink });
+        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
         let error = remove_workspace(&*sink, &removal, &|_| {}).unwrap_err();
         let failure = crate::archive_script::Failure::from_error(&error).unwrap();
         assert_eq!(failure.code, Some(19));
+        assert!(failure.sessions_stopped);
+        let output = String::from_utf8_lossy(&terminals.read_output(&failure.pane).unwrap()).into_owned();
+        assert!(output.contains(&format!("session:{}", session.id)));
+        assert!(output.contains("attribution:none"));
         assert!(Path::new(&session.cwd).exists());
         assert!(!index::get(&session.id).unwrap().worktree_removed);
         removal.archive_failure = Some(&failure.token);
@@ -1636,7 +1640,7 @@ mod tests {
         let terminals = Arc::new(crate::pty::Terminals::new());
         let sink: Arc<dyn EventSink> = Arc::new(sink());
         let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
-        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink });
+        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
         let failure = crate::archive_script::Failure::from_error(&remove_workspace(&*sink, &removal, &|_| {}).unwrap_err()).unwrap();
         save("sleep 0.1; printf '%s' \"$TERMINALX_WORKSPACE_PATH\" > \"$TERMINALX_REPO_ROOT/archived\"");
         removal.archive_failure = Some(&failure.token);

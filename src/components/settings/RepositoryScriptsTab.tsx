@@ -52,7 +52,7 @@ function ScriptsEditor({ project }: { project: Project }) {
   };
   return <section aria-label={`${project.name} scripts`} className="space-y-4">
     <h3 className="text-base font-medium">Scripts</h3>
-    <p className="text-xs text-muted-foreground">Saved on this computer for this repository. Archive scripts run with /bin/sh in the workspace, with your terminal environment and TERMINALX_WORKSPACE_PATH, TERMINALX_REPO_ROOT and TERMINALX_BRANCH.</p>
+    <p className="text-xs text-muted-foreground">Saved on this computer for this repository. Archive scripts run with /bin/sh in the workspace, with the local runtime environment, login-shell PATH, TERMINALX_WORKSPACE_PATH, TERMINALX_REPO_ROOT, TERMINALX_BRANCH and TERMINALX_SESSION_ID when a session exists. Agent-only credentials and CLI attribution are not inherited.</p>
     {(["setup", "archive"] as const).map((kind) => <label key={kind} className="flex flex-col gap-2 text-sm">
       {kind === "setup" ? "Setup script" : "Archive script"}
       <textarea aria-label={kind === "setup" ? "Setup script" : "Archive script"} spellCheck={false} disabled={busy}

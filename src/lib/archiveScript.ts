@@ -8,12 +8,12 @@ export function archiveFailure(error: string): ArchiveFailure | null {
   if (!message.startsWith("ARCHIVE_SCRIPT_FAILED:")) return null;
   try {
     const value = JSON.parse(message.slice("ARCHIVE_SCRIPT_FAILED:".length));
-    return typeof value.token === "string" && typeof value.pane === "string" && (typeof value.code === "number" || value.code === null) && typeof value.timedOut === "boolean" ? value : null;
+    return typeof value.token === "string" && typeof value.pane === "string" && (typeof value.code === "number" || value.code === null) && typeof value.timedOut === "boolean" && (value.log == null || typeof value.log === "string") && (value.sessionsStopped === undefined || typeof value.sessionsStopped === "boolean") ? value : null;
   } catch { return null; }
 }
 
 export function archiveFailureMessage(failure: ArchiveFailure): string {
-  return `Archive script failed (exit ${failure.code ?? "unknown"}). Remove anyway?${failure.timedOut ? " The script timed out after 5 minutes." : ""}`;
+  return `Archive script failed (exit ${failure.code ?? "unknown"}). Remove anyway?${failure.timedOut ? " The script timed out after 5 minutes." : ""}${failure.sessionsStopped ? " Its sessions are stopped." : ""}`;
 }
 
 const panes = new Map<string, string>();

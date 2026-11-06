@@ -52,8 +52,8 @@ impl Sessions {
     /// remove a workspace whose new desktop saved an archive script.
     pub fn require_archive_support(&self) -> Result<()> {
         let supported: bool = self.quick("runtime.session.workspace", json!({"operation":"archiveSupport","params":{}}))
-            .context("Restart the local runtime before using archive scripts")?;
-        anyhow::ensure!(supported, "Restart the local runtime before using archive scripts");
+            .context("Restart the local runtime before using archive scripts; older runtimes can discard saved scripts when updating projects")?;
+        anyhow::ensure!(supported, "Restart the local runtime before using archive scripts; older runtimes can discard saved scripts when updating projects");
         Ok(())
     }
 
@@ -63,7 +63,8 @@ impl Sessions {
         let seconds = match operation {
             "removeWorkspace" => 480,
             "remove" => 120 + 360 * params["items"].as_array().map_or(1, |items| items.len() as u64),
-            "mergedSweep" => 3600,
+            "removeLeftovers" => 120 + 360 * params["ids"].as_array().map_or(1, |items| items.len() as u64),
+            "mergedSweep" => 3600 + 360 * crate::merged_cleanup::ARCHIVES_PER_PASS as u64,
             _ => 120,
         };
         self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))

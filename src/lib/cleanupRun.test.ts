@@ -159,3 +159,24 @@ it("does not retry archive failures when the workspace changed after review", as
   expect(here.calls).toHaveLength(1);
   resetCleanupRun();
 });
+
+it.each(["shrinks", "grows", "head changes"])("rechecks a failed archive whose ignored data %s before consent", async (change) => {
+  const here = host(LOCAL_HOST);
+  const before = { ...candidate("a"), verdict: "ignoredData" as const, ignoredData: [".env", "node_modules/"] };
+  const after = { ...before, token: "after-cleanup", ignoredData: change === "grows" ? [".env", "new.db"] : [".env"], ...(change === "head changes" ? { head: "new-head" } : {}) };
+  here.entry.scan = async () => [{ path: "/p", name: "p", note: null, candidates: [after] }];
+  startCleanupRun([here.entry], [{ ...pick(LOCAL_HOST, "a"), candidate: before }]);
+  here.calls[0]!.answer([result(before, { outcome: "failed", archiveFailure: { token: "receipt", pane: "archive:run", code: 7, timedOut: false } })]);
+  await flush();
+  if (change === "shrinks") {
+    await retryArchiveFailures();
+    expect(here.calls).toHaveLength(2);
+    expect(here.calls[1]!.items[0]).toMatchObject({ token: after.token, archiveFailure: "receipt", acceptIgnored: true });
+    here.calls[1]!.answer([result(after)]);
+    await flush();
+  } else {
+    await expect(retryArchiveFailures()).rejects.toThrow("changed");
+    expect(here.calls).toHaveLength(1);
+  }
+  resetCleanupRun();
+});

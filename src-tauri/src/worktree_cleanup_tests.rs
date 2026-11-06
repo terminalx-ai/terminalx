@@ -925,7 +925,7 @@ fn bulk_archive_runs_every_hook_and_keeps_failures_for_separate_confirmation() {
     let terminals = Arc::new(crate::pty::Terminals::new());
     let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
     let remove_with_archive = |items: &[RemoveItem]| f.with_host(&[], None, |host| {
-        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink }), ..*host };
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
         remove(&host, &*sink, items, Watch::default())
     });
     let results = remove_with_archive(&items);
@@ -953,7 +953,7 @@ fn archive_changes_are_checked_again_before_bulk_removal() {
     let terminals = Arc::new(crate::pty::Terminals::new());
     let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
     let results = f.with_host(&[], None, |host| {
-        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink }), ..*host };
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
         remove(&host, &*sink, &[item], Watch::default())
     });
     assert_eq!(results[0].outcome, Outcome::Skipped);
@@ -970,4 +970,33 @@ fn removal_wire_format_preserves_archive_consent_and_omits_absent_receipts() {
     let wire = serde_json::to_value(&item).unwrap();
     assert_eq!(wire["archiveFailure"], "failed-run");
     assert_eq!(serde_json::from_value::<RemoveItem>(wire).unwrap().archive_failure.as_deref(), Some("failed-run"));
+}
+
+#[test]
+fn archive_may_remove_reviewed_ignored_data_but_cannot_add_new_ignored_data() {
+    let f = Fixture::new();
+    let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
+    let save = |script: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: script.into() }), ..Default::default()
+    }).unwrap();
+    let shrinks = f.worktree(&f.alpha(), "shrinks");
+    std::fs::write(shrinks.join(".env"), "local-data").unwrap();
+    std::fs::create_dir(shrinks.join("node_modules")).unwrap();
+    std::fs::write(shrinks.join("node_modules/package"), "build-output").unwrap();
+    let mut item = f.item(&f.find(&shrinks));
+    item.accept_ignored = true;
+    let terminals = Arc::new(crate::pty::Terminals::new());
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+    let run = |item: RemoveItem| f.with_host(&[], None, |host| {
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
+        remove(&host, &*sink, &[item], Watch::default())
+    });
+    save("rm -f .env; rm -rf node_modules");
+    assert_eq!(run(item)[0].outcome, Outcome::Removed);
+    assert!(!shrinks.exists());
+    let grows = f.worktree(&f.alpha(), "grows");
+    save("echo new-local-data > .env");
+    assert_eq!(run(f.item(&f.find(&grows)))[0].outcome, Outcome::Skipped);
+    assert!(grows.join(".env").exists());
+    terminals.kill_all();
 }

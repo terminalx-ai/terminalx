@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import type { CleanupStep } from "@terminalx/portable/workspace";
+import type { ArchiveFailure, CleanupStep } from "@terminalx/portable/workspace";
 import { ArchiveTerminal } from "@/components/terminal/ArchiveTerminal";
 import { Button } from "@/components/ui/button";
 import { useArchiveTerminal } from "@/lib/archiveScript";
@@ -60,7 +60,7 @@ export function CleanupRunView({ run }: { run: CleanupRun }) {
   const item = (key: string) => run.items.find((entry) => entry.key === key);
   const current = run.current ? item(run.current.key) : undefined;
   const archivePane = useArchiveTerminal(current?.hostKind === "local" ? current.path : null);
-  const [log, setLog] = useState<string | null>(null);
+  const [log, setLog] = useState<ArchiveFailure | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const failures = run.outcomes.filter((outcome) => outcome.hostId === "local" && outcome.archiveFailure);
@@ -136,7 +136,7 @@ export function CleanupRunView({ run }: { run: CleanupRun }) {
           {resultText(sum)}
         </p>
       )}
-      {(running && archivePane || log) && <ArchiveTerminal pane={log ?? archivePane!} />}
+      {(running && archivePane || log) && <ArchiveTerminal pane={log?.pane ?? archivePane!} output={log?.log} />}
       {!running && failures.length > 0 && <div className="mb-2 space-y-2 text-xs">
         <p>{failures.length} archive script{failures.length === 1 ? "" : "s"} failed. Remove these workspaces anyway?</p>
         <Button variant="destructive" size="xs" disabled={retrying} onClick={() => void retry()}>{retrying ? "Checking…" : "Remove failed workspaces anyway"}</Button>
@@ -170,7 +170,7 @@ export function CleanupRunView({ run }: { run: CleanupRun }) {
                   )}
                 </div>
                 {outcome.reason && <div className="text-[11px] text-muted-foreground">{outcome.reason}</div>}
-                {outcome.hostId === "local" && outcome.archiveFailure && <Button variant="outline" size="xs" onClick={() => setLog(outcome.archiveFailure!.pane)}>Open log</Button>}
+                {outcome.hostId === "local" && outcome.archiveFailure && <Button variant="outline" size="xs" onClick={() => setLog(outcome.archiveFailure!)}>Open log</Button>}
                 {good && (
                   <div className="text-[11px] text-muted-foreground">
                     {[

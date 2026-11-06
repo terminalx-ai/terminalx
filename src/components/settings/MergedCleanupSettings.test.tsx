@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MergedRemovalView } from "@terminalx/portable/workspace";
+import type { MergedRemovalView, MergedStatus } from "@terminalx/portable/workspace";
 import type { HeadBranchSetting, MergedCleanupSettings as Settings } from "@/lib/api";
 import type { Project } from "@/types/session";
 
@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
   projects: [] as Project[],
   catalog: { orgs: {} as Record<string, unknown> },
   clients: new Map<string, unknown>(),
+  openWorkspaceRemove: vi.fn(),
 }));
+vi.mock("@/lib/dialogs", () => ({ openWorkspaceRemove: mocks.openWorkspaceRemove }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
@@ -22,7 +24,7 @@ vi.mock("@/lib/cloudSessions", () => ({ managesOf: () => true, forgetCloudSessio
 vi.mock("@/lib/workspaceSizes", () => ({ forgetWorkspaceSize: vi.fn() }));
 
 const { MergedCleanupSettings } = await import("./MergedCleanupSettings");
-const { resetMergedCleanupForTest } = await import("@/lib/mergedCleanup");
+const { dismissMergedNotice, getMergedCleanup, resetMergedCleanupForTest } = await import("@/lib/mergedCleanup");
 
 const record = (patch: Partial<MergedRemovalView>): MergedRemovalView => ({
   id: "removal-1",
@@ -47,6 +49,7 @@ let head: Record<string, HeadBranchSetting | Error>;
 let saveFails: string | null;
 /** The projects whose pull requests a pass could not read. */
 let unreadable: { projectPath: string; reason: string }[];
+let statuses: MergedStatus[];
 
 const calls = (command: string) => mocks.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
 const toggle = (name: string) => screen.getByRole("switch", { name });
@@ -63,6 +66,8 @@ beforeEach(() => {
   head = {};
   saveFails = null;
   unreadable = [];
+  statuses = [];
+  mocks.openWorkspaceRemove.mockReset();
   mocks.projects = [
     { path: "/repos/app", name: "App", kind: "git" },
     { path: "/repos/site", name: "Site" },
@@ -85,7 +90,7 @@ beforeEach(() => {
       settings = { ...settings, ...rest, projects };
       return settings;
     }
-    if (command === "merged_cleanup_sweep") return { statuses: [], unreadable };
+    if (command === "merged_cleanup_sweep") return { statuses, unreadable };
     if (command === "merged_cleanup_records") return records;
     if (command === "merged_cleanup_restore") return { record: { ...records[0], restoredAt: new Date().toISOString() }, notes: ['The session "Fix login" has been used since and stays under the project.'] };
     if (command === "github_head_branch_setting" || command === "github_enable_head_branch_deletion") {
@@ -104,6 +109,18 @@ afterEach(() => {
 });
 
 describe("the setting", () => {
+  it("keeps a paused archive removal available after its notice is dismissed", async () => {
+    settings.enabled = true;
+    const removed = record({});
+    statuses = [{ ...removed, phase: "kept", record: null, due: null, reason: "automatic archive cleanup is paused", detail: "Archive script failed (exit 17). Automatic retries are paused.", fresh: false, sessions: [], archiveBlocked: true }];
+    await show();
+    await screen.findByText(`Archive cleanup paused: ${removed.name}`);
+    act(() => { for (const notice of getMergedCleanup().notices) dismissMergedNotice(notice.id); });
+    expect(getMergedCleanup().notices).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Review removal" }));
+    expect(mocks.openWorkspaceRemove).toHaveBeenCalledWith({ projectPath: removed.projectPath, path: removed.path, name: removed.name, mode: "settle", archiveNotice: statuses[0].detail });
+  });
+
   it("is off until it is turned on, and what depends on it waits for that", async () => {
     await show();
     const main = toggle("Delete the workspace when its pull request is merged");

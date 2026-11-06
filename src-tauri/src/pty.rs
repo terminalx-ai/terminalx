@@ -615,7 +615,7 @@ impl Terminals {
     /// grandchild of this shell — which tab it belongs to.
     pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         let printed = self.retained.lock().unwrap().get(id).map(|history| history.data.clone()).unwrap_or_default();
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
@@ -629,12 +629,17 @@ impl Terminals {
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
             pane.group.terminate();
         }
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
 
-    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>) -> Result<()> {
+    /// A program with literal argv, independent of the user's shell syntax.
+    pub(crate) fn spawn_program(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, program: &std::ffi::OsStr, args: &[&std::ffi::OsStr]) -> Result<()> {
+        self.spawn_after(sink, id, spec, Vec::new(), Some((program, args)))
+    }
+
+    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>, executable: Option<(&std::ffi::OsStr, &[&std::ffi::OsStr])>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
@@ -646,7 +651,7 @@ impl Terminals {
         let PaneSpec { cwd, cols, rows, command, env } = spec;
         // A bare shell is still an interactive shell (also used by disposable
         // PTY fixtures). Shell scripts/arguments are work until the pane exits.
-        let explicit_command = command.is_some_and(|command| {
+        let explicit_command = executable.is_some() || command.is_some_and(|command| {
             let command = command.trim();
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
@@ -654,10 +659,15 @@ impl Terminals {
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
-        let mut cmd = CommandBuilder::new(&sh);
+        let mut cmd = CommandBuilder::new(executable.map_or(std::ffi::OsStr::new(&sh), |(program, _)| program));
         // A login shell so PATH and prompts match the reader's own terminal.
         let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
-        match command {
+        if let Some((_, args)) = executable {
+            for arg in args { cmd.arg(arg); }
+            // A lifecycle hook is not a provider/CLI call on behalf of an agent.
+            cmd.env_remove("RACCOON_SESSION_ID");
+            cmd.env_remove("TERMINALX_SESSION_ID");
+        } else { match command {
             Some(c) if known_shell => {
                 cmd.arg("-l");
                 cmd.arg("-c");
@@ -671,7 +681,7 @@ impl Terminals {
                 cmd.arg("-l");
             }
             None => {}
-        }
+        } }
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");

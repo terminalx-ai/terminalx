@@ -310,3 +310,18 @@ it("keeps the workspace when archive-failure consent is declined", async () => {
   expect(mocks.removeWorkspace).toHaveBeenCalledTimes(1);
   expect(screen.queryByRole("dialog")).toBeNull();
 });
+
+it("offers consent for a recorded unattended failure and shows its saved log", async () => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace.mockRejectedValueOnce(`internal: ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "saved-receipt", pane: "archive:closed", code: 17, timedOut: false, log: "saved output", sessionsStopped: true })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  await screen.findByText(/Its sessions are stopped/);
+  fireEvent.click(screen.getByRole("button", { name: "Open log" }));
+  expect(screen.getByTestId("archive-log").textContent).toBe("log:archive:closed");
+  fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }));
+  await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledTimes(2));
+  expect(mocks.removeWorkspace.mock.calls[1][2].archiveFailure).toBe("saved-receipt");
+});

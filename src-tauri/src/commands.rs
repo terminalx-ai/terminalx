@@ -4253,7 +4253,7 @@ mod command_tests {
 
 #[tauri::command]
 pub fn update_project(app: AppHandle, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
-    if patch.scripts.as_ref().is_some_and(|scripts| !scripts.archive.trim().is_empty()) {
+    if patch.scripts.is_some() {
         app.state::<crate::AppState>().sessions().map_err(err)?.require_archive_support().map_err(err)?;
     }
     let project = projects::update(&path, patch).map_err(err)?;
@@ -4310,10 +4310,10 @@ pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
 pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
     tauri::async_runtime::spawn_blocking(move || {
         let run = run.unwrap_or_default();
-        let report = |progress: &crate::cleanup::Progress| {
-            let _ = app.emit(crate::cleanup::PROGRESS_EVENT, crate::worktree_cleanup::OfRun { run: &run, progress });
-        };
-        let removal = crate::cleanup::remove(&ids, &report).map_err(err)?;
+        let state = app.state::<crate::AppState>();
+        let (projects, _) = projects::list().map_err(err)?;
+        require_archive_runtime(&state, projects.iter().map(|project| project.path.as_str()))?;
+        let removal: crate::cleanup::Removal = state.sessions().map_err(err)?.workspace("removeLeftovers", serde_json::json!({"ids":ids,"run":run})).map_err(err)?;
         let projects: std::collections::BTreeSet<&str> =
             removal.removed.iter().filter_map(|id| id.strip_prefix("worktree:")).filter_map(|rest| rest.rsplit_once(':')).map(|(project, _)| project).collect();
         for project in projects {

@@ -1051,8 +1051,22 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         };
         let roots = Roots::of(host, &sessions);
         let live = (host.live)(&sessions);
-        let after = inspect(host, &roots, repository, entry, &sessions, &live, Activity::Anything);
-        if after.token != now.token || !matches!(after.verdict, Verdict::Eligible | Verdict::IgnoredData) {
+        let refreshed = match Repository::open(repository.project, repository.fetch) {
+            Ok(repository) => repository,
+            Err(error) => return result(item, Outcome::Skipped, error),
+        };
+        let Some(entry) = refreshed.listed.iter().find(|entry| !entry.prunable && same_dir(&canonical(Path::new(&entry.path)), &target)) else {
+            return result(item, Outcome::Skipped, "The worktree listing changed during its archive script.".to_string());
+        };
+        let after = inspect(host, &roots, &refreshed, entry, &sessions, &live, Activity::Anything);
+        // Removing ignored data that was already reviewed is the point of many
+        // cleanup scripts. New ignored data still needs a separate review.
+        let allowed = matches!(after.verdict, Verdict::Eligible | Verdict::IgnoredData)
+            && after.ignored_data.iter().all(|name| now.ignored_data.contains(name));
+        let mut comparable = after.clone();
+        comparable.verdict = now.verdict;
+        comparable.ignored_data.clone_from(&now.ignored_data);
+        if !allowed || token(&comparable, "") != now.token {
             return result(item, Outcome::Skipped, "It changed during its archive script. Review it again before removing it.".to_string());
         }
     }
