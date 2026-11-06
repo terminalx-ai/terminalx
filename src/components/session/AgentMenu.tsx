@@ -15,14 +15,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, runningModelName } from "@/lib/models";
+import { cn } from "@/lib/cn";
+import { EFFORT_LABEL, PERMISSION_MODES, modeIsUnguarded, modelGroups, modelNote, runningModelName } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
 
 /**
  * Agent, model, effort and permissions behind one quiet button: `Opus 5.5
- * High`. The menu holds the agent and the efforts inline, the models and
- * permissions one level in. Bypassing permissions is shown on the button,
- * since it changes what the agent may do unasked.
+ * High · Ask every time`. The menu holds the agent and the efforts inline, the
+ * models and permissions one level in. The mode is always on the button, so
+ * what the agent may do unasked is never a menu away (PRO-162); Bypass is
+ * marked as a warning and Plan in the composer's plan colour.
  */
 export function AgentMenu({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
   const { harnesses, harness, readiness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort } = selection;
@@ -30,7 +32,8 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
   const modelText = unavailableModel ? `Unavailable: ${unavailableModel}` : (model ? runningModelName(model) : (harness?.name ?? "Agent"));
   const effortText = effort ? (EFFORT_LABEL[effort] ?? effort) : null;
   const permission = PERMISSION_MODES.find((m) => m.id === mode);
-  const bypass = mode === "bypassPermissions";
+  const modeText = permission?.label ?? mode;
+  const bypass = modeIsUnguarded(mode);
 
   return (
     <DropdownMenu {...menu.root}>
@@ -39,19 +42,22 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
           type="button"
           disabled={disabled}
           data-testid="agent-menu"
-          aria-label={`${modelText}${effortText ? ` ${effortText}` : ""}`}
-          title={`${harness?.name ?? "Agent"} · ${permission?.label ?? mode}`}
+          aria-label={`${modelText}${effortText ? ` ${effortText}` : ""}, ${modeText}`}
+          title={`${harness?.name ?? "Agent"} · ${modeText}`}
           className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-[13px] text-foreground transition-colors hover:bg-veil-raised disabled:opacity-50"
         >
           {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
           <span className="truncate" data-testid="agent-model">{modelText}</span>
           {effortText && <span className="shrink-0 text-muted-foreground" data-testid="agent-effort">{effortText}</span>}
-          {bypass && (
-            <span className="flex shrink-0 items-center gap-1 text-[11.5px] text-warning" title="The agent runs commands and edits files without asking">
-              <TriangleAlert className="size-3" aria-hidden />
-              Bypass
-            </span>
-          )}
+          <span
+            data-testid="agent-mode"
+            className={cn("flex shrink-0 items-center gap-1 text-[11.5px]", bypass ? "text-warning" : mode === "plan" ? "text-info" : "text-muted-foreground")}
+            title={bypass ? "The agent runs commands and edits files without asking" : permission?.hint}
+          >
+            <span aria-hidden className="text-faint">·</span>
+            {bypass && <TriangleAlert className="size-3" aria-hidden />}
+            {bypass ? "Bypass" : modeText}
+          </span>
           <ChevronDown className="size-3.5 shrink-0 text-faint" />
         </button>
       </DropdownMenuTrigger>

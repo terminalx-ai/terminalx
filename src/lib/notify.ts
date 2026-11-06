@@ -9,6 +9,7 @@ import { createCloudAttentionTracker, getCloudDashboard, openCloudSession, subsc
 import { isCloudKey } from "@/types/target";
 import { appWindow, type AppWindow } from "@/lib/appWindow";
 import { getFloating, showFloatingWindow, subscribeFloating } from "@/lib/floating";
+import { bootLocalSharing, onJoinRequest, openSessionShare, shownShareDialog, type JoinRequest } from "@/lib/localSharing";
 import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from "@/types/session";
 import type { AutomationRun } from "@/types/automations";
 import type { IssuePipeline } from "@/types/issuePipeline";
@@ -20,9 +21,9 @@ import type { IssuePipeline } from "@/types/issuePipeline";
  * and only the tone when the session is already on screen. The dock badge
  * counts sessions that want the reader back.
  *
- * The app has two windows and one reader. Every window hears every status
+ * The app has several windows and one reader. Every window hears every status
  * change, so each decides for itself and they must not both speak: the window
- * that has the focus raises the tone and the notice; when neither has it, the
+ * that has the focus raises the tone and the notice; when none has it, the
  * main window alone sends the banner and keeps the dock badge. A banner about
  * the session the floating window shows brings that window back when the
  * reader returns to the app.
@@ -40,6 +41,8 @@ export interface Notice {
   title: string;
   body: string;
   at: number;
+  /** Opened, it also opens this on the session: Share, for someone waiting to be admitted. */
+  opens?: "share";
 }
 
 let notices: Notice[] = [];
@@ -68,6 +71,7 @@ export function openNotice(n: Notice) {
   // A cloud session opens on the tab that asked, and only looks: nothing wakes its workspace.
   if (isCloudKey(n.sessionId)) openCloudSession(n.sessionId, n.tabId);
   else selectSession(n.sessionId);
+  if (n.opens === "share") openSessionShare(n.sessionId);
   dismissNotice(n.id);
 }
 
@@ -96,12 +100,12 @@ interface Presence {
   focused: boolean;
   sessionId: string | null;
 }
-const presenceKey = (win: AppWindow) => `raccoon.presence.${win}`;
-const otherWindow = (): AppWindow => (appWindow() === "main" ? "floating" : "main");
+const PRESENCE_PREFIX = "raccoon.presence.";
+const presenceKey = (win: AppWindow) => `${PRESENCE_PREFIX}${win}`;
 
 /** This window has the reader: the focus, and (for the floating one) it is on screen. A hidden floating window shows nothing to anyone, whatever its page thinks. */
 function looking(): boolean {
-  return focused && (appWindow() === "main" || getFloating().visible);
+  return focused && (appWindow() !== "floating" || getFloating().visible);
 }
 
 function publishPresence() {
@@ -113,14 +117,27 @@ function publishPresence() {
   }
 }
 
-function presenceElsewhere(): Presence | null {
+function readPresence(key: string): Presence | null {
   try {
-    const raw = localStorage.getItem(presenceKey(otherWindow()));
+    const raw = localStorage.getItem(key);
     const parsed = raw ? (JSON.parse(raw) as Partial<Presence>) : null;
     return parsed ? { focused: parsed.focused === true, sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null } : null;
   } catch {
     return null;
   }
+}
+
+function presenceElsewhere(): Presence | null {
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (!key.startsWith(PRESENCE_PREFIX) || key === presenceKey(appWindow())) continue;
+      const presence = readPresence(key);
+      if (presence?.focused) return presence;
+    }
+  } catch {
+    /* storage unavailable */
+  }
+  return null;
 }
 
 /**
@@ -144,10 +161,13 @@ function onReturn() {
   // says about itself now, not what it showed some other day. The main
   // window's own sessions are where the reader left them, and are not
   // navigated for them.
-  if (presenceElsewhere()?.sessionId === target.sessionId) void showFloatingWindow(target.sessionId, target.tabId).catch(() => {});
+  if (readPresence(presenceKey("floating"))?.sessionId === target.sessionId) void showFloatingWindow(target.sessionId, target.tabId).catch(() => {});
 }
 
 if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    try { localStorage.removeItem(presenceKey(appWindow())); } catch { /* storage unavailable */ }
+  });
   window.addEventListener("focus", onReturn);
   window.addEventListener("blur", () => {
     focused = false;
@@ -155,7 +175,7 @@ if (typeof window !== "undefined") {
   });
   // The reader came back through the other window: what was raised has been answered there.
   window.addEventListener("storage", (event) => {
-    if (event.key === presenceKey(otherWindow()) && event.storageArea === localStorage && presenceElsewhere()?.focused) raised = null;
+    if (event.key?.startsWith(PRESENCE_PREFIX) && event.key !== presenceKey(appWindow()) && event.storageArea === localStorage && presenceElsewhere()?.focused) raised = null;
   });
 }
 
@@ -292,6 +312,31 @@ export function notePipelineState(pipeline: IssuePipeline) {
   window.setTimeout(() => dismissNotice(id), 8000);
 }
 
+/**
+ * Someone asked to join a shared session. Every new link approves each person
+ * (PRO-162), so they wait until the host admits them, and the host may have
+ * closed Share long ago. The same focus-aware path as an agent's request:
+ * a banner when nobody is looking, else the tone and a notice that opens
+ * Share on the session. Only the tone while that Share already lists them.
+ */
+export function noteShareRequest({ sessionId, person }: JoinRequest) {
+  const who = person.displayName || person.email || "Someone";
+  const session = getSessions().sessions.find((candidate) => candidate.id === sessionId);
+  const title = `${who} asked to join`;
+  const body = `${session?.title ? `${session.title}. ` : ""}Open Share to admit or decline them.`;
+  if (!looking()) {
+    if (sendsBanner()) void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  playSound("waiting");
+  if (shownShareDialog() === sessionId) return;
+  const key = `share:${sessionId}:${person.userId}:`;
+  const id = `${key}${Date.now()}`;
+  notices = [...notices.filter((notice) => !notice.id.startsWith(key)), { id, sessionId, tabId: "", kind: "waiting", opens: "share", title, body, at: Date.now() }];
+  emit();
+  window.setTimeout(() => dismissNotice(id), 8000);
+}
+
 // ---- cloud sessions (PRO-23 CS-19)
 
 let observeCloud: ReturnType<typeof createCloudAttentionTracker> | null = null;
@@ -362,14 +407,20 @@ export function startNotifications() {
   subscribeFloating(publishPresence);
   // Cloud sessions and the badge are the main window's: the floating window shows neither.
   if (appWindow() !== "main") return;
-  // The floating window is made by this run of the app. What an earlier run
-  // left written for it is not a window that has the reader now.
+  // Secondary windows are made by this run. Discard presence from a previous
+  // run before any can be created.
   try {
-    localStorage.removeItem(presenceKey("floating"));
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(PRESENCE_PREFIX) && key !== presenceKey("main")) localStorage.removeItem(key);
+    }
   } catch {
     /* storage unavailable */
   }
   subscribeSessions(refreshBadge);
+  // Join requests for any shared session, heard whichever session is on screen.
+  // Only the main window listens, so one window speaks for each request.
+  onJoinRequest(noteShareRequest);
+  void bootLocalSharing().catch(() => {});
   subscribeCloudDashboard(() => {
     onCloudSessions();
     refreshBadge();

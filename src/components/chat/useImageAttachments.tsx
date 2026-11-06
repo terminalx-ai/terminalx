@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObject } from "react";
 import { Paperclip, X } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { files as filesApi, type ImageInput } from "@/lib/api";
+import { registerWindowDraft } from "@/lib/windowDrafts";
 import { registerFileDropTarget } from "@/lib/fileDrop";
 
 export interface Attachment {
@@ -76,7 +77,19 @@ export function useImageAttachments({
    */
   mentionFiles?: boolean;
 }): ImageAttachments {
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachmentState] = useState<Attachment[]>([]);
+  const current = useRef(attachments);
+  // Keep the preservation check current even between an async file read and
+  // React's next render. Every queue edit goes through this one operation.
+  const setAttachments = useCallback((change: (items: Attachment[]) => Attachment[]) => {
+    current.current = change(current.current);
+    setAttachmentState(current.current);
+  }, []);
+  const pendingInput = useRef(0);
+  const readInput = useCallback(async (read: () => Promise<void>) => {
+    pendingInput.current++;
+    try { await read(); } finally { pendingInput.current--; }
+  }, []);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   // A local tab mentions what is not an image; a cloud tab can only say why it was left out.
@@ -91,7 +104,7 @@ export function useImageAttachments({
   const latest = useRef({ draft, onDraftChange });
   latest.current = { draft, onDraftChange };
 
-  const addFiles = useCallback(async (list: File[]) => {
+  const addFiles = useCallback((list: File[]) => readInput(async () => {
     const out: Attachment[] = [];
     const skipped: string[] = [];
     for (const f of list) {
@@ -108,10 +121,10 @@ export function useImageAttachments({
     }
     if (out.length) setAttachments((a) => [...a, ...out]);
     refuse(skipped);
-  }, [refuse]);
+  }), [refuse, readInput, setAttachments]);
 
   const addPaths = useCallback(
-    async (paths: string[]) => {
+    (paths: string[]) => readInput(async () => {
       const mentions: string[] = [];
       const skipped: string[] = [];
       for (const path of paths) {
@@ -134,11 +147,11 @@ export function useImageAttachments({
       }
       refuse(skipped);
       textareaRef.current?.focus();
-    },
-    [textareaRef, mentionFiles, refuse],
+    }),
+    [textareaRef, mentionFiles, refuse, readInput, setAttachments],
   );
 
-  const chooseFiles = useCallback(async () => {
+  const chooseFiles = useCallback(() => readInput(async () => {
     try {
       const selected = await openDialog({ multiple: true, title: "Attach files" });
       if (!selected) return;
@@ -147,7 +160,7 @@ export function useImageAttachments({
       // The hidden browser picker keeps the composer usable outside Tauri.
       fileRef.current?.click();
     }
-  }, [addPaths]);
+  }), [addPaths, readInput]);
 
   const remove = useCallback((id: string) => {
     setAttachments((list) => {
@@ -198,8 +211,9 @@ export function useImageAttachments({
     return [...kept.values()];
   }, [attachments]);
 
-  const current = useRef(attachments);
-  current.current = attachments;
+  useLayoutEffect(() => registerWindowDraft(() =>
+    current.current.length > 0 || aside.current.size > 0 || pendingInput.current > 0,
+  ), []);
   const setAside = useCallback((): SetAside => {
     const taken = current.current;
     const images = taken.map((a) => inputs.current.get(a.id) ?? { mediaType: a.mediaType, data: a.data, name: a.name });
