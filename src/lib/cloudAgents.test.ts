@@ -34,6 +34,7 @@ import {
   stopCloudAgent,
   POLL_MAX_MS,
 } from "./cloudAgents";
+import { mergeReadMarkers, setReadMarkerAccount } from "./cloudReadMarkers";
 import { getTabLog } from "./agentEvents";
 import { getDraft, setDraft } from "./drafts";
 import { buildTranscript } from "./transcript";
@@ -179,6 +180,7 @@ function fakeClient(connected = true, connection: Record<string, unknown> = {}) 
 }
 
 beforeEach(() => {
+  setReadMarkerAccount(null);
   backend = new FakeBackend();
   mocks.invoke.mockReset();
   mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => backend.handle(cmd, args));
@@ -976,4 +978,19 @@ it("retains message presence from a legacy checkpoint with no verified time or r
   expect(getCloudAgents(scope).tabs[0].info.lastMessageAt).toBeUndefined();
   await flushCloudAgentCache(scope);
   expect(backend.cache["t-1"].tab).toMatchObject({ hasMessages: true, sessionHasMessages: true });
+});
+
+
+describe("account read markers in cloud rows", () => {
+  it("clears the finished row immediately and keeps the next reply unread", () => {
+    setReadMarkerAccount("A");
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastSeq: 10 })]);
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(true);
+    mergeReadMarkers([{ orgId: scope.organizationId, workspaceId: scope.workspaceId, sessionId: "s-1", tabId: "t-1", readSeq: 10 }]);
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(false);
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress", lastSeq: 11 })]);
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastSeq: 12 })]);
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(true);
+    setReadMarkerAccount(null);
+  });
 });

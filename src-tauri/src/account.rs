@@ -123,6 +123,7 @@ pub struct AccountStatus {
     multi_org: bool,
     /// The server lists every member Organization in one request (PRO-74).
     catalog_feed: bool,
+    desktop_inbox: bool,
     /// The server lets any member create a cloud workspace and manage the
     /// ones they created (PRO-73). Without it, creating stays with owners
     /// and admins, as that server enforces.
@@ -1380,6 +1381,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
+        desktop_inbox: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get("cloud.desktop.inbox.v1") == Some(&true)),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
         agent_command_wake: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(AGENT_COMMAND_WAKE_CAPABILITY) == Some(&true)),
         work_claims: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(crate::work_claims::CAPABILITY) == Some(&true)),

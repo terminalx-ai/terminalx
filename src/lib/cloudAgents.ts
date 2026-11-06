@@ -1,3 +1,4 @@
+import { isServerRead, queueReadMarker, subscribeReadMarkers } from "@/lib/cloudReadMarkers";
 import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
@@ -172,7 +173,15 @@ function store(scope: CloudAgentScope): Store {
   return s;
 }
 
+function readMarker(s: Store, tab: CloudAgentTab) {
+  return { orgId: s.scope.organizationId, workspaceId: s.scope.workspaceId, sessionId: tab.info.sessionId, tabId: tab.tabId, readSeq: knownSeq(tab) };
+}
+subscribeReadMarkers(() => { for (const s of stores.values()) publish(s); });
+
 function publish(s: Store) {
+  for (const tab of s.tabs.values()) {
+    if (tab.info.sessionId && isServerRead(readMarker(s, tab))) tab.unread = false;
+  }
   const tabs = [...s.tabs.values()].sort((a, b) => a.info.created.localeCompare(b.info.created) || a.tabId.localeCompare(b.tabId));
   s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
   for (const listener of [...s.listeners]) listener();
@@ -749,6 +758,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     else applyEvent(ev);
     if (current) {
       current.info = { ...current.info, lastSeq: Math.max(current.info.lastSeq, ev.seq) };
+      if (ev.payload.type === "turn_completed" && isViewed(scope, tabId)) queueReadMarker(readMarker(s, current));
       if (ev.payload.type === "turn_completed" && !isViewed(scope, tabId)) {
         current.unread = true;
         current.completed = true;
@@ -769,7 +779,10 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
         if (!current) return;
         const status = settledStatus(current.info, change.status);
         noteStatus(current, status);
-        if (status === "completed" && isViewed(scope, tabId)) current.unread = false;
+        if (status === "completed" && isViewed(scope, tabId)) {
+          current.unread = false;
+          queueReadMarker(readMarker(s, current));
+        }
         // The runtime reports the process in `session.tabs`, not with a status.
         current.info = { ...current.info, status, process: change.process ?? current.info.process };
         publish(s);
@@ -836,6 +849,7 @@ export async function markCloudAgentRead(scope: CloudAgentScope, tabId: string, 
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   if (!tab || (!tab.unread && tab.info.status !== "completed")) return;
+  queueReadMarker(readMarker(s, tab));
   tab.unread = false;
   if (tab.info.status === "completed") tab.info = { ...tab.info, status: "idle" };
   publish(s);

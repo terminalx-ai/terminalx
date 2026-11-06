@@ -90,6 +90,7 @@ vi.mock("@/lib/cloudConnections", async (importOriginal) => ({
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn() }));
+vi.mock("@/lib/cloudInbox", () => ({ bootCloudInbox: vi.fn() }));
 vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));

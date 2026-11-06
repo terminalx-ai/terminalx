@@ -1049,6 +1049,8 @@ pub struct CloudCatalogOrganization {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CloudCatalogBody {
+    #[serde(default)]
+    read_markers: Vec<crate::desktop_inbox::ReadMarker>,
     cursor: String,
     #[serde(default)]
     reset: bool,
@@ -1062,6 +1064,7 @@ struct CloudCatalogBody {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudCatalogFeed {
+    pub read_markers: Vec<crate::desktop_inbox::ReadMarker>,
     pub changed: bool,
     pub cursor: Option<String>,
     /// The answer is the whole catalog and replaces what the desktop holds.
@@ -2487,7 +2490,7 @@ impl CloudWorkspaceService {
         let answer = self.client.catalog_feed(&context, cursor);
         let scope = self.account.scope_if_same_account(&context).filter(|scope| scope.multi_org).ok_or_else(|| context_changed_error(risk))?;
         let Some(body) = answer? else {
-            return Ok(CloudCatalogFeed { changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
+            return Ok(CloudCatalogFeed { read_markers: Vec::new(), changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
         };
         if !valid_cursor(&body.cursor) {
             return Err(invalid_response());
@@ -2512,7 +2515,8 @@ impl CloudWorkspaceService {
         let listed: std::collections::BTreeSet<&str> = organizations.iter().flat_map(|organization| organization.tombstones.iter().map(|tombstone| tombstone.id.as_str())).collect();
         // Only ids this desktop was also shown a tombstone for, or (in a delta) ids that are well formed.
         let deleted_workspace_ids = body.deleted_workspace_ids.into_iter().filter(|id| valid_resource_id(id) && (!body.reset || listed.contains(id.as_str()))).collect();
-        Ok(CloudCatalogFeed { changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
+        let read_markers = body.read_markers.into_iter().filter(|m| scope.allows(&m.org_id) && valid_resource_id(&m.workspace_id) && m.read_seq <= 9_007_199_254_740_991).collect();
+        Ok(CloudCatalogFeed { read_markers, changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
     }
 
     /// Check the repositories and refs before quoting (contract §16), and

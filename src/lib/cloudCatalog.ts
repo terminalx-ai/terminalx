@@ -1,3 +1,4 @@
+import { mergeReadMarkers } from "@/lib/cloudReadMarkers";
 import { useSyncExternalStore } from "react";
 import type { RuntimeIssuePipeline, RuntimeSession } from "@terminalx/portable/workspace";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -706,12 +707,11 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
   let refused = false;
   const flight = (async () => {
     const requestedAt = now();
-    const repositories = Promise.allSettled(asked.map((orgId) => refreshRepositories(orgId, owner, now)));
+    void Promise.allSettled(asked.map((orgId) => refreshRepositories(orgId, owner, now)));
     let feed: CloudCatalogFeed;
     try {
       feed = await api.cloudCatalogFeed(feedCursor);
     } catch (error) {
-      await repositories;
       // Signed out or another user while it ran: nothing lands.
       if (state.owner !== owner) return;
       const code = errorText(error);
@@ -734,9 +734,9 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
       for (const orgId of liveCloudOrgIds(getAccount().status)) patchOrg(orgId, { error: code });
       return;
     }
-    await repositories;
     if (state.owner !== owner) return;
     feedFailures = 0;
+    if (feed.readMarkers) mergeReadMarkers(feed.readMarkers);
     // As of the answer: an organization the user left meanwhile gets nothing.
     const live = liveCloudOrgIds(getAccount().status);
     if (!feed.changed) {

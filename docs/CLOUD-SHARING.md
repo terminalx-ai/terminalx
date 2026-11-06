@@ -881,3 +881,41 @@ and attachments may carry `userId`. The file is re-read on every refresh.
   the new role. The revocation closes the connection, drops the queued
   follow-up and rotates the key. An outsider (not a member) never gets an
   attachment; that is the API's 404 and is tested there.
+
+
+### Live inbox and account read markers (PRO-125)
+
+On servers advertising `cloud.desktop.inbox.v1`, the desktop keeps one
+account-bound native SSE subscriber to
+`GET /v1/desktop/inbox/stream`, with `Last-Event-ID` naming its last processed
+per-user sequence. Tokens stay native. The server sends `inbox` events whose
+JSON data is `{ events, cursor, more }`, including a heartbeat every second,
+and rotates streams after 55 seconds. A dropped stream reconnects with jittered
+exponential backoff (1–30 seconds), uses `/inbox?cursor=…&wait=1` while disconnected,
+and leaves the existing catalog poll running. Receipt failure retries without
+repeating effects. Account changes cancel delivery and discard in-memory markers.
+
+Inbox events are `share.added`, `share.removed`, `workspace.reassigned`, and
+`read-marker.changed`. Each contains `id`, `orgId`, nullable `workspaceId`,
+`type`, and `payload`. Events invalidate the catalog without starting compute.
+A transition to private sends former organization viewers only an organization
+invalidation (`workspaceId: null`); queued events are filtered against current
+membership and workspace visibility before delivery. Postgres commits event
+creation with the underlying mutation, serializing each user's cursor across
+transactions. Redis broadcasts committed inbox hints across API instances;
+a one-second database catch-up also covers Redis interruption.
+
+`POST /inbox/receipts` takes `{ deviceId, cursor }`, records a monotonic delivery
+receipt for this authenticated user and device, and does not consume the event
+for another device. The desktop persists its cursor after processing an event.
+The notification seam accepts optional notification title/body metadata through
+the existing macOS notification preference; the first four event types are silent.
+
+`PUT /orgs/:orgId/cloud-workspaces/:workspaceId/read-markers` takes
+`{ sessionId, tabId, readSeq }`. Only workspace collaborators may write their own
+markers. The API takes the maximum sequence and emits a read-marker event for
+that user. Catalog answers include a `readMarkers` array, with `orgId` and
+`workspaceId` added, and incorporate it in the catalog cursor/304 calculation.
+A marker clears only replies at or below its observed transcript sequence;
+newer replies remain unread. Offline reads are queued per account and retried.
+Deploy the paired server migration/routes before this desktop release.

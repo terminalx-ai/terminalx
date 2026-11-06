@@ -740,6 +740,8 @@ export interface AccountStatus {
   multiOrg?: boolean;
   /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
   catalogFeed?: boolean;
+  /** Durable per-user inbox and account read markers (PRO-125). */
+  desktopInbox?: boolean;
   /** The server lets any member create a cloud workspace and manage the ones they created (`cloud.workspaces.member-managed.v1`, PRO-73). */
   memberWorkspaces?: boolean;
   /** The server takes `wake: false` on an agent command and refuses a stopped workspace instead of starting it (`cloud.workspaces.agent-command-wake.v1`, PRO-89). */
@@ -764,6 +766,7 @@ export interface CloudCatalogOrganization {
  * listed and `deletedWorkspaceIds` names the ones to drop.
  */
 export interface CloudCatalogFeed {
+  readMarkers?: import("@/lib/cloudReadMarkers").ReadMarker[];
   changed: boolean;
   cursor: string | null;
   reset: boolean;

@@ -17,6 +17,8 @@ mod chat_link;
 mod cleanup;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
+#[cfg(feature = "desktop")]
+mod desktop_inbox;
 mod cloud_activity;
 #[cfg(feature = "desktop")]
 mod cloud_mirror;
@@ -485,6 +487,11 @@ pub fn run() {
             commands::cloud_workspace_repositories,
             commands::cloud_workspaces,
             commands::cloud_catalog_feed,
+            desktop_inbox::desktop_inbox_stream,
+            desktop_inbox::desktop_inbox_stop,
+            desktop_inbox::desktop_inbox_poll,
+            desktop_inbox::desktop_inbox_receipt,
+            desktop_inbox::desktop_read_marker,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,
             commands::cloud_workspace_release,

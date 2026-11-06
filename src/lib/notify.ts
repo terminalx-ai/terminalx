@@ -430,3 +430,9 @@ export function startNotifications() {
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
+
+/** Notification seam for inbox events; respects the existing macOS preference. */
+export function noteOrganizationEvent(notification: { title: string; body: string }) {
+  if (!sendsBanner()) return;
+  void canNotify().then(ok => ok && sendNotification({ title: notification.title.slice(0, 200), body: notification.body.slice(0, 1000) }));
+}
