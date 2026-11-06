@@ -1959,8 +1959,11 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
             let rig = Rig::of(CliKind::Codex, "");
             rig.compose("active turn", 0);
             rig.cli_takes("active turn");
+            // This control reuses consent only with a verified execution
+            // directory; command-only Codex frames now always ask.
+            let input = json!({"command":"ls", "workdir":"/workspace/app"});
             let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: event.into(),
-                payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":{"command":"ls"}, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
+                payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":input, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
             let (paused_tx, paused_rx) = std::sync::mpsc::channel();
             let (resume_tx, resume_rx) = std::sync::mpsc::channel();
             let manager = rig.manager.clone();
@@ -1980,7 +1983,7 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
                     p.origin.token = crate::hooks::mint_token();
                 }
                 p.ready = ready.clone();
-                p.answered.insert(tool_key("Bash", &json!({"command":"ls"})), true);
+                p.answered.insert(tool_key("Bash", &input), true);
             }
             let receipt = rig.compose_confirmed("still awaiting acceptance");
             rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
@@ -2072,8 +2075,9 @@ fn stale_stop_reply_cannot_fabricate_successor_output() {
 fn delayed_permission_lookup_cannot_reuse_successor_consent() {
     for replace in [false, true] {
         let rig = Rig::of(CliKind::Codex, "");
+        let input = json!({"command":"ls", "workdir":"/workspace/app"});
         let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
-            payload: json!({"tool_name":"Bash","tool_input":{"command":"ls"}}) };
+            payload: json!({"tool_name":"Bash","tool_input":input}) };
         let (paused_tx, paused_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let manager = rig.manager.clone();
@@ -2092,7 +2096,7 @@ fn delayed_permission_lookup_cannot_reuse_successor_consent() {
                 p.generation += 1;
                 p.origin.token = crate::hooks::mint_token();
             }
-            p.answered.insert(tool_key("Bash", &json!({"command":"ls"})), true);
+            p.answered.insert(tool_key("Bash", &input), true);
         }
         resume_tx.send(()).unwrap();
         let reply = worker.join().unwrap();

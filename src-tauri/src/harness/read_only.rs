@@ -47,7 +47,25 @@ pub fn command<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
 /// grants. A new explanation or output limit does not change the command.
 pub fn session_key(tool: &str, input: &Value, cwd: Option<&str>) -> Option<String> {
     command(tool, input)?;
-    Some(serde_json::json!([tool, execution_input(input), cwd?]).to_string())
+    let cwd = cwd.filter(|cwd| Path::new(cwd).is_absolute())?;
+    Some(serde_json::json!([tool, execution_input(input), cwd]).to_string())
+}
+
+/// Only an explicit absolute execution directory can authorize Codex input.
+/// Its normalized shell hooks (0.164) omit workdir, while payload.cwd names
+/// the session directory. Neither omission nor a relative path is proof.
+pub fn explicit_cwd(input: &Value) -> Option<&str> {
+    if input.get("workdir").is_some()
+        && input.get("cwd").is_some()
+        && input["workdir"] != input["cwd"]
+    {
+        return None;
+    }
+    let cwd = input
+        .get("workdir")
+        .or_else(|| input.get("cwd"))?
+        .as_str()?;
+    Path::new(cwd).is_absolute().then_some(cwd)
 }
 
 /// Retain every execution argument when comparing approvals. Only explanatory
@@ -107,20 +125,23 @@ fn approved_input_in(
     }) {
         return None;
     }
+    let cwd = cwd.filter(|cwd| Path::new(cwd).is_absolute())?;
     let commands = parse(command(tool, input)?)?;
-    let mut script = String::new();
+    // Keep the checked directory bound to execution, even if the provider
+    // supplies inconsistent metadata or changes it after the hook returns.
+    let mut script = format!("'/bin/test' '.' '-ef' {} || exit 125; ", quote(cwd));
     for command in commands {
         if !safe_command(&command.words) {
             return None;
         }
         let name = &command.words[0];
-        // Resolve using the owner's PATH, never the executing shell's PATH,
-        // aliases, functions, startup files or command substitutions.
-        let binary = which::which(name).ok()?;
+        // Use the same trusted lookup as agent launches, including known
+        // developer install directories when Finder supplied a minimal PATH.
+        let binary = crate::binpath::resolve(name)?;
         if !binary.is_absolute() {
             return None;
         }
-        if name == "git" && !git_config_is_read_only(&binary, Path::new(cwd?), execution) {
+        if name == "git" && !git_config_is_read_only(&binary, Path::new(cwd), execution) {
             return None;
         }
         if !script.is_empty() {
@@ -804,7 +825,12 @@ mod tests {
     #[test]
     fn wrappers_and_escalated_or_custom_shell_inputs_ask() {
         assert_eq!(
-            approved_input("Bash", &serde_json::json!({"command":"pwd; ls"}), None).is_some(),
+            approved_input(
+                "Bash",
+                &serde_json::json!({"command":"pwd; ls"}),
+                Some("/workspace/app")
+            )
+            .is_some(),
             cfg!(unix)
         );
         for (tool, input) in [
@@ -819,7 +845,7 @@ mod tests {
             ),
             ("Bash", serde_json::json!({"command":"pwd", "env":{}})),
         ] {
-            assert!(approved_input(tool, &input, None).is_none());
+            assert!(approved_input(tool, &input, Some("/workspace/app")).is_none());
         }
     }
 
@@ -878,7 +904,7 @@ mod tests {
             serde_json::json!({"command":"pwd", "cmd":"rm file"}),
             serde_json::json!({"command":"pwd", "dangerouslyDisableSandbox":true}),
         ] {
-            assert!(approved_input("Bash", &input, None).is_none());
+            assert!(approved_input("Bash", &input, Some("/workspace/app")).is_none());
         }
     }
 
@@ -909,6 +935,27 @@ mod tests {
             ("shell", input, "/workspace/app"),
         ] {
             assert_ne!(key, session_key(tool, &input, Some(cwd)));
+        }
+    }
+
+    #[test]
+    fn missing_relative_and_conflicting_directories_never_authorize_a_command() {
+        for input in [
+            serde_json::json!({"command":"pwd"}),
+            serde_json::json!({"command":"pwd", "workdir":"relative"}),
+            serde_json::json!({"command":"pwd", "workdir":null}),
+            serde_json::json!({"command":"pwd", "workdir":"/a", "cwd":"/b"}),
+        ] {
+            assert!(explicit_cwd(&input).is_none());
+        }
+        assert_eq!(
+            explicit_cwd(&serde_json::json!({"command":"pwd", "workdir":"/b"})),
+            Some("/b")
+        );
+        for cwd in [None, Some("relative")] {
+            let input = serde_json::json!({"command":"pwd"});
+            assert!(approved_input("Bash", &input, cwd).is_none());
+            assert!(session_key("Bash", &input, cwd).is_none());
         }
     }
 }

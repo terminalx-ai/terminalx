@@ -436,7 +436,7 @@ fn permission_card(kind: CliKind, mode: &str, gate: &str, payload: Value, answer
 fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).
     for (gate, input, description, reason) in [
-        ("PreToolUse", json!({"command":"git status --short --branch"}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
+        ("PreToolUse", json!({"command":"git status --short --branch", "workdir":"/workspace/app"}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
         ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), Value::Null),
     ] {
         let (payload, _) = permission_card(CliKind::Codex, "manual", gate, json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}), Decision::Deny);
@@ -448,12 +448,22 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
 }
 
 fn command_frame(rig: &Rig, gate: &str, command: &str, cwd: &str) -> HookFrame {
+    let mut input = json!({"command":command});
+    // Positive fixtures explicitly report the execution workdir. Codex
+    // 0.164's normalized command-only frames are tested separately below.
+    if matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.harness == CliKind::Codex) { input["workdir"] = json!(cwd); }
     HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
-        payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":{"command": command}}) }
+        payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":input}) }
 }
 
 /// Exercise the real response path, including validation of session options.
 fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: bool) {
+    let key = tool_key(frame.payload["tool_name"].as_str().unwrap(), &frame.payload["tool_input"]);
+    let (unverified_codex, previous_answer) = {
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &rt.engine else { unreachable!() };
+        (p.harness == CliKind::Codex && permission_directory(p.harness, &frame.payload).is_none(), p.answered.get(&key).copied())
+    };
     let manager = rig.manager.clone();
     let worker = std::thread::spawn(move || manager.on_hook(frame));
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -470,24 +480,42 @@ fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: boo
     }).unwrap();
     assert_eq!(event.iter().any(|o| o.id == crate::harness::read_only::SESSION_OPTION), session_option);
     if !session_option {
+        if unverified_codex {
+            // A pending card handed over from an older runtime may still
+            // advertise its old session option. Revalidate at answer time.
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.decisions.get_mut(&request).unwrap().session_command = Some("legacy-session-key".into());
+        }
         assert!(rig.manager.respond_permission(SESSION, TAB, &request, crate::harness::read_only::SESSION_OPTION).is_err());
+        if unverified_codex {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.decisions.get_mut(&request).unwrap().session_command = None;
+        }
     }
     rig.manager.respond_permission(SESSION, TAB, &request, option).unwrap();
     assert!(worker.join().unwrap().output.is_some());
+    if unverified_codex {
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &rt.engine else { unreachable!() };
+        assert_eq!(p.answered.get(&key).copied(), previous_answer, "an unverified workdir must never populate the approval cache");
+    }
     rig.manager.forget_tool_answers(&mut rig.rt.lock().unwrap());
 }
 
 #[test]
 #[cfg(unix)]
-fn ask_mode_discovery_skips_cards_for_both_clis_but_writes_and_network_ask() {
+fn ask_mode_discovery_with_verified_directory_skips_cards_for_both_clis() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
         let mut commands = vec!["pwd; ls", "ls; cat file", "cat file | grep -n hello"];
         if which::which("rg").is_ok() { commands.push("pwd; rg --files"); }
         for command in commands {
-            let reply = rig.manager.on_hook(command_frame(&rig, gate, command, "/workspace/app"));
-            let updated = crate::harness::read_only::approved_input("Bash", &json!({"command":command}), Some("/workspace/app")).unwrap();
+            let frame = command_frame(&rig, gate, command, "/workspace/app");
+            let updated = crate::harness::read_only::approved_input("Bash", &frame.payload["tool_input"], Some("/workspace/app")).unwrap();
+            let reply = rig.manager.on_hook(frame);
             assert_eq!(reply.output, Some(if kind == CliKind::Codex { codex::pty::pre_tool_rewrite(updated) } else { claude::pty::permission_decision(true, Some(updated), vec![]) }));
             assert!(rig.manager.pending_permissions().is_empty());
             assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
@@ -496,6 +524,45 @@ fn ask_mode_discovery_skips_cards_for_both_clis_but_writes_and_network_ask() {
             answer_command(&rig, command_frame(&rig, gate, command, "/workspace/app"), "deny", true);
         }
     }
+}
+
+#[test]
+fn codex_normalized_input_cannot_reuse_session_or_turn_grants_for_an_unknown_workdir() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    // Codex 0.164 reports session A here even when exec_command runs in B.
+    let input = json!({"command":"rm relative-file"});
+    rig.manager.session_commands.lock().unwrap().entry(key_of(SESSION, TAB)).or_default()
+        .insert(crate::harness::read_only::session_key("Bash", &input, Some("/workspace/a")).unwrap());
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.answered.insert(tool_key("Bash", &input), true);
+    }
+    for (input, answer) in [
+        (input.clone(), "deny"),
+        (input, "allow"),
+        (json!({"command":"rm relative-file"}), "deny"),
+        (json!({"command":"git diff"}), "deny"),
+        (json!({"command":"pwd"}), "deny"),
+        (json!({"command":"pwd", "workdir":"../b"}), "deny"),
+        (json!({"command":"pwd", "workdir":"/workspace/a", "cwd":"/workspace/b"}), "deny"),
+    ] {
+        let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
+            payload: json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":input}) };
+        answer_command(&rig, frame, answer, false);
+    }
+    assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("verifiable execution directory"))));
+}
+
+#[test]
+fn execution_directory_never_falls_back_to_a_codex_session_directory() {
+    let mut payload = json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":{"command":"git diff"}});
+    assert_eq!(permission_directory(CliKind::Codex, &payload), None);
+    payload["tool_input"]["workdir"] = json!("/workspace/b");
+    assert_eq!(permission_directory(CliKind::Codex, &payload), Some("/workspace/b"));
+    assert_eq!(permission_directory(CliKind::Claude, &payload), None);
+    payload["tool_input"].as_object_mut().unwrap().remove("workdir");
+    assert_eq!(permission_directory(CliKind::Claude, &payload), Some("/workspace/a"));
 }
 
 #[test]

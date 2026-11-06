@@ -1,4 +1,4 @@
-//! Executable reproductions from PRO-198's first security review.
+//! Executable reproductions from PRO-198's security reviews.
 use super::*;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -365,4 +365,120 @@ fn sanitized_execution_preserves_pipes_conditionals_and_literal_arguments() {
         );
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     }
+}
+
+#[test]
+fn a_checked_repository_cannot_authorize_git_execution_in_another_workdir() {
+    let checked = Repository::new();
+    let execution = Repository::new();
+    std::fs::write(execution.root.join("tracked"), "before\n").unwrap();
+    execution.run(&execution.root, &["add", "tracked"]);
+    execution.run(
+        &execution.root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "tracked fixture",
+        ],
+    );
+    std::fs::write(execution.root.join("tracked"), "after\n").unwrap();
+    let marker = execution.home.join("diff-marker");
+    let helper = execution.helper(
+        "external-diff",
+        &format!(": > {}", quote(marker.to_str().unwrap())),
+    );
+    execution.run(
+        &execution.root,
+        &["config", "diff.external", helper.to_str().unwrap()],
+    );
+    let updated = checked.approved("git diff").unwrap();
+    let output = Command::new("/bin/sh")
+        .current_dir(&execution.root)
+        .args(["-c", updated["command"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "the checked workdir must be bound to execution"
+    );
+    assert!(!marker.exists());
+    assert!(
+        execution.approved("git diff").is_none(),
+        "the actual repository's helper config must ask"
+    );
+    execution.run(&execution.root, &["diff"]);
+    assert!(
+        marker.exists(),
+        "fixture must reproduce an unchecked external diff helper"
+    );
+}
+
+#[test]
+fn finder_launch_uses_trusted_developer_install_directories() {
+    const CHILD: &str = "TERMINALX_READ_ONLY_FINDER_TEST";
+    if let Some(home) = std::env::var_os(CHILD).map(PathBuf::from) {
+        assert_eq!(
+            std::env::var("PATH").unwrap(),
+            "/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+        let tool = home.join(".local/bin/rg");
+        assert_ne!(
+            which::which("rg").ok().as_ref(),
+            Some(&tool),
+            "the inherited Finder PATH must not find the test install"
+        );
+        let cwd = std::env::current_dir().unwrap();
+        let updated = approved_input(
+            "Bash",
+            &serde_json::json!({"command":"pwd; rg --files"}),
+            cwd.to_str(),
+        )
+        .unwrap();
+        let command = updated["command"].as_str().unwrap();
+        assert!(
+            command.contains(tool.to_str().unwrap()),
+            "use TerminalX's trusted developer tool resolution"
+        );
+        let output = Command::new("/bin/sh")
+            .args(["-c", command])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("trusted-rg"));
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let work = temp.path().join("work");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir(&work).unwrap();
+    let tool = bin.join("rg");
+    std::fs::write(&tool, "#!/bin/sh\nprintf 'trusted-rg\\n'\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // An isolated child keeps global PATH, HOME and binpath caches out of
+    // the rest of the test process, just as a fresh Finder launch would.
+    let output = Command::new(std::env::current_exe().unwrap()).env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").env("SHELL", "/bin/sh")
+        .env("HOME", &home).env("TERMINALX_HOME", temp.path().join("data")).env(CHILD, &home)
+        .current_dir(&work)
+        .args(["--exact", "harness::read_only::security_tests::finder_launch_uses_trusted_developer_install_directories", "--nocapture"])
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

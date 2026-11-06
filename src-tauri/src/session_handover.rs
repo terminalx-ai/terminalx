@@ -628,7 +628,8 @@ impl SessionManager {
                 Ok(connection) if local_owner => crate::hooks::Caller::of(Arc::new(connection)),
                 _ => crate::hooks::Caller::default(),
             };
-            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone(), session_command: ask.session_command.clone() });
+            let session_command = if p.harness == CliKind::Codex && crate::harness::read_only::explicit_cwd(&ask.input).is_none() { None } else { ask.session_command.clone() };
+            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone(), session_command });
             (p.harness, p.origin.token.clone(), p.generation)
         };
         let manager = self.clone();

@@ -1329,6 +1329,27 @@ fn tool_key(tool_name: &str, input: &Value) -> String {
     serde_json::json!([tool_name, crate::harness::read_only::execution_input(input)]).to_string()
 }
 
+/// The directory this provider proves the command will execute in. Codex's
+/// session cwd is not its exec_command workdir, so it is never a fallback.
+fn permission_directory(kind: CliKind, payload: &Value) -> Option<&str> {
+    let input = &payload["tool_input"];
+    match kind {
+        CliKind::Codex => {
+            crate::harness::read_only::command(payload["tool_name"].as_str()?, input)?;
+            crate::harness::read_only::explicit_cwd(input)
+        }
+        CliKind::Claude => {
+            let cwd = payload["cwd"].as_str().filter(|cwd| Path::new(cwd).is_absolute())?;
+            // Claude's Bash uses the hook cwd. Do not treat unsupported or
+            // conflicting execution-directory arguments as an override.
+            for field in ["workdir", "cwd"] {
+                if input.get(field).is_some() && input[field].as_str() != Some(cwd) { return None; }
+            }
+            Some(cwd)
+        }
+    }
+}
+
 /// Why a permission hook's card is up, in TerminalX's words (#775): the
 /// gate that asked, which the agent's own description of the call never
 /// says. None when the session's own mode asked, which needs no telling.
@@ -3348,7 +3369,7 @@ impl SessionManager {
         let ask = rt.pending.get(request_id).cloned().ok_or_else(|| anyhow!("that request is no longer open"))?;
         let session_command = if option_id == crate::harness::read_only::SESSION_OPTION {
             match &rt.engine {
-                Engine::Cli(p) => p.decisions.get(request_id).and_then(|d| d.session_command.clone()),
+                Engine::Cli(p) if p.harness != CliKind::Codex || crate::harness::read_only::explicit_cwd(&ask.input).is_some() => p.decisions.get(request_id).and_then(|d| d.session_command.clone()),
                 _ => None,
             }.ok_or_else(|| anyhow!("that request does not offer a session command allowance"))?
         } else { String::new() };
@@ -5988,13 +6009,7 @@ impl SessionManager {
         // An automatic discovery allowance only skips TerminalX's Ask gate.
         // Codex's own PermissionRequest (sandbox/network escalation), and
         // Claude's safety checks in bypass mode, always remain a decision.
-        let cwd = input["workdir"].as_str().or_else(|| input["cwd"].as_str()).or_else(|| frame.payload["cwd"].as_str());
-        let cwd = cwd.and_then(|cwd| {
-            let path = Path::new(cwd);
-            if path.is_absolute() { Some(path.to_path_buf()) }
-            else { frame.payload["cwd"].as_str().filter(|base| Path::new(base).is_absolute()).map(|base| Path::new(base).join(path)) }
-        });
-        let cwd = cwd.as_deref().and_then(Path::to_str);
+        let cwd = permission_directory(kind, &frame.payload);
         let session_command = {
             let rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
@@ -6028,7 +6043,7 @@ impl SessionManager {
         // Codex raises `PermissionRequest` for a command the reader has just
         // been asked about at `PreToolUse`. Reusing that answer is what keeps
         // one tool to one card.
-        if kind == CliKind::Codex {
+        if kind == CliKind::Codex && cwd.is_some() {
             let key = tool_key(&tool_name, &input);
             let already = {
                 let rt = rt_arc.lock().unwrap();
@@ -6068,7 +6083,9 @@ impl SessionManager {
                     description: ["justification", "description"].iter()
                         .find_map(|field| input[*field].as_str().filter(|s| !s.trim().is_empty()))
                         .map(String::from),
-                    reason: asked_because(kind, gate, &frame.payload, &p.mode, &tool_name),
+                    reason: if kind == CliKind::Codex && cwd.is_none() && crate::harness::read_only::command(&tool_name, &input).is_some() {
+                        Some("Codex did not report a verifiable execution directory. Approval applies only to this invocation.".into())
+                    } else { asked_because(kind, gate, &frame.payload, &p.mode, &tool_name) },
                     cwd: frame.payload["cwd"].as_str().filter(|s| !s.trim().is_empty()).map(String::from),
                     options: {
                         let mut options = claude::mapper::build_options(&suggestions);
@@ -6120,8 +6137,8 @@ impl SessionManager {
         }
         if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
-            if let Some(d) = &answer {
-                p.answered.insert(tool_key(&tool_name, &input), !matches!(d, Decision::Deny));
+            if kind != CliKind::Codex || (crate::harness::read_only::command(&tool_name, &input).is_some() && crate::harness::read_only::explicit_cwd(&input).is_some()) {
+                if let Some(d) = &answer { p.answered.insert(tool_key(&tool_name, &input), !matches!(d, Decision::Deny)); }
             }
         }
         match answer {
