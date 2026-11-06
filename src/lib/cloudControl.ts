@@ -30,7 +30,7 @@ import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
-import { DEFAULT_PERMISSION_MODE, pickerMode } from "@/lib/models";
+import { FIRST_RUN_PERMISSION_MODE, pickerMode } from "@/lib/models";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import type { AgentEvent, RecoveryKind } from "@/types/events";
@@ -835,7 +835,7 @@ async function sessionsCreate(params: Params) {
     agent,
     model: text(params, "model") ?? prefs.lastModel[agent] ?? "",
     effort: text(params, "effort") ?? prefs.lastEffort[agent] ?? null,
-    mode: mode ?? DEFAULT_PERMISSION_MODE,
+    mode: mode ?? FIRST_RUN_PERMISSION_MODE,
     prompt,
     useWorktree: params.useWorktree !== false,
   };

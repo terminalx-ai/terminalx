@@ -246,9 +246,10 @@ fn yes() -> bool {
 }
 
 /// The permission mode an automation gets when its input carries none.
-/// Automations run unattended, so this is the same "never stop to ask" mode
-/// new interactive tabs start in; a run that paused for approval would sit
-/// until someone noticed. An explicit mode in the input always wins.
+/// Automations run unattended, so this is the runtime's "never stop to ask"
+/// default, not the Ask every time a new desktop chat starts in; a run that
+/// paused for approval would sit until someone noticed. An explicit mode in
+/// the input always wins.
 fn default_mode() -> String {
     index::DEFAULT_PERMISSION_MODE.into()
 }

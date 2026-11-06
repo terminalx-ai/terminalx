@@ -1,5 +1,5 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
-import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, Search, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
@@ -33,27 +33,14 @@ import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
 import { EnvironmentSettings } from "./EnvironmentSettings";
 import { ExperimentalTab } from "./ExperimentalSettings";
+import { HighlightedText } from "@/components/ui/HighlightedText";
+import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
+import { SETTINGS_SECTIONS, searchSettingsSections, type SettingsTab } from "@/lib/settingsSections";
 
-const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "environment", "transcription", "integrations", "storage", "shortcuts", "experimental", "about"] as const;
-export type SettingsTab = (typeof TABS)[number];
+export type { SettingsTab } from "@/lib/settingsSections";
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
 type Tab = SettingsTab;
-const TAB_LABEL: Record<Tab, string> = {
-  account: "Account",
-  devices: "Devices",
-  general: "General",
-  appearance: "Appearance",
-  organizations: "Organizations",
-  agents: "Agents",
-  environment: "Environment",
-  transcription: "Transcription",
-  integrations: "Integrations",
-  storage: "Storage",
-  shortcuts: "Shortcuts",
-  experimental: "Experimental",
-  about: "About",
-};
 
 export function SettingsPage({
   onBack,
@@ -76,16 +63,58 @@ export function SettingsPage({
   openRequest?: number;
 }) {
   // Settings always opens on a section: a value that names none is the default one.
-  const initial: Tab = TABS.includes(initialTab) ? initialTab : DEFAULT_SETTINGS_TAB;
+  const initial: Tab = SETTINGS_SECTIONS.some((section) => section.id === initialTab) ? initialTab : DEFAULT_SETTINGS_TAB;
   const [tab, setTab] = useState<Tab>(initial);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const [selectionRequest, setSelectionRequest] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const results = useMemo(() => searchSettingsSections(query), [query]);
+  const searching = !!query.trim();
+  const changeQuery = (value: string) => {
+    setQuery(value);
+    setSelected(0);
+  };
+  const chooseSection = (next: Tab) => {
+    setTab(next);
+    changeQuery("");
+    setSelectionRequest((request) => request + 1);
+  };
   useEffect(() => {
     setTab(initial);
+    setQuery("");
+    setSelected(0);
+    setSelectionRequest((request) => request + 1);
   }, [initial, openRequest]);
 
+  useEffect(() => {
+    if (!selectionRequest) return;
+    if (sectionRef.current) sectionRef.current.scrollTop = 0;
+    headingRef.current?.focus({ preventScroll: true });
+  }, [selectionRequest]);
+
+  useEffect(() => {
+    resultsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [selected, query]);
+
   useHotkey("escape", () => {
-    if (hasEscapeOverlay()) return false;
+    if (hasEscapeOverlay(resultsRef.current)) return false;
+    if (query) {
+      changeQuery("");
+      inputRef.current?.focus();
+      return;
+    }
     onBack();
   });
+
+  useHotkey("mod+f", () => {
+    if (hasEscapeOverlay(resultsRef.current)) return false;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, { global: true });
 
   return (
     <main className="flex h-full min-w-0 flex-1 flex-col bg-background" aria-label="Settings">
@@ -105,27 +134,79 @@ export function SettingsPage({
           <X />
         </Button>
       </header>
+      <div className="shrink-0 border-b border-hairline px-4 py-3">
+        <div className="mx-auto flex max-w-[48rem] items-center gap-2 rounded-md bg-well px-3 hairline focus-within:ring-1 focus-within:ring-ring/40">
+          <Search className="size-4 shrink-0 text-faint" />
+          <input
+            ref={inputRef}
+            role="combobox"
+            aria-label="Search settings"
+            aria-autocomplete="list"
+            aria-expanded={searching}
+            aria-controls={searching ? "settings-search-results" : undefined}
+            aria-activedescendant={searching ? results[selected]?.item.id : undefined}
+            placeholder="Search settings…"
+            autoComplete="off"
+            spellCheck={false}
+            value={query}
+            onChange={(event) => changeQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229 || !searching) return;
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelected((current) => movePaletteSelection(current, results.length, event.key as PaletteNavigationKey));
+              } else if (event.key === "Enter" && results[selected]) {
+                event.preventDefault();
+                chooseSection(results[selected].item.tab);
+              }
+            }}
+            className="h-9 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
+          />
+          {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
+        </div>
+      </div>
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="Settings sections" className="flex w-48 shrink-0 flex-col gap-0.5 overflow-y-auto scrollbar-thin border-r border-hairline p-4">
-          {TABS.map((t) => (
+        <nav aria-label="Settings sections" className="flex w-48 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-hairline p-4 scrollbar-thin">
+          {SETTINGS_SECTIONS.map(({ id: t, title }) => (
             <button
               key={t}
               type="button"
               aria-current={tab === t ? "page" : undefined}
-              onClick={() => setTab(t)}
+              onClick={() => chooseSection(t)}
               className={cn(
                 "rounded-md px-2.5 py-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                 tab === t ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
               )}
             >
-              {TAB_LABEL[t]}
+              {title}
             </button>
           ))}
         </nav>
-        <section className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby="settings-section-title">
-          <div className="mx-auto w-full max-w-[48rem] p-6 pb-12">
-            <h2 id="settings-section-title" className="mb-5 text-xl font-semibold tracking-tight">
-              {TAB_LABEL[tab]}
+        <section ref={sectionRef} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby={searching ? "settings-results-title" : "settings-section-title"}>
+          {searching && <div className="mx-auto w-full max-w-[48rem] p-6">
+            <h2 id="settings-results-title" className="mb-3 text-sm font-medium">Settings sections</h2>
+            <div ref={resultsRef} id="settings-search-results" role="listbox" aria-label="Settings search results">
+              {results.map((match, index) => (
+                <button
+                  key={match.item.id}
+                  id={match.item.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selected === index}
+                  onMouseEnter={() => setSelected(index)}
+                  onClick={() => chooseSection(match.item.tab)}
+                  className={cn("flex w-full flex-col gap-1 rounded-md px-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40", selected === index ? "bg-selected" : "hover:bg-veil-raised")}
+                >
+                  <span className="text-sm"><HighlightedText text={match.item.primary} ranges={match.primaryRanges} /></span>
+                  <span className="text-xs text-muted-foreground"><HighlightedText text={match.item.secondary} ranges={match.secondaryRanges} /></span>
+                </button>
+              ))}
+            </div>
+            {!results.length && <p role="status" className="py-6 text-sm text-muted-foreground">No settings match {query.trim()}</p>}
+          </div>}
+          <div hidden={searching} className="mx-auto w-full max-w-[48rem] p-6 pb-12">
+            <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="mb-5 text-xl font-semibold tracking-tight outline-none">
+              {SETTINGS_SECTIONS.find((section) => section.id === tab)?.title}
             </h2>
             {tab === "account" && <AccountTab />}
             {tab === "devices" && <DevicesTab />}
