@@ -77,7 +77,10 @@ export interface PendingAsk {
   kind: "permission" | "questions";
   toolName?: string;
   title?: string;
+  /** The agent's own words about the call. */
   description?: string;
+  /** Why the card is up, in TerminalX's words (#775). */
+  reason?: string;
   cwd?: string;
   input?: unknown;
   options?: PermissionOption[];
@@ -234,6 +237,8 @@ const sameOverrides = (a: Map<CompactionRow, CompactionOperation> | undefined, b
 export class TranscriptReducer {
   private readonly turns: Turn[] = [];
   private readonly asks = new Map<string, PendingAsk>();
+  /** A replayed request cannot reopen an answer, even if it arrives after the decision. */
+  private readonly decidedAsks = new Set<string>();
   private readonly calls = new Map<string, ToolCall>();
   /** The calls in `calls` that have no result yet: what a new prompt or a turn's end abandons. */
   private readonly unresolved = new Set<ToolCall>();
@@ -550,6 +555,7 @@ export class TranscriptReducer {
         break;
       }
       case "permission_requested":
+        if (this.asks.has(payload.requestId) || this.decidedAsks.has(payload.requestId)) break;
         this.asks.set(payload.requestId, {
           requestId: payload.requestId,
           toolUseId: payload.toolUseId,
@@ -558,6 +564,7 @@ export class TranscriptReducer {
           toolName: payload.toolName,
           title: payload.title,
           description: payload.description,
+          reason: payload.reason,
           cwd: payload.cwd,
           input: payload.input,
           options: payload.options,
@@ -565,10 +572,13 @@ export class TranscriptReducer {
         this.asksVersion++;
         break;
       case "questions_asked":
+        if (this.asks.has(payload.requestId) || this.decidedAsks.has(payload.requestId)) break;
         this.asks.set(payload.requestId, { requestId: payload.requestId, toolUseId: payload.toolUseId, seq: event.seq, kind: "questions", questions: payload.questions });
         this.asksVersion++;
         break;
       case "permission_decided":
+        if (this.decidedAsks.has(payload.requestId)) break;
+        this.decidedAsks.add(payload.requestId);
         if (this.asks.delete(payload.requestId)) this.asksVersion++;
         if (this.current && !payload.automatic) {
           this.current.work.push({ kind: "decision", label: payload.label, allowed: payload.allowed, automatic: payload.automatic, key: `d${event.seq}`, seq: event.seq });
@@ -901,18 +911,27 @@ export function compactionStatus(item: Extract<WorkItem, { kind: "compaction" }>
   return "Context compacted";
 }
 
+/**
+ * A call folded into a run of its kind says nothing of its own. One that
+ * returned images shows them, and one an agent's safety check held for a
+ * person says so (#775): each keeps a row of its own.
+ */
+function standsInGroup(call: ToolCall): boolean {
+  return !call.result?.images?.length && !call.result?.safetyCheck;
+}
+
 /** Runs of two or more consecutive calls to one groupable tool fold into one row. */
 export function groupWork(items: WorkItem[]): WorkItem[] {
   const output: WorkItem[] = [];
   let index = 0;
   while (index < items.length) {
     const item = items[index];
-    if (item.kind === "tool" && GROUPABLE.has(item.call.name) && !item.call.result?.images?.length) {
+    if (item.kind === "tool" && GROUPABLE.has(item.call.name) && standsInGroup(item.call)) {
       let nextIndex = index + 1;
       const run: ToolCall[] = [item.call];
       while (nextIndex < items.length) {
         const next = items[nextIndex];
-        if (next.kind === "tool" && next.call.name === item.call.name && !next.call.result?.images?.length) {
+        if (next.kind === "tool" && next.call.name === item.call.name && standsInGroup(next.call)) {
           run.push(next.call);
           nextIndex++;
         } else break;
@@ -931,6 +950,21 @@ export function groupWork(items: WorkItem[]): WorkItem[] {
 
 export function turnHasAnswer(turn: Turn): boolean {
   return turn.work.some((item) => item.kind === "text") || !!turn.finalText;
+}
+
+/**
+ * What the agent says of a call it asks about: what the command does
+ * (Claude's `description`) or why it wants it (Codex's `justification`). A
+ * card shows it as the agent's, apart from why the card is up (#775).
+ */
+export function askAgentNote(ask: Pick<PendingAsk, "input">): string | null {
+  const input = ask.input;
+  if (!input || typeof input !== "object") return null;
+  for (const name of ["justification", "description"]) {
+    const value = (input as Record<string, unknown>)[name];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
 }
 
 export function groupTargets(calls: ToolCall[]): string[] {

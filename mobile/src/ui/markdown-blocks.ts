@@ -1,6 +1,27 @@
-import { Marked, type Token, type Tokens } from "marked";
+import { Marked, type Token, type TokenizerExtension, type Tokens } from "marked";
+import { CODEX_FILE_CITATION_OPEN, matchCodexFileCitation, type CodexFileCitation } from "@terminalx/portable/codexCitations";
 
-const parser = new Marked({ gfm: true, breaks: true });
+/** A Codex `:codex-file-citation{…}` marker (#776), read before emphasis and autolinks so its path stays whole. */
+export interface CitationToken {
+  type: "codexFileCitation";
+  raw: string;
+  citation: CodexFileCitation;
+}
+
+const citations: TokenizerExtension = {
+  name: "codexFileCitation",
+  level: "inline",
+  start(src) {
+    const at = src.indexOf(CODEX_FILE_CITATION_OPEN);
+    return at < 0 ? undefined : at;
+  },
+  tokenizer(src) {
+    const match = matchCodexFileCitation(src);
+    return match ? { type: "codexFileCitation", raw: src.slice(0, match.end), citation: match.citation } : undefined;
+  },
+};
+
+const parser = new Marked({ gfm: true, breaks: true, extensions: [citations] });
 const MAX_CHARS = 1600;
 const MAX_LINES = 32;
 

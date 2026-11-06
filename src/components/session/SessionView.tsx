@@ -617,7 +617,8 @@ export function SessionView({
             )}
             {/* Who else works on the issue now (#441). It is the first to go when the header narrows. */}
             {session.issue && <SessionIssueWork session={session} sessions={store.sessions} className={cn("ml-1 max-w-48 shrink", HEADER_TIGHT)} />}
-            {!pipelineRole && !cloud && !quick && isGit && <button type="button" className="ml-1 text-xs text-muted-foreground" onClick={() => setPipelineOpen(true)}>Automation</button>}
+            {/* It gives way first, like the chips: at a narrow header it ran under Share. */}
+            {!pipelineRole && !cloud && !quick && isGit && <button type="button" className={cn("ml-1 min-w-0 shrink-[1000] truncate whitespace-nowrap text-xs text-muted-foreground", HEADER_TIGHT)} onClick={() => setPipelineOpen(true)}>Automation</button>}
             {pipelineRole && (
               // The issue pipeline this session is part of, as its author or its reviewer.
               <WithTooltip label={`${pipelineRole.role === "reviewer" ? "Reviewing" : "Working on"} ${(pipelineRole.pipeline.issue?.identifier ?? pipelineRole.pipeline.branch)} · ${pipelineRole.pipeline.note ?? (pipelineRole.pipeline.issue?.title ?? pipelineRole.pipeline.branch)}`}>

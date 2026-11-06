@@ -410,6 +410,7 @@ impl Acp {
                     input,
                     title: tc["title"].as_str().map(String::from),
                     description: None,
+                    reason: None,
                     options,
                 }));
                 out

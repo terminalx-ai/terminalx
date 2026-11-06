@@ -227,6 +227,14 @@ command hook. If it lapses, the card is retired as "Lapsed" and the CLI falls
 back to asking in its own TUI, which the `Notification` hook turns into a
 Waiting status so the reader knows to look at the terminal view.
 
+The transcript keeps one pending card per request id and remembers decided
+ids, so replaying a request cannot reopen it (PRO-160). Decision events retire
+cards immediately, including answers from `terminalx permissions`. All views
+of a tab share a submission guard: a confirmed local response retires its
+card even before the broadcast arrives, and a stale click sends no second
+decision. A cloud mailbox enqueue still waits for the owner's decision event;
+queuing an answer does not establish that the request was answered.
+
 ### The composer writes keystrokes
 
 `send_message` on a Claude tab writes into the pane, on its own thread under a

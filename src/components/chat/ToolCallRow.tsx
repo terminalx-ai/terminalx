@@ -1,4 +1,4 @@
-import { ChevronRight, FileCode2, FilePen, FolderSearch, Globe, Loader2, Puzzle, Terminal, Users, ListChecks, CircleAlert } from "@/icons";
+import { ChevronRight, FileCode2, FilePen, FolderSearch, Globe, Loader2, Puzzle, Terminal, Users, ListChecks, CircleAlert, ShieldCheck, ShieldX } from "@/icons";
 import { cn } from "@/lib/cn";
 import { callTarget, groupTargets, type ToolCall } from "@/lib/transcript";
 import { fileName, shortPath } from "@/lib/paths";
@@ -80,6 +80,9 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
   const hasBody = !!call.result?.text || !!call.edits?.length || ((call.name === "Bash" || call.name === "shell") && !!callTarget(call));
   const target = targetOf(call, cwd);
   const isWholeRead = call.name === "Read" && !(call.input as { offset?: number })?.offset && !failed;
+  // The agent's own safety check held this call for a person (#775): which one, and whether it was let past.
+  const safetyCheck = call.result?.safetyCheck;
+  const SafetyIcon = failed ? ShieldX : ShieldCheck;
 
   return (
     <div className="group/tool">
@@ -105,6 +108,12 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
         <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-foreground/90" title={target}>
           <LinkedText text={target} context={linkContext} />
         </span>
+        {safetyCheck && (
+          <span className="flex min-w-0 max-w-[45%] items-center gap-1 text-[11px] text-warning" title={safetyCheck} data-testid="tool-safety-check">
+            <SafetyIcon className="size-3 shrink-0" />
+            <span className="truncate">{safetyCheck}</span>
+          </span>
+        )}
         {call.edits?.length ? <EditCounts edits={call.edits} /> : null}
         {hasBody && !isWholeRead && (
           <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse tool output" : "Expand tool output"} className="rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40"><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>

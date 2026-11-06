@@ -9,6 +9,7 @@ import { TurnBlock } from "./TurnBlock";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Turn } from "@/lib/transcript";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
 import { setPrefs } from "@/lib/prefs";
 
 afterEach(cleanup);
@@ -55,6 +56,19 @@ it("keeps link activation separate from expanding reasoning and tool output", ()
   fireEvent.click(screen.getByRole("button", { name: "Expand tool output" }));
   expect(screen.getByRole("link", { name: "https://example.com/output" })).toBeDefined();
   expect(container.querySelector("button a")).toBeNull();
+});
+
+it("links a Codex file citation in a failed turn's final text (#776)", async () => {
+  const value = turn([]);
+  value.finalText = 'Wrote the workbook before the error.\n\n:codex-file-citation{path="/repo/out/report.xlsx" artifact_kind="workbook" purpose="output"}';
+  value.completed = { status: "error", ts: "2026-10-03T00:00:01Z" };
+  render(<TurnBlock turn={value} sessionId="s" cwd="/repo" stream={[]} working={false} />);
+  const link = screen.getByRole("link", { name: "report.xlsx" });
+  expect(link.getAttribute("title")).toBe("/repo/out/report.xlsx");
+  expect(link.dataset.fileChip).toBe("true");
+  expect(link.parentElement?.parentElement?.textContent).toBe("Wrote the workbook before the error.\n\nreport.xlsx");
+  fireEvent.click(link);
+  expect(invoke).toHaveBeenCalledWith("inspect_local_path", { base: "/repo", path: "/repo/out/report.xlsx" });
 });
 
 describe("a prompt's images", () => {
@@ -124,6 +138,33 @@ describe("a finished turn with tool calls folded", () => {
       expect(screen.queryByText("make build") === null).toBe(foldToolCalls);
       cleanup();
     }
+  });
+});
+
+// #775: a finished turn folds the row that says Claude's safety check held a call; its summary line still says so.
+describe("a finished turn with a call an agent's safety check held", () => {
+  const held = (notes: string[]): Turn =>
+    ({
+      ...turn([]),
+      completed: { status: "ok", ts: "2026-10-03T00:01:00Z" },
+      toolCount: notes.length + 1,
+      work: [
+        { kind: "tool", key: "ca", call: { callId: "a", name: "Read", toolType: "read", input: { file_path: "a.txt" }, seq: 2, result: { text: "ok", isError: false } } },
+        ...notes.map((safetyCheck, i) => ({ kind: "tool", key: `cb${i}`, call: { callId: `b${i}`, name: "Bash", toolType: "shell", input: { command: "echo" }, seq: 3 + i, result: { text: "2", isError: false, safetyCheck } } })),
+        { kind: "text", key: "a9", seq: 9, text: "Counted." },
+      ],
+    }) as unknown as Turn;
+
+  it("says on its summary line which check held the call, or how many were held", () => {
+    setPrefs({ foldToolCalls: true });
+    render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check"])} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("2 tool calls · Approved past Claude's dangerous-removal check");
+    cleanup();
+    render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check", "Stopped at Claude's safety check"])} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("3 tool calls · 2 held by a safety check");
+    cleanup();
+    render(<TurnBlock turn={held([])} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("1 tool call");
   });
 });
 
