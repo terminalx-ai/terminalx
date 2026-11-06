@@ -656,7 +656,12 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
-  branchOverview: (cwd: string) => invoke<BranchOverview>("branch_overview", { cwd }),
+  /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
+  branchOverview: (cwd: string, base?: string | null) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null }),
+  /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
+  branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
+  /** Merges the checked-out branch into the local branch `into`; says what it did. */
+  branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
   // directory from the two ids and only reports it back (`root`).
@@ -2073,7 +2078,13 @@ export interface BranchOverview {
   upstream: string | null;
   unpushed: number;
   unpulled: number;
+  /** The upstream's commits not pulled yet, newest first. */
+  incoming: CommitInfo[];
   dirty: boolean;
+  /** Files changed and not committed. */
+  changed: number;
+  /** Has a remote at all: without one there is no push and no pull request. */
+  hasRemote: boolean;
   merge: { state: "clean" | "conflicts" | "merged" | "unknown"; conflicted: string[] };
 }
 

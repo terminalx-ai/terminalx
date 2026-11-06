@@ -32,6 +32,8 @@ beforeEach(() => {
     if (command === "working_changes") return ["head", files];
     if (command === "work_status") return { isRepo: true, dirty: true, branch: "fix/test", ahead: 0, behind: 0 };
     if (command === "log_commits") return [];
+    // No merge in progress (#736).
+    if (command === "unfinished_merge") return null;
     throw new Error(`Unexpected command: ${command}`);
   });
 });
@@ -47,26 +49,23 @@ it("opens on the Branch tab", () => {
   expect(screen.queryByText("Branch overview")).toBeNull();
 });
 
-it("shows workspace work after a status-only turn and opens Repo for committing", async () => {
+it("shows workspace work after a status-only turn, and commits from its Uncommitted scope", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" events={events} />);
   openChanges();
 
   expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
   expect(screen.getByText(/Against main/)).toBeTruthy();
   expect(invoke).not.toHaveBeenCalledWith("working_changes", expect.anything());
-  fireEvent.click(screen.getByRole("button", { name: "Commit and history in Repo" }));
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
 
-  await waitFor(() => expect(screen.getAllByRole("button", { name: /modified.ts/ })).toHaveLength(2));
-  expect(screen.getAllByRole("button", { name: /untracked.json/ })).toHaveLength(2);
-  expect(screen.getByRole("radio", { name: /Uncommitted/ }).getAttribute("aria-checked")).toBe("true");
+  await waitFor(() => expect(screen.getAllByRole("button", { name: /modified.ts/ })).toHaveLength(1));
   expect(invoke).toHaveBeenCalledWith("working_changes", { cwd });
 
-  // The shortcut must also return from History without losing a commit draft.
+  // History and back keep a commit draft.
   fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Keep my draft" } });
-  fireEvent.click(screen.getByRole("radio", { name: "History" }));
-  fireEvent.click(screen.getByRole("button", { name: "Changes" }));
-  fireEvent.click(screen.getByRole("button", { name: "Commit and history in Repo" }));
-  expect(screen.getAllByRole("button", { name: /untracked.json/ })).toHaveLength(2);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "history" } });
+  expect(await screen.findByText("No commits yet.")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
   expect(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)")).toHaveProperty("value", "Keep my draft");
 });
 
@@ -90,5 +89,4 @@ it("keeps the working-tree view scoped to the workspace", async () => {
   openChanges();
   expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
   expect(screen.getByRole("button", { name: /untracked.json/ })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Commit and history in Repo" })).toBeTruthy();
 });

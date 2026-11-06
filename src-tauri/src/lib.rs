@@ -592,6 +592,8 @@ pub fn run() {
             commands::skill_detail,
             commands::work_status,
             commands::branch_overview,
+            commands::branch_fetch,
+            commands::branch_merge_into,
             commands::list_branches,
             commands::worktree_disposition,
             commands::sessions_sharing_worktree,
