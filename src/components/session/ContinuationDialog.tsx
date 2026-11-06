@@ -33,8 +33,10 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  * does take it, even after the dialog said it could not confirm it, the
  * dialog closes as it would have on success (#662).
  */
-export function ContinuationDialog({ session, source, into, onClose, onLateError }: {
+export function ContinuationDialog({ session, source, into, onClose, onLateError, onDelivered }: {
   session: SessionEntry; source: TabEntry; onClose: () => void;
+  /** The new session took the handoff, just before the dialog closes: where it went (#815). */
+  onDelivered?: (to: { sessionId: string; tabId: string }) => void;
   into?: { project: Project; worktree: boolean };
   onLateError?: (error: string) => void;
 }) {
@@ -89,13 +91,19 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     active.current = false;
     onClose();
   };
+  // Where the handoff went, told once it is delivered.
+  const launched = useRef<Launched | undefined>(undefined);
+  const delivered = () => {
+    if (active.current && launched.current) onDelivered?.({ sessionId: launched.current.sessionId, tabId: launched.current.tab.id });
+    close();
+  };
 
   useEffect(() => {
     if (!destination) return;
     let stop: (() => void) | undefined;
     let gone = false;
     void onPromptDelivery(destination.sessionId, destination.tab.id, (stage) => {
-      if (stage === "delivered") close();
+      if (stage === "delivered") delivered();
       else setProgress(stage);
     }).then((unlisten) => {
       if (gone) unlisten();
@@ -140,8 +148,9 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     try {
       const prompt = preparedPrompt.current ?? continuationPrompt(context, mode, into?.project.path);
       preparedPrompt.current = prompt;
-      const created = (launched: Launched) => {
-        if (active.current) setDestination(launched);
+      const created = (made: Launched) => {
+        launched.current = made;
+        if (active.current) setDestination(made);
       };
       const confirming = () => { if (active.current) setDelivering(true); };
       const result = into
@@ -151,7 +160,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
         if (result.stage !== "delivered") onLateError?.(result.error);
         return;
       }
-      if (result.stage === "delivered") close();
+      if (result.stage === "delivered") delivered();
       else if (result.stage === "input") {
         setSent(true);
         setInInput({ seq: result.seq, pressed: false });
