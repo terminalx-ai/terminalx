@@ -87,7 +87,8 @@ describe("the floating window's system-wide shortcut", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("another app may already use it");
 
     // Turned off: nothing is registered, so there is nothing to fail.
-    fireEvent.click(screen.getByRole("button", { name: "Turn off" }));
+    // The backend error can arrive before the recorder finishes saving.
+    fireEvent.click(await screen.findByRole("button", { name: "Turn off" }));
     await waitFor(() => expect(patches()).toEqual([{ shortcut: "mod+alt+k" }, { shortcut: "" }]));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(screen.getByText("Off")).toBeTruthy();
