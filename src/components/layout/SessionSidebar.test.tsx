@@ -118,6 +118,35 @@ describe("a project's fold", () => {
   });
 });
 
+describe("project context menus (PRO-187)", () => {
+  it.each(["right-click", "Shift+F10", "menu button"])("opens the project's actions with %s", async (input) => {
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    mount();
+    const title = screen.getByRole("button", { name: "web overview" });
+    if (input === "right-click") fireEvent.contextMenu(title);
+    else if (input === "Shift+F10") fireEvent.keyDown(title, { key: "F10", shiftKey: true });
+    else fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+      "New chat in web", "Reveal in Finder", "Pin project", "Name and appearance", "Issue pipeline…", "Remove from TerminalX…",
+    ]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Reveal in Finder" }));
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    expect(revealItemInDir).toHaveBeenCalledWith("/repos/web");
+  });
+
+  it.each(["simple", "list"] as const)("opens a conversation's context menu with Shift+F10 in the %s sidebar", async (sidebarLayout) => {
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z", { branch: "main" })]);
+    prefs.setPrefs({ sidebarLayout });
+    mount();
+    const title = screen.getByRole("button", { name: sidebarLayout === "simple" ? "main, Talk here" : "Talk here" });
+    fireEvent.keyDown(title, { key: "F10", shiftKey: true });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Rename…" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  });
+});
+
 describe("the conversation list", () => {
   it("puts each conversation under the project it is linked to, a chat by the repo its agent works in, and the rest under Chats", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
@@ -289,7 +318,7 @@ describe("the conversation list", () => {
     const dialog = await import("@tauri-apps/plugin-dialog");
     vi.mocked(dialog.ask).mockResolvedValue(true);
     mount();
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Project menu for web" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
     await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: "Remove from TerminalX…" })); });
     expect(vi.mocked(dialog.ask).mock.calls[0][0]).toBe("Remove web from TerminalX? Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.");
     // Archived together, in one change, before the project goes.

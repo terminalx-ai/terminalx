@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ listDir: vi.fn() }));
@@ -21,6 +21,28 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("FileTreeView", () => {
+  it.each(["right-click", "Shift+F10", "ContextMenu"])("opens actions for the intended file with %s", async (input) => {
+    mocks.listDir.mockResolvedValue([
+      { path: "alpha.txt", name: "alpha.txt", isDir: false },
+      { path: "beta.txt", name: "beta.txt", isDir: false },
+    ]);
+    render(<FileTreeView sessionId="files" root="/repos/alpha" rootName="Alpha" active />);
+    await screen.findByText("beta.txt");
+    const tree = screen.getByRole("tree");
+    act(() => tree.focus());
+    if (input === "right-click") fireEvent.contextMenu(screen.getByText("beta.txt"));
+    else {
+      fireEvent.keyDown(tree, { key: "ArrowDown" });
+      fireEvent.keyDown(tree, { key: "ArrowDown" });
+      fireEvent.keyDown(tree, { key: input === "Shift+F10" ? "F10" : "ContextMenu", shiftKey: input === "Shift+F10" });
+    }
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Open" }));
+    const { openFile } = await import("@/lib/editors");
+    expect(openFile).toHaveBeenCalledWith("files", "/repos/alpha", "beta.txt", undefined, "/repos/alpha", undefined);
+    await waitFor(() => expect(document.activeElement).toBe(tree));
+  });
+
   it("loads a fresh tree when its project root changes", async () => {
     mocks.listDir.mockImplementation(async (root: string) => [
       {

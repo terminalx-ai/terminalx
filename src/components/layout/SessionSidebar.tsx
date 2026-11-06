@@ -3,6 +3,7 @@ import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Fold
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -467,6 +468,7 @@ function ProjectGroup({
   const [expanded, toggle] = useFold(`project:${canon(group.path)}`, true);
   const open = expanded || filtered;
   const [pipelineOpen, setPipelineOpen] = useState(false);
+  const menu = useRowMenu();
   const prefs = usePrefs();
   const { animations } = prefs;
   // A branch's sessions are tabs or sidebar rows, never both: as tabs, the branch is one row here whatever their number.
@@ -549,8 +551,8 @@ function ProjectGroup({
     );
   return (
     <div role="group" aria-label={group.name} className="mb-1">
-      <DropdownMenu>
-        <div className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md px-2 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
+      <DropdownMenu {...menu.root}>
+        <div {...menu.surface} className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md px-2 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
           <button
             type="button"
@@ -587,7 +589,7 @@ function ProjectGroup({
                 <Plus />
               </Button>
             </WithTooltip>
-            <DropdownMenuTrigger asChild>
+            <DropdownMenuTrigger asChild {...menu.trigger}>
               <Button variant="ghost" size="icon-xs" aria-label={`Project menu for ${group.name}`}>
                 <Ellipsis />
               </Button>

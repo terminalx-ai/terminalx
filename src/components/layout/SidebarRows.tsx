@@ -64,10 +64,10 @@ const TREE_ROW = {
  * "item" row is a session; `selected` marks the active workspace or the
  * selected session. Trailing content can yield to a {@link RowActions} toolbar.
  */
-export function TreeRow({ level, selected, title, children }: { level: keyof typeof TREE_ROW; selected: boolean; title?: string; children: ReactNode }) {
+export function TreeRow({ level, selected, children, ...props }: { level: keyof typeof TREE_ROW; selected: boolean } & HTMLAttributes<HTMLDivElement>) {
   const style = TREE_ROW[level];
   return (
-    <div data-tree-row className={cn(actionRow, style.base, selected ? style.selected : style.idle)} title={title}>
+    <div {...props} data-tree-row className={cn(actionRow, style.base, selected ? style.selected : style.idle)}>
       {children}
     </div>
   );
@@ -253,7 +253,7 @@ const TAB_ROW = {
 } as const;
 
 /** Props a menu trigger (`asChild`) or a caller may add to a tab row's element. */
-type TabRowPassThrough = Omit<HTMLAttributes<HTMLDivElement>, "id" | "title" | "className" | "children" | "onClick" | "onKeyDown" | "onAuxClick"> & {
+type TabRowPassThrough = Omit<HTMLAttributes<HTMLDivElement>, "id" | "title" | "className" | "children" | "onClick" | "onAuxClick"> & {
   ref?: Ref<HTMLDivElement>;
 };
 
@@ -281,7 +281,7 @@ export interface TabRowProps extends TabRowPassThrough {
  * middle click or its hover close button. Remaining props (a context menu
  * trigger's handlers and ref, `aria-description`) land on the row element.
  */
-export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLabel, onOpen, onClose, pinned, children, ...rest }: TabRowProps) {
+export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLabel, onOpen, onClose, pinned, children, onKeyDown, ...rest }: TabRowProps) {
   const style = TAB_ROW[tone];
   return (
     <div
@@ -296,6 +296,8 @@ export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLab
       onClick={onOpen}
       onAuxClick={(event) => event.button === 1 && onClose?.()}
       onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (event.defaultPrevented) return;
         if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
