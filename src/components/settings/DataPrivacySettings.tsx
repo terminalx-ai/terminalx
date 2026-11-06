@@ -1,5 +1,6 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useState } from "react";
-import { SettingRow, Switch } from "@/components/ui/controls";
+import { Switch } from "@/components/ui/controls";
 import { PRIVACY_MESSAGE, setDataPrivacy, useDataPrivacy } from "@/lib/dataPrivacy";
 
 export function PrivacyEmptyState() {
@@ -12,9 +13,8 @@ export function DataPrivacySettings() {
   const [error, setError] = useState<string | null>(null);
   return (
     <div>
-      <SettingRow
-        label="Data privacy mode"
-        description="Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved."
+      <RegisteredSetting
+        setting="general.dataPrivacy"
         control={<Switch aria-label="Data privacy mode" checked={privacy.ready && privacy.enabled} disabled={!privacy.ready || privacy.managed || busy} onCheckedChange={(enabled) => {
           setBusy(true);
           setError(null);

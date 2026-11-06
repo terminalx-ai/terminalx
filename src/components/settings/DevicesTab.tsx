@@ -1,6 +1,7 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { PrivacyEmptyState } from "./DataPrivacySettings";
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, Loader2, QrCode, RotateCw, Smartphone, Trash2 } from "@/icons";
 import QRCode from "qrcode";
@@ -143,7 +144,7 @@ function DevicesTabContent() {
 
   return (
     <div className="flex flex-col gap-6">
-      <section>
+      <RegisteredSetting setting="devices.pairing"><section>
         <div className="text-sm font-medium">Pair a phone</div>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           Scan a one-time code with TerminalX on your phone. The QR image is made on this Mac; it is never uploaded.
@@ -225,9 +226,9 @@ function DevicesTabContent() {
           </div>
         )}
         {generationError && <p role="alert" className="mt-2 text-xs text-destructive">{generationError}</p>}
-      </section>
+      </section></RegisteredSetting>
 
-      <section>
+      <RegisteredSetting setting="devices.paired"><section>
         <div className="text-sm font-medium">Paired devices</div>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           Each device has its own revocable credential. Revoking one disconnects its live connection immediately.
@@ -260,7 +261,7 @@ function DevicesTabContent() {
             ))
           )}
         </div>
-      </section>
+      </section></RegisteredSetting>
 
       {pairing.status.lastError && <p className="text-xs text-destructive">{pairing.status.lastError}</p>}
     </div>

@@ -300,3 +300,23 @@ describe("owner deletion wiring", () => {
     expect(screen.getByTestId("section-teardown")).toBeTruthy();
   });
 });
+
+describe("organization row entry points (PRO-123)", () => {
+  it("opens a direct row link on the active organization and lets Back stay on the list", async () => {
+    const view = render(<OrganizationsTab initialRow="organizations.agentLogins" />);
+    expect(screen.getByTestId("organization-settings-name").textContent).toBe("Acme");
+    await screen.findAllByTestId("agent-login");
+    fireEvent.click(screen.getByRole("button", { name: "All organizations" }));
+    view.rerender(<OrganizationsTab initialRow="organizations.agentLogins" />);
+    expect(screen.queryByTestId("organization-settings-name")).toBeNull();
+    view.rerender(<OrganizationsTab initialRow="organizations.agentLogins" openRequest={1} />);
+    expect(screen.getByTestId("organization-settings-name").textContent).toBe("Acme");
+  });
+
+  it("keeps an explicit organization request ahead of the active-organization fallback", async () => {
+    openAgentLogins("b");
+    render(<OrganizationsTab initialRow="organizations.agentLogins" />);
+    expect(screen.getByTestId("organization-settings-name").textContent).toBe("Beta");
+    await screen.findAllByTestId("agent-login");
+  });
+});
