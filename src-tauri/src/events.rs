@@ -143,6 +143,12 @@ pub struct ToolResult {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageRef>,
+    /// The agent's own safety check that held this call for a person, and
+    /// what became of it, as the call's row says it: "Approved past
+    /// Claude's dangerous-removal check" (#775). Absent for a call its
+    /// permission mode decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -430,8 +436,16 @@ pub enum Payload {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// The agent's own words about the call: what it says the command
+        /// does, or why it wants it. Never why the card is up.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// Why the card is up, in TerminalX's words: which gate asked. A
+        /// Claude tab in bypass mode is asked by Claude Code's own safety
+        /// check, which bypass does not switch off (#775); a Codex tab in
+        /// Ask every time, by the app.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
         options: Vec<PermissionOption>,
     },
     QuestionsAsked {

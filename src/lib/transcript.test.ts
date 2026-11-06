@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, groupWork } from "./transcript";
+import { askAgentNote, buildTranscript, groupWork } from "./transcript";
 import type { AgentEvent, Payload } from "@/types/events";
 
 let seq = 0;
@@ -142,6 +142,26 @@ describe("buildTranscript", () => {
     ]);
     expect(items[0].kind).toBe("tool_group");
     expect(items[2].kind).toBe("tool");
+  });
+
+  // #775: why a card is up is the app's to say, apart from the agent's words; a call an agent's safety check held keeps a row that says so.
+  it("keeps why a card is up apart from the agent's description, and a call its safety check held on a row of its own", () => {
+    const reason = "Claude Code's safety check wants approval for this command. Bypass permissions doesn't cover commands it can't verify.";
+    const command = 'a=("${(@f)$(printf "x\\ny")}"); echo ${#a}';
+    const asked = buildTranscript([
+      ev({ type: "user_message", text: "go", queued: false }),
+      ev({ type: "permission_requested", requestId: "r1", toolUseId: "", toolName: "Bash", input: { command, description: "Split printf output into lines" }, description: "Split printf output into lines", reason, options: [] }),
+    ], true);
+    expect(asked.pendingAsks[0]).toMatchObject({ reason, description: "Split printf output into lines" });
+    expect(askAgentNote(asked.pendingAsks[0])).toBe("Split printf output into lines");
+    expect(askAgentNote({ input: { cmd: "pwd", justification: "Inspect the checkout" } })).toBe("Inspect the checkout");
+    expect(askAgentNote({ input: { command: "ls", description: "  " } })).toBeNull();
+
+    const held = ev({ type: "tool_call_completed", callId: "b", result: { text: "2", isError: false, safetyCheck: "Approved past Claude's dangerous-removal check" } });
+    const work = buildTranscript([ev({ type: "user_message", text: "go", queued: false }), toolStart("a", "Bash", { command: "ls" }), toolDone("a"), toolStart("b", "Bash", { command }), held, toolStart("c", "Bash", { command: "pwd" }), toolDone("c")], true).turns[0].work;
+    expect(groupWork(work).map((item) => item.kind)).toEqual(["tool", "tool", "tool"]);
+    const row = groupWork(work)[1];
+    expect(row.kind === "tool" && row.call.result?.safetyCheck).toBe("Approved past Claude's dangerous-removal check");
   });
 
   it("tracks pending asks until decided and folds queued prompts into the open turn", () => {

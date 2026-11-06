@@ -64,6 +64,20 @@ pub(crate) mod update_plan;
 
 pub const PROTOCOL: u64 = 1;
 
+/// What the menu-bar owner's notification says about an agent event while
+/// no window is open, when it says anything: its title, and the line under
+/// the session's name. A permission request says who asked in the card's
+/// own words: in bypass mode, Claude Code's safety check (#775).
+pub fn background_notice(payload: &crate::events::Payload) -> Option<(&'static str, Option<String>)> {
+    use crate::events::Payload;
+    match payload {
+        Payload::TurnCompleted { .. } => Some(("Agent finished", None)),
+        Payload::PermissionRequested { reason, .. } => Some(("Agent needs you", reason.clone())),
+        Payload::QuestionsAsked { .. } => Some(("Agent needs you", None)),
+        _ => None,
+    }
+}
+
 /// The handover record this runtime writes (#765), which a desktop needs to
 /// hand it over rather than stop it; `None` where it cannot be handed over.
 fn handover_format() -> Option<u32> {
@@ -430,6 +444,19 @@ impl Lifetime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_background_notice_says_who_asked_for_permission() {
+        use crate::events::Payload;
+        let asked = |reason: Option<&str>| Payload::PermissionRequested {
+            request_id: "r".into(), tool_use_id: String::new(), tool_name: "Bash".into(), input: json!({"command": "ls"}),
+            cwd: None, title: None, description: Some("List files".into()), reason: reason.map(String::from), options: vec![],
+        };
+        let reason = crate::harness::claude::mapper::safety_check_reason("Bash");
+        assert_eq!(background_notice(&asked(Some(reason))), Some(("Agent needs you", Some(reason.to_string()))));
+        assert_eq!(background_notice(&asked(None)), Some(("Agent needs you", None)), "the agent's own description is not who asked");
+        assert_eq!(background_notice(&Payload::ModelRequestStarted), None);
+    }
 
     #[test]
     fn failed_stop_stays_available_only_for_an_explicit_retry() {
