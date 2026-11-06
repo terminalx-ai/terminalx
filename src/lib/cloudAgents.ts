@@ -286,6 +286,23 @@ function newTab(info: AgentTabInfo, source: CloudAgentTab["source"], placeholder
   };
 }
 
+/** Old caches/checkpoints predate presence metadata and may have no verified message times. */
+function withMessagePresence(info: AgentTabInfo, events: readonly AgentEvent[]): AgentTabInfo {
+  if (info.hasMessages) return info;
+  const hasMessages = events.some((event) => {
+    if (event.subagent || event.sessionId !== info.sessionId || event.tabId !== info.tabId) return false;
+    const p = event.payload;
+    switch (p.type) {
+      case "user_message": return true;
+      case "assistant_text": return p.text.length > 0;
+      case "turn_completed": return !!p.finalText;
+      case "delta": return p.delta === "text_delta" && p.text.length > 0;
+      default: return false;
+    }
+  });
+  return hasMessages ? { ...info, hasMessages: true } : info;
+}
+
 function newer(a: { epoch: number; version: number }, b: { epoch: number; version: number } | null): boolean {
   if (!b) return true;
   return a.epoch > b.epoch || (a.epoch === b.epoch && a.version > b.version);
@@ -349,7 +366,14 @@ async function persistNow(s: Store, tabId: string, owner: string) {
   if (isDevScope(s.scope)) return;
   const tab = s.tabs.get(tabId);
   if (!tab || tab.placeholder || !tab.info.sessionId) return;
-  const events = getTabLog(tab.info.sessionId, tabId).events.filter((ev) => ev.payload.type !== "delta").slice(-CACHE_EVENTS);
+  const history = getTabLog(tab.info.sessionId, tabId).events;
+  // Retain presence before trimming the saved tail, including history from older live runtimes.
+  const info = withMessagePresence(tab.info, history);
+  if (info !== tab.info) {
+    tab.info = info;
+    publish(s);
+  }
+  const events = history.filter((ev) => ev.payload.type !== "delta").slice(-CACHE_EVENTS);
   const entry: CachedTab = {
     tab: tab.info,
     events,
@@ -424,11 +448,22 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
     try {
       const cached = await cloudAgentApi.cacheLoad(cacheAccount(s), scope);
       for (const [tabId, entry] of Object.entries(cached?.tabs ?? {})) {
+        if (!entry?.tab) continue;
+        const info = withMessagePresence(entry.tab, entry.events ?? []);
         const known = s.tabs.get(tabId);
         // A tab the live runtime listed first still gets back what was being typed in it.
-        if (known) restoreDraft(s, known, entry?.draft);
-        if (!entry?.tab || known) continue;
-        const tab = newTab(entry.tab, "cache");
+        if (known) {
+          restoreDraft(s, known, entry.draft);
+          if (known.info.sessionId === info.sessionId && info.hasMessages && !known.info.hasMessages) {
+            known.info = { ...known.info, hasMessages: true };
+            // The live list may arrive before its replay. Preserve the cached messages
+            // when saving the migrated metadata instead of replacing them with an empty log.
+            if (entry.events?.length) mergeTabEvents(info.sessionId, tabId, entry.events);
+            scheduleSave(s, tabId);
+          }
+          continue;
+        }
+        const tab = newTab(info, "cache");
         tab.cursor = entry.cursor ?? null;
         tab.checkpoint = entry.checkpoint ?? null;
         tab.unread = entry.unread;
@@ -438,6 +473,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
         s.tabs.set(tabId, tab);
         restoreDraft(s, tab, entry.draft);
         if (entry.tab.sessionId && entry.events?.length) mergeTabEvents(entry.tab.sessionId, tabId, entry.events);
+        if (info !== entry.tab) scheduleSave(s, tabId);
       }
     } catch (error) {
       s.error = errorText(error);
@@ -546,6 +582,7 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
     sessionLastMessageAt: newestMessageTime(current.info.sessionLastMessageAt, p.sessionLastMessageAt),
     sessionHasMessages: current.info.sessionHasMessages || p.sessionHasMessages,
   };
+  current.info = withMessagePresence(current.info, p.events);
   mergeTabEvents(p.sessionId, tabId, p.events);
   current.historyRead = true;
   publish(s);
