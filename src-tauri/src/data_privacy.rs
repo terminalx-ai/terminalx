@@ -436,6 +436,24 @@ mod tests {
 
     const ON: Status = Status { enabled: true, managed: false };
 
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        // A raw fixture must consume the whole request before closing;
+        // unread headers or a POST body can reset the socket on macOS.
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+        }
+        let headers = String::from_utf8(bytes).unwrap();
+        let length = headers.lines().filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map_or(0, |(_, value)| value.trim().parse::<usize>().unwrap());
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        headers
+    }
+
     #[test]
     fn persisted_tickets_cannot_become_local_authority_after_owner_replacement() {
         let owner = Arc::new(Policy::default());
@@ -562,15 +580,9 @@ mod tests {
         let received = std::thread::spawn(move || {
             let (mut stream, _) = server.accept().unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            let mut bytes = Vec::new();
-            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                let mut chunk = [0; 4096];
-                let n = stream.read(&mut chunk).unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&chunk[..n]);
-            }
+            let headers = read_http_request(&mut stream);
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
-            String::from_utf8_lossy(&bytes).into_owned()
+            headers
         });
         assert_eq!(request().unwrap().status(), 200);
         assert!(received.join().unwrap().contains("Bearer retained-session"));
@@ -628,15 +640,7 @@ mod tests {
                         let peer = std::thread::spawn(move || {
                             let (mut socket,_) = listener.accept().unwrap();
                             socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                            // Consume the request before closing the connection.
-                            // Closing with unread bytes can reset the socket and
-                            // discard the response on macOS.
-                            let mut headers = Vec::new();
-                            while !headers.ends_with(b"\r\n\r\n") {
-                                let mut byte = [0];
-                                socket.read_exact(&mut byte).unwrap();
-                                headers.push(byte[0]);
-                            }
+                            read_http_request(&mut socket);
                             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                         });
                         assert_eq!(client.get(&url).call().unwrap().status(),200);

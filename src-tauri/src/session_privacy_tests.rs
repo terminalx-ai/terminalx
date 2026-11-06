@@ -443,7 +443,14 @@ fn post_spawn_commit_failure() {
     executable(&program, r#"#!/bin/sh
 case "$1" in
   --help) printf '  --no-daemon  Run without the daemon\n'; exit 0;;
-  app-server) exit 1;;
+  app-server)
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"model/list"'*) printf '%s\n' '{"id":2,"result":{"data":[{"id":"original-model","isDefault":true},{"id":"remote-model"}]}}'; exit 0;;
+        *'"id":2'*) printf '%s\n' '{"id":2,"error":{"message":"Unsupported fixture method"}}'; exit 0;;
+      esac
+    done
+    exit 0;;
 esac
 printf 'LAUNCH %s\n' "$*" >> "$0.launches"
 stty raw -echo
@@ -490,7 +497,7 @@ exec cat
     std::fs::remove_dir(&index_path).unwrap();
     std::fs::rename(&backup, &index_path).unwrap();
     wait_for("replacement really executed", || launches().lines().count() == 2);
-    assert!(launches().lines().nth(1).unwrap().contains("remote-model"));
+    assert!(launches().lines().nth(1).unwrap().contains("remote-model"), "{}", launches());
     let token = {
         let rt = rig.rt.lock().unwrap();
         assert!(rt.stopping && rt.recovery.is_some(), "a failed commit is explicitly recoverable");
