@@ -1,13 +1,110 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 import { checkAgentReadiness, readinessBlock, useAgentReadiness, type AgentReadiness } from "./agentReadiness";
 
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-10-26T14:00:00Z", version: "0.164.0" });
-afterEach(() => { cleanup(); invoke.mockReset(); });
+const exits = new Set<() => void>();
+beforeEach(() => {
+  listen.mockImplementation(async (_event, callback) => {
+    exits.add(callback);
+    return () => exits.delete(callback);
+  });
+});
+afterEach(() => { cleanup(); invoke.mockReset(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("agent readiness", () => {
+  it("follows installation and login on return to the app without a manual check", async () => {
+    invoke.mockResolvedValue(answer("missing"));
+    const { result } = renderHook(() => useAgentReadiness("codex"));
+    await waitFor(() => expect(result.current.value?.state).toBe("missing"));
+    invoke.mockResolvedValue(answer("signed_out"));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(result.current.value?.state).toBe("signed_out"));
+    invoke.mockResolvedValue(answer("ready"));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(result.current.value?.state).toBe("ready"));
+  });
+
+  it("rechecks when the embedded sign-in command finishes, without inferring success from its exit", async () => {
+    invoke.mockResolvedValue(answer("signed_out"));
+    const { result, unmount } = renderHook(() => useAgentReadiness("codex"));
+    await waitFor(() => expect(result.current.value?.state).toBe("signed_out"));
+    await act(async () => exits.forEach((notify) => notify()));
+    expect(result.current.value?.state).toBe("signed_out");
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => exits.forEach((notify) => notify()));
+    expect(result.current.value?.state).toBe("ready");
+    unmount();
+    expect(exits.size).toBe(0);
+  });
+
+  it("polls every two minutes only while the Agents card is visible and disposes all triggers", async () => {
+    vi.useFakeTimers();
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+    invoke.mockResolvedValue(answer("missing"));
+    const { result, unmount } = renderHook(() => useAgentReadiness("codex", true));
+    await act(async () => {});
+    invoke.mockResolvedValue(answer("signed_out"));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(result.current.value?.state).toBe("signed_out");
+    hidden.mockReturnValue(true);
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(result.current.value?.state).toBe("signed_out");
+    hidden.mockReturnValue(false);
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(result.current.value?.state).toBe("ready");
+    expect(invoke).toHaveBeenCalledTimes(3);
+    unmount();
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(exits.size).toBe(0);
+  });
+
+  it("does not poll unless requested or probe a cloud agent", async () => {
+    vi.useFakeTimers();
+    invoke.mockResolvedValue(answer("ready"));
+    const { rerender } = renderHook(({ id }) => useAgentReadiness(id), { initialProps: { id: "codex" as string | null } });
+    await act(async () => vi.advanceTimersByTimeAsync(360_000));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    rerender({ id: null });
+    window.dispatchEvent(new Event("focus"));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(exits.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("disposes a native listener that finishes registering after unmount", async () => {
+    let register: (stop: () => void) => void = () => {};
+    listen.mockReturnValueOnce(new Promise<() => void>((resolve) => { register = resolve; }));
+    invoke.mockResolvedValue(answer("ready"));
+    const { unmount } = renderHook(() => useAgentReadiness("codex"));
+    unmount();
+    const stop = vi.fn();
+    await act(async () => register(stop));
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a pre-login probe replace a newer result", async () => {
+    let old: (value: AgentReadiness) => void = () => {};
+    invoke.mockReturnValueOnce(new Promise<AgentReadiness>((resolve) => { old = resolve; }));
+    const { result } = renderHook(() => useAgentReadiness("codex"));
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => result.current.refresh());
+    await act(async () => old(answer("signed_out")));
+    expect(result.current.value?.state).toBe("ready");
+  });
+
   it("keeps probe errors unknown without leaking diagnostics or blocking a working CLI", async () => {
     invoke.mockRejectedValue(new Error("provider diagnostic with secret value"));
     const result = await checkAgentReadiness("codex");

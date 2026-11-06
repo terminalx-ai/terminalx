@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useShortcut } from "@/lib/hotkeys";
 import type { Project } from "@/types/session";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), openDialog: vi.fn() }));
@@ -84,5 +85,24 @@ describe("adding a project from the command palette", () => {
     fireEvent.click(entry(dialog));
 
     await waitFor(() => expect(screen.getByTestId("start-dialog").textContent).toBe(dialog));
+  });
+});
+
+describe("Home in the command palette (PRO-183)", () => {
+  it("offers Home without a key binding and opens it with Enter", async () => {
+    const onOpenChange = vi.fn();
+    function Palette() {
+      useShortcut("app.home", store.openHome);
+      return <CommandPalette open onOpenChange={onOpenChange} onOpenSettings={vi.fn()} onCreated={vi.fn()} />;
+    }
+    store.openIssues();
+    render(<Palette />);
+    fireEvent.change(screen.getByLabelText("Command palette search"), { target: { value: "home" } });
+    await screen.findByRole("option", { name: /Home/ });
+
+    fireEvent.keyDown(screen.getByLabelText("Command palette search"), { key: "Enter" });
+
+    await waitFor(() => expect(store.getSessionStore().view).toBe("home"));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });
