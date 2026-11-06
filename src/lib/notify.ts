@@ -9,6 +9,7 @@ import { createCloudAttentionTracker, getCloudDashboard, openCloudSession, subsc
 import { isCloudKey } from "@/types/target";
 import { appWindow, type AppWindow } from "@/lib/appWindow";
 import { getFloating, showFloatingWindow, subscribeFloating } from "@/lib/floating";
+import { bootLocalSharing, onJoinRequest, openSessionShare, shownShareDialog, type JoinRequest } from "@/lib/localSharing";
 import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from "@/types/session";
 import type { AutomationRun } from "@/types/automations";
 import type { IssuePipeline } from "@/types/issuePipeline";
@@ -40,6 +41,8 @@ export interface Notice {
   title: string;
   body: string;
   at: number;
+  /** Opened, it also opens this on the session: Share, for someone waiting to be admitted. */
+  opens?: "share";
 }
 
 let notices: Notice[] = [];
@@ -68,6 +71,7 @@ export function openNotice(n: Notice) {
   // A cloud session opens on the tab that asked, and only looks: nothing wakes its workspace.
   if (isCloudKey(n.sessionId)) openCloudSession(n.sessionId, n.tabId);
   else selectSession(n.sessionId);
+  if (n.opens === "share") openSessionShare(n.sessionId);
   dismissNotice(n.id);
 }
 
@@ -308,6 +312,31 @@ export function notePipelineState(pipeline: IssuePipeline) {
   window.setTimeout(() => dismissNotice(id), 8000);
 }
 
+/**
+ * Someone asked to join a shared session. Every new link approves each person
+ * (PRO-162), so they wait until the host admits them, and the host may have
+ * closed Share long ago. The same focus-aware path as an agent's request:
+ * a banner when nobody is looking, else the tone and a notice that opens
+ * Share on the session. Only the tone while that Share already lists them.
+ */
+export function noteShareRequest({ sessionId, person }: JoinRequest) {
+  const who = person.displayName || person.email || "Someone";
+  const session = getSessions().sessions.find((candidate) => candidate.id === sessionId);
+  const title = `${who} asked to join`;
+  const body = `${session?.title ? `${session.title}. ` : ""}Open Share to admit or decline them.`;
+  if (!looking()) {
+    if (sendsBanner()) void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  playSound("waiting");
+  if (shownShareDialog() === sessionId) return;
+  const key = `share:${sessionId}:${person.userId}:`;
+  const id = `${key}${Date.now()}`;
+  notices = [...notices.filter((notice) => !notice.id.startsWith(key)), { id, sessionId, tabId: "", kind: "waiting", opens: "share", title, body, at: Date.now() }];
+  emit();
+  window.setTimeout(() => dismissNotice(id), 8000);
+}
+
 // ---- cloud sessions (PRO-23 CS-19)
 
 let observeCloud: ReturnType<typeof createCloudAttentionTracker> | null = null;
@@ -388,6 +417,10 @@ export function startNotifications() {
     /* storage unavailable */
   }
   subscribeSessions(refreshBadge);
+  // Join requests for any shared session, heard whichever session is on screen.
+  // Only the main window listens, so one window speaks for each request.
+  onJoinRequest(noteShareRequest);
+  void bootLocalSharing().catch(() => {});
   subscribeCloudDashboard(() => {
     onCloudSessions();
     refreshBadge();

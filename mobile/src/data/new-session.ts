@@ -17,7 +17,8 @@ export interface NewSessionChoices {
 /**
  * The form as it opens: the project last used on the Mac (or a quick chat when
  * there is none), the first installed agent and its default model, effort and
- * the Mac's default mode, as the desktop starts its new-session view.
+ * the mode the Mac offers (`defaultMode`): Ask every time, where a fresh
+ * profile's new-session view starts, never Bypass unasked (PRO-162).
  */
 export function initialChoices(options: NewSessionOptions): NewSessionChoices {
   const project = options.projects.find((candidate) => candidate.lastUsed) ?? options.projects[0];

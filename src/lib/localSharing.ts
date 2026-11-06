@@ -73,6 +73,10 @@ export function useShareDialog() {
     () => null,
   );
 }
+/** The session whose Share dialog is open, if one is. */
+export function shownShareDialog(): string | null {
+  return dialog;
+}
 export function openSessionShare(sessionId: string) {
   dialog = sessionId;
   notify();
@@ -88,9 +92,30 @@ export function useLocalShare(sessionId: string) {
     () => EMPTY_SHARE,
   );
 }
+type ShareGuest = ShareState["people"][number];
+/** A guest the host has yet to admit, to the session or to one more of its links: what the dialog offers Admit for. */
+export function isWaitingGuest(guest: ShareGuest): boolean {
+  return !guest.admitted || !!guest.pendingLinkIds?.length;
+}
+/** Someone asked to join a shared session and waits for the host (each link approves people by default, PRO-162). */
+export interface JoinRequest {
+  sessionId: string;
+  person: SharePerson;
+}
+const joinListeners = new Set<(request: JoinRequest) => void>();
+/** Hear each person who starts waiting to be admitted: once per wait, not for every update while they wait. */
+export function onJoinRequest(listener: (request: JoinRequest) => void): () => void {
+  joinListeners.add(listener);
+  return () => joinListeners.delete(listener);
+}
 function apply(sessionId: string, state: ShareState) {
+  const waitedBefore = new Set((states.get(sessionId)?.people ?? []).filter(isWaitingGuest).map((guest) => guest.person.userId));
   states.set(sessionId, state);
   notify();
+  for (const guest of state.people) {
+    if (!isWaitingGuest(guest) || waitedBefore.has(guest.person.userId)) continue;
+    for (const listener of joinListeners) listener({ sessionId, person: guest.person });
+  }
 }
 export async function bootLocalSharing() {
   return (boot ??= listen<{ sessionId: string; state: ShareState }>("session_share_changed", ({ payload }) =>
@@ -114,13 +139,18 @@ export async function copyShareLink(sessionId: string) {
   if (link) await copyText(link.url);
   else openSessionShare(sessionId);
 }
+/**
+ * A new link's settings (PRO-162): guests read only, and each one waits for the
+ * host to admit them. Driving the session, or joining unseen, is for the host
+ * to turn on for a link, never what a forwarded link does by default.
+ */
 export function defaultShareSettings(): ShareSettings {
   return {
     audience: "anyone",
-    role: "driver",
+    role: "viewer",
     people: [],
     expiresAt: Date.now() + 3_600_000,
-    approveEachPerson: false,
+    approveEachPerson: true,
     canApprove: false,
     maximumPeople: 8,
     singleUse: false,

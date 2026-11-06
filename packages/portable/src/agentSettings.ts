@@ -141,12 +141,21 @@ export function modelGroups(models: ModelInfo[]): { title: string | null; models
 export const BYPASS_MODE = "bypassPermissions";
 
 /**
- * The launch mode of every new session or agent tab, local or cloud, until
- * the reader picks another. Mirrors `DEFAULT_PERMISSION_MODE` in
- * src-tauri/src/store/index.rs, which also covers any request that names no
- * mode. An explicit choice (including one saved in prefs) always wins.
+ * What the runtime launches a request in when it names no mode: the CLI, the
+ * relay, a cloud launch, an automation, and a stored tab written by a build
+ * that knew no mode. Mirrors `DEFAULT_PERMISSION_MODE` in
+ * src-tauri/src/store/index.rs. The desktop's own new chats always name their
+ * mode, the reader's saved one (`FIRST_RUN_PERMISSION_MODE` until they pick).
  */
 export const DEFAULT_PERMISSION_MODE = BYPASS_MODE;
+
+/**
+ * The mode a new chat starts in until the reader picks one (PRO-162). After
+ * that, the picked mode is remembered and every new chat starts in it.
+ * Nothing goes through unasked by default: the reader opts into a looser
+ * mode, Bypass included, from the picker.
+ */
+export const FIRST_RUN_PERMISSION_MODE = "manual";
 
 /**
  * Every new automation starts in "Bypass permissions". Automations run
