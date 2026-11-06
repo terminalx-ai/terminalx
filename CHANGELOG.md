@@ -7,6 +7,9 @@
   Settings → Agents is open. Each card's badge and setup instructions now use
   the same readiness check, so they cannot disagree about installation or
   login. (PRO-170)
+- Return to the welcome screen with **Home** in either sidebar layout or ⌘K,
+  even after opening projects or sessions. Open local project, Open GitHub
+  project and Quick start remain available there. (PRO-183)
 
 ## 0.2.24
 

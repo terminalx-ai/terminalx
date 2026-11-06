@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { CalendarClock, CircleDot, Folder, FolderOpen, ImagePlus, LayoutGrid } from "@/icons";
+import { CalendarClock, CircleDot, Folder, FolderOpen, Home, ImagePlus, LayoutGrid } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,7 @@ export interface RailProps {
   onHide: () => void;
   onOpenSettings: (tab?: SettingsTab) => void;
   onOpenAccount: () => void;
+  onOpenHome: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
   onOpenStats: () => void;
@@ -39,14 +40,14 @@ export function ProjectRail(props: RailProps) {
 }
 
 /**
- * Issues, the dashboard, stats, automations and skills, each carrying its own
- * status: a strip of icons, or a labelled list where there is room to name them.
+ * Home, the dashboard, issues and automations, with status beside their names.
  */
 export function AppDestinations({
+  onOpenHome,
   onOpenIssues,
   onOpenAgents,
   onOpenAutomations,
-}: Pick<RailProps, "onOpenIssues" | "onOpenAgents" | "onOpenAutomations">) {
+}: Pick<RailProps, "onOpenHome" | "onOpenIssues" | "onOpenAgents" | "onOpenAutomations">) {
   const store = useSessionStore();
   const automationStore = useAutomationStore();
   // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
@@ -58,6 +59,7 @@ export function AppDestinations({
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
   const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
   const active = onNavView ? store.view : null;
+  const home = { id: "home", label: "Home", shortcut: "app.home", icon: <Home />, onOpen: onOpenHome } satisfies Destination;
   const dashboard = { id: "agents", label: "Agent dashboard", shortcut: "app.agentDashboard", icon: <LayoutGrid />, onOpen: onOpenAgents, ...dashboardStatus(dashboardBuckets) } satisfies Destination;
   const issues = { id: "issues", label: "Issues", shortcut: "app.issues", icon: <CircleDot />, onOpen: onOpenIssues } satisfies Destination;
   const automations: Destination = {
@@ -70,9 +72,9 @@ export function AppDestinations({
     count: automationFailures || undefined,
   };
   // Skills and Usage are reached from Settings (and their shortcuts), not from here.
-  // Named rows, the same in both sidebar layouts: the dashboard leads and says what is waiting on you, or what is still running.
+  // Named rows, the same in both sidebar layouts.
   const waiting = dashboardBuckets.needs.length || dashboardBuckets.working.length;
-  return <DestinationList active={active} destinations={[{ ...dashboard, label: "Dashboard", count: waiting || undefined }, issues, automations]} />;
+  return <DestinationList active={active} destinations={[home, { ...dashboard, label: "Dashboard", count: waiting || undefined }, issues, automations]} />;
 }
 
 /** `status` is read out with the label; `dot` marks it when something there wants a look; `count` is shown beside it in a list. */

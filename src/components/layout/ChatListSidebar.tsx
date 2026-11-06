@@ -59,7 +59,7 @@ export function chatPreview(
  * or waits on you. Projects are not a level here; they are one click away
  * as the project view.
  */
-export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
+export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const [error, setError] = useState<string | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
@@ -106,7 +106,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
       <SidebarTitlebar onHide={onHide} onSearch={onSearch} onNewChat={newChat} onAddProject={addAndStart} projects={projects} />
 
       <div className="shrink-0 px-2">
-        <AppDestinations onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
+        <AppDestinations onOpenHome={onOpenHome} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
       </div>
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}

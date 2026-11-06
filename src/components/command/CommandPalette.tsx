@@ -20,6 +20,7 @@ import {
   Gauge,
   GitBranch,
   GitPullRequest,
+  Home,
   Keyboard,
   LayoutGrid,
   Loader2,
@@ -152,6 +153,7 @@ const START_ACTION_ICONS: Record<StartAction["id"], LucideIcon> = { local: Folde
 
 function shortcutIcon(shortcut: ShortcutAction): LucideIcon {
   const label = shortcut.label.toLowerCase();
+  if (shortcut.id === "app.home") return Home;
   if (label.includes("session") || label === "send" || label.includes("chat")) return MessageSquare;
   if (label.includes("issue")) return CircleDot;
   if (label.includes("dashboard")) return LayoutGrid;
