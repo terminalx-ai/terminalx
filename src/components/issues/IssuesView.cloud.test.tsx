@@ -57,7 +57,11 @@ vi.mock("@/lib/models", async (original) => ({
   useModels: (harness: string) => models.filter((m) => m.harness === harness),
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
-vi.mock("@/lib/notify", () => ({ notePipelineState: vi.fn() }));
+vi.mock("@/lib/notify", () => ({ notePipelineState: vi.fn(), noteSessionStarted: vi.fn() }));
+vi.mock("@/lib/cloudAgents", async (original) => ({
+  ...(await original<typeof import("@/lib/cloudAgents")>()),
+  getCloudAgents: () => ({ tabs: [{ tabId: "t1", info: { sessionId: "s1" } }] }),
+}));
 vi.mock("@/lib/issuePipeline", async (original) => ({
   ...(await original<typeof import("@/lib/issuePipeline")>()),
   useIssuePipelines: () => pipelineStore.pipelines,
@@ -103,6 +107,8 @@ vi.mock("@/lib/cloudNewSession", () => ({
 }));
 
 const { IssuesView } = await import("./IssuesView");
+const { noteSessionStarted } = await import("@/lib/notify");
+const { selectSession } = await import("@/lib/sessions");
 
 const issue = {
   provider: "github" as const,
@@ -145,6 +151,8 @@ beforeEach(() => {
     return "cloud:org-a:ws-1:s1";
   });
   openCloudSession.mockReset();
+  vi.mocked(selectSession).mockClear();
+  vi.mocked(noteSessionStarted).mockClear();
   startCloudSessionIn.mockReset();
   setPrefs({ lastProject: "/repo", issueCloudProject: PROJECT, lastAgent: "claude", lastMode: "bypassPermissions", issueProvider: "github", useWorktree: true, cloudIssuePipelines: {} });
 });
@@ -212,6 +220,13 @@ describe("the Issues view for a cloud project", () => {
       },
     });
     expect(request.prompt).toContain("Work on GitHub issue #433: Carry issue sessions on");
+    expect(cloudStart.startInWorkspace.mock.calls[0][2]).toMatchObject({ select: false });
+    await waitFor(() => expect(noteSessionStarted).toHaveBeenCalledWith("cloud:org-a:ws-1:s1", "t1", "claude", "#433 Carry issue sessions on"));
+    expect(selectSession).not.toHaveBeenCalled();
+    expect(openCloudSession).not.toHaveBeenCalled();
+    expect(screen.getByTestId("issue-detail").textContent).toContain("Sessions stop at code.");
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    expect(openCloudSession).toHaveBeenCalledWith("cloud:org-a:ws-1:s1", undefined);
     // Nothing is started on this computer.
     expect(calls("create_session")).toEqual([]);
     expect(screen.queryByTestId("issue-start-note")).toBeNull();
@@ -275,6 +290,9 @@ describe("the Issues view for a cloud project", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
     expect(await screen.findByText("Workspace disconnected")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Open Agent logins" })).toBeNull();
+    expect(noteSessionStarted).not.toHaveBeenCalled();
+    expect(selectSession).not.toHaveBeenCalled();
+    expect(openCloudSession).not.toHaveBeenCalled();
   });
 
   it("starts nothing in a repository that is no longer selected for cloud workspaces", async () => {

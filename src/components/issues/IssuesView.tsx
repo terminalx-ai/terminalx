@@ -33,10 +33,12 @@ import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam,
 import { filterMiss, issueFilterFor, issueFilterKey, wireFilter, type IssueListFilter } from "@/lib/issueListFilter";
 import { openAutomation, selectProject, selectSession, startCloudSessionIn, takeNewIssueRequest, upsertSession, useSessionStore } from "@/lib/sessions";
 import { openCloudSession } from "@/lib/cloudDashboard";
+import { getCloudAgents } from "@/lib/cloudAgents";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { planCloudStart, startInWorkspace, type CloudIssueOutcome } from "@/lib/cloudNewSession";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { cn } from "@/lib/cn";
+import { noteSessionStarted } from "@/lib/notify";
 import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import type { IssueThread } from "@/lib/issueComments";
 import type { IssueDetails } from "@/lib/issueOps";
@@ -45,7 +47,7 @@ import { mine, taken, unavailableText, useIssueWork, workKeyOf, workToWarnAbout,
 import { cloudPipelineSettings, pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { Project, WorkStatus } from "@/types/session";
-import type { CloudProject } from "@/types/target";
+import { cloudSessionKey, type CloudProject } from "@/types/target";
 
 type Provider = "github" | "linear";
 /** Which issues the list shows by who works on them (#441). */
@@ -484,9 +486,12 @@ export function IssuesView({
               settings: pipelineDefaults,
             },
           },
-          { onIssue: (outcome) => setStartNote(cloudIssueNote(outcome)) },
+          { select: false, onIssue: (outcome) => setStartNote(cloudIssueNote(outcome)) },
         );
         work.recordCloudStart(startedKey, issue);
+        const { orgId, id: workspaceId } = plan.node.item.workspace;
+        const tab = getCloudAgents({ organizationId: orgId, workspaceId }).tabs.find((tab) => cloudSessionKey(orgId, workspaceId, tab.info.sessionId) === startedKey);
+        if (tab) noteSessionStarted(startedKey, tab.tabId, harness.id, `${issue.identifier} ${issue.title}`);
         return;
       }
       const s = await api.createSession({
@@ -515,8 +520,8 @@ export function IssuesView({
           console.error("issue pipeline did not start", e);
         }
       }
-      selectSession(s.id);
       onCreated?.(s.id, s.tabs[0].id, prompt);
+      noteSessionStarted(s.id, s.tabs[0].id, harness.id, `${issue.identifier} ${issue.title}`);
     } catch (e) {
       setError({
         message: cloud ? cloudStartError(e, cloud.project.orgId) : errorMessage(e),
@@ -610,7 +615,8 @@ export function IssuesView({
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
-  const openLinked = linkedSession ? () => selectSession(linkedSession.id) : pipeline?.place ? () => openCloudSession(pipeline.author.sessionId, pipeline.author.tabId) : null;
+  const cloudLinked = selected ? work.byIssue.get(workKeyOf(selected))?.filter((worker) => worker.you && worker.cloudSession).sort((a, b) => b.since - a.since)[0]?.cloudSession : null;
+  const openLinked = linkedSession ? () => selectSession(linkedSession.id) : pipeline?.place ? () => openCloudSession(pipeline.author.sessionId, pipeline.author.tabId) : cloudLinked ? () => openCloudSession(cloudLinked.key, cloudLinked.tabId) : null;
 
   // Who has the issue shows once that is known: from the row, or from its details.
   const assigneeShown = !!current && !!(current.assignees || current.assignee || !detailLoading);

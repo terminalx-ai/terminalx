@@ -159,7 +159,13 @@ try {
       }, thread);
       if (shots) await page.screenshot({ path: join(shots, `issue-${mode}-${provider}-${width}.png`) });
       await page.getByRole("button", { name: "Start session", exact: true }).click();
-      await page.getByTitle("Model: GPT-6 Astra · High", { exact: true }).waitFor();
+      const notice = page.getByRole("status").filter({ hasText: "Session started" });
+      await notice.waitFor();
+      assert.ok((await notice.textContent()).includes(`${provider === "github" ? "#42" : "DEMO-42"} Add keyboard navigation to the demo list`));
+      assert.equal(await notice.getByRole("img", { name: "Codex", exact: true }).count(), 1);
+      assert.equal(await page.getByTestId("issues-view").isVisible(), true);
+      assert.equal(await page.getByTestId("issue-detail").getByText(/^Synthetic issue:/).isVisible(), true);
+      await page.getByRole("button", { name: "Open session", exact: true }).waitFor();
       const req = await page.evaluate(() => window.__ISSUE_REQUEST__);
       assert.deepEqual(req.tab, { harness: "codex", model: "gpt-6-astra", effort: "high", permissionMode: "bypassPermissions" });
       assert.equal(req.issue.provider, provider);
@@ -173,6 +179,12 @@ try {
       assert.ok(started.prompt.endsWith("\n\nEnd every reply with a status block."), started.prompt);
       assert.ok(started.prompt.includes("## Comments\n\n**kim** (2026-10-01):\nSynthetic comment: keep Home and End working too."), started.prompt);
       assert.deepEqual(await page.evaluate(() => window.__RESOLVE_CHOICE__), { id: "demo-pipeline", value: true });
+      failed += report(`${mode}, ${provider}, ${width}px`, {
+        "the first prompt is sent while Issues stays open with a started notice and Open session": await page.getByTestId("issues-view").isVisible() && !!started.prompt,
+      });
+      await notice.click();
+      await notice.waitFor({ state: "detached" });
+      await page.getByTitle("Model: GPT-6 Astra · High", { exact: true }).waitFor();
       await page.getByTestId("session-pipeline").waitFor();
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "the session header says where its pipeline stands": (await page.getByTestId("session-pipeline").textContent()).trim() === "Working",
@@ -425,6 +437,71 @@ try {
       await page.close();
     }
   }
+  // Work through a scrolled Linear list in one visit, with three independent notices.
+  const batch = await browser.newPage({ viewport: { width: 1100, height: 700 } });
+  const setupBatch = () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: false, issueProvider: "linear", lastAgent: "claude" }));
+    const answers = window.__PW_STUB__.answers;
+    answers.list_projects.projects[0].issuePipeline = { enabled: false };
+    const issues = Array.from({ length: 30 }, (_, index) => ({
+      provider: "linear", id: `batch-${index + 1}`, identifier: `BATCH-${index + 1}`, number: index + 1,
+      title: `Batch issue ${index + 1}`, url: `https://linear.app/demo/issue/BATCH-${index + 1}`,
+      state: "Todo", stateType: "open", labels: [], updatedAt: new Date().toISOString(), body: `Batch description ${index + 1}`,
+    }));
+    window.__BATCH_PROMPTS__ = [];
+    Object.assign(answers, {
+      gh_available: true, github_repo: "demo/project", linear_status: { connected: true }, linear_teams: [],
+      issues_list: issues, issue_details: ({ id }) => issues.find((issue) => issue.id === id),
+      issue_comments: { comments: [], nextCursor: null }, load_tab_events: [],
+      preview_workspace_name: "batch-workspace",
+      work_status: { isRepo: true, dirty: false, branch: "main", defaultBranch: "main", head: "abc" },
+      create_session: ({ req }) => ({
+        ...req, id: req.issue.id, cwd: `/repos/p0/${req.worktreeName}`, branch: req.worktreeName,
+        worktreeRemoved: false, created: new Date().toISOString(), modified: new Date().toISOString(), archived: false, pinned: false,
+        tabs: [{ ...req.tab, id: `${req.issue.id}-tab`, status: "idle", created: "", modified: "" }],
+      }),
+      send_message: (args) => { window.__BATCH_PROMPTS__.push(args); return { events: [] }; },
+    });
+  };
+  await batch.addInitScript(`window.__PW_FIXTURE__ = { cloud: false, localProjects: 1 };\n${stub}\n(${setupBatch})();`);
+  await batch.goto(server.url);
+  await batch.getByRole("button", { name: /^Issues/ }).click();
+  await batch.getByRole("textbox", { name: "Search issues", exact: true }).fill("batch");
+  await batch.locator('[data-issue-row="linear:batch-28"]').waitFor();
+  for (const number of [28, 29, 30]) {
+    const row = batch.locator(`[data-issue-row="linear:batch-${number}"]`);
+    await row.click();
+    await batch.getByText(`Batch description ${number}`, { exact: true }).waitFor();
+    const before = await row.evaluate((node) => {
+      let list = node.parentElement;
+      while (list && !list.classList.contains("overflow-y-auto")) list = list.parentElement;
+      return { scroll: list.scrollTop, rows: [...list.querySelectorAll("[data-issue-row]")].map((row) => row.dataset.issueRow) };
+    });
+    assert.ok(before.scroll > 0);
+    await batch.getByRole("button", { name: "Start session", exact: true }).click();
+    await batch.getByRole("status").filter({ hasText: `BATCH-${number} Batch issue ${number}` }).waitFor();
+    assert.equal(await batch.getByRole("status").filter({ hasText: "Session started" }).count(), number - 27);
+    assert.equal(await row.getAttribute("aria-current"), "true");
+    assert.equal(await batch.getByRole("textbox", { name: "Search issues", exact: true }).inputValue(), "batch");
+    assert.deepEqual(await row.evaluate((node) => {
+      let list = node.parentElement;
+      while (list && !list.classList.contains("overflow-y-auto")) list = list.parentElement;
+      return { scroll: list.scrollTop, rows: [...list.querySelectorAll("[data-issue-row]")].map((row) => row.dataset.issueRow) };
+    }), before);
+    await batch.getByRole("button", { name: "Open session", exact: true }).waitFor();
+  }
+  assert.equal((await batch.evaluate(() => window.__BATCH_PROMPTS__)).length, 3);
+  failed += report("Linear batch", { "three starts preserve the list, search, selection and scroll and send three prompts": true });
+  for (const number of [28, 29, 30]) {
+    const notice = batch.getByRole("status").filter({ hasText: `BATCH-${number} Batch issue ${number}` });
+    await notice.click();
+    await notice.waitFor({ state: "detached" });
+    await batch.getByTestId("session-branch").waitFor();
+    assert.ok((await batch.getByTestId("session-branch").getAttribute("title")).includes(`BATCH-${number} Batch issue ${number}`));
+    await batch.getByRole("button", { name: /^Issues/ }).click();
+  }
+  failed += report("Linear batch", { "each notice opens its own session and disappears": true });
+  await batch.close();
 } finally {
   await browser.close();
   server.close();
