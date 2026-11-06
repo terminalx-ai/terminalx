@@ -237,6 +237,9 @@ fn control_child() {
     }
     wait_for("activation and restoration", || coordination.join("restored").exists());
     drop(writer);
+    // Releasing the physical lock alone does not advance the FIFO: the
+    // queued command also waits for this ticket's turn to be retired.
+    drop(queue);
     if case != "openTerminal" {
         wait_for("queued command withdrawn", || matches!(&rig.rt.lock().unwrap().engine,Engine::Cli(cli) if !cli.echoed.iter().any(|echo|echo.command)));
         rig.typed();
@@ -430,7 +433,11 @@ fn lifecycle_child() {
 }
 
 fn post_spawn_commit_failure() {
-    let rig = Rig::on(CliKind::Codex, "original-model", Some("low"));
+    let mut rig = Rig::on(CliKind::Codex, "original-model", Some("low"));
+    // start_cli uses the persisted tab's real pane, unlike the placeholder
+    // used by Rig's synthetic transcript tests. Inspect and clean up that
+    // exact pane throughout the injected failure and subsequent Stop.
+    rig.pane = index::get(SESSION).unwrap().tab(TAB).unwrap().pane_id();
     let (lifetime, actor) = lifecycle_phone(&rig);
     let program = rig._dir.path().join("codex");
     executable(&program, r#"#!/bin/sh

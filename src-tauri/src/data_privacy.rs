@@ -628,7 +628,15 @@ mod tests {
                         let peer = std::thread::spawn(move || {
                             let (mut socket,_) = listener.accept().unwrap();
                             socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                            socket.read_exact(&mut [0]).unwrap();
+                            // Consume the request before closing the connection.
+                            // Closing with unread bytes can reset the socket and
+                            // discard the response on macOS.
+                            let mut headers = Vec::new();
+                            while !headers.ends_with(b"\r\n\r\n") {
+                                let mut byte = [0];
+                                socket.read_exact(&mut byte).unwrap();
+                                headers.push(byte[0]);
+                            }
                             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                         });
                         assert_eq!(client.get(&url).call().unwrap().status(),200);
