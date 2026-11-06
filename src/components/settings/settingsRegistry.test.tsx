@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
+import preferenceDefaults from "@/lib/userPreferenceDefaults.json";
 import { RegisteredSetting, resolveSetting, SETTINGS_GROUPS, SETTINGS_ROWS, SETTINGS_SECTIONS, settingsInSection, type SettingsSection } from "./settingsRegistry";
 
 afterEach(cleanup);
@@ -35,6 +36,18 @@ describe("settings registry", () => {
 
   it("uses each keyboard action's own id instead of an array index", () => {
     for (const action of SHORTCUT_ACTIONS) expect(resolveSetting(`shortcuts.${action.id}`).title).toBe(action.label);
+  });
+
+  it("registers the file locator and records migrated preferences in their current store", () => {
+    expect(resolveSetting("general.settingsFile").storage).toEqual({ kind: "file", location: "$TERMINALX_HOME/settings.json" });
+    expect(resolveSetting("appearance.theme").storage.location).toBe("$TERMINALX_HOME/settings.json#preferences.theme");
+    expect(resolveSetting("appearance.mode").storage.location).toBe("$TERMINALX_HOME/settings.json#preferences.mode");
+    for (const row of SETTINGS_ROWS) {
+      const legacyKeys = row.storage.location.startsWith("raccoon.prefs#")
+        ? row.storage.location.slice("raccoon.prefs#".length).split(/,\s*/).map((key) => key.split(".")[0]) : [];
+      for (const key of legacyKeys) expect(key in preferenceDefaults, row.id).toBe(false);
+      if (row.storage.location.startsWith("$TERMINALX_HOME/settings.json#preferences.")) expect(row.storage.kind).toBe("file");
+    }
   });
 
   it("preserves native list semantics and ref ownership for custom editors", () => {

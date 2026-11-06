@@ -250,7 +250,7 @@ export const SETTINGS_ROWS = [
     id: "general.websiteLinks", section: "general", title: "Website links",
     description: "Choose a browser for website links, or ask each time.",
     searchTerms: ["general", "website", "links"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#linkBrowser, linkBrowserChosen" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.linkBrowser, preferences.linkBrowserChosen" },
   }),
   defineSetting({
     id: "general.linkActions", section: "general", title: "Link actions",
@@ -358,7 +358,7 @@ export const SETTINGS_ROWS = [
     id: "organizations.sidebar", section: "organizations", title: "Organizations in sidebar",
     description: "Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace.",
     searchTerms: ["organizations", "in", "sidebar"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#organizationDisplay, selectedOrganization" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.organizationDisplay, preferences.selectedOrganization" },
   }),
   defineSetting({
     id: "organizations.organization", section: "organizations", title: "Organization",

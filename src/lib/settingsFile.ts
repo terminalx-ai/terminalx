@@ -57,9 +57,16 @@ function save(patch: Record<string, unknown>) {
 async function refresh() {
   let file = await invoke<SettingsFileStatus>("settings_file_status");
   if (!connected && !file.error) {
-    file = await invoke<SettingsFileStatus>("update_user_preferences", {
-      patch: { ...legacyUserPreferences(), ...legacyThemePreferences() }, migrate: true,
-    });
+    try {
+      file = await invoke<SettingsFileStatus>("update_user_preferences", {
+        patch: { ...legacyUserPreferences(), ...legacyThemePreferences() }, migrate: true,
+      });
+    } catch (error) {
+      // A rejected legacy choice is not a corrupt settings file. Still show
+      // its valid values and path, and keep legacy storage available to retry.
+      apply(file);
+      throw error;
+    }
     connected = true;
     connectPreferenceFile(save);
     connectThemeFile(save);

@@ -1,12 +1,12 @@
-//! The existing user layer only. Registry-generated schemas and other layers
-//! belong to PRO-123/PRO-136; do not invent a second resolver here.
+//! The existing user layer only. Registry-generated schemas and the layered
+//! PRO-136 resolver remain follow-up work; do not invent a second resolver here.
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 
 use super::Settings;
@@ -16,6 +16,8 @@ static FILES: LazyLock<Mutex<HashMap<PathBuf, FileState>>> = LazyLock::new(Defau
 #[derive(Default)]
 struct FileState {
     good: Settings,
+    // Preserve fields this version does not understand when a control saves.
+    source: Option<Value>,
     error: Option<String>,
 }
 
@@ -30,27 +32,54 @@ pub struct Status {
     preferences: BTreeMap<String, Value>,
 }
 
-fn preference_defaults() -> Value {
+static PREFERENCE_DEFAULTS: LazyLock<Value> = LazyLock::new(||
     serde_json::from_str(include_str!("../../../../src/lib/userPreferenceDefaults.json")).expect("bundled preference defaults")
-}
+);
 
-fn template() -> Value {
+static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
     let mut value = serde_json::to_value(Settings::default()).expect("settings defaults");
     for key in ["linearApiKey", "linearViewer", "machineName"] {
         value[key] = Value::Null;
     }
-    value["preferences"] = preference_defaults();
+    value["preferences"] = PREFERENCE_DEFAULTS.clone();
     value
+});
+
+/// Retain duplicate members so an ambiguous field cannot silently become a
+/// new permission choice while valid fields elsewhere in the file are loaded.
+struct Members<'a>(BTreeMap<String, Vec<&'a RawValue>>);
+impl<'de> Deserialize<'de> for Members<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Members<'de>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result { formatter.write_str("an object") }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+                let mut members = BTreeMap::<String, Vec<&RawValue>>::new();
+                while let Some((key, value)) = map.next_entry()? { members.entry(key).or_default().push(value); }
+                Ok(Members(members))
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
+fn invalid(source: &str, raw: &RawValue, key: &str, why: &str, file_lines: bool) -> anyhow::Error {
+    let key = if key.is_empty() { "settings" } else { key };
+    if file_lines {
+        let line = source[..raw.get().as_ptr() as usize - source.as_ptr() as usize].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        anyhow::anyhow!("{key}, line {line}: {why}")
+    } else {
+        anyhow::anyhow!("Cannot save settings: {key}: {why}")
+    }
 }
 
 /// RawValue borrows the original input, so diagnostics use the actual value's
 /// line even for repeated keys in different objects or escaped JSON key names.
-fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str) -> Result<()> {
+fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_lines: bool) -> Result<()> {
     let value: Value = serde_json::from_str(raw.get())?;
-    let line = source[..raw.get().as_ptr() as usize - source.as_ptr() as usize].bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let invalid = |why: &str| anyhow::anyhow!("{}, line {line}: {why}", if key.is_empty() { "settings" } else { key });
+    let error = |why: &str| invalid(source, raw, key, why, file_lines);
     let choices: &[&str] = match key {
-        "quitBehavior" => &["keepRunning", "stopAll"],
         "statusBar.percent" => &["used", "remaining"],
         "statusBar.usageMode" => &["detailed", "compact"],
         "preferences.linkBrowser" => &["terminalx", "system", "ask"],
@@ -64,9 +93,8 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str) -> Result
         "preferences.mode" => &["system", "light", "dark"],
         _ => &[],
     };
-    if !choices.is_empty() && !(key == "quitBehavior" && value.is_null())
-        && !value.as_str().is_some_and(|text| choices.contains(&text)) {
-        return Err(invalid("unknown option"));
+    if !choices.is_empty() && !value.as_str().is_some_and(|text| choices.contains(&text)) {
+        return Err(error("unknown option"));
     }
     let numbers: &[u32] = match key {
         "agents.idleStopMinutes" => &super::IDLE_STOP_MINUTES,
@@ -76,15 +104,15 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str) -> Result
         _ => &[],
     };
     if !numbers.is_empty() && !value.as_u64().is_some_and(|n| numbers.iter().any(|v| u64::from(*v) == n)) {
-        return Err(invalid("choose one of the supported intervals"));
+        return Err(error("choose one of the supported intervals"));
     }
     if key == "floating.retentionDays" && !value.as_u64().is_some_and(|n| n <= u64::from(super::MAX_RETENTION_DAYS)) {
-        return Err(invalid("expected days from 0 to 3650"));
+        return Err(error("expected days from 0 to 3650"));
     }
     match expected {
         Value::Object(properties) => {
-            let members: BTreeMap<String, &RawValue> = serde_json::from_str(raw.get()).map_err(|_| invalid("expected an object"))?;
-            for (name, member) in members {
+            let Members(members): Members = serde_json::from_str(raw.get()).map_err(|_| error("expected an object"))?;
+            for (name, members) in members {
                 let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
                 let map_value = match key {
                     "mergedCleanup.projects" => Some(Value::Bool(false)),
@@ -92,45 +120,112 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str) -> Result
                     _ => None,
                 };
                 let Some(kind) = map_value.as_ref().or_else(|| properties.get(&name)) else {
-                    let line = source[..member.get().as_ptr() as usize - source.as_ptr() as usize].bytes().filter(|byte| *byte == b'\n').count() + 1;
-                    bail!("{path}, line {line}: unknown setting");
+                    // Future fields and editor metadata (including $schema)
+                    // are inert to this build, and survive subsequent writes.
+                    continue;
                 };
-                validate(source, member, kind, &path)?;
+                if members.len() > 1 { return Err(invalid(source, members[1], &path, "duplicate setting", file_lines)); }
+                validate(source, members[0], kind, &path, file_lines)?;
             }
         }
         Value::Array(_) => {
             if !value.as_array().is_some_and(|items| items.iter().all(Value::is_string)) {
-                return Err(invalid("expected a list of strings"));
+                return Err(error("expected a list of strings"));
             }
         }
-        Value::Bool(_) if !value.is_boolean() => return Err(invalid("expected true or false")),
-        Value::String(_) if !value.is_string() && !(key == "floating.shortcut" && value.is_null()) => return Err(invalid("expected a string")),
-        Value::Number(_) if !value.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)) => return Err(invalid("expected a non-negative integer")),
-        Value::Null if !value.is_null() && !value.is_string() => return Err(invalid("expected a string or null")),
+        Value::Bool(_) if !value.is_boolean() => return Err(error("expected true or false")),
+        Value::String(_) if !value.is_string() && !(key == "floating.shortcut" && value.is_null()) => return Err(error("expected a string")),
+        Value::Number(_) if !value.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)) => return Err(error("expected a non-negative integer")),
+        Value::Null if !value.is_null() && !value.is_string() => return Err(error("expected a string or null")),
         _ => {}
     }
     Ok(())
 }
 
-fn parse(source: &str) -> Result<Settings> {
+fn parse(source: &str) -> Result<Settings> { parse_input(source, true) }
+
+fn parse_input(source: &str, file_lines: bool) -> Result<Settings> {
     let raw: &RawValue = serde_json::from_str(source).map_err(|error| anyhow::anyhow!("settings, line {}: invalid JSON", error.line()))?;
-    validate(source, raw, &template(), "")?;
-    serde_json::from_str(source).map_err(|error| {
+    validate(source, raw, &TEMPLATE, "", file_lines)?;
+    let mut settings: Settings = serde_json::from_str(source).map_err(|error| {
         let message = error.to_string();
         let key = message.strip_prefix("duplicate field `").and_then(|tail| tail.split_once('`')).map(|(key, _)| key).unwrap_or("settings");
-        anyhow::anyhow!("{key}, line {}: invalid or duplicate setting", error.line())
-    })
+        if file_lines { anyhow::anyhow!("{key}, line {}: invalid or duplicate setting", error.line()) }
+        else { anyhow::anyhow!("Cannot save settings: {key}: invalid or duplicate setting") }
+    })?;
+    // Unknown preferences are preserved in the source, not sent to webviews.
+    settings.preferences.retain(|key, _| PREFERENCE_DEFAULTS.get(key).is_some());
+    Ok(settings)
+}
+
+/// Recover each known field independently. One invalid leaf must not discard
+/// credentials, permission choices, or valid siblings on a cold start. Missing
+/// keys still inherit defaults; only an invalid field uses its previous value.
+fn recover(source: &str, raw: &RawValue, expected: &Value, previous: Option<&Value>, key: &str) -> Value {
+    if let (Value::Object(properties), Ok(Members(members))) = (expected, serde_json::from_str::<Members>(raw.get())) {
+        let mut values = serde_json::Map::new();
+        for (name, members) in members {
+            let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
+            let map_value = match key {
+                "mergedCleanup.projects" => Some(Value::Bool(false)),
+                "preferences.shortcuts" => Some(serde_json::json!([""])),
+                _ => None,
+            };
+            if let Some(kind) = map_value.as_ref().or_else(|| properties.get(&name)) {
+                let previous = previous.and_then(|value| value.get(&name));
+                if map_value.is_some() && previous.is_none()
+                    && (members.len() > 1 || validate(source, members[0], kind, &path, true).is_err()) { continue; }
+                let value = if members.len() > 1 { previous.unwrap_or(kind).clone() }
+                    else { recover(source, members[0], kind, previous, &path) };
+                values.insert(name, value);
+            }
+        }
+        return Value::Object(values);
+    }
+    if validate(source, raw, expected, key, true).is_ok() {
+        serde_json::from_str(raw.get()).expect("validated JSON value")
+    } else {
+        previous.unwrap_or(expected).clone()
+    }
 }
 
 fn refresh(path: &Path, state: &mut FileState) {
-    let next = match std::fs::read_to_string(path) {
-        Ok(source) => parse(&source),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-        Err(_) => Err(anyhow::anyhow!("settings, line 1: could not read the file")),
-    };
-    match next {
-        Ok(good) => { state.good = good; state.error = None; }
-        Err(error) => state.error = Some(error.to_string()),
+    match std::fs::read_to_string(path) {
+        Ok(source) => {
+            state.source = serde_json::from_str::<Value>(&source).ok().filter(Value::is_object);
+            match parse(&source) {
+                Ok(good) => { state.good = good; state.error = None; }
+                Err(error) => {
+                    if state.source.is_some() {
+                        let previous = serde_json::to_value(&state.good).expect("settings values");
+                        let raw = serde_json::from_str::<&RawValue>(&source).expect("parsed source");
+                        let recovered = recover(&source, raw, &TEMPLATE, Some(&previous), "");
+                        if let Ok(good) = serde_json::from_value(recovered) { state.good = good; }
+                    }
+                    state.error = Some(error.to_string());
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => *state = FileState::default(),
+        Err(_) => { state.source = None; state.error = Some("settings, line 1: could not read the file".into()); }
+    }
+}
+
+/// Settings serializes only fields understood by this build. Carry the others
+/// forward at every object level, without restoring deleted dynamic map keys.
+fn preserve_unknown(next: &mut Value, source: &Value, expected: &Value, key: &str) {
+    if matches!(key, "mergedCleanup.projects" | "preferences.shortcuts") { return; }
+    if let (Some(next), Some(source), Some(properties)) = (next.as_object_mut(), source.as_object(), expected.as_object()) {
+        for (name, value) in source {
+            if let Some(kind) = properties.get(name) {
+                if let Some(child) = next.get_mut(name) {
+                    let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
+                    preserve_unknown(child, value, kind, &path);
+                }
+            } else {
+                next.insert(name.clone(), value.clone());
+            }
+        }
     }
 }
 
@@ -148,8 +243,10 @@ pub(super) fn load() -> Settings {
 
 fn write(path: &Path, state: &mut FileState, settings: &Settings) -> Result<()> {
     if let Some(error) = &state.error { bail!("Fix settings.json before saving: {error}"); }
-    let bytes = serde_json::to_vec_pretty(settings)?;
-    parse(std::str::from_utf8(&bytes)?)?;
+    let mut next = serde_json::to_value(settings)?;
+    let good = parse_input(&serde_json::to_string(&next)?, false)?;
+    if let Some(source) = &state.source { preserve_unknown(&mut next, source, &TEMPLATE, ""); }
+    let bytes = serde_json::to_vec_pretty(&next)?;
     // Tighten before making the temporary copy too, not after exposing a
     // credential in a file whose old permissions may have been too broad.
     #[cfg(unix)]
@@ -158,7 +255,8 @@ fn write(path: &Path, state: &mut FileState, settings: &Settings) -> Result<()> 
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     crate::store::write_atomic(path, &bytes)?;
-    state.good = settings.clone();
+    state.good = good;
+    state.source = Some(next);
     Ok(())
 }
 
@@ -315,7 +413,7 @@ mod tests {
     fn patch(value: Value) -> BTreeMap<String, Value> { serde_json::from_value(value).unwrap() }
 
     #[test]
-    fn validates_types_options_unknown_keys_and_the_exact_nested_line() {
+    fn validates_types_options_and_the_exact_nested_line() {
         for (source, key) in [
             (r#"{"preferences":{"sounds":"secret-value"}}"#, "preferences.sounds"),
             (r#"{"preferences":{"fontScale":"huge"}}"#, "preferences.fontScale"),
@@ -324,7 +422,6 @@ mod tests {
             (r#"{"notifications":null}"#, "notifications"),
             (r#"{"preferences":{"shortcuts":{"session.stop":"escape"}}}"#, "preferences.shortcuts.session.stop"),
             (r#"{"floating":{"retentionDays":3651}}"#, "floating.retentionDays"),
-            (r#"{"typo":true}"#, "typo"),
         ] {
             let error = parse(source).unwrap_err().to_string();
             assert!(error.contains(key) && error.contains("line 1"), "{error}");
@@ -347,6 +444,122 @@ mod tests {
         assert!(settings.floating.shortcut.is_none());
         assert!(settings.merged_cleanup.enabled_for("/repo"));
         assert_eq!(settings.preferences["mode"], "dark");
+    }
+
+    #[test]
+    fn a_cold_start_keeps_known_values_and_preserves_future_keys_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source = json!({
+            "$schema": "https://example.test/settings.schema.json", "future": {"enabled": true},
+            "linearApiKey": "private-key", "agents": {"readOnlyCommands": false, "future": 42},
+            "mergedCleanup": {"enabled": true, "graceMinutes": 30, "projects": {"/repo": true}},
+            "floating": {"shortcut": "alt+space", "alwaysOnTop": false, "retentionDays": 7},
+            "preferences": {"sounds": false, "theme": "moss", "future": "preserve-me"}
+        });
+        std::fs::write(&path, source.to_string()).unwrap();
+        let mut state = FileState::default();
+        refresh(&path, &mut state);
+        assert!(state.error.is_none());
+        assert_eq!(state.good.linear_api_key.as_deref(), Some("private-key"));
+        assert!(!state.good.agents.read_only_commands);
+        assert!(state.good.merged_cleanup.enabled);
+        assert_eq!(state.good.merged_cleanup.grace_minutes, 30);
+        assert_eq!(state.good.floating.shortcut.as_deref(), Some("alt+space"));
+        assert!(!state.good.floating.always_on_top);
+        assert_eq!(state.good.floating.retention_days, 7);
+        assert_eq!(state.good.preferences["sounds"], false);
+        assert_eq!(state.good.preferences["theme"], "moss");
+        assert!(!serde_json::to_string(&status_at(&path, &state)).unwrap().contains("preserve-me"));
+
+        let mut next = state.good.clone();
+        next.notifications = false;
+        next.linear_api_key = None; // Clearing a known optional field must still work.
+        next.merged_cleanup.projects.clear();
+        write(&path, &mut state, &next).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["$schema"], source["$schema"]);
+        assert_eq!(saved["future"], source["future"]);
+        assert_eq!(saved["agents"]["future"], 42);
+        assert_eq!(saved["preferences"]["future"], "preserve-me");
+        assert!(saved.get("linearApiKey").is_none());
+        assert_eq!(saved["mergedCleanup"]["projects"], json!({}));
+        assert_eq!(saved["notifications"], false);
+    }
+
+    #[test]
+    fn a_cold_start_with_one_invalid_value_keeps_credentials_permissions_and_valid_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let source = "{\n\"linearApiKey\":\"private-key\",\n\"agents\":{\"readOnlyCommands\":false,\"idleStopMinutes\":1},\n\"mergedCleanup\":{\"enabled\":true,\"graceMinutes\":30},\n\"floating\":{\"shortcut\":\"alt+space\",\"retentionDays\":7},\n\"preferences\":{\"theme\":\"moss\",\"sounds\":false}\n}";
+        std::fs::write(&path, source).unwrap();
+        let mut state = FileState::default();
+        refresh(&path, &mut state);
+        assert!(state.error.as_deref().unwrap().contains("agents.idleStopMinutes, line 3"));
+        assert_eq!(state.good.linear_api_key.as_deref(), Some("private-key"));
+        assert!(!state.good.agents.read_only_commands);
+        assert_eq!(state.good.agents.idle_stop_minutes, Settings::default().agents.idle_stop_minutes);
+        assert!(state.good.merged_cleanup.enabled);
+        assert_eq!(state.good.merged_cleanup.grace_minutes, 30);
+        assert_eq!(state.good.floating.shortcut.as_deref(), Some("alt+space"));
+        assert_eq!(state.good.floating.retention_days, 7);
+        assert_eq!(state.good.preferences["theme"], "moss");
+        assert_eq!(state.good.preferences["sounds"], false);
+
+        // A later invalid preference only retains that preference, while valid edits apply.
+        std::fs::write(&path, source.replace("\"sounds\":false", "\"sounds\":\"invalid\"").replace("\"theme\":\"moss\"", "\"theme\":\"slate\"")).unwrap();
+        refresh(&path, &mut state);
+        assert_eq!(state.good.preferences["sounds"], false);
+        assert_eq!(state.good.preferences["theme"], "slate");
+        assert!(!state.good.agents.read_only_commands);
+    }
+
+    #[test]
+    fn a_cold_start_with_an_invalid_preference_keeps_the_rest_and_uses_its_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"linearApiKey":"private-key","agents":{"readOnlyCommands":false},"preferences":{"sounds":"invalid","theme":"moss"}}"#).unwrap();
+        let mut state = FileState::default();
+        refresh(&path, &mut state);
+        assert!(state.error.as_deref().unwrap().contains("preferences.sounds"));
+        assert_eq!(state.good.preferences["sounds"], PREFERENCE_DEFAULTS["sounds"]);
+        assert_eq!(state.good.preferences["theme"], "moss");
+        assert_eq!(state.good.linear_api_key.as_deref(), Some("private-key"));
+        assert!(!state.good.agents.read_only_commands);
+    }
+
+    #[test]
+    fn future_quit_behaviors_keep_the_existing_lenient_policy() {
+        let settings = parse(r#"{"quitBehavior":"future-policy","agents":{"readOnlyCommands":false}}"#).unwrap();
+        assert_eq!(settings.quit_behavior, Some(super::super::QuitBehavior::KeepRunning));
+        assert!(!settings.agents.read_only_commands);
+    }
+
+    #[test]
+    fn duplicate_fields_and_invalid_map_entries_do_not_replace_other_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut state = FileState::default();
+        std::fs::write(&path, r#"{"agents":{"readOnlyCommands":false},"preferences":{"theme":"moss"}}"#).unwrap();
+        refresh(&path, &mut state);
+        std::fs::write(&path, r#"{"agents":{"readOnlyCommands":false,"readOnlyCommands":true},"preferences":{"theme":"slate","shortcuts":{"bad":"invalid","valid":["mod+."]}}}"#).unwrap();
+        refresh(&path, &mut state);
+        assert!(!state.good.agents.read_only_commands);
+        assert_eq!(state.good.preferences["theme"], "slate");
+        assert_eq!(state.good.preferences["shortcuts"], json!({"valid":["mod+."]}));
+        assert!(state.error.as_deref().unwrap().contains("agents.readOnlyCommands"));
+    }
+
+    #[test]
+    fn bad_window_or_migration_patches_have_no_fictional_file_line() {
+        for migrate in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(&path, "{}").unwrap();
+            let error = change_preferences(&path, patch(json!({"fontScale":"invalid"})), migrate, false).err().unwrap().to_string();
+            assert_eq!(error, "Cannot save settings: preferences.fontScale: unknown option");
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "{}");
+        }
     }
 
     #[test]

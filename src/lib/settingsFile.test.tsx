@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import defaults from "./userPreferenceDefaults.json";
 import type { SettingsFileStatus } from "./settingsFile";
 
@@ -15,6 +15,9 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTheme: 
 
 let file: SettingsFileStatus;
 let migrated: boolean;
+// Keep cold Vite compilation outside the row's five-second behavior check.
+// beforeEach still resets modules so each case starts with its own stores.
+beforeAll(async () => { await import("../components/settings/AgentIdleSettings"); }, 60_000);
 beforeEach(() => {
   vi.resetModules();
   localStorage.clear();
@@ -122,6 +125,7 @@ describe("user preference files", () => {
     render(<SettingsFileError />);
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
+    expect(screen.getByRole("alert").textContent).toContain("Invalid entries use their previous value or a default.");
     expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).sounds).toBe(false);
     file.error = null;
     await act(async () => mocks.listeners.get("settings_file_changed")!());
@@ -140,6 +144,27 @@ describe("user preference files", () => {
     await act(async () => prefs.setPrefs({ sounds: false }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Disk full"));
     expect(prefs.getPrefs().sounds).toBe(true);
+  });
+
+  it("shows the valid file when a legacy migration patch is rejected, without a fictional line", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ fontScale: "invalid", sounds: false }));
+    file.exists = true;
+    file.preferences = { sounds: true, theme: "moss" };
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) => command === "update_user_preferences"
+      ? Promise.reject("Cannot save settings: preferences.fontScale: unknown option")
+      : original(command, args));
+    const settings = await import("./settingsFile");
+    const prefs = await import("./prefs");
+    const { SettingsFileError, SettingsFileRow } = await import("../components/settings/SettingsFile");
+    await settings.bootSettingsFile();
+    render(<><SettingsFileError /><SettingsFileRow /></>);
+    expect(prefs.getPrefs().sounds).toBe(true);
+    expect(document.documentElement.dataset.theme).toBe("moss");
+    expect(screen.getByText(file.path)).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Cannot save settings: preferences.fontScale");
+    expect(screen.getByRole("alert").textContent).not.toMatch(/line \d/);
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).fontScale).toBe("invalid");
   });
 
   it("opens on the last valid file view without replacing legacy choices before migration succeeds", async () => {

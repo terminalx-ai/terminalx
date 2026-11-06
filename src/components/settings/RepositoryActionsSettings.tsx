@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 import { Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
-import { SettingRow, Switch } from "@/components/ui/controls";
+import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { IconPicker, RepositoryIcon } from "@/components/ui/IconPicker";
 import { moveRepositoryEntry, validateAction, type RepositoryAction } from "@/lib/repositoryActions";
@@ -113,8 +113,14 @@ function ActionDialog({ action, actions, isNew, busy, error, onClose, onSave }: 
               <textarea id={`${id}-command`} rows={5} spellCheck={false} autoCapitalize="off" autoCorrect="off" value={draft.command} aria-invalid={!!errors.command} aria-describedby={errors.command ? `${id}-command-error` : undefined} onChange={(event) => setDraft({ ...draft, command: event.target.value })} className={`${repositoryInputClass} resize-y font-mono`} />
               <RepositoryFieldError id={`${id}-command-error`} error={errors.command} />
             </div>
-            <SettingRow label="Run after setup" control={<Switch aria-label="Run after setup" checked={draft.runAfterSetup} onCheckedChange={(runAfterSetup) => setDraft({ ...draft, runAfterSetup })} />} />
-            <SettingRow label="Allow several at once" control={<Switch aria-label="Allow several at once" checked={draft.concurrent} onCheckedChange={(concurrent) => setDraft({ ...draft, concurrent })} />} />
+            <div className="flex items-center justify-between gap-4 py-2">
+              <label htmlFor={`${id}-after-setup`} className="min-w-0 text-[13px] font-medium">Run after setup</label>
+              <Switch id={`${id}-after-setup`} className="shrink-0" checked={draft.runAfterSetup} onCheckedChange={(runAfterSetup) => setDraft({ ...draft, runAfterSetup })} />
+            </div>
+            <div className="flex items-center justify-between gap-4 py-2">
+              <label htmlFor={`${id}-concurrent`} className="min-w-0 text-[13px] font-medium">Allow several at once</label>
+              <Switch id={`${id}-concurrent`} className="shrink-0" checked={draft.concurrent} onCheckedChange={(concurrent) => setDraft({ ...draft, concurrent })} />
+            </div>
           </fieldset>
           <RepositoryFieldError id={`${id}-save-error`} error={error} />
           <DialogFooter>

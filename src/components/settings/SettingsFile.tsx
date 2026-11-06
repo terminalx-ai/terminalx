@@ -5,7 +5,7 @@ import { createSettingsFile, useSettingsFile } from "@/lib/settingsFile";
 
 export function SettingsFileError() {
   const { error } = useSettingsFile();
-  return error ? <p role="alert" className="mb-4 rounded-md border border-destructive/30 p-3 text-xs text-destructive">Settings file: {error}. Your last valid settings remain in effect.</p> : null;
+  return error ? <p role="alert" className="mb-4 rounded-md border border-destructive/30 p-3 text-xs text-destructive">Settings: {error}. Valid entries remain in use. Invalid entries use their previous value or a default.</p> : null;
 }
 
 export function SettingsFileRow() {
