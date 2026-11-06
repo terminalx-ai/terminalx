@@ -303,7 +303,7 @@ describe("a settled turn's header and footer", () => {
     setPrefs({ foldToolCalls: true });
     render(<TurnBlock turn={worked("ok")} sessionId="s" stream={[]} working={false} />);
     const header = screen.getByRole("button", { name: /Worked for 14s/ });
-    expect(header.textContent).toContain("2 tool calls");
+    expect(header.textContent).toBe("Worked for 14s · 2 tool calls");
     expect(header.getAttribute("aria-expanded")).toBe("false");
     const footer = screen.getByTestId("turn-footer");
     expect(footer.textContent).not.toContain("Worked");

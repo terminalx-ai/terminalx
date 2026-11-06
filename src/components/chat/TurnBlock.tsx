@@ -74,6 +74,8 @@ function TurnBody({
   const linkContext = useMemo(() => cwd ? { sessionId, cwd } : undefined, [cwd, sessionId]);
   const changes = useMemo(() => (prefs.turnChanges && turn.completed ? turnFileChanges(turn) : []), [prefs.turnChanges, turn]);
   const outcome = turnOutcome(turn);
+  // The header leads with how the turn went when that says something: how long it took, or that it stopped or failed.
+  const lead = outcome && (outcome.tone !== "ok" || outcome.duration) ? outcome : null;
 
   return (
     // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
@@ -89,9 +91,10 @@ function TurnBody({
             aria-expanded={expanded}
             className="flex max-w-full items-center gap-1.5 rounded-md -mx-1.5 px-1.5 py-1 text-[13px] hover:bg-veil-raised"
           >
-            {outcome && outcome.tone !== "ok" && <OutcomeIcon tone={outcome.tone} />}
-            <span className={cn("shrink-0", outcome?.tone === "failed" ? "text-destructive" : "text-muted-foreground")}>{outcome ? outcome.label : summarize(turn)}</span>
-            {outcome && <span className="min-w-0 truncate text-faint">· {summarize(turn)}</span>}
+            {lead && lead.tone !== "ok" && <OutcomeIcon tone={lead.tone} />}
+            <span className={cn("shrink-0", lead?.tone === "failed" ? "text-destructive" : "text-muted-foreground")}>{lead ? lead.label : summarize(turn)}</span>
+            {/* The space before the dot is for the text (a screen reader, a copy); the flex gap draws the room. */}
+            {lead && <span className="min-w-0 truncate text-faint">{` · ${summarize(turn)}`}</span>}
             <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", expanded && "rotate-90")} />
           </button>
           {expanded && (
