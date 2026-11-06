@@ -30,7 +30,7 @@ pub(crate) fn guest_status(
     let sharing = sessions.sharing.lock().unwrap();
     let share = sharing.sessions.get(session).context("Sharing ended.")?;
     super::owner::authorize(share, owner)?;
-    let _privacy = share.guests.get(connection).context("Access ended.")?.privacy.enter()?;
+    let _privacy = share.guests.get(connection).context("Access ended.")?.privacy.scope()?;
     let guest = share.guests.get(connection).context("Access ended.")?;
     if !guest.admitted {
         return Ok(json!({ "admitted": false }));
@@ -72,7 +72,7 @@ pub(crate) fn request(
         .get_mut(session)
         .context("Sharing ended.")?;
     super::owner::authorize(share, owner)?;
-    let _privacy = share.guests.get(connection).context("Access ended.")?.privacy.enter()?;
+    let _privacy = share.guests.get(connection).context("Access ended.")?.privacy.scope()?;
     let tab_id = params["tabId"].as_str();
     let write = matches!(
         method,
@@ -328,7 +328,7 @@ pub(crate) fn drain_queue(
         let input = share.queue.remove(at).unwrap();
         let kept = input.clone();
         let result = (|| {
-            let _privacy = input.privacy.enter()?;
+            let _privacy = input.privacy.scope()?;
             let tab = index::get(session)?
                 .tab(&input.tab_id)
                 .cloned()

@@ -16,8 +16,9 @@ choice. A missing file defaults to off; an unreadable or malformed existing file
 fails closed. The desktop loads the policy before creating service clients. Each
 window loads it before rendering and the local background runtime watches the
 same policy. A setting change also asks the attached owner to reload it and
-waits for its acknowledgement. An older or unavailable owner produces an error
-instead of claiming that activation completed. Profile changes are checked every second; windows refresh their
+waits for its acknowledgement. An older or unavailable owner produces a synchronization error alongside the
+actual applied Mac policy. The switch shows that applied value; an IPC failure
+makes it unavailable, rather than claiming that protection is enabled. Profile changes are checked every second; windows refresh their
 display every two seconds and on focus.
 
 ## Enforce it with macOS device management
@@ -51,7 +52,9 @@ after disabling; normal recovery creates new ones. Pairing/share entry points,
 mobile grants and guest requests also check the policy. Remote writes hold a
 lease through delivery, including PTY paste/draw waits and partial native Codex
 frames; activation drains these leases before acknowledging. Old grants and
-queued prompts stay invalid after a toggle. Reconnecting obtains new grants. Organisation launch
+queued prompts and control commands stay invalid after a toggle. Phone controls
+retain privacy authority through mutations; queued slash commands, native Codex
+frames, HTTP actions and deferred restarts revalidate it at their final writer. Reconnecting obtains new grants. Organisation launch
 config is not injected into new agent processes while enabled.
 
 Frontend gates stop catalog polling and queued cloud/remote actions. Webview

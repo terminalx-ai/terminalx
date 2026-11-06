@@ -15,7 +15,7 @@ export function DataPrivacySettings() {
       <SettingRow
         label="Data privacy mode"
         description="Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved."
-        control={<Switch aria-label="Data privacy mode" checked={privacy.enabled} disabled={!privacy.ready || privacy.managed || busy} onCheckedChange={(enabled) => {
+        control={<Switch aria-label="Data privacy mode" checked={privacy.ready && privacy.enabled} disabled={!privacy.ready || privacy.managed || busy} onCheckedChange={(enabled) => {
           setBusy(true);
           setError(null);
           void setDataPrivacy(enabled).catch((cause: unknown) => setError(String(cause))).finally(() => setBusy(false));
@@ -30,7 +30,7 @@ export function DataPrivacySettings() {
         <li>External logging</li>
       </ul>
       {privacy.managed && <p role="status" className="mb-3 text-xs text-muted-foreground">Managed by your organisation</p>}
-      {error && <p role="alert" className="mb-3 text-xs text-destructive">{error}</p>}
+      {(error || privacy.error) && <p role="alert" className="mb-3 text-xs text-destructive">{error || privacy.error}</p>}
     </div>
   );
 }

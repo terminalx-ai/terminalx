@@ -660,6 +660,11 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         _ => {}
     }
     let grant = manager.mobile.grant(&actor, string("connection")?)?;
+    // This independent lease survives controls releasing their device locks
+    // before taking admission/runtime locks. Queued writers inherit its ticket.
+    let _privacy = grant.privacy.scope()?;
+    #[cfg(test)]
+    after_control_admission();
     if method == "release" {
         manager.mobile.release_driver(&actor,string("connection")?,string("sessionId")?,string("tabId")?)?;
         manager.mobile.publish_drivers(manager);
@@ -1273,3 +1278,17 @@ mod lock_tests;
 #[cfg(test)]
 #[path = "mobile_create_tests.rs"]
 mod create_tests;
+
+#[cfg(test)]
+thread_local! {
+    static CONTROL_ADMITTED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn observe_control_admission(callback: Box<dyn FnOnce()>) {
+    CONTROL_ADMITTED.with(|slot| *slot.borrow_mut() = Some(callback));
+}
+#[cfg(test)]
+fn after_control_admission() {
+    let callback = CONTROL_ADMITTED.with(|slot| slot.borrow_mut().take());
+    if let Some(callback) = callback { callback(); }
+}

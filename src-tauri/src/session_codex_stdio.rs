@@ -9,6 +9,12 @@ use crate::harness::codex::stdio::{Action as StdioAction, Outbound, Stdio};
 use crate::harness::host::TerminalReceipt;
 use crate::store::index::AgentTransport;
 
+pub(super) struct Delivery {
+    line: Outbound,
+    sender: Option<Authority>,
+    privacy: Option<crate::data_privacy::Ticket>,
+}
+
 pub(super) fn selected(tab: &TabEntry) -> bool {
     tab.transport == AgentTransport::ExperimentalCodexStdio
 }
@@ -246,11 +252,15 @@ impl SessionManager {
         let cwd = entry.cwd.clone();
         let session = rt.session_id.clone();
         let tab = rt.tab_id.clone();
+        let privacy = crate::data_privacy::remote_ticket();
         // Reserve the exact launch while admitted; no discovery, version wait,
         // spawn, rollback or reader join runs under admission/runtime locks.
         let spawned = std::thread::Builder::new().name("codex-stdio-owner".into()).spawn(move || {
             let Some(rt_arc) = runtime.upgrade() else { return };
-            let result = manager.prepare_codex_stdio(&rt_arc, &launch, &session, &tab, &cwd);
+            let result = (|| {
+                let _privacy = privacy.as_ref().map(|ticket| ticket.scope()).transpose()?;
+                manager.prepare_codex_stdio(&rt_arc, &launch, &session, &tab, &cwd)
+            })();
             {
                 let mut rt = rt_arc.lock().unwrap();
                 if !same_launch(&rt, &launch) { return; }
@@ -264,8 +274,8 @@ impl SessionManager {
             drop(rt_arc);
             // Only this worker writes. It may wait for admission, but reader
             // settlement and the Host terminal receipt never wait for it.
-            while let Ok((line, sender)) = rx.recv() {
-                if let Err(error) = manager.write_codex_frame(&runtime, &launch, line, sender) {
+            while let Ok(Delivery { line, sender, privacy }) = rx.recv() {
+                if let Err(error) = manager.write_codex_frame(&runtime, &launch, line, sender, privacy) {
                     if let Some(rt_arc) = runtime.upgrade() {
                         let mut rt = rt_arc.lock().unwrap();
                         if same_launch(&rt, &launch) && !rt.stopping {
@@ -354,14 +364,14 @@ impl SessionManager {
     /// takes it (`send_mobile`, `type_prompt`, a phone's reconcile): sharing,
     /// the share's admission, the phone's permit, the share owner's
     /// attachment, and only then the tab's runtime, never under it.
-    fn write_codex_frame(&self, runtime: &std::sync::Weak<Mutex<TabRuntime>>, launch: &Arc<()>, frame: Outbound, sender: Option<Authority>) -> Result<()> {
+    fn write_codex_frame(&self, runtime: &std::sync::Weak<Mutex<TabRuntime>>, launch: &Arc<()>, frame: Outbound, sender: Option<Authority>, control: Option<crate::data_privacy::Ticket>) -> Result<()> {
         let mut bytes = frame.line.as_bytes().to_vec();
         bytes.push(b'\n');
         let mut offset = 0;
         let deadline = Instant::now() + Duration::from_secs(5);
         // Keep the remote barrier through every partial write of this frame.
-        let privacy = sender.as_ref().and_then(|sender| sender.shared.as_ref().map(|permit| &permit.privacy)
-            .or_else(|| sender.mobile.as_ref().map(|permit| &permit.grant.privacy))).map(|ticket| ticket.enter()).transpose();
+        let privacy = control.as_ref().or_else(|| sender.as_ref().and_then(|sender| sender.shared.as_ref().map(|permit| &permit.privacy)
+            .or_else(|| sender.mobile.as_ref().map(|permit| &permit.grant.privacy)))).map(|ticket| ticket.enter()).transpose();
         let mut sender = sender;
         while offset < bytes.len() {
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
@@ -396,7 +406,7 @@ impl SessionManager {
                     (Err(error), _) | (_, Err(error)) => {
                         engine.withdraw(&frame);
                         log::warn!("[{}] withdrew a Codex prompt before delivery: {error:#}", rt.key());
-                        self.withdraw_codex_prompt(&mut rt, sender.as_ref().and_then(|sender| sender.seq));
+                        if frame.delivers_prompt() { self.withdraw_codex_prompt(&mut rt, sender.as_ref().and_then(|sender| sender.seq)); }
                         return Ok(());
                     }
                 };
@@ -437,7 +447,7 @@ impl SessionManager {
                     // the sender's permits without holding this runtime.
                     let sender = if line.delivers_prompt() { rt.stdio_authority.take() } else { None };
                     rt.stdio_writer.as_ref().context("Codex writer is closed")?
-                        .try_send((line, sender)).context("Codex writer queue unavailable; input will not be replayed")?;
+                        .try_send(Delivery { line, sender, privacy: crate::data_privacy::remote_ticket() }).context("Codex writer queue unavailable; input will not be replayed")?;
                 }
                 StdioAction::ThreadReady(id) => {
                     let Engine::CodexStdio(engine) = &rt.engine else { bail!("Codex owner was replaced") };

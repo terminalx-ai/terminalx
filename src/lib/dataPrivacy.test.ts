@@ -39,7 +39,7 @@ describe("data privacy command boundary", () => {
   it("keeps networking off if the policy cannot be read, and recovers", async () => {
     native.mockRejectedValueOnce(new Error("unavailable"));
     await refreshDataPrivacy();
-    expect(getDataPrivacy()).toMatchObject({ enabled: true, ready: true });
+    expect(getDataPrivacy()).toMatchObject({ enabled: true, ready: false });
     native.mockResolvedValueOnce({ enabled: false, managed: false });
     await refreshDataPrivacy();
     expect(getDataPrivacy().enabled).toBe(false);
@@ -55,4 +55,16 @@ describe("data privacy command boundary", () => {
     await oldRead;
     expect(getDataPrivacy().enabled).toBe(true);
   });
+});
+
+it("reports the applied off state with an owner synchronization error", async () => {
+  native.mockResolvedValueOnce({ enabled: true, managed: false });
+  await setDataPrivacy(true);
+  native.mockResolvedValueOnce({ enabled: false, managed: false, error: "Owner unavailable" });
+  await setDataPrivacy(false);
+  expect(getDataPrivacy()).toMatchObject({ enabled: false, ready: true, error: "Owner unavailable" });
+  expect(privacyBlocksCommand("cloud_workspaces")).toBe(false);
+  native.mockResolvedValueOnce({ enabled: false, managed: false, error: "Owner unsupported" });
+  await refreshDataPrivacy();
+  expect(getDataPrivacy()).toMatchObject({ enabled: false, ready: true, error: "Owner unsupported" });
 });

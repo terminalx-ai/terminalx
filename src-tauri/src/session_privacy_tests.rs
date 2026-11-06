@@ -151,3 +151,96 @@ fn writer_child() {
     rig.typed();
     assert_eq!(std::fs::read(&input).unwrap(),before,"old permits never revive");
 }
+
+#[test]
+fn privacy_fences_paused_controls_and_cancels_queued_model_effort_commands() {
+    for case in ["control", "openTerminal", "model", "effort"] {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("child.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::watch_tests::prompts::privacy::control_child", "--nocapture"])
+            .env(CASE, case).env(DIRECTORY, dir.path())
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
+        let info_path = dir.path().join("ready.json");
+        wait_for("control admitted or command queued", || info_path.exists());
+        let info: serde_json::Value = serde_json::from_slice(&std::fs::read(info_path).unwrap()).unwrap();
+        let preference = PathBuf::from(info["root"].as_str().unwrap()).join("data-privacy.json");
+        store::write_json(&preference, &json!({"enabled":true})).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let owner = info.clone();
+        let activation = std::thread::spawn(move || tx.send(refresh_owner(&owner)).unwrap());
+        if matches!(case, "control" | "openTerminal") {
+            assert!(rx.recv_timeout(Duration::from_millis(100)).is_err(), "admitted {case} must hold activation before its mutation");
+            std::fs::write(dir.path().join("release"), b"").unwrap();
+        }
+        assert!(rx.recv_timeout(WAIT).unwrap().enabled);
+        activation.join().unwrap();
+        let input = PathBuf::from(info["input"].as_str().unwrap());
+        assert!(std::fs::read(&input).unwrap_or_default().is_empty(), "{case}: no command has been delivered");
+        store::write_json(&preference, &json!({"enabled":false})).unwrap();
+        assert!(!refresh_owner(&info).enabled);
+        std::fs::write(dir.path().join("restored"), b"").unwrap();
+        let until = Instant::now() + WAIT;
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() { break status; }
+            assert!(Instant::now() < until,"{case}: {}", std::fs::read_to_string(&log_path).unwrap());
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success(),"{case}: {}", std::fs::read_to_string(&log_path).unwrap());
+    }
+}
+
+#[test]
+fn control_child() {
+    let Ok(case) = std::env::var(CASE) else { return };
+    let coordination = PathBuf::from(std::env::var(DIRECTORY).unwrap());
+    let rig = Rig::of(CliKind::Claude, "");
+    let root = store::root().unwrap();
+    crate::data_privacy::refresh();
+    index::save(&[serde_json::from_value(json!({"id":SESSION,"projectPath":rig._dir.path(),"cwd":rig._dir.path(),
+        "title":"Privacy control", "created":index::now(),"modified":index::now(),
+        "tabs":[{"id":TAB,"harness":"claude","permissionMode":"default","model":"opus","effort":"low","created":index::now()}]})).unwrap()]).unwrap();
+    let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(120));
+    let endpoint = rig.manager.control.clone();
+    let service = crate::control::ControlService::headless(rig.manager.sink.clone(),rig.manager.clone(),endpoint.clone(),"local".into())
+        .with_local_lifetime(lifetime.clone());
+    crate::hooks::serve_private(endpoint.clone(), |_| crate::hooks::HookReply::refused("test"), move |request| service.handle(request)).unwrap();
+    let input = rig._dir.path().join("typed");
+    rig.run_in_pane(&format!("stty raw -echo\nprintf '\\033]0;CLI-IS-UP\\007'\nexec cat > '{}'\n",input.display()));
+    store::write_json(&root.join("devices.json"), &json!({"devices":[{"id":"phone","label":"Phone","platform":"test",
+        "token":"fixture","scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()}]})).unwrap();
+    let lease = lifetime.command("runtime.attach",json!({"protocol":1})).unwrap();
+    let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+    rig.manager.mobile.register(&lifetime,actor.clone(),"connection","phone").unwrap();
+    let params = json!({"actor":actor,"connection":"connection","sessionId":SESSION,"tabId":TAB,"model":"sonnet","effort":"high"});
+    let method = if case == "openTerminal" { "openTerminal" } else if case == "effort" { "setEffort" } else { "setModel" };
+    let info = json!({"socket":endpoint.socket,"token":endpoint.token,"root":root,"input":input});
+    // Hold the existing physical-writer queue. The model/effort operation
+    // returns after enqueue, proving it is the queued authority, not its
+    // original call's lease, which prevents a write after off/on.
+    let queue = rig.manager.writers.lock().unwrap().entry(rig.pane.clone()).or_default().ticket();
+    let writer = queue.take();
+    if matches!(case.as_str(),"control" | "openTerminal") {
+        let directory = coordination.clone();
+        let info = info.clone();
+        crate::local_runtime::mobile::observe_control_admission(Box::new(move || {
+            store::write_json(&directory.join("ready.json"),&info).unwrap();
+            wait_for("paused control released", || directory.join("release").exists());
+        }));
+    }
+    let result = crate::local_runtime::mobile::execute(&rig.manager,&lifetime,method,params.clone());
+    if matches!(case.as_str(),"model" | "effort") {
+        result.unwrap();
+        assert!(matches!(&rig.rt.lock().unwrap().engine,Engine::Cli(cli) if cli.echoed.iter().any(|echo|echo.command)),"a real slash command was queued");
+        store::write_json(&coordination.join("ready.json"),&info).unwrap();
+    }
+    wait_for("activation and restoration", || coordination.join("restored").exists());
+    drop(writer);
+    if case != "openTerminal" {
+        wait_for("queued command withdrawn", || matches!(&rig.rt.lock().unwrap().engine,Engine::Cli(cli) if !cli.echoed.iter().any(|echo|echo.command)));
+        rig.typed();
+    }
+    assert!(std::fs::read(&input).unwrap_or_default().is_empty(),"old control must never type after restoration");
+    assert!(crate::local_runtime::mobile::execute(&rig.manager,&lifetime,method,params).is_err(),"old phone grant cannot mutate the tab again");
+}

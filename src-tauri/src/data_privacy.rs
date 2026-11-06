@@ -97,6 +97,31 @@ impl Ticket {
     }
 }
 
+// Owner operations are synchronous until they explicitly enqueue work. The
+// scope carries just privacy authority, never device/attachment locks. Each
+// asynchronous writer captures `remote_ticket()` and re-enters it at delivery.
+thread_local! {
+    static REMOTE: std::cell::RefCell<Option<Ticket>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn remote_ticket() -> Option<Ticket> { REMOTE.with(|ticket| ticket.borrow().clone()) }
+
+pub struct RemoteScope {
+    _write: RemoteWrite,
+    previous: Option<Ticket>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl Ticket {
+    pub fn scope(&self) -> anyhow::Result<RemoteScope> {
+        let write = self.enter()?;
+        let previous = REMOTE.with(|ticket| ticket.replace(Some(self.clone())));
+        Ok(RemoteScope { _write: write, previous, _thread: Default::default() })
+    }
+}
+impl Drop for RemoteScope {
+    fn drop(&mut self) { REMOTE.with(|ticket| ticket.replace(self.previous.take())); }
+}
+
 /// Held through the last physical mutation, including PTY paste/draw waits
 /// and partial stdio frames. Counted leases allow nested admission without a
 /// recursive RwLock deadlock when activation is waiting for existing work.
@@ -191,41 +216,62 @@ pub fn initialize() {
     });
 }
 
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub async fn data_privacy_status(state: tauri::State<'_, crate::AppState>) -> Result<Status, String> {
-    let runtime = state.runtime();
-    tauri::async_runtime::spawn_blocking(move || synchronize_runtime(refresh(), runtime.as_deref()))
-        .await.map_err(|error| error.to_string())?
+/// Always report the applied transport policy, even when owner synchronization
+/// failed. A synchronization error must never be mistaken for a policy value.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    #[serde(flatten)]
+    status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn synchronize(policy: &Policy, desired: Status, owner: impl FnOnce() -> anyhow::Result<Status>) -> Snapshot {
+    policy.set(desired);
+    let status = policy.status();
+    let error = match owner() {
+        Ok(applied) if applied == status => None,
+        Ok(_) => Some("The background runtime's data privacy setting changed. Try again.".into()),
+        Err(error) => Some(format!("Could not apply data privacy mode to the background runtime: {error}. Update or restart the runtime before relying on this setting.")),
+    };
+    Snapshot { status, error }
 }
 
 #[cfg(feature = "desktop")]
-fn synchronize_runtime(status: Status, runtime: Option<&crate::local_runtime::desktop::Desktop>) -> Result<Status, String> {
-    if let Some(runtime) = runtime {
-        let owner = runtime.refresh_data_privacy().map_err(|error| format!("Could not apply data privacy mode to the background runtime: {error}. Update or restart the runtime before using remote features."))?;
-        if owner != status { return Err("The background runtime's data privacy setting changed. Try again.".into()); }
-    }
-    Ok(status)
+fn synchronize_runtime(status: Status, runtime: Option<&crate::local_runtime::desktop::Desktop>) -> Snapshot {
+    synchronize(policy(), status, || runtime.map_or(Ok(status), |runtime| runtime.refresh_data_privacy()))
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn data_privacy_set(state: tauri::State<'_, crate::AppState>, enabled: bool) -> Result<Status, String> {
+pub async fn data_privacy_status(state: tauri::State<'_, crate::AppState>) -> Result<Snapshot, String> {
     let runtime = state.runtime();
     tauri::async_runtime::spawn_blocking(move || {
         let _settings = SETTINGS.lock().unwrap();
-        let status = read_status();
-        if !enabled && status.managed {
-            policy().set(status);
-            return Err("Managed by your organisation".into());
-        }
-        crate::store::write_json(&crate::store::root().map_err(|e| e.to_string())?.join("data-privacy.json"), &Preference { enabled })
-            .map_err(|error| error.to_string())?;
+        synchronize_runtime(read_status(), runtime.as_deref())
+    })
+        .await.map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn data_privacy_set(state: tauri::State<'_, crate::AppState>, enabled: bool) -> Result<Snapshot, String> {
+    let runtime = state.runtime();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _settings = SETTINGS.lock().unwrap();
+        let write = || -> anyhow::Result<()> {
+            anyhow::ensure!(enabled || !read_status().managed, "Managed by your organisation");
+            crate::store::write_json(&crate::store::root()?.join("data-privacy.json"), &Preference { enabled })
+        };
+        let error = write().err().map(|error| error.to_string());
         policy().set(read_status());
         let status = policy().status();
-        drop(_settings);
-        synchronize_runtime(status, runtime.as_deref())
-    }).await.map_err(|error| error.to_string())?
+        let mut snapshot = synchronize_runtime(status, runtime.as_deref());
+        if error.is_some() { snapshot.error = error; }
+        snapshot
+    }).await.map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -473,6 +519,62 @@ mod tests {
         assert_eq!(request.join().unwrap().unwrap().status(), 200);
         receive.recv_timeout(Duration::from_secs(1)).unwrap();
         switch.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn owner_failure_reports_the_applied_http_and_relay_policy() {
+        for initial in [Status::default(), ON] {
+            for failure in ["unsupported", "unavailable"] {
+                let dir = tempfile::tempdir().unwrap();
+                let file = dir.path().join("data-privacy.json");
+                let policy = Arc::new(Policy::default());
+                policy.set(initial);
+                // Both a saved-off read and an on-to-off write have the same
+                // response contract, including later background file refresh.
+                for enabled in [false, true, false] {
+                    crate::store::write_json(&file, &Preference { enabled }).unwrap();
+                    let desired = Status { enabled: local_preference_at(&file), managed: false };
+                    let reply = synchronize(&policy, desired, || anyhow::bail!(failure));
+                    let shown = serde_json::to_value(&reply).unwrap();
+                    assert_eq!(shown["enabled"], enabled);
+                    assert!(shown["error"].as_str().unwrap().contains(failure));
+                    // The background refresh uses the same applied policy;
+                    // there is no hidden hold for it to accidentally undo.
+                    policy.set(desired);
+                    assert_eq!(reply.status, policy.status());
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let url = format!("http://{}",listener.local_addr().unwrap());
+                    let client = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).middleware(HttpPolicy(policy.clone())).build();
+                    if enabled {
+                        listener.set_nonblocking(true).unwrap();
+                        assert!(client.get(&url).call().is_err());
+                        assert_eq!(listener.accept().unwrap_err().kind(),io::ErrorKind::WouldBlock);
+                    } else {
+                        let peer = std::thread::spawn(move || {
+                            let (mut socket,_) = listener.accept().unwrap();
+                            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                            socket.read_exact(&mut [0]).unwrap();
+                            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        });
+                        assert_eq!(client.get(&url).call().unwrap().status(),200);
+                        peer.join().unwrap();
+                    }
+                    let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let url = format!("ws://{}",relay.local_addr().unwrap());
+                    if enabled {
+                        assert!(connect_with_policy(url.as_str(),None,false,policy.clone()).await.is_err());
+                        assert!(tokio::time::timeout(Duration::from_millis(20),relay.accept()).await.is_err());
+                    } else {
+                        let peer = tokio::spawn(async move {
+                            let (socket,_) = relay.accept().await.unwrap();
+                            tokio_tungstenite::accept_async(socket).await.unwrap()
+                        });
+                        assert!(connect_with_policy(url.as_str(),None,false,policy.clone()).await.is_ok());
+                        drop(peer.await.unwrap());
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -57,3 +57,16 @@ it("blocks webview network images while preserving local attachments", async () 
   await act(refreshDataPrivacy);
   expect(container.querySelector('img[alt="remote"]')).toBeTruthy();
 });
+
+it("shows applied off with the synchronization error and does not invent protection", async () => {
+  native.mockResolvedValue({ enabled: false, managed: false, error: "Background runtime unavailable" });
+  await act(refreshDataPrivacy);
+  render(<DataPrivacySettings />);
+  expect(screen.getByRole("switch", { name: "Data privacy mode" }).getAttribute("aria-checked")).toBe("false");
+  expect(screen.getByRole("alert").textContent).toBe("Background runtime unavailable");
+  native.mockImplementation((command) => command === "data_privacy_status" ? Promise.reject(new Error("IPC unavailable")) : Promise.resolve(null));
+  await act(refreshDataPrivacy);
+  expect(screen.getByRole("switch", { name: "Data privacy mode" }).getAttribute("aria-checked")).toBe("false");
+  expect(screen.getByRole("switch", { name: "Data privacy mode" }).matches(":disabled")).toBe(true);
+  expect(screen.getByRole("alert").textContent).toContain("Could not verify");
+});

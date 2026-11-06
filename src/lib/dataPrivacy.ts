@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export const PRIVACY_MESSAGE = "Turned off by data privacy mode";
-export interface DataPrivacy { enabled: boolean; managed: boolean; ready: boolean }
+export interface DataPrivacy { enabled: boolean; managed: boolean; ready: boolean; error?: string }
 
 // Startup waits for the native policy before starting account/cloud work.
 // Native transports enforce it independently, including before the webview.
@@ -20,7 +20,7 @@ export const useDataPrivacy = () => useSyncExternalStore(subscribeDataPrivacy, g
 
 function apply(value: Omit<DataPrivacy, "ready">) {
   if (typeof value?.enabled !== "boolean" || typeof value?.managed !== "boolean") throw new Error("Could not read data privacy mode");
-  if (state.ready && value.enabled === state.enabled && value.managed === state.managed) return;
+  if (state.ready && value.enabled === state.enabled && value.managed === state.managed && value.error === state.error) return;
   state = { ...value, ready: true };
   for (const listener of listeners) listener();
 }
@@ -31,10 +31,15 @@ export async function refreshDataPrivacy() {
   try {
     const value = await invoke<Omit<DataPrivacy, "ready">>("data_privacy_status");
     if (asked === generation) apply(value);
-  } catch {
-    // A missing policy response grants no network access.
-    if (asked === generation) apply({ enabled: true, managed: state.managed });
+  } catch (error) {
+    if (asked === generation) unavailable(error);
   }
+}
+
+function unavailable(error: unknown) {
+  // Gate UI actions, but do not represent an unknown native policy as applied.
+  state = { enabled: true, managed: state.managed, ready: false, error: `Could not verify data privacy mode: ${String(error)}` };
+  for (const listener of listeners) listener();
 }
 
 export async function setDataPrivacy(enabled: boolean) {
@@ -43,6 +48,9 @@ export async function setDataPrivacy(enabled: boolean) {
   ++generation;
   try {
     apply(await invoke<Omit<DataPrivacy, "ready">>("data_privacy_set", { enabled }));
+  } catch (error) {
+    unavailable(error);
+    throw error;
   } finally {
     writing = false;
   }

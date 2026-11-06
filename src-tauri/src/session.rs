@@ -741,6 +741,7 @@ pub struct CliTab {
     /// A setting the CLI only reads at startup, changed mid-turn. The restart
     /// waits for the turn to end.
     pub restart_when_idle: bool,
+    restart_privacy: Option<crate::data_privacy::Ticket>,
     /// When a model or effort change was last typed into this CLI and is
     /// still waiting for it to answer (`harness::settings`). A CLI that never
     /// answers is given up on by the session watcher.
@@ -863,7 +864,7 @@ pub struct TabRuntime {
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
     /// Each frame with the phone or share a prompt came from, if any.
-    stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
+    stdio_writer: Option<std::sync::mpsc::SyncSender<codex_stdio::Delivery>>,
     /// The phone or share the prompt just sent came from, until its frame is
     /// queued with it: it is held to its permits when that frame is written.
     stdio_authority: Option<codex_stdio::Authority>,
@@ -936,6 +937,7 @@ struct CliRestart {
     tail: Arc<tui::Tail>,
     pane: String,
     process: Option<pty::StoppingPane>,
+    _privacy: Option<crate::data_privacy::RemoteWrite>,
 }
 
 impl TabRuntime {
@@ -2483,6 +2485,7 @@ impl SessionManager {
             let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
+            let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
             self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx))
         })();
@@ -2643,6 +2646,7 @@ impl SessionManager {
             let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
+            let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
             self.send_admitted(&admission, session_id, tab_id, PromptText { mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None)
@@ -2653,7 +2657,7 @@ impl SessionManager {
 
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
-        let _privacy = connection.privacy.enter()?;
+        let _privacy = connection.privacy.scope()?;
         self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None)
     }
 
@@ -2886,7 +2890,9 @@ impl SessionManager {
                 Action::Http { tag, method, url, body } => {
                     let manager = self.clone();
                     let me = rt.me.clone();
+                    let privacy = crate::data_privacy::remote_ticket();
                     std::thread::spawn(move || {
+                        let Ok(_privacy) = privacy.as_ref().map(|ticket| ticket.scope()).transpose() else { return };
                         let line = opencode::perform(&tag, &method, &url, body);
                         if let Some(r) = me.upgrade() {
                             manager.on_line(&r, &line);
@@ -3503,6 +3509,7 @@ impl SessionManager {
             // so its tab is restarted on the same conversation instead: now,
             // or once the turn it would interrupt is over.
             Engine::Cli(p) => {
+                if before != after { p.restart_privacy = crate::data_privacy::remote_ticket(); }
                 if turn_open {
                     p.restart_when_idle |= before != after;
                 } else {
@@ -3836,6 +3843,7 @@ impl SessionManager {
                 }
             }
             Engine::Cli(p) => {
+                if before != after { p.restart_privacy = crate::data_privacy::remote_ticket(); }
                 if turn_open {
                     p.restart_when_idle |= before != after;
                 } else {
@@ -4164,6 +4172,7 @@ impl SessionManager {
             generation,
             launched_at: Instant::now(),
             restart_when_idle: false,
+            restart_privacy: None,
             settings_asked_at: None,
             launched_for,
             status_names_model: false,
@@ -4440,6 +4449,16 @@ impl SessionManager {
 
     fn prepare_cli_restart(&self, rt: &mut TabRuntime, tail: &Arc<tui::Tail>) -> Option<CliRestart> {
         if !Self::has_tail(rt, tail) || rt.restart_claim.is_some() { return None; }
+        let privacy = match &rt.engine { Engine::Cli(p) => p.restart_privacy.clone().or_else(crate::data_privacy::remote_ticket), _ => return None };
+        let privacy = match privacy.as_ref().map(|ticket| ticket.enter()).transpose() {
+            Ok(privacy) => privacy,
+            Err(_) => {
+                if let Engine::Cli(p) = &mut rt.engine { p.restart_when_idle = false; p.restart_privacy = None; }
+                let _ = self.refuse_setting(rt, Setting::Model, None, crate::data_privacy::MESSAGE);
+                let _ = self.refuse_setting(rt, Setting::Effort, None, crate::data_privacy::MESSAGE);
+                return None;
+            }
+        };
         let pane = match &rt.engine { Engine::Cli(p) => p.pane_id.clone(), _ => return None };
         self.release_cli(rt);
         // Capture the actual group before dropping runtime. A later stop or
@@ -4447,7 +4466,7 @@ impl SessionManager {
         let process = self.terminals.begin_stop(&pane);
         rt.stopping_pid = process.as_ref().and_then(pty::StoppingPane::pid);
         rt.restart_claim = Some(tail.clone());
-        Some(CliRestart { tail: tail.clone(), pane, process })
+        Some(CliRestart { tail: tail.clone(), pane, process, _privacy: privacy })
     }
 
     fn claim_restart_completion<'a>(&self, rt_arc: &'a Arc<Mutex<TabRuntime>>, work: &CliRestart, exited: bool) -> Result<Option<MutexGuard<'a, TabRuntime>>> {
@@ -5100,6 +5119,7 @@ impl SessionManager {
         // Taken here, while the sender still has the tab, so it is the order
         // the prompts were sent in.
         let ticket = self.writers.lock().unwrap().entry(pane.to_string()).or_default().ticket();
+        let privacy = crate::data_privacy::remote_ticket();
         let terminals = self.terminals.clone();
         let manager = self.clone();
         let rt_arc = rt_arc.clone();
@@ -5162,11 +5182,12 @@ impl SessionManager {
             }
             // Nothing is typed into an input box that holds something: the
             // Enter would send that and this prompt as one (#722).
-            let revoked = || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
+            let revoked = || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
             let input = match manager.wait_for_empty_input(&rt_arc, &pane, seq, stops, &ticket, &mut held, revoked, &stage) {
                 InputWait::Type(input) => input,
                 InputWait::Revoked => {
                     let mut rt = rt_arc.lock().unwrap();
+                    if seq.is_none() { manager.command_not_typed(&mut rt, &text); }
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
                     manager.refuse_continuation(&mut rt, receipt);
@@ -5204,6 +5225,7 @@ impl SessionManager {
             let mut admitted_to_writer = false;
             // Whether the Enter was written: not after a stop (#746).
             let result = (|| -> Result<bool> {
+                let _control = privacy.as_ref().map(|ticket| ticket.enter()).transpose()?;
                 let _privacy = shared.as_ref().map(|(permit, _, _, _)| permit.privacy.enter()).transpose()?;
                 let mut sharing = (shared.is_some() || mobile.is_some()).then(|| manager.sharing.lock().unwrap());
                 let mut owner_attachment = None;
@@ -5269,6 +5291,10 @@ impl SessionManager {
             if let Err(e) = result {
                 log::warn!("[{pane}] write: {e:#}");
                 let mut rt = rt_arc.lock().unwrap();
+                if !admitted_to_writer && seq.is_none() && privacy.is_some() {
+                    manager.command_not_typed(&mut rt, &text);
+                    return;
+                }
                 if !admitted_to_writer && (shared.is_some() || mobile.is_some()) {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
