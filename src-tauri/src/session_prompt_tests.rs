@@ -2125,7 +2125,7 @@ fn a_delayed_permission_hook_asks_only_for_its_own_launch() {
 #[test]
 fn restart_dispatch_is_bound_to_the_original_launch() {
     for (replace, fenced) in [(false, true), (true, false), (true, true)] {
-        let rig = Rig::of(CliKind::Codex, "");
+        let rig = Rig::on(CliKind::Codex, "", None);
         let spec = || pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
         rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap();
         let (paused_tx, paused_rx) = std::sync::mpsc::channel();
@@ -2177,7 +2177,7 @@ fn restart_dispatch_is_bound_to_the_original_launch() {
 #[test]
 fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
     for replacement in ["none", "engine", "stop", "pane", "claim"] {
-        let rig = Rig::of(CliKind::Codex, "");
+        let rig = Rig::on(CliKind::Codex, "", None);
         let spec = || pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
         rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap();
         let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
@@ -2236,7 +2236,13 @@ fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
 #[test]
 fn delayed_idle_restart_defers_to_new_work_on_the_same_launch() {
     for (state, fenced) in [("idle", true), ("turn", false), ("turn", true), ("cancelled", true), ("stop", true)] {
-        let rig = Rig::of(CliKind::Codex, "");
+        let rig = Rig::on(CliKind::Codex, "", Some("low"));
+        // Restart admission reads the pending edit and its provenance from
+        // the saved tab. A runtime flag alone is no longer pending work.
+        index::update_tab(SESSION, TAB, |tab| {
+            tab.requested_effort = Some("high".into());
+            Ok(())
+        }).unwrap();
         let spec = pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
         rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec).unwrap();
         if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine { p.restart_when_idle = true; }
