@@ -15,6 +15,11 @@ export function getDraft(tabId: string): string {
   return drafts.get(tabId) ?? "";
 }
 
+/** Every unsent tab in this window, including tabs whose composers are unmounted. */
+export function snapshotDrafts(): Map<string, string> {
+  return new Map([...drafts].filter(([, text]) => text.length > 0));
+}
+
 /** Changes on every write, including identical text; forgetting a draft invalidates it. */
 export function getDraftRevision(tabId: string): number | undefined {
   return revisions.get(tabId);

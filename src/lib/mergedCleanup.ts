@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { MergedRemoval, MergedRemovalView, MergedRestored, MergedStatus, MergedSwept, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { mergedCleanup as native, type MergedCleanupSettings } from "@/lib/api";
-import { isFloatingWindow } from "@/lib/appWindow";
+import { isCompactWindow } from "@/lib/appWindow";
 import { getCloudCatalog, type CloudCatalogState } from "@/lib/cloudCatalog";
 import { connectedCloudClient } from "@/lib/cloudConnections";
 import { forgetCloudSessions, managesOf, refreshCloudSessions } from "@/lib/cloudSessions";
@@ -460,7 +460,7 @@ export async function saveMergedCleanupSettings(patch: Parameters<typeof native.
 
 /** Passes are the main window's to run: two windows would only ask twice. */
 function drives(): boolean {
-  return !isFloatingWindow();
+  return !isCompactWindow();
 }
 
 let booted: Promise<void> | null = null;

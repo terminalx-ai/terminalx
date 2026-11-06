@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { FIRST_RUN_PERMISSION_MODE } from "@terminalx/portable/agentSettings";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
 import type { IssueListFilter } from "@/lib/issueListFilter";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
@@ -51,6 +52,10 @@ export interface Prefs {
   lastAgent: string;
   lastModel: Record<string, string>;
   lastEffort: Record<string, string>;
+  /**
+   * The permission mode new chats start in: the last one the reader picked,
+   * and Ask every time on a profile where they never picked one.
+   */
   lastMode: string;
   issueProvider: "github" | "linear";
   /** The cloud project the Issues view shows (`cloud:<orgId>:<identity>`); null for `lastProject`, a project on this computer. */
@@ -148,7 +153,7 @@ const DEFAULTS: Prefs = {
   lastAgent: "claude",
   lastModel: {},
   lastEffort: {},
-  lastMode: "bypassPermissions",
+  lastMode: FIRST_RUN_PERMISSION_MODE,
   issueProvider: "github",
   issueCloudProject: null,
   cloudIssuePipelines: {},

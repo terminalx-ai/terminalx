@@ -1115,7 +1115,10 @@ fn new_session_options(manager: &PairingManager) -> Result<Value> {
         {"id": "plan", "label": "Plan"}, {"id": "manual", "label": "Ask every time"}, {"id": "auto", "label": "Auto"},
         {"id": "acceptEdits", "label": "Accept edits"}, {"id": "bypassPermissions", "label": "Bypass permissions"},
     ]);
-    Ok(json!({"projects": projects, "agents": agents, "modes": modes, "defaultMode": index::DEFAULT_PERMISSION_MODE,
+    // The phone cannot see the mode the reader last picked on the Mac (it is
+    // the webview's to keep), so its form opens where a fresh profile's New
+    // Session does: Ask every time, never Bypass unasked (PRO-162).
+    Ok(json!({"projects": projects, "agents": agents, "modes": modes, "defaultMode": index::FIRST_RUN_PERMISSION_MODE,
         "nativeCodex": store::settings::load().experimental.native_codex}))
 }
 

@@ -2036,6 +2036,8 @@ mod tests {
         let options = ask(&viewer, &tablet, "sessions.options", json!({})).await;
         assert_eq!(options["ok"], true, "{options}");
         assert!(options["result"]["agents"].as_array().unwrap().iter().any(|agent| agent["id"] == "claude" && agent["available"] == true), "{options}");
+        // The phone's form opens in Ask every time, as a fresh profile's New Session does (PRO-162).
+        assert_eq!(options["result"]["defaultMode"], "manual", "{options}");
         assert_eq!(ask(&viewer, &tablet, "mac.settings", json!({})).await["result"], json!({"nativeCodex": false}));
         assert_eq!(refused(&ask(&viewer, &tablet, "sessions.create", create.clone()).await), (json!(false), json!("forbidden")));
         assert_eq!(refused(&ask(&viewer, &tablet, "mac.setSettings", json!({"nativeCodex": true})).await), (json!(false), json!("forbidden")));
