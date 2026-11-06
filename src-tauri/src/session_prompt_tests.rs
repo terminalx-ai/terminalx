@@ -1959,8 +1959,9 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
             let rig = Rig::of(CliKind::Codex, "");
             rig.compose("active turn", 0);
             rig.cli_takes("active turn");
+            let input = json!({"command":"ls", "workdir":"/workspace/app"});
             let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: event.into(),
-                payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":{"command":"ls"}, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
+                payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":input, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
             let (paused_tx, paused_rx) = std::sync::mpsc::channel();
             let (resume_tx, resume_rx) = std::sync::mpsc::channel();
             let manager = rig.manager.clone();
@@ -2087,8 +2088,9 @@ fn new_card(rig: &Rig, known: &str) -> String {
 fn a_delayed_permission_hook_asks_only_for_its_own_launch() {
     for replace in [false, true] {
         let rig = Rig::of(CliKind::Codex, "");
+        let input = json!({"command":"ls", "workdir":"/workspace/app"});
         let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
-            payload: json!({"tool_name":"Bash","tool_input":{"command":"ls"}}) };
+            payload: json!({"tool_name":"Bash","tool_input":input}) };
         let (paused_tx, paused_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let manager = rig.manager.clone();

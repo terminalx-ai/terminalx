@@ -130,7 +130,7 @@ export function PermissionCard({
           onClick={() => onAnswer(o.id)}
           className={cn((blocked || o.kind === "deny") && "text-muted-foreground")}
         >
-          {o.kind === "deny" ? "Deny" : o.kind === "allow_once" ? "Allow" : o.kind === "allow_always" ? "Always allow" : o.kind === "allow_session" ? "Allow for session" : "Change permission mode"}
+          {o.kind === "deny" ? "Deny" : o.kind === "allow_once" ? "Allow" : o.kind === "allow_always" ? "Always allow" : o.kind === "allow_session" ? o.label : "Change permission mode"}
           {/* Return answers nothing for someone who may not answer. */}
           {i === 0 && !blocked && <EnterKey />}
         </Button>
