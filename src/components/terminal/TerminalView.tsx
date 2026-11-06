@@ -6,7 +6,7 @@ import { pty } from "@/lib/api";
 import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { terminalInput } from "@/lib/terminalInput";
-import { fitTerminal } from "@/lib/terminalFit";
+import { deferredTerminalFit, fitTerminal } from "@/lib/terminalFit";
 import { TerminalBufferCleanup } from "@/lib/terminalBufferCleanup";
 import { terminalColorHex } from "@/lib/terminalColor";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
@@ -258,13 +258,15 @@ export function TerminalView({
         /* not laid out yet */
       }
     };
-    const ro = new ResizeObserver(refit);
+    const deferred = deferredTerminalFit(() => fitting.current ? peekInstance(id)?.term : undefined, el);
+    const ro = new ResizeObserver(deferred.schedule);
     ro.observe(el);
     const frame = requestAnimationFrame(refit);
     trimTerminalInstances();
     return () => {
       cancelAnimationFrame(frame);
       ro.disconnect();
+      deferred.cancel();
       trimTerminalInstances();
     };
   }, [id]);

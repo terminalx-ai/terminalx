@@ -7,6 +7,8 @@ interface PairingState {
   status: PairingStatus;
   ready: boolean;
   busy: boolean;
+  relayRetrying: boolean;
+  relayRetryError: string | null;
   generationError: { connectionMode: PairingConnectionMode; message: string } | null;
 }
 
@@ -18,7 +20,7 @@ const emptyStatus: PairingStatus = {
   lastError: null,
 };
 
-let state: PairingState = { status: emptyStatus, ready: false, busy: false, generationError: null };
+let state: PairingState = { status: emptyStatus, ready: false, busy: false, relayRetrying: false, relayRetryError: null, generationError: null };
 const listeners = new Set<() => void>();
 
 function set(patch: Partial<PairingState>) {
@@ -27,7 +29,7 @@ function set(patch: Partial<PairingState>) {
 }
 
 function applyStatus(status: PairingStatus) {
-  set({ status, ready: true });
+  set({ status, ready: true, ...(status.relay.phase === "connected" ? { relayRetryError: null } : {}) });
 }
 
 export function usePairing(): PairingState {
@@ -78,6 +80,18 @@ export async function revokePairing(deviceId: string): Promise<void> {
     set({ status: { ...state.status, lastError: errorMessage(error) } });
   } finally {
     set({ busy: false });
+  }
+}
+
+export async function retryRelay(): Promise<void> {
+  if (state.relayRetrying) return;
+  set({ relayRetrying: true, relayRetryError: null });
+  try {
+    applyStatus(await api.pairingRetryRelay());
+  } catch (error) {
+    set({ relayRetryError: errorMessage(error) });
+  } finally {
+    set({ relayRetrying: false });
   }
 }
 

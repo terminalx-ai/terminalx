@@ -11,7 +11,8 @@ Failures retain a typed stage: local identity, authorization, assignment, contro
 WebSocket connection, host proof, or established control session. A phone's relay
 connection has its own stages: the host data leg (phone attach), the E2EE
 handshake and device login (phone handshake), and after login (phone session).
-Categories are service unavailable (HTTP 5xx), authentication (401, or a refused
+Categories are service unavailable (HTTP 5xx), service restart/replacement,
+assignment changed, remote closed, authentication (401, or a refused
 device credential), access denied (403), account entitlement, rate limited (429),
 network, timeout, protocol, local storage, network changed, woke from sleep, local
 runtime, and unknown. A 403 alone is not classified as lack of entitlement. Unknown errors are
@@ -64,7 +65,7 @@ files are mode 0600 on Unix. Invalid or non-allowlisted old records are discarde
 
 Records contain only timestamp, event, attempt, retry count, and optional typed
 failure stage/category/HTTP status. Control-channel events are `started`,
-`failed` and `connected`; host-binding rounds add `recovered` (below). Each phone
+`failed`, `connected` and `retry-requested`; host-binding rounds add `recovered` (below). Each phone
 connection through Relay adds
 `phone-requested` (the cell's `conn-open`), `phone-attached` (host data leg open),
 `phone-authenticated` (device login accepted), and `phone-closed` or `phone-failed`
@@ -119,6 +120,46 @@ Coverage includes:
 The loopback supervisor fixture supplies assignment failures and generated host
 identity at the connection boundary; HTTP authorization/assignment are exercised
 separately. It does not use a real account, production endpoint, or Keychain.
+
+## Footer explanations and prompt redraw (PRO-196)
+
+The account footer's Relay status opens an interactive explanation on hover,
+click, or keyboard focus. It shows the backend's safe cause, keeps that cause
+visible during reconnection, and offers Retry while offline. Retry wakes the
+existing supervisor's backoff, including its 90-second maximum, and records a
+`retry-requested` event. It does not start a second supervisor or interrupt a
+connection that has already recovered. Local terminals do not depend on Relay.
+
+Control closes now distinguish a remote close, service restart/replacement,
+assignment change, authentication rejection, timeout and rate limit by documented
+numeric close codes. No remote reason string is displayed or logged. Valid
+WebSocket Ping/Pong frames are handled during both host proof and the established
+session; previously these were rejected as non-text protocol messages, ending an
+otherwise working connection. JSON heartbeat behavior is unchanged.
+
+Investigation on November 6: the available local production diagnostics contain a
+`control-session` / `protocol` failure at November 5, 05:46:44 UTC, followed by
+`connected` at 05:46:47 UTC. This confirms automatic recovery on that machine,
+but the clean VM's diagnostic file was not supplied, so its exact drop cannot be
+attributed to that event or to WebSocket heartbeats. The loopback regression
+reproduces the heartbeat rejection and verifies the fix, including a service
+close whose sensitive reason never reaches diagnostics.
+
+The drawer redraw was reproduced using a clean macOS zsh 5.9 PTY with a long
+prompt and an unsubmitted command: changing xterm's grid before parsing the
+previous resize's queued redraw leaves a duplicate prompt. Resize observations
+now settle for 100 ms, then wait behind xterm's queued writes before changing
+the grid and notifying the PTY. This avoids a redraw per drag observation and
+keeps both sides on the same size. The real-parser regression uses captured zsh
+escape sequences, demonstrates the duplicate in the old sequence, and checks
+that the fix preserves the prompt and typed command. Pending fits are cancelled
+when the view unmounts and never resize an evicted or replaced terminal.
+
+```sh
+pnpm exec vitest run src/components/account/AccountSidebarEntry.test.tsx src/lib/terminalResize.real.test.ts
+pnpm build && node scripts/webkit/account-row.mjs
+cargo test --manifest-path src-tauri/Cargo.toml --lib pairing::
+```
 
 ## Validation result
 

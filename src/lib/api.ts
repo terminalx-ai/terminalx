@@ -520,6 +520,7 @@ export const api = {
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
+  pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
   /** This Mac's name as the user's other devices show it (#686). */

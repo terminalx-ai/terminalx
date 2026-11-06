@@ -42,6 +42,9 @@ pub(super) enum Stage {
 #[error("relay category {self:?}")]
 pub(super) enum Category {
     ServiceUnavailable,
+    ServiceRestart,
+    AssignmentChanged,
+    RemoteClosed,
     Authentication,
     AccessDenied,
     Entitlement,
@@ -136,6 +139,12 @@ impl Failure {
                 "The account service cannot authorize Relay right now. Retrying automatically. You can use LAN meanwhile.",
             Category::ServiceUnavailable =>
                 "TerminalX Relay service is temporarily unavailable. Retrying automatically. You can use LAN meanwhile.",
+            Category::ServiceRestart =>
+                "The Relay service is restarting or replacing this connection. Reconnecting automatically.",
+            Category::AssignmentChanged =>
+                "This Mac's Relay assignment changed. Reconnecting automatically.",
+            Category::RemoteClosed =>
+                "The Relay service closed the connection. Reconnecting automatically.",
             Category::Authentication =>
                 "Relay authorization was rejected. Retrying automatically. If this continues, check your sign-in in Settings → Account.",
             Category::AccessDenied =>
@@ -170,6 +179,7 @@ pub(super) enum Event {
     Started,
     Failed,
     Connected,
+    RetryRequested,
     /// A host-binding request succeeded after `attempt` failed rounds.
     Recovered,
     /// The cell asked for a host data leg (`conn-open`): a phone is connecting.

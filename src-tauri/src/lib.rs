@@ -524,6 +524,7 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,
             commands::session_share_change,

@@ -53,3 +53,33 @@ export function fitTerminal(term: Terminal, box: HTMLElement) {
   (term as unknown as { _core?: Core })._core?._renderService?.clear?.();
   term.resize(size.cols, size.rows);
 }
+
+/**
+ * During a drag, a shell can still be redrawing the previous size when the
+ * next observation arrives. Resize both xterm and its PTY only after the
+ * box settles, and parse queued output at the size it was printed for first.
+ * Resizing only the PTY later leaves its redraw and xterm on different grids.
+ */
+export function deferredTerminalFit(getTerminal: () => Terminal | undefined, box: HTMLElement) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+  const cancel = () => {
+    clearTimeout(timer);
+    generation++;
+  };
+  return {
+    schedule: () => {
+      cancel();
+      const request = generation;
+      timer = setTimeout(() => {
+        const term = getTerminal();
+        if (!term) return;
+        term.write("", () => {
+          if (request !== generation || getTerminal() !== term) return;
+          fitTerminal(term, box);
+        });
+      }, 100);
+    },
+    cancel,
+  };
+}

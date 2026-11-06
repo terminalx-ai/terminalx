@@ -1613,6 +1613,12 @@ pub async fn pairing_status(state: tauri::State<'_, crate::AppState>) -> CmdResu
 }
 
 #[tauri::command]
+pub async fn pairing_retry_relay(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.retry_relay()).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
 pub async fn pairing_generate(
     connection_mode: Option<crate::pairing::PairingConnectionMode>,
     state: tauri::State<'_, crate::AppState>,
