@@ -135,6 +135,7 @@ pub struct Link {
 }
 
 pub struct Guest {
+    pub(crate) privacy: crate::data_privacy::Ticket,
     pub connection_id: String,
     pub link_id: String,
     pub person: Person,
@@ -169,6 +170,7 @@ pub struct Note {
 
 #[derive(Clone)]
 pub struct WritePermit {
+    pub(crate) privacy: crate::data_privacy::Ticket,
     pub share_generation: String,
     pub connection_id: String,
     pub revision: u64,
@@ -177,6 +179,7 @@ pub struct WritePermit {
 
 #[derive(Clone)]
 pub struct QueuedInput {
+    pub(crate) privacy: crate::data_privacy::Ticket,
     pub connection_id: String,
     pub tab_id: String,
     pub text: String,
@@ -498,6 +501,7 @@ impl Share {
             .get(connection)
             .ok_or_else(|| anyhow!("Access ended."))?;
         Ok(WritePermit {
+            privacy: guest.privacy.clone(),
             share_generation: self.generation.clone(),
             connection_id: connection.into(),
             revision: guest.write_revision,
@@ -506,7 +510,7 @@ impl Share {
     }
 
     pub fn permit_current(&self, permit: &WritePermit, tab: &str, now: i64) -> bool {
-        if crate::data_privacy::enabled() { return false; }
+        if !permit.privacy.valid() { return false; }
         if permit.share_generation != self.generation || self.owner.as_ref().is_some_and(|owner| !owner.attachment.valid()) { return false; }
         self.guests.get(&permit.connection_id).is_some_and(|g| {
             g.write_revision == permit.revision

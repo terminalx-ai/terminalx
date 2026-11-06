@@ -15,7 +15,9 @@ The owner-only `data-privacy.json` file under `TERMINALX_HOME` stores the person
 choice. A missing file defaults to off; an unreadable or malformed existing file
 fails closed. The desktop loads the policy before creating service clients. Each
 window loads it before rendering and the local background runtime watches the
-same policy. Profile changes are checked every second; windows refresh their
+same policy. A setting change also asks the attached owner to reload it and
+waits for its acknowledgement. An older or unavailable owner produces an error
+instead of claiming that activation completed. Profile changes are checked every second; windows refresh their
 display every two seconds and on focus.
 
 ## Enforce it with macOS device management
@@ -46,11 +48,14 @@ Relay and LAN streams enforce the policy below TLS and WebSocket framing,
 including handshake, automatic pong and close writes. Enabling invalidates all
 existing stream generations and wakes idle readers. Old streams stay invalid
 after disabling; normal recovery creates new ones. Pairing/share entry points,
-mobile grants and guest requests also check the policy. Organisation launch
+mobile grants and guest requests also check the policy. Remote writes hold a
+lease through delivery, including PTY paste/draw waits and partial native Codex
+frames; activation drains these leases before acknowledging. Old grants and
+queued prompts stay invalid after a toggle. Reconnecting obtains new grants. Organisation launch
 config is not injected into new agent processes while enabled.
 
 Frontend gates stop catalog polling and queued cloud/remote actions. Webview
-images from the network and update checks are suppressed too. The app's existing
+external images and update checks are suppressed too. The app's existing
 diagnostic logs stay local; no external logging sink is enabled by this mode.
 
 `data_privacy::tests` includes real loopback HTTP and WebSocket network tests

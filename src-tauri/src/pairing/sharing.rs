@@ -528,7 +528,7 @@ impl PairingManager {
                                         Ok(person) => {
                                             let admission = if access_token.is_some() {
                                                 self.refresh_share_guest(&session_id, &id, person)
-                                            } else { self.join_share_guest(&session_id, Guest { connection_id: id.clone(), link_id: link_id.clone(), person, role: Role::Viewer,
+                                            } else { self.join_share_guest(&session_id, Guest { privacy:Default::default(), connection_id: id.clone(), link_id: link_id.clone(), person, role: Role::Viewer,
                                                 can_approve: false, admitted: false, verified_until: now() + IDENTITY_MS, active: active.clone(), cancel: cancel.clone(),
                                                 viewing: None, typing: false, last_write: 0, write_revision: 0 }) };
                                             match admission {

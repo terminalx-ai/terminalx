@@ -2653,6 +2653,7 @@ impl SessionManager {
 
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
+        let _privacy = connection.privacy.enter()?;
         self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None)
     }
 
@@ -5203,6 +5204,7 @@ impl SessionManager {
             let mut admitted_to_writer = false;
             // Whether the Enter was written: not after a stop (#746).
             let result = (|| -> Result<bool> {
+                let _privacy = shared.as_ref().map(|(permit, _, _, _)| permit.privacy.enter()).transpose()?;
                 let mut sharing = (shared.is_some() || mobile.is_some()).then(|| manager.sharing.lock().unwrap());
                 let mut owner_attachment = None;
                 if let (Some((connection, session_id, tab_id, _)), Some(sharing)) = (&shared, &mut sharing) {

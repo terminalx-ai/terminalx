@@ -41,9 +41,18 @@ it("unmounts organisations and pairing controls when privacy is on", async () =>
 it("blocks webview network images while preserving local attachments", async () => {
   native.mockResolvedValue({ enabled: true, managed: false });
   await act(refreshDataPrivacy);
-  const { container } = render(<><PrivacyImage src="https://relay.terminalx.ai/image" alt="remote" /><PrivacyImage src="data:image/png;base64,a" alt="local" /></>);
+  const { container } = render(<>
+    <PrivacyImage src="https://relay.terminalx.ai/image" alt="remote" />
+    <PrivacyImage src="data:image/png;base64,a" alt="local" />
+    <PrivacyImage src="http://127.0.0.1:1234/grant" alt="media preview" />
+    <PrivacyImage src="http://asset.localhost/attachment.png" alt="attachment" />
+    <PrivacyImage src="https://127.0.0.1.attacker.example/picture" alt="lookalike" />
+  </>);
   expect(container.querySelector('img[alt="remote"]')).toBeNull();
   expect(container.querySelector('img[alt="local"]')).toBeTruthy();
+  expect(container.querySelector('img[alt="media preview"]')).toBeTruthy();
+  expect(container.querySelector('img[alt="attachment"]')).toBeTruthy();
+  expect(container.querySelector('img[alt="lookalike"]')).toBeNull();
   native.mockResolvedValue({ enabled: false, managed: false });
   await act(refreshDataPrivacy);
   expect(container.querySelector('img[alt="remote"]')).toBeTruthy();

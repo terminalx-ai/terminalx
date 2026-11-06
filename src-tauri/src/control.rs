@@ -408,6 +408,9 @@ impl ControlService {
         }
         if command.starts_with("runtime.") {
             if let Some(lifetime) = &self.local_lifetime {
+                if command == "runtime.dataPrivacy.refresh" {
+                    return serde_json::to_value(crate::data_privacy::refresh()).map_err(ControlError::internal);
+                }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }

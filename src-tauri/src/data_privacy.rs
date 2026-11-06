@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll};
 
 use serde::{Deserialize, Serialize};
@@ -31,33 +31,81 @@ struct State {
     cancel: CancellationToken,
 }
 
-pub struct Policy(RwLock<State>);
+pub struct Policy {
+    state: RwLock<State>,
+    updating: Mutex<()>,
+    writers: Mutex<usize>,
+    drained: Condvar,
+}
 
 impl Default for Policy {
     fn default() -> Self {
-        Self(RwLock::new(State { status: Status::default(), epoch: 0, cancel: CancellationToken::new() }))
+        Self {
+            state: RwLock::new(State { status: Status::default(), epoch: 0, cancel: CancellationToken::new() }),
+            updating: Mutex::new(()), writers: Mutex::new(0), drained: Condvar::new(),
+        }
     }
 }
 
 impl Policy {
-    fn status(&self) -> Status { self.0.read().unwrap().status }
+    fn status(&self) -> Status { self.state.read().unwrap().status }
 
     // The writer waits for requests already admitted. Once it returns, no
     // old request or socket can send, even if the switch is turned off again.
     fn set(&self, status: Status) {
-        let mut state = self.0.write().unwrap();
+        let _updating = self.updating.lock().unwrap();
+        let mut state = self.state.write().unwrap();
         if status.enabled && !state.status.enabled {
             state.epoch = state.epoch.wrapping_add(1);
             state.cancel.cancel();
             state.cancel = CancellationToken::new();
         }
         state.status = status;
+        drop(state);
+        if status.enabled {
+            let mut writers = self.writers.lock().unwrap();
+            while *writers != 0 { writers = self.drained.wait(writers).unwrap(); }
+        }
     }
+}
 
-    fn http(&self, request: ureq::Request, next: ureq::MiddlewareNext<'_>) -> Result<ureq::Response, ureq::Error> {
-        let state = self.0.read().unwrap();
-        if state.status.enabled { return Err(io::Error::new(io::ErrorKind::PermissionDenied, MESSAGE).into()); }
-        next.handle(request)
+/// Authority captured when a phone connects or a share is created. A toggle
+/// permanently expires it, including queued work, even after privacy is off.
+#[derive(Clone)]
+pub struct Ticket { policy: Arc<Policy>, epoch: Option<u64> }
+
+impl Default for Ticket {
+    fn default() -> Self { Self::with_policy(policy().clone()) }
+}
+
+impl Ticket {
+    fn with_policy(policy: Arc<Policy>) -> Self {
+        let state = policy.state.read().unwrap();
+        let epoch = (!state.status.enabled).then_some(state.epoch);
+        drop(state);
+        Self { policy, epoch }
+    }
+    pub fn valid(&self) -> bool {
+        let state = self.policy.state.read().unwrap();
+        !state.status.enabled && self.epoch == Some(state.epoch)
+    }
+    pub fn enter(&self) -> anyhow::Result<RemoteWrite> {
+        let state = self.policy.state.read().unwrap();
+        anyhow::ensure!(!state.status.enabled && self.epoch == Some(state.epoch), MESSAGE);
+        *self.policy.writers.lock().unwrap() += 1;
+        Ok(RemoteWrite(self.policy.clone()))
+    }
+}
+
+/// Held through the last physical mutation, including PTY paste/draw waits
+/// and partial stdio frames. Counted leases allow nested admission without a
+/// recursive RwLock deadlock when activation is waiting for existing work.
+pub struct RemoteWrite(Arc<Policy>);
+impl Drop for RemoteWrite {
+    fn drop(&mut self) {
+        let mut writers = self.0.writers.lock().unwrap();
+        *writers -= 1;
+        if *writers == 0 { self.0.drained.notify_all(); }
     }
 }
 
@@ -83,7 +131,9 @@ struct HttpPolicy(Arc<Policy>);
 
 impl ureq::Middleware for HttpPolicy {
     fn handle(&self, request: ureq::Request, next: ureq::MiddlewareNext<'_>) -> Result<ureq::Response, ureq::Error> {
-        self.0.http(request, next)
+        let state = self.0.state.read().unwrap();
+        if state.status.enabled { return Err(io::Error::new(io::ErrorKind::PermissionDenied, MESSAGE).into()); }
+        next.handle(request)
     }
 }
 
@@ -122,7 +172,7 @@ fn read_status() -> Status {
 // older read after the settings command has finished.
 static SETTINGS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn refresh() -> Status {
+pub(crate) fn refresh() -> Status {
     let _settings = SETTINGS.lock().unwrap();
     policy().set(read_status());
     policy().status()
@@ -143,13 +193,25 @@ pub fn initialize() {
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn data_privacy_status() -> Result<Status, String> {
-    tauri::async_runtime::spawn_blocking(refresh).await.map_err(|error| error.to_string())
+pub async fn data_privacy_status(state: tauri::State<'_, crate::AppState>) -> Result<Status, String> {
+    let runtime = state.runtime();
+    tauri::async_runtime::spawn_blocking(move || synchronize_runtime(refresh(), runtime.as_deref()))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[cfg(feature = "desktop")]
+fn synchronize_runtime(status: Status, runtime: Option<&crate::local_runtime::desktop::Desktop>) -> Result<Status, String> {
+    if let Some(runtime) = runtime {
+        let owner = runtime.refresh_data_privacy().map_err(|error| format!("Could not apply data privacy mode to the background runtime: {error}. Update or restart the runtime before using remote features."))?;
+        if owner != status { return Err("The background runtime's data privacy setting changed. Try again.".into()); }
+    }
+    Ok(status)
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn data_privacy_set(enabled: bool) -> Result<Status, String> {
+pub async fn data_privacy_set(state: tauri::State<'_, crate::AppState>, enabled: bool) -> Result<Status, String> {
+    let runtime = state.runtime();
     tauri::async_runtime::spawn_blocking(move || {
         let _settings = SETTINGS.lock().unwrap();
         let status = read_status();
@@ -160,7 +222,9 @@ pub async fn data_privacy_set(enabled: bool) -> Result<Status, String> {
         crate::store::write_json(&crate::store::root().map_err(|e| e.to_string())?.join("data-privacy.json"), &Preference { enabled })
             .map_err(|error| error.to_string())?;
         policy().set(read_status());
-        Ok(policy().status())
+        let status = policy().status();
+        drop(_settings);
+        synchronize_runtime(status, runtime.as_deref())
     }).await.map_err(|error| error.to_string())?
 }
 
@@ -215,7 +279,7 @@ pub struct NetworkIo<T> {
 impl<T> NetworkIo<T> {
     pub fn new(inner: T) -> Self { Self::with_policy(inner, policy().clone()) }
     fn with_policy(inner: T, policy: Arc<Policy>) -> Self {
-        let state = policy.0.read().unwrap();
+        let state = policy.state.read().unwrap();
         let epoch = state.epoch;
         let cancelled = Box::pin(state.cancel.clone().cancelled_owned());
         drop(state);
@@ -225,7 +289,7 @@ impl<T> NetworkIo<T> {
     fn permitted(&mut self, cx: &mut Context<'_>) -> bool {
         // Registers the idle socket's waker before checking the current epoch.
         let _ = self.cancelled.as_mut().poll(cx);
-        let state = self.policy.0.read().unwrap();
+        let state = self.policy.state.read().unwrap();
         !state.status.enabled && state.epoch == self.epoch
     }
 }
@@ -236,7 +300,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for NetworkIo<T> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if !this.permitted(cx) { return Poll::Ready(Err(denied())); }
-        let state = this.policy.0.read().unwrap();
+        let state = this.policy.state.read().unwrap();
         if state.status.enabled || state.epoch != this.epoch { return Poll::Ready(Err(denied())); }
         Pin::new(&mut this.inner).poll_read(cx, buf)
     }
@@ -246,14 +310,14 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for NetworkIo<T> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         if !this.permitted(cx) { return Poll::Ready(Err(denied())); }
-        let state = this.policy.0.read().unwrap();
+        let state = this.policy.state.read().unwrap();
         if state.status.enabled || state.epoch != this.epoch { return Poll::Ready(Err(denied())); }
         Pin::new(&mut this.inner).poll_write(cx, buf)
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if !this.permitted(cx) { return Poll::Ready(Err(denied())); }
-        let state = this.policy.0.read().unwrap();
+        let state = this.policy.state.read().unwrap();
         if state.status.enabled || state.epoch != this.epoch { return Poll::Ready(Err(denied())); }
         Pin::new(&mut this.inner).poll_flush(cx)
     }
@@ -281,13 +345,13 @@ async fn connect_with_policy<R: tokio_tungstenite::tungstenite::client::IntoClie
     let connect = tokio::net::TcpStream::connect((host.trim_start_matches('[').trim_end_matches(']'), port));
     tokio::pin!(connect);
     let (epoch, cancelled) = {
-        let state = policy.0.read().unwrap();
+        let state = policy.state.read().unwrap();
         (state.epoch, state.cancel.clone().cancelled_owned())
     };
     tokio::pin!(cancelled);
     let tcp = futures_util::future::poll_fn(|cx| {
         let _ = cancelled.as_mut().poll(cx);
-        let state = policy.0.read().unwrap();
+        let state = policy.state.read().unwrap();
         if state.status.enabled || state.epoch != epoch { return Poll::Ready(Err(denied())); }
         connect.as_mut().poll(cx)
     }).await?;
@@ -368,7 +432,7 @@ mod tests {
         let url = format!("http://{}", server.local_addr().unwrap());
         let policy = Arc::new(Policy::default());
         let client = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).middleware(HttpPolicy(policy.clone())).build();
-        let request = || client.post(&format!("{url}/v1/desktop/auth/capabilities")).set("Authorization", "Bearer retained-session").send_json(serde_json::json!({}));
+        let request = || client.post(&format!("{url}/v1/desktop/auth/capabilities")).set("Authorization", "Bearer retained-session").send_json(serde_json::json!({})).map_err(|error| error.to_string());
         policy.set(ON);
         for _ in 0..3 { assert!(request().is_err()); }
         assert_eq!(server.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock, "no TCP connection, not just an HTTP error");
@@ -397,7 +461,7 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let policy = Arc::new(Policy::default());
         let client = ureq::AgentBuilder::new().timeout(Duration::from_secs(3)).middleware(HttpPolicy(policy.clone())).build();
-        let request = std::thread::spawn(move || client.get(&url).call());
+        let request = std::thread::spawn(move || client.get(&url).call().map_err(|error| error.to_string()));
         let (mut stream, _) = listener.accept().unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let mut byte = [0];

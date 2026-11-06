@@ -359,6 +359,9 @@ impl SessionManager {
         bytes.push(b'\n');
         let mut offset = 0;
         let deadline = Instant::now() + Duration::from_secs(5);
+        // Keep the remote barrier through every partial write of this frame.
+        let privacy = sender.as_ref().and_then(|sender| sender.shared.as_ref().map(|permit| &permit.privacy)
+            .or_else(|| sender.mobile.as_ref().map(|permit| &permit.grant.privacy))).map(|ticket| ticket.enter()).transpose();
         let mut sender = sender;
         while offset < bytes.len() {
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
@@ -369,11 +372,11 @@ impl SessionManager {
                 let sender = if offset == 0 { sender.take() } else { None };
                 let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
                 let mut owner_attachment = None;
-                let admitted = match &sender {
+                let admitted = privacy.as_ref().map_err(|error| anyhow::anyhow!("{error}")).and_then(|_| match &sender {
                     None => Ok(None),
                     Some(sender) => admit_codex_prompt(sender, sharing.as_deref_mut(), &mut owner_attachment)
                         .and_then(|()| sender.mobile.as_ref().map(|permit| permit.enter()).transpose()),
-                };
+                });
                 let owner = admitted.as_ref().ok().and(owner_attachment.as_ref()).map(|attachment| attachment.enter()).transpose();
                 let rt_arc = runtime.upgrade().context("Codex runtime was removed")?;
                 let mut rt = rt_arc.lock().unwrap();

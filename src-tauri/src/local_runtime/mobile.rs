@@ -24,6 +24,7 @@ struct Owner { actor: Actor, attachment: Arc<Attachment>, revoked: bool }
 
 pub struct Grant {
     actor: Actor,
+    pub(crate) privacy: crate::data_privacy::Ticket,
     attachment: Arc<Attachment>,
     pub device: DeviceEntry,
     active: Mutex<bool>,
@@ -31,17 +32,18 @@ pub struct Grant {
 }
 
 pub struct ReadGuard<'a> {
+    _privacy: crate::data_privacy::RemoteWrite,
     _active: MutexGuard<'a, bool>,
     _attachment: MutexGuard<'a, Option<std::time::Instant>>,
 }
 
 impl Grant {
     pub fn enter(&self) -> Result<ReadGuard<'_>> {
-        crate::data_privacy::require_network()?;
+        let privacy = self.privacy.enter()?;
         let attachment = self.attachment.enter()?;
         let active = self.active.lock().unwrap();
         if !*active { bail!("The paired-device grant was revoked."); }
-        Ok(ReadGuard { _active:active, _attachment:attachment })
+        Ok(ReadGuard { _privacy:privacy, _active:active, _attachment:attachment })
     }
     pub fn valid(&self) -> bool { self.enter().is_ok() }
     fn revoke(&self) {
@@ -492,7 +494,7 @@ impl Registry {
         if state.connections.contains_key(connection) { bail!("The paired-device connection cannot be rebound."); }
         if state.connections.len() >= 128 { bail!("Too many paired-device connections."); }
         state.owners.insert(actor.lease.clone(),Owner { actor:actor.clone(),attachment:attachment.clone(),revoked:false });
-        state.connections.insert(connection.into(),Arc::new(Grant { actor,attachment:attachment.clone(),device,active:Mutex::new(true),observations:Default::default() }));
+        state.connections.insert(connection.into(),Arc::new(Grant { actor,privacy:Default::default(),attachment:attachment.clone(),device,active:Mutex::new(true),observations:Default::default() }));
         Ok(())
     }
 

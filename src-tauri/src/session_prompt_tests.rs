@@ -209,7 +209,7 @@ fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
         (cli.ready.clone(), cli.awaiting_delivery.unwrap())
     };
     // No share survives: this is the delayed writer after the kill switch.
-    let permit = crate::local_sharing::WritePermit { share_generation: String::new(), connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
+    let permit = crate::local_sharing::WritePermit { privacy:Default::default(), share_generation: String::new(), connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
     rig.manager.type_prompt(&rig.rt, &rig.pane, "Undelivered guest input".into(), vec![], PromptDelivery {
         mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)), stops: 0,
     });
@@ -2851,3 +2851,7 @@ fn a_prompt_an_idle_cli_recorded_shorter_or_edited_is_shown_once_as_changed() {
         drop(rig);
     }
 }
+
+#[cfg(unix)]
+#[path = "session_privacy_tests.rs"]
+mod privacy;
