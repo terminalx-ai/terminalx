@@ -1,6 +1,6 @@
 import { privacyEnabled, subscribeDataPrivacy } from "@/lib/dataPrivacy";
 import { useSyncExternalStore } from "react";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+import { check, type Update } from "@/lib/nativeUpdater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { errorMessage, localRuntime, type LocalRuntimeWorkItem } from "@/lib/api";
 import { getPrefs } from "@/lib/prefs";

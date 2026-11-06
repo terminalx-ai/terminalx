@@ -9,6 +9,8 @@
 mod account;
 mod agent_data;
 pub mod data_privacy;
+#[cfg(feature = "desktop")]
+mod updater;
 mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
@@ -412,6 +414,8 @@ pub fn run() {
             commands::list_projects,
             data_privacy::data_privacy_status,
             data_privacy::data_privacy_set,
+            updater::app_update_check,
+            updater::app_update_install,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,

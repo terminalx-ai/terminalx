@@ -1124,11 +1124,15 @@ mod tests {
 
     #[test]
     fn privacy_blocks_and_drains_app_github_processes() {
-        let root = tempfile::tempdir().unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "github::tests::privacy_process_child", "--nocapture"])
-            .env("TERMINALX_TEST_GITHUB_PRIVACY", "1").env("TERMINALX_HOME", root.path()).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        for managed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "github::tests::privacy_process_child", "--nocapture"])
+                .env("TERMINALX_TEST_GITHUB_PRIVACY", "1").env("TERMINALX_HOME", root.path());
+            if managed { child.env("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
     }
 
     #[test]
@@ -1143,15 +1147,17 @@ mod tests {
             command.args(["-c", "printf '%s' $$ > \"$1\"; exec sleep 30", "privacy"]).arg(&marker);
             command
         };
-        crate::store::write_json(&preference, &serde_json::json!({"enabled":true})).unwrap();
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":std::env::var_os("TERMINALX_TEST_MANAGED_PRIVACY").is_none()})).unwrap();
         crate::data_privacy::initialize();
         assert!(output_within(command(), Duration::from_secs(5)).is_err());
         assert!(!marker.exists(), "disabled GitHub requests never spawn");
         let runtime = tokio::runtime::Runtime::new().unwrap();
         assert!(runtime.block_on(star_request(command(), &[])).is_none());
         assert!(!marker.exists(), "star requests use the same admission");
+        std::env::remove_var("TERMINALX_TEST_MANAGED_PRIVACY");
         crate::store::write_json(&preference, &serde_json::json!({"enabled":false})).unwrap();
         crate::data_privacy::refresh();
+        let queued = crate::data_privacy::Ticket::default();
         let pending = std::thread::spawn({ let command = command(); move || output_within(command, Duration::from_secs(30)) });
         let until = Instant::now() + Duration::from_secs(5);
         while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
@@ -1165,6 +1171,9 @@ mod tests {
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "activation acknowledges after the exact process exits");
         crate::store::write_json(&preference, &serde_json::json!({"enabled":false})).unwrap();
         crate::data_privacy::refresh();
+        std::fs::remove_file(&marker).unwrap();
+        assert!(output_admitted(command(), Duration::from_secs(5), queued).is_err(), "queued calls cannot revive across activation/restoration");
+        assert!(!marker.exists());
         let mut restored = Command::new("/bin/sh");
         restored.args(["-c", "printf restored"]);
         assert_eq!(output_within(restored, Duration::from_secs(5)).unwrap().stdout, b"restored");

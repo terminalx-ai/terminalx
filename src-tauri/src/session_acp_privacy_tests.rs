@@ -11,6 +11,10 @@ for line in sys.stdin:
         output.write(json.dumps(value) + '\n')
     method = value.get('method')
     if method == 'initialize':
+        if (base / 'block-init').exists():
+            (base / 'opening').touch()
+            while (base / 'block-init').exists():
+                time.sleep(0.005)
         if (base / 'fail-init').exists():
             (base / 'fail-init').unlink()
             print(json.dumps({'jsonrpc':'2.0','id':value['id'],'error':{'code':-32000,'message':'Initialization refused'}}), flush=True)
@@ -19,6 +23,10 @@ for line in sys.stdin:
         if (base / 'needs-auth').exists():
             result['authMethods'] = [{'id':'fixture'}]
     elif method == 'authenticate':
+        if (base / 'block-auth').exists():
+            (base / 'opening').touch()
+            while (base / 'block-auth').exists():
+                time.sleep(0.005)
         result = {}
     elif method in ('session/new', 'session/load'):
         if method == 'session/load' and (base / 'fail-load').exists():
@@ -49,7 +57,7 @@ fn blocked_acp_pipe_releases_admission_and_allows_privacy_and_stop() {
         let log = std::fs::File::create(&log_path).unwrap();
         let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "session::watch_tests::prompts::privacy::acp_lifecycle::blocked_pipe_child", "--nocapture"])
-            .env(CASE, case).env(DIRECTORY, dir.path())
+            .env(CASE, &case).env(DIRECTORY, dir.path())
             .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
         let ready = dir.path().join("ready.json");
         wait_for("actual ACP input pipe is full", || ready.exists());
@@ -131,13 +139,19 @@ fn blocked_pipe_child() {
 
 #[test]
 fn phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write() {
-    for case in ["phone-on", "phone-cycle", "phone-off", "phone-revoked", "phone-mode", "phone-interrupt", "phone-stop", "phone-init-error", "local-on", "phone-load-cycle", "phone-load-fallback-cycle", "phone-auth-cycle", "phone-interrupt-local", "edit-model-on", "edit-model-cycle", "edit-model-off", "edit-mode-on", "edit-mode-cycle", "edit-mode-off", "edit-local-model-on", "edit-local-mode-on"] {
+    let mut cases: Vec<String> = ["phone-on", "phone-cycle", "phone-off", "phone-revoked", "phone-mode", "phone-interrupt", "phone-stop", "phone-init-error", "local-on", "phone-load-cycle", "phone-load-fallback-cycle", "phone-auth-cycle", "phone-interrupt-local", "edit-model-on", "edit-model-cycle", "edit-model-off", "edit-mode-on", "edit-mode-cycle", "edit-mode-off", "edit-local-model-on", "edit-local-mode-on", "edit-mixed-model-on", "edit-mixed-model-cycle", "edit-mixed-mode-on", "edit-mixed-mode-cycle"].into_iter().map(String::from).collect();
+    for stage in ["init", "auth", "load"] {
+        for setting in ["model", "mode"] {
+            for policy in ["on", "cycle"] { cases.push(format!("edit-{stage}-{setting}-{policy}")); }
+        }
+    }
+    for case in cases {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("child.log");
         let log = std::fs::File::create(&log_path).unwrap();
         let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "session::watch_tests::prompts::privacy::acp_lifecycle::startup_child", "--nocapture"])
-            .env(CASE, case).env(DIRECTORY, dir.path())
+            .env(CASE, &case).env(DIRECTORY, dir.path())
             .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
         let ready = dir.path().join("ready.json");
         wait_for("phone input waiting for ACP session opening", || ready.exists());
@@ -183,7 +197,7 @@ fn startup_child() {
     crate::hooks::serve_private(endpoint.clone(), |_| crate::hooks::HookReply::refused("test"), move |request| service.handle(request)).unwrap();
     let program = rig._dir.path().join("acp-server");
     executable(&program, SERVER);
-    let blocked = rig._dir.path().join("block-open");
+    let blocked = rig._dir.path().join(if case.contains("-init-") { "block-init" } else if case.contains("edit-auth-") { "block-auth" } else { "block-open" });
     std::fs::write(&blocked, b"").unwrap();
     if case.contains("fallback") { std::fs::write(rig._dir.path().join("fail-load"), b"").unwrap(); }
     if case.contains("auth") { std::fs::write(rig._dir.path().join("needs-auth"), b"").unwrap(); }
@@ -214,6 +228,10 @@ fn startup_child() {
         } else {
             crate::local_runtime::mobile::execute(&rig.manager, &lifetime, if mode { "setMode" } else { "setModel" },
                 json!({"actor":actor,"connection":"connection","sessionId":SESSION,"tabId":TAB,"mode":"plan","model":"remote-model"})).unwrap();
+        }
+        if case.contains("mixed") {
+            if mode { rig.manager.set_model(SESSION, TAB, "desktop-model").unwrap(); }
+            else { rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap(); }
         }
         let pending = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
         assert_eq!(pending.model, "original-model");
@@ -246,13 +264,21 @@ fn startup_child() {
         let method = if mode { "session/set_mode" } else { "session/set_model" };
         assert_eq!(requests().iter().filter(|v| v["method"] == method).count(), usize::from(applied), "{case}: {:?}", requests());
         let final_settings = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
-        assert_eq!(final_settings.model, if !mode && applied { "remote-model" } else { "original-model" });
-        assert_eq!(final_settings.permission_mode, if mode && applied { "plan" } else { "auto" });
+        assert_eq!(final_settings.model, if !mode && applied { "remote-model" } else if mode && case.contains("mixed") { "desktop-model" } else { "original-model" });
+        assert_eq!(final_settings.permission_mode, if (mode && applied) || (!mode && case.contains("mixed")) { "plan" } else { "auto" });
         assert!(final_settings.request_privacy.is_empty());
         assert!(final_settings.requested_model.is_none());
         assert!(final_settings.requested_permission_mode.is_none());
         assert_eq!(prompts().len(), 1);
         rig.manager.stop(SESSION, TAB).unwrap();
+        if !applied {
+            launch();
+            rig.manager.send(SESSION, TAB, "local restart".into(), vec![]).unwrap();
+            wait_for("local restart delivered without the withdrawn remote setting", || prompts().len() == 2);
+            wait_for("local restart completes", || !rig.rt.lock().unwrap().turn_open);
+            assert_eq!(requests().iter().filter(|v| v["method"] == method).count(), 0, "expired edits must not replay at restart");
+            rig.manager.stop(SESSION, TAB).unwrap();
+        }
         return;
     }
     if case == "phone-interrupt-local" {

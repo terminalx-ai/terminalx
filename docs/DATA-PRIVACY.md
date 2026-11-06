@@ -61,6 +61,14 @@ Frontend gates stop catalog polling and queued cloud/remote actions. Webview
 external images and update checks are suppressed too. The app's existing
 diagnostic logs stay local; no external logging sink is enabled by this mode.
 
+App-owned GitHub subprocesses are refused while enabled and terminated before
+activation is acknowledged. Agent-owned subprocesses retain their network access.
+Update checks and downloads use native admission too: an already admitted
+transfer drains, with a 60-second limit, before privacy activation is acknowledged.
+Its result is then discarded. Cached updates and deferred install choices are
+withdrawn across activation/restoration; a fresh check is required after restoring
+access. The short-lived GitHub broker helper loads the same policy before access.
+
 `data_privacy::tests` includes real loopback HTTP and WebSocket network tests
 (zero connections while on, idle-stream invalidation, retained bearer credentials
 after off), native macOS preference reads in an isolated test domain and forced

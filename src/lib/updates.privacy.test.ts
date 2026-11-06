@@ -4,7 +4,7 @@ const native = vi.hoisted(() => vi.fn());
 const updater = vi.hoisted(() => ({ check: vi.fn(), install: vi.fn(), relaunch: vi.fn() }));
 const runtime = vi.hoisted(() => ({ work: vi.fn(), planUpdate: vi.fn() }));
 vi.mock("@tauri-apps/api/core", async (original) => ({ ...(await original<object>()), invoke: native }));
-vi.mock("@tauri-apps/plugin-updater", () => ({ check: updater.check }));
+vi.mock("@/lib/nativeUpdater", () => ({ check: updater.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: updater.relaunch }));
 vi.mock("@/lib/api", async (original) => ({ ...(await original<typeof import("@/lib/api")>()), localRuntime: runtime }));
 

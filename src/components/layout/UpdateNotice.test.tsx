@@ -5,7 +5,7 @@ const updater = vi.hoisted(() => ({ check: vi.fn(), relaunch: vi.fn(), install: 
 const runtime = vi.hoisted(() => ({ work: vi.fn(), planUpdate: vi.fn() }));
 /** What happened, in order: the plan must be left after installing and before relaunching. */
 const steps = vi.hoisted(() => [] as string[]);
-vi.mock("@tauri-apps/plugin-updater", () => ({ check: updater.check }));
+vi.mock("@/lib/nativeUpdater", () => ({ check: updater.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: updater.relaunch }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), localRuntime: runtime }));

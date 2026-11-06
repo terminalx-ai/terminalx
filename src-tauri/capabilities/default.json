@@ -32,7 +32,6 @@
     "core:webview:default",
     "core:window:default",
     "core:event:default",
-    "notification:default",
-    "updater:default"
+    "notification:default"
   ]
 }

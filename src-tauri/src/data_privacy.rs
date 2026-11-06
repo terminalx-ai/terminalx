@@ -165,6 +165,20 @@ pub fn require_network() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any(feature = "desktop", test))]
+pub(crate) const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Drain native updater traffic admitted before activation. No lease lives
+/// in JavaScript, so closing a window cannot strand the acknowledgement.
+/// A timeout drops the entire transport future before releasing admission.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) async fn transfer<T>(ticket: &Ticket, work: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    let _privacy = ticket.enter()?;
+    let result = tokio::time::timeout(TRANSFER_TIMEOUT, work).await??;
+    anyhow::ensure!(ticket.valid(), MESSAGE);
+    Ok(result)
+}
+
 /// Every TerminalX service client, including the relay director, uses this
 /// builder. The policy is checked at send time, not when a client is made.
 pub fn http_agent() -> ureq::AgentBuilder {
@@ -209,6 +223,10 @@ fn resolve(local: bool, forced: bool, value: Option<bool>) -> Status {
 
 fn read_status() -> Status {
     let (forced, value) = managed_preference();
+    // Process-isolated network/entrypoint tests exercise the forced-profile
+    // result without installing or changing an OS configuration profile.
+    #[cfg(test)]
+    let (forced, value) = if std::env::var_os("TERMINALX_TEST_MANAGED_PRIVACY").is_some() { (true, Some(true)) } else { (forced, value) };
     resolve(local_preference(), forced, value)
 }
 
@@ -435,6 +453,45 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
 
     const ON: Status = Status { enabled: true, managed: false };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_transfer_drains_before_privacy_ack_and_discards_expired_results() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let owner = Arc::new(Policy::default());
+        let ticket = Ticket::with_policy(owner.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (arrived, receiving) = tokio::sync::oneshot::channel();
+        let (finish, finishing) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0]; socket.read_exact(&mut request).await.unwrap();
+            arrived.send(()).unwrap();
+            finishing.await.unwrap();
+            socket.write_all(b"x").await.unwrap();
+        });
+        let operation = tokio::spawn({ let ticket = ticket.clone(); async move {
+            transfer(&ticket, async {
+                let mut socket = tokio::net::TcpStream::connect(address).await?;
+                socket.write_all(b"u").await?;
+                let mut body = [0]; socket.read_exact(&mut body).await?;
+                Ok(body)
+            }).await
+        }});
+        receiving.await.unwrap();
+        let (acknowledge, acknowledged) = std::sync::mpsc::channel();
+        let enabling = std::thread::spawn({ let owner = owner.clone(); move || { owner.set(ON); acknowledge.send(()).unwrap(); } });
+        while !owner.status().enabled { tokio::task::yield_now().await; }
+        assert!(acknowledged.try_recv().is_err(), "an in-flight native transfer holds activation until drained");
+        finish.send(()).unwrap();
+        assert!(operation.await.unwrap().is_err(), "a drained update cannot be installed after activation");
+        server.await.unwrap();
+        acknowledged.recv_timeout(Duration::from_secs(5)).unwrap();
+        enabling.join().unwrap();
+        owner.set(Status::default());
+        assert!(transfer::<()>(&ticket, async { panic!("an expired discovered update must never start its download") }).await.is_err());
+        assert_eq!(transfer(&Ticket::with_policy(owner), async { Ok(7) }).await.unwrap(), 7);
+    }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {
         // A raw fixture must consume the whole request before closing;

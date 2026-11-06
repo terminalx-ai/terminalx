@@ -1117,17 +1117,21 @@ mod tests {
 
     #[test]
     fn credential_helper_initializes_privacy_before_contacting_the_broker() {
-        let state = state_with_credential();
-        crate::store::write_json(&state.path().join("data-privacy.json"), &serde_json::json!({"enabled":true})).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let config = BrokerConfig { v: 1, origin: format!("http://{}", listener.local_addr().unwrap()), state_dir: state.path().into(), cache_dir: None };
-        crate::store::write_json(&state.path().join(CONFIG_FILE), &config).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "cloud_github::tests::privacy_helper_child", "--nocapture"])
-            .env("TERMINALX_TEST_GITHUB_HELPER_PRIVACY", "1").env("TERMINALX_HOME", state.path()).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "no connection reaches the real broker socket");
+        for managed in [false, true] {
+            let state = state_with_credential();
+            crate::store::write_json(&state.path().join("data-privacy.json"), &serde_json::json!({"enabled":!managed})).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let config = BrokerConfig { v: 1, origin: format!("http://{}", listener.local_addr().unwrap()), state_dir: state.path().into(), cache_dir: None };
+            crate::store::write_json(&state.path().join(CONFIG_FILE), &config).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "cloud_github::tests::privacy_helper_child", "--nocapture"])
+                .env("TERMINALX_TEST_GITHUB_HELPER_PRIVACY", "1").env("TERMINALX_HOME", state.path());
+            if managed { child.env("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "no connection reaches the real broker socket");
+        }
     }
 
     #[test]
