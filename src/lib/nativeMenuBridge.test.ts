@@ -148,7 +148,13 @@ describe("native menu integration", () => {
     await Promise.resolve();
     dispatchNativeMenu("app.newWindow");
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "N", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
-    expect(mocks.invoke.mock.calls.filter(([name]) => name === "new_chat_window")).toHaveLength(2);
+    if (label === "main") {
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === "new_chat_window")).toHaveLength(2);
+    } else {
+      expect(mocks.invoke).toHaveBeenNthCalledWith(1, "forward_menu_action", { action: "app.newWindow" });
+      expect(mocks.invoke).toHaveBeenNthCalledWith(2, "forward_menu_action", { action: "app.newWindow" });
+      expect(mocks.invoke).not.toHaveBeenCalledWith("new_chat_window");
+    }
     expect(mocks.invoke).not.toHaveBeenCalledWith("floating_show", expect.anything());
   });
 

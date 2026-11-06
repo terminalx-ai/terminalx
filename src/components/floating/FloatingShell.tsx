@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { message } from "@tauri-apps/plugin-dialog";
+import { openChatWindowInMain } from "@/lib/chatWindowHandoff";
 import { isChatWindow } from "@/lib/appWindow";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppWindow, ChevronDown, Ellipsis, MessageCirclePlus, Pin, PinOff, Trash2 } from "@/icons";
@@ -185,10 +186,15 @@ export function FloatingShell() {
 }
 
 /** Hand off only this view; an independent window never hides Quick Chat. */
+let handoff: Promise<void> | null = null;
 function openChatInMain(sessionId: string, tabId?: string | null): Promise<void> {
-  return isChatWindow()
-    ? invoke("chat_window_open_in_main", { sessionId, tabId: tabId ?? null })
-    : floatingWindow.openInMain(sessionId, tabId);
+  return handoff ??= (isChatWindow()
+    ? openChatWindowInMain(sessionId, tabId ?? null)
+    : floatingWindow.openInMain(sessionId, tabId))
+    .catch(async (error: unknown) => {
+      await message(error instanceof Error ? error.message : String(error), { title: "Could not open in main window", kind: "error" });
+    })
+    .finally(() => { handoff = null; });
 }
 
 /** Keeps the window above other apps' windows, or lets it go behind them. */

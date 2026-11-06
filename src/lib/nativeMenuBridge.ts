@@ -83,7 +83,9 @@ export function useNativeMenus() {
       void getCurrentWebviewWindow().setZoom(zoom).catch(failed);
     };
     const cleanups = [
-      registerShortcut("app.newWindow", () => { void invoke("new_chat_window").catch(failed); }),
+      // Main exists even when every window is minimized. Compact windows
+      // forward this action just like any other main-owned menu command.
+      ...(!isCompactWindow() ? [registerShortcut("app.newWindow", () => { void invoke("new_chat_window").catch(failed); })] : []),
       registerShortcut("app.closeWindow", () => { void invoke("native_window_action", { action: "close" }).catch(failed); }),
       registerShortcut("app.fullscreen", () => { void invoke("native_window_action", { action: "fullscreen" }).catch(failed); }),
       registerShortcut("app.zoomIn", () => changeZoom(0.1)),

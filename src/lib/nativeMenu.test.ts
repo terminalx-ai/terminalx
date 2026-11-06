@@ -7,6 +7,14 @@ function leaves(items: NativeMenuItem[]): NativeMenuItem[] {
 }
 
 describe("native menus and the action registry", () => {
+  it("routes New Window to main even when no window has focus", () => {
+    const items = leaves(buildNativeMenu(resolveKeymap({}, true), []).flatMap((group) => group.items));
+    expect(items.find((item) => item.id.endsWith(":app.newWindow"))).toMatchObject({
+      id: "command:main:app.newWindow",
+      accelerator: "CmdOrCtrl+Shift+N",
+    });
+  });
+
   it("contains the requested menu tree, with each registered menu action exactly once", () => {
     const groups = buildNativeMenu(resolveKeymap({}, true), []);
     expect(groups.map((group) => [group.id, group.items.map((item) => item.id.split(":").at(-1))])).toEqual([

@@ -215,6 +215,13 @@ the reader is in.
 of it is selected, chat versus terminal view for a tab, and unsent composer
 text.
 
+Independent chat windows created by File → New Window close when their view
+is opened in the main window. Before closing, they copy every unsent tab's
+text to the main window and wait for its acknowledgment. A conflicting draft
+in the main window, a failed transfer, or edits during the transfer keep the
+source window open and report why. Quick Chat still hides on handoff and
+keeps its own drafts.
+
 **What there is one of**, owned by the main window: the dock badge, and
 desktop banners. Each window writes whether it has the focus and which
 session it shows; the rule is:
