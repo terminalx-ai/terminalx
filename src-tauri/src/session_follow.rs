@@ -438,7 +438,6 @@ impl SessionManager {
             generation,
             launched_at: Instant::now(),
             restart_when_idle: false,
-            restart_privacy: None,
             settings_asked_at: None,
             launched_for: None,
             status_names_model: false,

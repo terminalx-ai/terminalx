@@ -176,6 +176,25 @@ impl Signal {
     }
 }
 
+/// Each deferred edit owns its authority independently. Persist it with the
+/// request: dropping a runtime, stopping a process or handing it to a new
+/// owner must not turn a phone edit into an unrestricted local one. The
+/// ticket's owner nonce also expires requests across owner replacement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPrivacy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<crate::data_privacy::Ticket>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<crate::data_privacy::Ticket>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permission_mode: Option<crate::data_privacy::Ticket>,
+}
+
+impl RequestPrivacy {
+    pub fn is_empty(&self) -> bool { self.model.is_none() && self.effort.is_none() && self.permission_mode.is_none() }
+}
+
 /// The fields of a tab this module owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +205,8 @@ pub struct Settings {
     pub requested_model: Option<String>,
     pub requested_effort: Option<String>,
     pub requested_permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "RequestPrivacy::is_empty")]
+    pub request_privacy: RequestPrivacy,
 }
 
 impl Settings {
@@ -197,6 +218,7 @@ impl Settings {
             requested_model: tab.requested_model.clone(),
             requested_effort: tab.requested_effort.clone(),
             requested_permission_mode: tab.requested_permission_mode.clone(),
+            request_privacy: tab.request_privacy.clone(),
         }
     }
 
@@ -207,6 +229,7 @@ impl Settings {
         tab.requested_model = self.requested_model.clone();
         tab.requested_effort = self.requested_effort.clone();
         tab.requested_permission_mode = self.requested_permission_mode.clone();
+        tab.request_privacy = self.request_privacy.clone();
     }
 
     #[cfg(test)]
@@ -221,9 +244,11 @@ impl Settings {
     /// false) the value is simply what the next launch will be given; with
     /// one, it waits.
     pub fn request_model(&mut self, model: &str, confirmed_by_provider: bool) {
+        self.request_privacy.model = crate::data_privacy::remote_ticket();
         if !confirmed_by_provider || model == self.model {
             self.model = model.to_string();
             self.requested_model = None;
+            self.request_privacy.model = None;
         } else {
             self.requested_model = Some(model.to_string());
         }
@@ -233,13 +258,17 @@ impl Settings {
     /// something a running CLI can be told, so it is only ever a launch
     /// setting.
     pub fn request_effort(&mut self, effort: Option<&str>, confirmed_by_provider: bool) {
+        self.request_privacy.effort = crate::data_privacy::remote_ticket();
         let effort = effort.filter(|e| !e.is_empty());
-        match effort {
-            Some(e) if confirmed_by_provider && Some(e) != self.effort.as_deref() => self.requested_effort = Some(e.to_string()),
-            _ => {
-                self.effort = effort.map(String::from);
-                self.requested_effort = None;
-            }
+        if confirmed_by_provider && effort != self.effort.as_deref() {
+            // An empty requested value means clearing the explicit effort
+            // at restart. Keep it pending, with the same authority as any
+            // other edit, instead of changing the effective value early.
+            self.requested_effort = Some(effort.unwrap_or_default().to_string());
+        } else {
+            self.effort = effort.map(String::from);
+            self.requested_effort = None;
+            self.request_privacy.effort = None;
         }
     }
 
@@ -252,9 +281,11 @@ impl Settings {
     /// given; `waits` says that launch is held up by a turn the restart would
     /// interrupt, and until then the tab is in the mode it was in.
     pub fn request_mode(&mut self, mode: &str, waits: bool) {
+        self.request_privacy.permission_mode = crate::data_privacy::remote_ticket();
         if !waits || mode == self.permission_mode {
             self.permission_mode = mode.to_string();
             self.requested_permission_mode = None;
+            self.request_privacy.permission_mode = None;
         } else {
             self.requested_permission_mode = Some(mode.to_string());
         }
@@ -266,6 +297,7 @@ impl Settings {
     pub fn reported_mode(&mut self, mode: &str) {
         if self.requested_permission_mode.as_deref() == Some(mode) {
             self.requested_permission_mode = None;
+            self.request_privacy.permission_mode = None;
         }
         self.permission_mode = mode.to_string();
     }
@@ -273,15 +305,51 @@ impl Settings {
     /// A process is being started, or the one that was running is gone:
     /// whatever was waiting rides with the launch, and is what the tab runs.
     pub fn launched(&mut self) {
+        self.request_privacy = RequestPrivacy::default();
         if let Some(model) = self.requested_model.take() {
             self.model = model;
         }
         if let Some(effort) = self.requested_effort.take() {
-            self.effort = Some(effort);
+            self.effort = Some(effort).filter(|effort| !effort.is_empty());
         }
         if let Some(mode) = self.requested_permission_mode.take() {
             self.permission_mode = mode;
         }
+    }
+
+    /// With no process, local requests become the next launch's settings.
+    /// Remote requests stay pending until a launch holds their admission
+    /// leases; otherwise a later toggle could no longer withdraw them.
+    pub fn settled_without_process(&mut self) {
+        let remote_model = self.request_privacy.model.as_ref().and_then(|_| self.requested_model.take());
+        let remote_effort = self.request_privacy.effort.as_ref().and_then(|_| self.requested_effort.take());
+        let remote_mode = self.request_privacy.permission_mode.as_ref().and_then(|_| self.requested_permission_mode.take());
+        let privacy = self.request_privacy.clone();
+        self.launched();
+        self.requested_model = remote_model;
+        self.requested_effort = remote_effort;
+        self.requested_permission_mode = remote_mode;
+        self.request_privacy = privacy;
+    }
+
+    /// Reserve every remote edit before applying any of them. An expired
+    /// edit is withdrawn on its own; unrelated local edits remain pending.
+    pub fn admit_pending(&mut self) -> Vec<crate::data_privacy::RemoteWrite> {
+        let mut leases = Vec::new();
+        for (value, ticket) in [
+            (&mut self.requested_model, &mut self.request_privacy.model),
+            (&mut self.requested_effort, &mut self.request_privacy.effort),
+            (&mut self.requested_permission_mode, &mut self.request_privacy.permission_mode),
+        ] {
+            if value.is_none() { *ticket = None; }
+            if let Some(authority) = ticket {
+                match authority.enter() {
+                    Ok(lease) => leases.push(lease),
+                    Err(_) => { *value = None; *ticket = None; }
+                }
+            }
+        }
+        leases
     }
 
     /// The provider says what it is running. `model` has already been through
@@ -292,12 +360,14 @@ impl Settings {
         if let Some(model) = model {
             if self.requested_model.as_deref() == Some(model) {
                 self.requested_model = None;
+                self.request_privacy.model = None;
             }
             self.model = model.to_string();
         }
         if let Some(effort) = effort {
             if self.requested_effort.as_deref() == Some(effort) {
                 self.requested_effort = None;
+                self.request_privacy.effort = None;
             }
             self.effort = Some(effort.to_string());
         }
@@ -307,13 +377,15 @@ impl Settings {
     pub fn accepted(&mut self, setting: Setting) {
         match setting {
             Setting::Model => {
+                self.request_privacy.model = None;
                 if let Some(model) = self.requested_model.take() {
                     self.model = model;
                 }
             }
             Setting::Effort => {
+                self.request_privacy.effort = None;
                 if let Some(effort) = self.requested_effort.take() {
-                    self.effort = Some(effort);
+                    self.effort = Some(effort).filter(|effort| !effort.is_empty());
                 }
             }
         }
@@ -329,6 +401,10 @@ impl Settings {
         };
         if value.is_some_and(|value| waiting.as_deref() != Some(value)) {
             return None;
+        }
+        match setting {
+            Setting::Model => self.request_privacy.model = None,
+            Setting::Effort => self.request_privacy.effort = None,
         }
         waiting.take()
     }
@@ -499,8 +575,12 @@ mod tests {
     fn no_effort_in_particular_is_a_launch_setting() {
         let mut s = on("opus", Some("high"));
         s.request_effort(None, true);
-        assert_eq!(s, on("opus", None));
+        assert_eq!(s.effort.as_deref(), Some("high"));
+        assert_eq!(s.requested_effort.as_deref(), Some(""));
         s.request_effort(Some(""), true);
+        assert_eq!(s.effort.as_deref(), Some("high"));
+        assert_eq!(s.requested_effort.as_deref(), Some(""));
+        s.launched();
         assert_eq!(s, on("opus", None));
     }
 

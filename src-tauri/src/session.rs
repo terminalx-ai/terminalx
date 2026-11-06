@@ -741,7 +741,6 @@ pub struct CliTab {
     /// A setting the CLI only reads at startup, changed mid-turn. The restart
     /// waits for the turn to end.
     pub restart_when_idle: bool,
-    restart_privacy: Option<crate::data_privacy::Ticket>,
     /// When a model or effort change was last typed into this CLI and is
     /// still waiting for it to answer (`harness::settings`). A CLI that never
     /// answers is given up on by the session watcher.
@@ -937,7 +936,7 @@ struct CliRestart {
     tail: Arc<tui::Tail>,
     pane: String,
     process: Option<pty::StoppingPane>,
-    _privacy: Option<crate::data_privacy::RemoteWrite>,
+    _privacy: Vec<crate::data_privacy::RemoteWrite>,
 }
 
 impl TabRuntime {
@@ -2829,11 +2828,14 @@ impl SessionManager {
         Ok(SendOutcome { queued: false, events, in_input: false })
     }
 
-    /// With no process there is nobody left to answer a model or effort
-    /// change that was waiting on one: it is simply what the next launch is
-    /// given, and so what the tab is on.
+    /// With no process, local changes become launch defaults. Remote changes
+    /// retain their provenance until an admitted launch consumes them, so a
+    /// privacy toggle can still withdraw them while the process is stopped.
     fn settle_settings_without_process(&self, rt: &mut TabRuntime) -> Option<Settings> {
-        match self.update_settings(rt, |s| s.launched()) {
+        match self.update_settings(rt, |s| {
+            let _privacy = s.admit_pending();
+            s.settled_without_process();
+        }) {
             Ok((_, now)) => Some(now),
             Err(error) => {
                 log::warn!("settle the settings of {}/{}: {error:#}", rt.session_id, rt.tab_id);
@@ -3509,9 +3511,8 @@ impl SessionManager {
             // so its tab is restarted on the same conversation instead: now,
             // or once the turn it would interrupt is over.
             Engine::Cli(p) => {
-                if before != after { p.restart_privacy = crate::data_privacy::remote_ticket(); }
                 if turn_open {
-                    p.restart_when_idle |= before != after;
+                    p.restart_when_idle = after.requested_permission_mode.is_some() || after.waiting();
                 } else {
                     restart = before != after;
                 }
@@ -3733,7 +3734,7 @@ impl SessionManager {
         // Whatever it was doing, it was doing in a mode the share forbids.
         self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
         let current_tail = match &rt.engine { Engine::Cli(p) => p.tail.clone(), _ => return false };
-        let work = self.prepare_cli_restart(&mut rt, &current_tail);
+        let work = self.prepare_cli_restart(&mut rt, &current_tail, false);
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         drop(rt);
         drop(sharing);
@@ -3829,7 +3830,8 @@ impl SessionManager {
             }
         }
         let turn_open = rt.turn_open;
-        let waits = self.change_waits(&rt, Setting::Effort);
+        let waits = self.change_waits(&rt, Setting::Effort)
+            && (HarnessId::parse(&rt.harness).settings().effort == Apply::Restart || effort.is_some_and(|e| !e.is_empty()));
         let (before, after) = self.update_settings(&mut rt, |s| s.request_effort(effort, waits))?;
         let mut respawn = false;
         let mut restart = false;
@@ -3843,9 +3845,8 @@ impl SessionManager {
                 }
             }
             Engine::Cli(p) => {
-                if before != after { p.restart_privacy = crate::data_privacy::remote_ticket(); }
                 if turn_open {
-                    p.restart_when_idle |= before != after;
+                    p.restart_when_idle = after.requested_permission_mode.is_some() || after.waiting();
                 } else {
                     restart = before != after;
                 }
@@ -4064,6 +4065,7 @@ impl SessionManager {
                 return Ok(false);
             }
         }
+        let _privacy = self.admit_pending_settings(rt)?;
         // In use again: a stop for idleness is over.
         if tab.parked {
             if let Err(error) = index::set_parked(&rt.session_id, &rt.tab_id, false) {
@@ -4097,9 +4099,6 @@ impl SessionManager {
             launching.write(&mut tab);
             tab
         };
-        if launching != waited {
-            self.update_settings(rt, |s| s.launched())?;
-        }
         // A quick chat's scratch directory is ours to keep there: one removed
         // by hand is made again rather than failing the launch.
         if entry.is_quick() && crate::store::quick::is_scratch(&entry.id, &entry.cwd) {
@@ -4163,6 +4162,11 @@ impl SessionManager {
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
+        // Only a successful spawn consumes deferred remote requests. A
+        // failed launch must leave their authority available for withdrawal.
+        if launching != waited {
+            self.update_settings(rt, |s| s.launched())?;
+        }
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             usage_account,
@@ -4172,7 +4176,6 @@ impl SessionManager {
             generation,
             launched_at: Instant::now(),
             restart_when_idle: false,
-            restart_privacy: None,
             settings_asked_at: None,
             launched_for,
             status_names_model: false,
@@ -4432,7 +4435,7 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         if !Self::has_tail(&rt, tail) { return Ok(None); }
         if let Some(refusal) = Self::by_hand_refusal(&rt, "its settings") { bail!(refusal); }
-        Ok(self.prepare_cli_restart(&mut rt, tail))
+        Ok(self.prepare_cli_restart(&mut rt, tail, false))
     }
 
     /// A deferred settings restart must still be due and idle when its worker
@@ -4444,21 +4447,37 @@ impl SessionManager {
             || !matches!(&rt.engine, Engine::Cli(p) if p.restart_when_idle && p.by_hand.is_none()) {
             return None;
         }
-        self.prepare_cli_restart(&mut rt, tail)
+        self.prepare_cli_restart(&mut rt, tail, true)
     }
 
-    fn prepare_cli_restart(&self, rt: &mut TabRuntime, tail: &Arc<tui::Tail>) -> Option<CliRestart> {
+    /// Persist withdrawal before a launch can consume requested settings.
+    /// The returned leases belong to the whole physical restart/launch.
+    fn admit_pending_settings(&self, rt: &mut TabRuntime) -> Result<Vec<crate::data_privacy::RemoteWrite>> {
+        let mut privacy = Vec::new();
+        self.update_settings(rt, |s| privacy = s.admit_pending())?;
+        Ok(privacy)
+    }
+
+    fn prepare_cli_restart(&self, rt: &mut TabRuntime, tail: &Arc<tui::Tail>, idle: bool) -> Option<CliRestart> {
         if !Self::has_tail(rt, tail) || rt.restart_claim.is_some() { return None; }
-        let privacy = match &rt.engine { Engine::Cli(p) => p.restart_privacy.clone().or_else(crate::data_privacy::remote_ticket), _ => return None };
-        let privacy = match privacy.as_ref().map(|ticket| ticket.enter()).transpose() {
-            Ok(privacy) => privacy,
-            Err(_) => {
-                if let Engine::Cli(p) = &mut rt.engine { p.restart_when_idle = false; p.restart_privacy = None; }
-                let _ = self.refuse_setting(rt, Setting::Model, None, crate::data_privacy::MESSAGE);
-                let _ = self.refuse_setting(rt, Setting::Effort, None, crate::data_privacy::MESSAGE);
-                return None;
-            }
+        // Immediate phone operations also retain their initiating authority
+        // through the process wait. Deferred work gets each request's ticket
+        // from the index; unrelated edits never replace that authority.
+        let mut privacy = match crate::data_privacy::remote_ticket().map(|ticket| ticket.enter()).transpose() {
+            Ok(lease) => lease.into_iter().collect::<Vec<_>>(),
+            Err(_) => return None,
         };
+        match self.admit_pending_settings(rt) {
+            Ok(leases) => privacy.extend(leases),
+            Err(error) => { log::warn!("admit deferred settings: {error:#}"); return None; }
+        }
+        if idle {
+            let tab = index::get(&rt.session_id).ok()?.tab(&rt.tab_id)?.clone();
+            let Engine::Cli(p) = &mut rt.engine else { return None };
+            p.restart_when_idle = tab.requested_permission_mode.is_some()
+                || (p.harness == CliKind::Codex && (tab.requested_model.is_some() || tab.requested_effort.is_some()));
+            if !p.restart_when_idle { return None; }
+        }
         let pane = match &rt.engine { Engine::Cli(p) => p.pane_id.clone(), _ => return None };
         self.release_cli(rt);
         // Capture the actual group before dropping runtime. A later stop or

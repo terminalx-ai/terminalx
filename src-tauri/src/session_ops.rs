@@ -191,7 +191,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         transport: t.transport,
         title: None,
         model: t.model.clone(),
-        effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None,
+        effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
         permission_mode: index::permission_mode_or_default(t.permission_mode.as_deref()),
         provider_session_id: None,
         status: TabStatus::Idle,

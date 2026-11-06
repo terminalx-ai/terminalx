@@ -217,7 +217,6 @@ impl Rig {
                 generation: 0,
                 launched_at: now,
                 restart_when_idle: false,
-            restart_privacy: None,
                 settings_asked_at: None,
                 launched_for: None,
                 status_names_model: false,
@@ -965,11 +964,8 @@ fn the_watcher_runs_a_pending_settings_restart_after_closing_the_turn() {
     })).unwrap();
     index::save(&[entry]).unwrap();
     rig.start_turn();
-    {
-        let mut rt = rig.rt.lock().unwrap();
-        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
-        p.restart_when_idle = true;
-    }
+    rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap();
+    assert_eq!(rig.mode().1.as_deref(), Some("plan"));
     let (sent, restarted) = std::sync::mpsc::channel();
     let shutting_down = rig.manager.shutting_down.clone();
     rig.manager.sink.listen("tab_status", Box::new(move |payload| {

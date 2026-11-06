@@ -535,7 +535,7 @@ mod tests {
         let pane = PaneInfo { id: "tab:t1".into(), pid: Some(400), running: true, cwd: "/work".into() };
         let rule = |status: index::TabStatus| {
             let tab = index::TabEntry { transport: Default::default(),
-                id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+                id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
                 permission_mode: "auto".into(), provider_session_id: None, status,
                 created: String::new(), modified: String::new(), context_used: None, context_max: None,
                 fork_from: None, continuation: None, parked: false, unknown: Default::default(),

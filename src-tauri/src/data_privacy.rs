@@ -32,6 +32,7 @@ struct State {
 }
 
 pub struct Policy {
+    id: String,
     state: RwLock<State>,
     updating: Mutex<()>,
     writers: Mutex<usize>,
@@ -41,6 +42,7 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
+            id: uuid::Uuid::new_v4().to_string(),
             state: RwLock::new(State { status: Status::default(), epoch: 0, cancel: CancellationToken::new() }),
             updating: Mutex::new(()), writers: Mutex::new(0), drained: Condvar::new(),
         }
@@ -71,8 +73,25 @@ impl Policy {
 
 /// Authority captured when a phone connects or a share is created. A toggle
 /// permanently expires it, including queued work, even after privacy is off.
-#[derive(Clone)]
-pub struct Ticket { policy: Arc<Policy>, epoch: Option<u64> }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Ticket {
+    #[serde(skip, default = "shared_policy")]
+    policy: Arc<Policy>,
+    owner: String,
+    epoch: Option<u64>,
+}
+
+fn shared_policy() -> Arc<Policy> { policy().clone() }
+
+impl std::fmt::Debug for Ticket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ticket").field("owner", &self.owner).field("epoch", &self.epoch).finish()
+    }
+}
+impl PartialEq for Ticket {
+    fn eq(&self, other: &Self) -> bool { self.owner == other.owner && self.epoch == other.epoch }
+}
+impl Eq for Ticket {}
 
 impl Default for Ticket {
     fn default() -> Self { Self::with_policy(policy().clone()) }
@@ -83,15 +102,15 @@ impl Ticket {
         let state = policy.state.read().unwrap();
         let epoch = (!state.status.enabled).then_some(state.epoch);
         drop(state);
-        Self { policy, epoch }
+        Self { owner: policy.id.clone(), policy, epoch }
     }
     pub fn valid(&self) -> bool {
         let state = self.policy.state.read().unwrap();
-        !state.status.enabled && self.epoch == Some(state.epoch)
+        self.owner == self.policy.id && !state.status.enabled && self.epoch == Some(state.epoch)
     }
     pub fn enter(&self) -> anyhow::Result<RemoteWrite> {
         let state = self.policy.state.read().unwrap();
-        anyhow::ensure!(!state.status.enabled && self.epoch == Some(state.epoch), MESSAGE);
+        anyhow::ensure!(self.owner == self.policy.id && !state.status.enabled && self.epoch == Some(state.epoch), MESSAGE);
         *self.policy.writers.lock().unwrap() += 1;
         Ok(RemoteWrite(self.policy.clone()))
     }
@@ -416,6 +435,62 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
 
     const ON: Status = Status { enabled: true, managed: false };
+
+    #[test]
+    fn persisted_tickets_cannot_become_local_authority_after_owner_replacement() {
+        let owner = Arc::new(Policy::default());
+        let ticket = Ticket::with_policy(owner.clone());
+        assert!(ticket.valid());
+        let saved = serde_json::to_vec(&ticket).unwrap();
+        // Deserialization binds to this process's owner, never to the owner
+        // named in an old record. The nonce must reject that old authority.
+        let restored: Ticket = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(ticket, restored);
+        assert!(!restored.valid());
+        assert!(restored.enter().is_err());
+        owner.set(ON);
+        owner.set(Status::default());
+        assert!(!ticket.valid());
+    }
+
+    #[test]
+    fn pending_setting_leases_hold_the_activation_barrier_until_work_finishes() {
+        let owner = Arc::new(Policy::default());
+        let ticket = Ticket::with_policy(owner.clone());
+        let mut settings = crate::harness::settings::Settings::default();
+        {
+            let _scope = ticket.scope().unwrap();
+            settings.request_mode("bypassPermissions", true);
+            settings.request_model("remote-model", true);
+        }
+        // The desktop edits only effort; both other tickets must remain.
+        settings.request_effort(Some("high"), true);
+        let leases = settings.admit_pending();
+        assert_eq!(leases.len(), 2);
+        let (sent, acknowledged) = std::sync::mpsc::channel();
+        let updating = owner.clone();
+        let activation = std::thread::spawn(move || { updating.set(ON); sent.send(()).unwrap(); });
+        // Status changes before the drain. Wait for that transition rather
+        // than assuming the activation thread was scheduled in a timeout.
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !owner.status().enabled {
+            assert!(std::time::Instant::now() < until);
+            std::thread::yield_now();
+        }
+        assert!(acknowledged.try_recv().is_err());
+        drop(leases);
+        acknowledged.recv_timeout(Duration::from_secs(5)).unwrap();
+        activation.join().unwrap();
+        owner.set(Status::default());
+        assert!(settings.admit_pending().is_empty());
+        assert!(settings.requested_model.is_none());
+        assert!(settings.requested_permission_mode.is_none());
+        assert_eq!(settings.requested_effort.as_deref(), Some("high"));
+        settings.launched();
+        assert_eq!(settings.effort.as_deref(), Some("high"));
+        assert!(settings.model.is_empty());
+        assert!(settings.permission_mode.is_empty());
+    }
 
     #[test]
     fn missing_preference_defaults_off_but_damaged_files_fail_closed() {

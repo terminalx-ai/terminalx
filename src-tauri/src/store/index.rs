@@ -204,6 +204,8 @@ pub struct TabEntry {
     /// (`harness::settings`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "crate::harness::settings::RequestPrivacy::is_empty")]
+    pub request_privacy: crate::harness::settings::RequestPrivacy,
     /// The harness's own conversation id (Claude session id, Codex thread id).
     #[serde(default)]
     pub provider_session_id: Option<String>,
@@ -1340,7 +1342,7 @@ mod tests {
             harness: "codex".into(),
             title: None,
             model: "gpt-5".into(),
-            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
             permission_mode: DEFAULT_PERMISSION_MODE.into(),
             provider_session_id: Some("provider-session".into()),
             status: TabStatus::InProgress,

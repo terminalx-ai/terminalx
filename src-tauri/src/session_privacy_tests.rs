@@ -244,3 +244,137 @@ fn control_child() {
     assert!(std::fs::read(&input).unwrap_or_default().is_empty(),"old control must never type after restoration");
     assert!(crate::local_runtime::mobile::execute(&rig.manager,&lifetime,method,params).is_err(),"old phone grant cannot mutate the tab again");
 }
+
+#[test]
+fn privacy_withdraws_deferred_phone_modes_and_preserves_mixed_desktop_edits() {
+    // Each child has its own policy and store. The parent changes the saved
+    // setting and waits for the real owner's refresh acknowledgement before
+    // allowing the already-running turn to complete.
+    for case in ["mode-codex", "mode-claude", "stopped-mode", "remote-model-first", "remote-model-last",
+        "remote-effort-first", "remote-effort-last", "remote-clear-first", "remote-clear-last",
+        "local-clear-first", "local-clear-last"] {
+        for restore in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let log_path = dir.path().join("child.log");
+            let log = std::fs::File::create(&log_path).unwrap();
+            let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "session::watch_tests::prompts::privacy::deferred_child", "--nocapture"])
+                .env(CASE, case).env(DIRECTORY, dir.path())
+                .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
+            let info_path = dir.path().join("ready.json");
+            wait_for("settings deferred during the running turn", || info_path.exists());
+            let info: serde_json::Value = serde_json::from_slice(&std::fs::read(info_path).unwrap()).unwrap();
+            let preference = PathBuf::from(info["root"].as_str().unwrap()).join("data-privacy.json");
+            store::write_json(&preference, &json!({"enabled":true})).unwrap();
+            assert!(refresh_owner(&info).enabled);
+            if restore {
+                store::write_json(&preference, &json!({"enabled":false})).unwrap();
+                assert!(!refresh_owner(&info).enabled);
+            }
+            std::fs::write(dir.path().join("complete-turn"), b"").unwrap();
+            let until = Instant::now() + WAIT;
+            let status = loop {
+                if let Some(status) = child.0.try_wait().unwrap() { break status; }
+                assert!(Instant::now() < until, "{case}, restore={restore}: {}", std::fs::read_to_string(&log_path).unwrap());
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(status.success(), "{case}, restore={restore}: {}", std::fs::read_to_string(&log_path).unwrap());
+        }
+    }
+}
+
+#[test]
+fn deferred_child() {
+    let Ok(case) = std::env::var(CASE) else { return };
+    let coordination = PathBuf::from(std::env::var(DIRECTORY).unwrap());
+    let kind = if case == "mode-claude" { CliKind::Claude } else { CliKind::Codex };
+    let rig = Rig::on(kind, "original-model", Some("low"));
+    index::update_tab(SESSION, TAB, |tab| { tab.permission_mode = "default".into(); Ok(()) }).unwrap();
+    let root = store::root().unwrap();
+    crate::data_privacy::refresh();
+    rig.rt.lock().unwrap().turn_open = true;
+    let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(120));
+    let endpoint = rig.manager.control.clone();
+    let service = crate::control::ControlService::headless(rig.manager.sink.clone(), rig.manager.clone(), endpoint.clone(), "local".into())
+        .with_local_lifetime(lifetime.clone());
+    crate::hooks::serve_private(endpoint.clone(), |_| crate::hooks::HookReply::refused("test"), move |request| service.handle(request)).unwrap();
+    store::write_json(&root.join("devices.json"), &json!({"devices":[{"id":"phone","label":"Phone","platform":"test",
+        "token":"fixture","scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()}]})).unwrap();
+    let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+    let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+    rig.manager.mobile.register(&lifetime, actor.clone(), "connection", "phone").unwrap();
+    let mode = case.contains("mode");
+    let remote_model = case.contains("remote-model") || case.contains("local-clear");
+    let clear = case.contains("clear");
+    let phone = || {
+        let method = if mode { "setMode" } else if remote_model { "setModel" } else { "setEffort" };
+        let effort = if clear { serde_json::Value::Null } else { json!("high") };
+        crate::local_runtime::mobile::execute(&rig.manager, &lifetime, method,
+            json!({"actor":actor,"connection":"connection","sessionId":SESSION,"tabId":TAB,
+                "model":"remote-model","effort":effort,"mode":"bypassPermissions"})).unwrap();
+    };
+    let desktop = || {
+        if remote_model { rig.manager.set_effort(SESSION, TAB, if clear { None } else { Some("high") }).unwrap(); }
+        else { rig.manager.set_model(SESSION, TAB, "desktop-model").unwrap(); }
+    };
+    if mode { phone(); }
+    else if case.ends_with("first") { phone(); desktop(); }
+    else { desktop(); phone(); }
+    assert!(crate::data_privacy::remote_ticket().is_none(), "the deferred worker has no initiating thread-local scope");
+    let saved = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+    assert_eq!(saved.model, "original-model");
+    assert_eq!(saved.effort.as_deref(), Some("low"));
+    assert_eq!(saved.permission_mode, "default");
+    assert!(!saved.request_privacy.is_empty(), "remote provenance must survive the index round trip");
+    if mode { assert_eq!(saved.requested_permission_mode.as_deref(), Some("bypassPermissions")); }
+    else {
+        assert_eq!(saved.requested_model.as_deref(), Some(if remote_model { "remote-model" } else { "desktop-model" }));
+        assert_eq!(saved.requested_effort.as_deref(), Some(if clear { "" } else { "high" }));
+    }
+    let tail = match &rig.rt.lock().unwrap().engine { Engine::Cli(p) => p.tail.clone(), _ => unreachable!() };
+    assert!(rig.manager.begin_idle_restart_launch(&rig.rt, &tail).is_none(), "a running turn cannot restart");
+    if case == "stopped-mode" {
+        rig.manager.release_cli(&mut rig.rt.lock().unwrap());
+        let stopped = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+        assert_eq!(stopped.permission_mode, "default", "stopping must not promote a remote permission request");
+        assert_eq!(stopped.requested_permission_mode.as_deref(), Some("bypassPermissions"));
+    }
+    store::write_json(&coordination.join("ready.json"), &json!({"socket":endpoint.socket,"token":endpoint.token,"root":root})).unwrap();
+    wait_for("privacy acknowledged before turn completion", || coordination.join("complete-turn").exists());
+    rig.rt.lock().unwrap().turn_open = false;
+    let work = rig.manager.begin_idle_restart_launch(&rig.rt, &tail);
+    if mode {
+        assert!(work.is_none(), "a stale phone mode must not reserve a restart");
+        if case != "stopped-mode" {
+            let cancelled = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+            assert!(cancelled.requested_permission_mode.is_none(), "turn completion must withdraw the stale request");
+            assert!(cancelled.request_privacy.is_empty());
+            assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if !p.restart_when_idle));
+        }
+        // Also replay the still-pending saved record as a handover/next-start
+        // would see it. Its persisted authority must remain invalid.
+        index::update_tab(SESSION, TAB, |tab| { saved.write(tab); Ok(()) }).unwrap();
+        let mut rt = rig.rt.lock().unwrap();
+        assert!(rig.manager.admit_pending_settings(&mut rt).unwrap().is_empty());
+        rig.manager.settle_settings_without_process(&mut rt).unwrap();
+    } else {
+        let work = work.expect("the independent desktop edit still requires its restart");
+        assert!(work._privacy.is_empty(), "no stale remote request rode with the local restart");
+        // Exercise the same process-release and restart claim as production,
+        // then stop before launching a real provider in this unit fixture.
+        rig.rt.lock().unwrap().stopping = true;
+        assert!(rig.manager.complete_cli_restart(&rig.rt, work).is_err());
+    }
+    let after = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+    assert_eq!(after.permission_mode, "default");
+    assert!(after.requested_permission_mode.is_none());
+    assert!(after.requested_model.is_none());
+    assert!(after.requested_effort.is_none());
+    assert!(after.request_privacy.is_empty());
+    assert_eq!(after.model, if mode || remote_model { "original-model" } else { "desktop-model" });
+    assert_eq!(after.effort.as_deref(), if mode || !remote_model { Some("low") } else if clear { None } else { Some("high") });
+    let mut reloaded: Settings = serde_json::from_value(serde_json::to_value(&after).unwrap()).unwrap();
+    assert!(reloaded.admit_pending().is_empty());
+    reloaded.launched();
+    assert_eq!(reloaded, after, "a later launch cannot revive any withdrawn phone edit");
+}
