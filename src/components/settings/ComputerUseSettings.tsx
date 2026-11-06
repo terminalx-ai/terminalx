@@ -1,7 +1,7 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
-import { SettingRow } from "@/components/ui/controls";
 import { api, errorMessage, type ComputerPermissionId, type ComputerPermissionStatus } from "@/lib/api";
 
 const COMPUTER_PERMISSIONS: { id: ComputerPermissionId; label: string; description: string }[] = [
@@ -82,7 +82,7 @@ export function ComputerUseRows() {
   };
   if (status && status.platform !== "macos") return (
     <div className="flex flex-col" data-testid="computer-use-settings">
-      <SettingRow label="Computer use" stacked description="Desktop requirements for agents on this platform." control={null} />
+      <RegisteredSetting setting="general.computerUse" stacked control={null} />
       <ul className="ml-6 list-disc space-y-1 text-xs leading-relaxed text-muted-foreground">
         {preconditions.map((item) => <li key={item}>{item}</li>)}
       </ul>
@@ -100,8 +100,7 @@ export function ComputerUseRows() {
   const removalFailed = legacy?.removed === false;
   return (
     <div className="flex flex-col" data-testid="computer-use-settings">
-      <SettingRow
-        label="Computer use"
+      <RegisteredSetting setting="general.computerUse"
         stacked
         description={
           unavailable

@@ -164,8 +164,8 @@ export function AppShell() {
   }, []);
   // An organization's page (PRO-107): a message that names its Agent logins offers the way there, with the
   // organization it is about. The Organizations section opens that page, and the logins scroll themselves into view.
-  const openOrganizationsSettings = useCallback(() => {
-    setSettingsTab("organizations");
+  const openOrganizationsSettings = useCallback((row: "organizations.overview" | "organizations.agentLogins") => {
+    setSettingsTab(row);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
