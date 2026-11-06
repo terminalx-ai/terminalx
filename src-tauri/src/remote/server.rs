@@ -2243,7 +2243,7 @@ impl WorkspaceRpc {
             Some(manager) => manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}")),
             None => Ok(()),
         };
-        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents) }))
+        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents), archive: None }))
     }
 
     /// `cleanup/1`: every worktree of the workspace's repositories with
@@ -2799,7 +2799,7 @@ impl WorkspaceRpc {
                     expected_sessions: Some(&expected),
                     direct: crate::git::DirectDelete::Never,
                     fetch: crate::landed::Fetch::Fresh,
-                    guard: None,
+                    guard: None, archive: None, archive_failure: None,
                 };
                 let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
                 kept_branch = removed.removal.kept_branch;
@@ -2892,7 +2892,7 @@ impl WorkspaceRpc {
             expected_sessions: Some(&p.expected_sessions),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
-            guard: None,
+            guard: None, archive: None, archive_failure: None,
         };
         let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
         let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;

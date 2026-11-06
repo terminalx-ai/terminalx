@@ -811,6 +811,8 @@ pub(crate) struct WorkspaceRemoval<'a> {
     /// For a caller with rules of its own on top of clean-and-merged (the
     /// removal that follows a merged pull request).
     pub guard: Option<&'a dyn Fn() -> Result<()>>,
+    pub archive: Option<crate::archive_script::Runner<'a>>,
+    pub archive_failure: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -878,6 +880,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     if target == project {
         return Err("A project's own checkout cannot be removed.".into());
     }
+    let _lease = crate::archive_script::RemovalLease::acquire(&target).map_err(err)?;
     let affected = sessions_in_workspace(&target)?;
     if let Some(expected) = request.expected_sessions {
         let now: std::collections::BTreeSet<&str> = affected.iter().map(|session| session.id.as_str()).collect();
@@ -899,6 +902,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     for session in &affected {
         stop(session)?;
     }
+    crate::archive_script::before_removal(&project, &target, &affected, request.archive_failure, request.archive, &|| {}).map_err(err)?;
     // Read again now that nothing is running in it. The default branch was
     // fetched a moment ago, so this does not go to the network again.
     let again = if before.fresh { crate::landed::Fetch::JustFetched } else { crate::landed::Fetch::Skip };
@@ -1221,6 +1225,7 @@ mod tests {
         assert!(has_shell_in_use(&session, &[], |pane| pane == "tab:was-agent"));
     }
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
 
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -1587,8 +1592,61 @@ mod tests {
             expected_sessions: None,
             direct,
             fetch: crate::landed::Fetch::Skip,
-            guard: None,
+            guard: None, archive: None, archive_failure: None,
         }
+    }
+
+    #[test]
+    fn archive_failure_keeps_workspace_and_sessions_until_explicit_consent() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
+        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "echo archive-log; exit 19".into() };
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { scripts: Some(script.clone()), ..Default::default() }).unwrap();
+        assert_eq!(crate::store::projects::scripts(dir.path()).unwrap(), script);
+        let session = worktree_session(dir.path());
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(sink());
+        let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
+        // A caller without a runner cannot bypass a configured hook.
+        assert!(remove_workspace(&*sink, &removal, &|_| {}).unwrap_err().contains("archive script"));
+        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink });
+        let error = remove_workspace(&*sink, &removal, &|_| {}).unwrap_err();
+        let failure = crate::archive_script::Failure::from_error(&error).unwrap();
+        assert_eq!(failure.code, Some(19));
+        assert!(Path::new(&session.cwd).exists());
+        assert!(!index::get(&session.id).unwrap().worktree_removed);
+        removal.archive_failure = Some(&failure.token);
+        remove_workspace(&*sink, &removal, &|_| {}).unwrap();
+        assert!(!Path::new(&session.cwd).exists());
+        assert!(index::get(&session.id).unwrap().worktree_removed);
+        terminals.kill_all();
+    }
+
+    #[test]
+    fn successful_archive_finishes_before_removal_and_script_changes_invalidate_consent() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
+        let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+        }).unwrap();
+        save("exit 8");
+        let session = worktree_session(dir.path());
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(sink());
+        let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
+        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink });
+        let failure = crate::archive_script::Failure::from_error(&remove_workspace(&*sink, &removal, &|_| {}).unwrap_err()).unwrap();
+        save("sleep 0.1; printf '%s' \"$TERMINALX_WORKSPACE_PATH\" > \"$TERMINALX_REPO_ROOT/archived\"");
+        removal.archive_failure = Some(&failure.token);
+        assert!(remove_workspace(&*sink, &removal, &|_| {}).unwrap_err().contains("script changed"));
+        assert!(Path::new(&session.cwd).exists());
+        removal.archive_failure = None;
+        remove_workspace(&*sink, &removal, &|_| {}).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("archived")).unwrap(), session.cwd);
+        assert!(!Path::new(&session.cwd).exists());
+        terminals.kill_all();
     }
 
     /// Remove a session's workspace with a blanket second confirmation.

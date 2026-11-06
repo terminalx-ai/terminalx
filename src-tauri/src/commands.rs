@@ -4153,7 +4153,7 @@ mod command_tests {
             expected_sessions: None,
             direct: crate::git::DirectDelete::Allowed,
             fetch: crate::landed::Fetch::Skip,
-            guard: None,
+            guard: None, archive: None, archive_failure: None,
         };
         crate::session_ops::remove_workspace(&sink, &request, &|_| {}).unwrap().sessions
     }
@@ -4253,6 +4253,9 @@ mod command_tests {
 
 #[tauri::command]
 pub fn update_project(app: AppHandle, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
+    if patch.scripts.as_ref().is_some_and(|scripts| !scripts.archive.trim().is_empty()) {
+        app.state::<crate::AppState>().sessions().map_err(err)?.require_archive_support().map_err(err)?;
+    }
     let project = projects::update(&path, patch).map_err(err)?;
     let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
     Ok(project)
@@ -4360,10 +4363,8 @@ pub async fn worktree_cleanup_cancel_sizes(app: AppHandle, prefix: String) -> Cm
 pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let items: Vec<_> = items.into_iter().map(|item| serde_json::json!({
-            "projectPath":item.project_path,"path":item.path,"token":item.token,"deleteSessions":item.delete_sessions,
-            "acceptIgnored":item.accept_ignored,"estimatedBytes":item.estimated_bytes
-        })).collect();
+        require_archive_runtime(&state, items.iter().map(|item| item.project_path.as_str()))?;
+        let items = serde_json::to_value(items).map_err(err)?;
         let results: serde_json::Value = state.sessions().map_err(err)?.workspace("remove", serde_json::json!({"items":items,"run":run})).map_err(err)?;
         for done in results.as_array().into_iter().flatten() {
             if matches!(done["outcome"].as_str(), Some("removed" | "alreadyRemoved")) {
@@ -4566,6 +4567,8 @@ pub fn session_set_work_private(app: AppHandle, session_id: String, private: boo
 pub async fn merged_cleanup_sweep(app: AppHandle) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
+        let (projects, _) = projects::list().map_err(err)?;
+        require_archive_runtime(&state, projects.iter().map(|project| project.path.as_str()))?;
         let result: serde_json::Value = state.sessions().map_err(err)?.workspace("mergedSweep", serde_json::json!({})).map_err(err)?;
         for status in result["statuses"].as_array().into_iter().flatten() {
             if status["phase"] == "removed" {
@@ -4712,6 +4715,15 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
     .map_err(err)?
 }
 
+fn require_archive_runtime<'a>(state: &crate::AppState, paths: impl Iterator<Item = &'a str>) -> CmdResult<()> {
+    for path in paths {
+        if !projects::scripts(Path::new(path)).map_err(err)?.archive.trim().is_empty() {
+            return state.sessions().map_err(err)?.require_archive_support().map_err(err);
+        }
+    }
+    Ok(())
+}
+
 /// Remove a workspace: the one command behind the workspace menu, the right
 /// panel, settling, and the session delete that takes its workspace along.
 ///
@@ -4724,15 +4736,20 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
 /// is removed only with `confirmed_digest`: the digest of the check the
 /// person saw when they gave the second confirmation. If the workspace has
 /// changed since, it no longer matches and nothing is removed.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn remove_workspace(app: AppHandle, project_path: String, path: String, keep_sessions: bool,
-    delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>) -> CmdResult<WorkspaceRemoveReport> {
+    delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>, archive_failure: Option<String>) -> CmdResult<WorkspaceRemoveReport> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", serde_json::json!({
+        require_archive_runtime(&state, std::iter::once(project_path.as_str()))?;
+        let mut params = serde_json::json!({
             "projectPath":project_path,"path":path,"keepSessions":keep_sessions,"deleteBranch":delete_branch,
             "confirmedDigest":confirmed_digest,"expectedSessions":expected_sessions
-        })).map_err(err)?;
+        });
+        // Older owners deny unknown fields, even when null.
+        if let Some(failure) = archive_failure { params["archiveFailure"] = failure.into(); }
+        let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", params).map_err(err)?;
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         Ok(removed)
     }).await.map_err(err)?

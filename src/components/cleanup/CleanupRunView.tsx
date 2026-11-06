@@ -1,5 +1,10 @@
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { CleanupStep } from "@terminalx/portable/workspace";
+import { ArchiveTerminal } from "@/components/terminal/ArchiveTerminal";
+import { Button } from "@/components/ui/button";
+import { useArchiveTerminal } from "@/lib/archiveScript";
+import { errorMessage } from "@/lib/api";
+import { retryArchiveFailures } from "@/lib/cleanupRun";
 import { Cloud, Loader2, Monitor } from "@/icons";
 import { DialogScrollArea } from "@/components/ui/dialog";
 import { summarize, type CleanupRun, type CleanupRunSummary } from "@/lib/cleanupRun";
@@ -16,6 +21,7 @@ const OUTCOME_LABEL: Record<CleanupOutcome["outcome"], string> = {
 
 const STEP_LABEL: Record<CleanupStep, string> = {
   measuring: "Measuring",
+  archiving: "Running archive script",
   checking: "Checking it again",
   removing: "Removing",
   sessions: "Updating sessions",
@@ -53,6 +59,18 @@ export function CleanupRunView({ run }: { run: CleanupRun }) {
   const running = run.status === "running";
   const item = (key: string) => run.items.find((entry) => entry.key === key);
   const current = run.current ? item(run.current.key) : undefined;
+  const archivePane = useArchiveTerminal(current?.hostKind === "local" ? current.path : null);
+  const [log, setLog] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const failures = run.outcomes.filter((outcome) => outcome.hostId === "local" && outcome.archiveFailure);
+  const retry = async () => {
+    setRetrying(true);
+    setError(null);
+    try { await retryArchiveFailures(); setLog(null); }
+    catch (error) { setError(errorMessage(error)); }
+    finally { setRetrying(false); }
+  };
   const list = useRef<HTMLDivElement>(null);
   // The newest outcome stays in view unless the person scrolled up to read an earlier one.
   const follow = useRef(true);
@@ -118,6 +136,12 @@ export function CleanupRunView({ run }: { run: CleanupRun }) {
           {resultText(sum)}
         </p>
       )}
+      {(running && archivePane || log) && <ArchiveTerminal pane={log ?? archivePane!} />}
+      {!running && failures.length > 0 && <div className="mb-2 space-y-2 text-xs">
+        <p>{failures.length} archive script{failures.length === 1 ? "" : "s"} failed. Remove these workspaces anyway?</p>
+        <Button variant="destructive" size="xs" disabled={retrying} onClick={() => void retry()}>{retrying ? "Checking…" : "Remove failed workspaces anyway"}</Button>
+        {error && <p role="alert">{error}</p>}
+      </div>}
       <DialogScrollArea
         ref={list}
         aria-label="Results, scrollable"
@@ -146,6 +170,7 @@ export function CleanupRunView({ run }: { run: CleanupRun }) {
                   )}
                 </div>
                 {outcome.reason && <div className="text-[11px] text-muted-foreground">{outcome.reason}</div>}
+                {outcome.hostId === "local" && outcome.archiveFailure && <Button variant="outline" size="xs" onClick={() => setLog(outcome.archiveFailure!.pane)}>Open log</Button>}
                 {good && (
                   <div className="text-[11px] text-muted-foreground">
                     {[

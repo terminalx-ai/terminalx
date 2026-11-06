@@ -212,7 +212,7 @@ impl Fixture {
             }
             live
         };
-        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None })
+        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None, archive: None })
     }
 
     fn sweep_scope(&self, scope: &Scope, minutes: i64) -> Vec<Status> {

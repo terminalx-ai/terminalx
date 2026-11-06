@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   relocateSession: vi.fn(),
 }));
 
+vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="archive-log">{id}</div> }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, message: mocks.message }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/api", () => ({
@@ -279,4 +280,33 @@ describe("WorkspaceRemoveDialog", () => {
     expect(mocks.workspaceDisposition).toHaveBeenCalledTimes(2);
     expect(removeButton().textContent).toContain("Remove anyway…");
   });
+});
+
+it("holds removal after an archive timeout, opens its terminal and requires separate consent", async () => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace.mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", code: 124, timedOut: true })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  await screen.findByText(/Archive script failed \(exit 124\). Remove anyway/);
+  expect(mocks.removeWorkspace).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Open log" }));
+  expect(screen.getByTestId("archive-log").textContent).toBe("archive:run");
+  fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }));
+  await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledTimes(2));
+  expect(mocks.removeWorkspace.mock.calls[1][2]).toMatchObject({ archiveFailure: "receipt", keepSessions: true, expectedSessions: ["s1", "s9"] });
+});
+
+it("keeps the workspace when archive-failure consent is declined", async () => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace.mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", code: 7, timedOut: false })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  await screen.findByText(/Archive script failed/);
+  fireEvent.click(screen.getByRole("button", { name: "Keep as is" }));
+  expect(mocks.removeWorkspace).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("dialog")).toBeNull();
 });

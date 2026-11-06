@@ -469,7 +469,7 @@ pub fn is_shell_id(id: &str) -> bool {
 
 pub fn shell_session(id: &str) -> Option<&str> {
     let (session, _) = id.split_once(':')?;
-    (session != "tab" && session != crate::harness::setup::PANE_NAMESPACE && !session.is_empty()).then_some(session)
+    (session != "tab" && session != "archive" && session != crate::harness::setup::PANE_NAMESPACE && !session.is_empty()).then_some(session)
 }
 
 #[derive(Default)]
@@ -1202,6 +1202,14 @@ impl Terminals {
         }
         self.drop_slot_if_unused(id);
         self.changed();
+    }
+
+    /// Stop a lifecycle script's entire process group, retaining its terminal log.
+    pub(crate) fn stop_keep_output(&self, id: &str, timeout: Duration) -> bool {
+        let group = self.panes.lock().unwrap().get(id).map(|pane| pane.group.clone());
+        let Some(group) = group else { return true };
+        group.signal(false);
+        StoppingPane { id: id.to_string(), group }.wait(timeout)
     }
 
     /// Kill the pane and wait for its process to really be gone.

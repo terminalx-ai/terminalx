@@ -539,7 +539,7 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         expected_sessions: Some(&expected),
         direct: git::DirectDelete::Never,
         fetch: Fetch::JustFetched,
-        guard: Some(&guard),
+        guard: Some(&guard), archive: run.host.archive, archive_failure: None,
     };
     let removed = match session_ops::remove_workspace_fallible(run.sink, &request, run.stop) {
         Ok(removed) => removed,
@@ -548,7 +548,7 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
                 Some(why) => why,
                 None if error.starts_with(session_ops::NEEDS_CONFIRMATION) => ("it is no longer clean and merged".into(), Some(error)),
                 None if error.starts_with(session_ops::SESSIONS_CHANGED) => ("its sessions changed while it was being checked".into(), Some(error)),
-                None => ("it could not be removed".into(), Some(error)),
+                None => ("it could not be removed".into(), Some(crate::archive_script::Failure::from_error(&error).map_or(error, |failure| failure.message()))),
             })
         }
     };

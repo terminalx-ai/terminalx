@@ -23,7 +23,7 @@ fn host<R>(manager: &SessionManager, f: impl FnOnce(&cleanup::Host<'_>) -> Resul
         live
     };
     let stop_agents = |entry: &SessionEntry| manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}"));
-    f(&cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents) })
+    f(&cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents), archive: Some(crate::archive_script::Runner { terminals: manager.terminals(), sink: manager.sink() }) })
 }
 
 #[derive(Deserialize)]
@@ -35,9 +35,11 @@ struct Removal {
     delete_branch: bool,
     confirmed_digest: Option<String>,
     expected_sessions: Vec<String>,
+    archive_failure: Option<String>,
 }
 
 pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &str, params: Value) -> Result<Value> {
+    if method == "archiveSupport" { return Ok(json!(true)); }
     // Cancellation must not wait behind the operation it is cancelling.
     if method == "cancelSizes" {
         cleanup::Jobs::sizes().cancel(&format!("local:{}", text(&params,"prefix")?));
@@ -78,7 +80,7 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
                 sessions: if params.keep_sessions { crate::session_ops::SessionsFate::Keep } else { crate::session_ops::SessionsFate::Delete },
                 delete_branch: params.delete_branch,
                 confirmation: params.confirmed_digest.map(crate::session_ops::Confirmation::Shown).unwrap_or(crate::session_ops::Confirmation::Single),
-                expected_sessions: Some(&params.expected_sessions), direct, fetch: crate::landed::Fetch::Fresh, guard: None,
+                expected_sessions: Some(&params.expected_sessions), direct, fetch: crate::landed::Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals: manager.terminals(), sink: manager.sink() }), archive_failure: params.archive_failure.as_deref(),
             };
             let removed = crate::session_ops::remove_workspace_fallible(sink,&request,&stop).map_err(anyhow::Error::msg)?;
             Ok(json!({"sessions":removed.sessions,"keptBranch":removed.removal.kept_branch,"rescuedBranch":removed.removal.rescued_branch,"strayProcesses":removed.strays}))

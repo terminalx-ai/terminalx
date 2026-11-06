@@ -385,7 +385,15 @@ export interface CleanupProject {
   candidates: CleanupCandidate[];
 }
 
+export interface ArchiveFailure {
+  token: string;
+  pane: string;
+  code: number | null;
+  timedOut: boolean;
+}
+
 export interface CleanupRemoveItem {
+  archiveFailure?: string;
   projectPath: string;
   path: string;
   token: string;
@@ -398,6 +406,7 @@ export interface CleanupRemoveItem {
 }
 
 export interface CleanupResult {
+  archiveFailure?: ArchiveFailure;
   projectPath: string;
   path: string;
   outcome: "removed" | "alreadyRemoved" | "skipped" | "failed";
@@ -411,7 +420,7 @@ export interface CleanupResult {
 }
 
 /** What a removal is doing to the worktree it is on. */
-export type CleanupStep = "measuring" | "checking" | "removing" | "sessions";
+export type CleanupStep = "measuring" | "checking" | "archiving" | "removing" | "sessions";
 
 /**
  * How far one removal call is, as its host reports it while it runs

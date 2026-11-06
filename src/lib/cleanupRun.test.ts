@@ -12,7 +12,7 @@ vi.mock("@/lib/cloudConnections", () => ({ connectedCloudClient: () => null }));
 vi.mock("@/lib/cloudSessions", () => ({ managesOf: () => true }));
 vi.mock("@/lib/workspaceSizes", () => ({ forgetWorkspaceSize: (path: string) => forgetWorkspaceSize(path) }));
 
-import { clearCleanupRun, getCleanupRun, resetCleanupRun, startCleanupRun, stopCleanupRun, summarize } from "./cleanupRun";
+import { retryArchiveFailures, clearCleanupRun, getCleanupRun, resetCleanupRun, startCleanupRun, stopCleanupRun, summarize } from "./cleanupRun";
 import { LOCAL_HOST, STOPPED, type CleanupHost, type CleanupSelection, type RemoveOptions } from "./worktreeCleanup";
 
 function candidate(name: string): CleanupCandidate {
@@ -132,4 +132,30 @@ describe("the clean-up run", () => {
     expect(box.calls).toHaveLength(0);
     expect(summarize(run)).toMatchObject({ removed: 1, skipped: 2, problems: 2 });
   });
+});
+
+it("retries only archive failures after explicit consent, preserving the selected conversation policy", async () => {
+  const here = host(LOCAL_HOST);
+  here.entry.scan = async () => [{ path: "/p", name: "p", note: null, candidates: [candidate("b")] }];
+  startCleanupRun([here.entry], [pick(LOCAL_HOST, "a"), { ...pick(LOCAL_HOST, "b"), deleteSessions: true }]);
+  here.calls[0]!.answer([result(candidate("a")), result(candidate("b"), { outcome: "failed", archiveFailure: { token: "receipt", pane: "archive:run", code: 124, timedOut: true } })]);
+  await flush();
+  expect(here.calls).toHaveLength(1);
+  await retryArchiveFailures();
+  expect(here.calls).toHaveLength(2);
+  expect(here.calls[1]!.items).toEqual([expect.objectContaining({ path: candidate("b").path, archiveFailure: "receipt", deleteSessions: true })]);
+  here.calls[1]!.answer([result(candidate("b"))]);
+  await flush();
+  resetCleanupRun();
+});
+
+it("does not retry archive failures when the workspace changed after review", async () => {
+  const here = host(LOCAL_HOST);
+  here.entry.scan = async () => [{ path: "/p", name: "p", note: null, candidates: [{ ...candidate("a"), token: "changed", verdict: "dirty" }] }];
+  startCleanupRun([here.entry], [pick(LOCAL_HOST, "a")]);
+  here.calls[0]!.answer([result(candidate("a"), { outcome: "failed", archiveFailure: { token: "receipt", pane: "archive:run", code: 1, timedOut: false } })]);
+  await flush();
+  await expect(retryArchiveFailures()).rejects.toThrow("changed");
+  expect(here.calls).toHaveLength(1);
+  resetCleanupRun();
 });
