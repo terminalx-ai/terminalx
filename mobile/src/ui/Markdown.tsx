@@ -2,9 +2,10 @@ import { memo, useMemo, type ReactNode } from "react";
 import { Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { Token, Tokens } from "marked";
 import { decodeHTML } from "entities";
+import { codexFileCitationLabel, isCodexFileOutput } from "@terminalx/portable/codexCitations";
 import { useTheme, type Palette } from "./theme";
 import { ChatLink, LinkedText, linkedText } from "./LinkedText";
-import { markdownTokens } from "./markdown-blocks";
+import { markdownTokens, type CitationToken } from "./markdown-blocks";
 
 // Parse markdown once per changed text, then draw native views. No WebView or
 // HTML is involved, including for streamed text and nested table/list content.
@@ -25,8 +26,11 @@ function blocks(tokens: Token[] | undefined, palette: Palette): ReactNode[] {
       case "space": case "def": return null;
       case "heading":
         return <Text key={index} selectable accessibilityRole="header" style={[styles.body, styles.heading, { color: palette.ink, fontSize: token.depth === 1 ? 24 : token.depth === 2 ? 21 : 18 }]}>{inline(token.tokens, palette)}</Text>;
-      case "paragraph": case "text":
+      case "paragraph": case "text": {
+        const output = handedOverFile(token.tokens);
+        if (output) return <FileChip key={index} token={output} palette={palette} />;
         return <Text key={index} selectable style={[styles.body, { color: palette.ink }]}>{token.tokens ? inline(token.tokens, palette) : linkedText(token.text)}</Text>;
+      }
       case "code":
         return <View key={index} style={[styles.codeBlock, { backgroundColor: palette.raised, borderColor: palette.border }]}>
           {token.lang ? <Text style={[styles.language, { color: palette.muted }]}>{token.lang.split(/\s/)[0]}</Text> : null}
@@ -64,6 +68,12 @@ function inline(tokens: Token[] | undefined, palette: Palette, linkify = true): 
         return <ChatLink key={index} href={token.href}>{inline(token.tokens, palette, false)}</ChatLink>;
       }
       case "image": return <Text key={index} style={{ color: palette.muted }}>{token.text || "Image"}</Text>;
+      case "codexFileCitation": {
+        // Inside a link's text it stays the text it was: a link cannot hold another.
+        if (!linkify) return <Text key={index}>{token.raw}</Text>;
+        const { citation } = token as unknown as CitationToken;
+        return <ChatLink key={index} href={citation.path}>{codexFileCitationLabel(citation)}</ChatLink>;
+      }
       case "text": return token.tokens ? <Text key={index}>{inline(token.tokens, palette, linkify)}</Text> : <Text key={index}>{linkify ? linkedText(decodeHTML(token.text)) : decodeHTML(token.text)}</Text>;
       case "escape": return <Text key={index}>{linkify ? linkedText(decodeHTML(token.text)) : decodeHTML(token.text)}</Text>;
       default: {
@@ -72,6 +82,21 @@ function inline(tokens: Token[] | undefined, palette: Palette, linkify = true): 
       }
     }
   });
+}
+
+/** A paragraph that is only a cited output file: the file Codex handed over, drawn as a chip. */
+function handedOverFile(tokens: Token[] | undefined): CitationToken | undefined {
+  const content = (tokens ?? []).filter((token) => !(token.type === "text" && !token.raw.trim()) && token.type !== "br");
+  const only = content.length === 1 ? (content[0] as unknown as CitationToken) : undefined;
+  return only?.type === "codexFileCitation" && isCodexFileOutput(only.citation) ? only : undefined;
+}
+
+function FileChip({ token, palette }: { token: CitationToken; palette: Palette }) {
+  return <View style={[styles.fileChip, { backgroundColor: palette.raised, borderColor: palette.border }]}>
+    <Text selectable style={[styles.body, styles.strong]}>
+      <ChatLink href={token.citation.path} style={styles.fileChipLink}>{codexFileCitationLabel(token.citation)}</ChatLink>
+    </Text>
+  </View>;
 }
 
 function MarkdownTable({ table, palette }: { table: Tokens.Table; palette: Palette }) {
@@ -101,6 +126,8 @@ const styles = StyleSheet.create({
   listBody: { flex: 1 },
   quote: { borderLeftWidth: 3, paddingLeft: 12 },
   rule: { height: StyleSheet.hairlineWidth },
+  fileChip: { alignSelf: "flex-start", maxWidth: "100%", borderRadius: 8, borderCurve: "continuous", borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingVertical: 6 },
+  fileChipLink: { textDecorationLine: "none" },
   tableScroll: { maxWidth: "100%" },
   table: { borderWidth: StyleSheet.hairlineWidth },
   tableRow: { flexDirection: "row" },

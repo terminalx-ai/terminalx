@@ -64,11 +64,18 @@ let visible: boolean;
 let pending: { sessionId: string; tabId?: string | null } | null;
 let status: { shortcut: string | null; alwaysOnTop: boolean; retentionDays: number; shortcutError: string | null };
 
-async function mount() {
+async function loadWindow() {
   vi.resetModules();
   (await import("@/lib/appWindow")).setAppWindowForTest("floating");
   const { FloatingShell } = await import("./FloatingShell");
   const sessions = await import("@/lib/sessions");
+  return { FloatingShell, sessions };
+}
+
+let windowModules: Awaited<ReturnType<typeof loadWindow>>;
+
+async function mount() {
+  const { FloatingShell, sessions } = windowModules;
   const utils = render(
     <TooltipProvider>
       <FloatingShell />
@@ -80,7 +87,7 @@ async function mount() {
 
 const called = (command: string) => mocks.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
 
-beforeEach(() => {
+beforeEach(async () => {
   localStorage.clear();
   mocks.listeners.clear();
   mocks.ask.mockReset();
@@ -117,6 +124,9 @@ beforeEach(() => {
         throw new Error(`Unexpected command: ${command}`);
     }
   });
+  // Load the fresh window before the test can render. A cold import inside mount()
+  // can outlive a timed-out test and render after cleanup, in the next test.
+  windowModules = await loadWindow();
 });
 
 afterEach(() => {
@@ -151,6 +161,7 @@ describe("the floating chat window", () => {
     cleanup();
 
     // The page is loaded afresh (the app restarted): it opens on the chat it showed last.
+    windowModules = await loadWindow();
     await mount();
     expect((await screen.findByTestId("session-view")).getAttribute("data-session")).toBe("chat-2");
   });
@@ -159,6 +170,8 @@ describe("the floating chat window", () => {
     stored = [chat("chat-1", "What is a monad?"), chat("chat-2", "Regex help")];
     localStorage.setItem("raccoon.floating.session", "chat-1");
     pending = { sessionId: "chat-2", tabId: "chat-2-tab" };
+    // Read the saved selection before applying the pending request on this page load.
+    windowModules = await loadWindow();
     const { sessions } = await mount();
     await waitFor(() => expect(sessions.getSessionStore().selectedSessionId).toBe("chat-2"));
 

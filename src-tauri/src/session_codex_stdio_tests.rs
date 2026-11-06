@@ -14,10 +14,18 @@ pub(super) fn observed_full_pipe() {
     FULL_PIPE.with(|hook| { if let Some(tx) = hook.borrow_mut().take() { tx.send(()).unwrap(); } });
 }
 
+pub(super) fn before_version_probe() {
+    if std::env::var(CASE).as_deref() == Ok("share-slow-start") {
+        // Delay asynchronous preparation beyond the fixture's protocol budget,
+        // outside the real version probe's five-second deadline.
+        std::thread::sleep(WAIT + Duration::from_secs(1));
+    }
+}
+
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
-        "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
+        "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
         "mailbox-after-refusal", "mailbox-cli-waiting"] {
@@ -364,6 +372,14 @@ fn remote_input_fixture(case: &str) {
     };
     let last_frame = || -> serde_json::Value { serde_json::from_str(std::fs::read_to_string(bin.join("received")).unwrap().lines().last().unwrap()).unwrap() };
     let idle_after = |frames: usize| {
+        // Startup includes a version probe allowed five seconds by the owner.
+        // Start the protocol deadline only once the fixture reads a frame;
+        // the parent still bounds this entire case to fifteen seconds.
+        let startup_until = Instant::now() + Duration::from_secs(10);
+        while methods().is_empty() {
+            assert!(Instant::now() < startup_until, "{case}: did not start: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let until = Instant::now() + WAIT;
         while methods().len() < frames || manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open {
             assert!(Instant::now() < until, "{case}: did not settle: {:?} {:?}", methods(), events().iter().map(|event| &event.payload).collect::<Vec<_>>());
@@ -446,7 +462,7 @@ fn remote_input_fixture(case: &str) {
         let permit = share.write_permit("guest-connection", "tab").unwrap();
         manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
         match case {
-            "share-input" => {
+            "share-input" | "share-slow-start" => {
                 manager.send_shared("stdio-owner", "tab", "from a guest".into(), person, permit).unwrap();
                 idle_after(4);
                 assert_eq!(last_frame()["params"]["input"][0]["text"], "from a guest");
@@ -1043,7 +1059,7 @@ fn streamed_fixture(case: &str) {
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
     if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
-    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
+    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-slow-start" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }

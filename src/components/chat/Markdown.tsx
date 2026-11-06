@@ -7,14 +7,20 @@ import { chunkStream } from "@/lib/markdownChunks";
 import { chatLinkComponent } from "./ChatLink";
 import { routeMarkdownLinks, type ChatLinkContext } from "@/lib/chatLinks";
 import { textLinks } from "@terminalx/portable/textLinks";
+import { withoutPartialCodexFileCitation } from "@terminalx/portable/codexCitations";
+import { completeStreamingMarkdown, remarkCodexFileCitations } from "@/lib/codexCitations";
 import { LinkedText } from "./LinkedText";
 import { MarkdownTable } from "./MarkdownTable";
 import { LinkedCode } from "./LinkedCode";
 
 const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
-const routedRemarkPlugins = [...Object.values(defaultRemarkPlugins), routeMarkdownLinks];
+// Codex file citations (#776) become links with or without a workspace; with one, every other link is routed too.
+const citedRemarkPlugins = [...Object.values(defaultRemarkPlugins), remarkCodexFileCitations];
+const routedRemarkPlugins = [...citedRemarkPlugins, routeMarkdownLinks];
 
 const Block = memo(function Block({ text, streaming, mode, linkContext }: { text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
+  // Streamdown would complete unfinished Markdown itself; done here, it leaves Codex file citations whole (#776).
+  const source = useMemo(() => (streaming ? completeStreamingMarkdown(text) : text), [text, streaming]);
   const components = useMemo(() => ({
     a: chatLinkComponent(linkContext),
     table: MarkdownTable,
@@ -33,25 +39,26 @@ const Block = memo(function Block({ text, streaming, mode, linkContext }: { text
       <Streamdown
         mode={streaming ? "streaming" : "static"}
         isAnimating={streaming}
-        parseIncompleteMarkdown={streaming}
+        parseIncompleteMarkdown={false}
         plugins={{ code: codePlugin }}
         shikiTheme={["github-light", "github-dark"]}
         controls={{ code: true, table: true, mermaid: false }}
         components={components}
-        remarkPlugins={linkContext ? routedRemarkPlugins : undefined}
+        remarkPlugins={linkContext ? routedRemarkPlugins : citedRemarkPlugins}
         linkSafety={{ enabled: false }}
         codeBlockMaxHeight="24rem"
       >
-        {text}
+        {source}
       </Streamdown>
     </div>
   );
 });
 
 /**
- * Assistant prose. Streaming text keeps incomplete markdown parseable; the
- * committed block re-renders in static mode. Routed links retain their
- * originating session and workspace context.
+ * Assistant prose. Streaming text keeps incomplete markdown parseable, and
+ * holds back a Codex file citation until its marker is whole; the committed
+ * block re-renders in static mode. Routed links retain their originating
+ * session and workspace context.
  */
 export const Markdown = memo(function Markdown({
   text,
@@ -65,11 +72,12 @@ export const Markdown = memo(function Markdown({
   linkContext?: ChatLinkContext;
 }) {
   const { resolvedMode } = useTheme();
-  const chunks = useMemo(() => (streaming ? chunkStream(text) : [text]), [text, streaming]);
+  const shown = useMemo(() => (streaming ? withoutPartialCodexFileCitation(text) : text), [text, streaming]);
+  const chunks = useMemo(() => (streaming ? chunkStream(shown) : [shown]), [shown, streaming]);
   if (chunks.length === 1) {
     return (
       <div className={className}>
-        <Block text={text} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} />
+        <Block text={shown} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} />
       </div>
     );
   }

@@ -62,3 +62,15 @@ it("decodes prose entities, preserves code, and only activates external web or m
   expect(container.textContent).toContain("&amp;");
   expect([...container.querySelectorAll('[role="link"]')].map((node) => node.textContent)).toEqual(["Web", "Mail", "File"]);
 });
+
+it("renders Codex file citations as the desktop does: a file chip for an output, a labelled link in a sentence (#776)", async () => {
+  const output = ':codex-file-citation{path="/abs/path/report.xlsx" artifact_kind="workbook" purpose="output"}';
+  await render(`Here is the summary workbook.\n\n${output}\n\nThe review of :codex-file-citation{path="/abs/report.xlsx" sheet="Revenue Model" range="C27" purpose="source"} is due *Friday*, see :codex-file-citation{path="/abs/review.pdf" page_number="3"} and :codex-file-citation{path="https://docs.google.com/spreadsheets/d/1Ab/edit"}.\n\n\`${output}\``);
+  expect([...container.querySelectorAll('[role="link"]')].map((node) => node.textContent)).toEqual(["report.xlsx", "report.xlsx · Revenue Model!C27", "review.pdf · p. 3", "Google Sheets file"]);
+  expect(container.textContent).toContain("The review of report.xlsx · Revenue Model!C27 is due Friday, see review.pdf · p. 3 and Google Sheets file.");
+  // Only the code span still shows the marker.
+  expect(container.textContent?.split("codex-file-citation")).toHaveLength(2);
+  // The output is a bordered chip; a citation in a sentence is not.
+  const box = (index: number) => getComputedStyle(container.querySelectorAll('[role="link"]')[index].parentElement!.parentElement!).borderTopWidth;
+  expect([box(0), box(1)]).toEqual(["1px", "0px"]);
+});

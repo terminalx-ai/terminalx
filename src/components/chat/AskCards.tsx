@@ -5,7 +5,7 @@ import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
 import { cn } from "@/lib/cn";
 import { usePromptTextProps } from "@/lib/autocorrect";
-import type { PendingAsk } from "@/lib/transcript";
+import { askAgentNote, type PendingAsk } from "@/lib/transcript";
 import { LinkedText } from "./LinkedText";
 
 /**
@@ -90,7 +90,11 @@ export function PermissionCard({
   const detail = showDetail ? askDetail(ask) : null;
   const workdir = showDetail ? field(ask.input, "workdir", "cwd") : null;
   const directory = showDetail ? workdir ?? ask.cwd : null;
-  const reason = showDetail ? field(ask.input, "justification", "description") ?? ask.description : null;
+  // Why the card is up, in the app's words: in bypass mode, Claude Code's own safety check (#775). Never the agent's.
+  const why = ask.reason?.trim() || null;
+  // What the agent says of the call: what the command does, or why it wants it. Labelled as the agent's, so it is not read as why the card is up.
+  const agentNote = showDetail ? askAgentNote(ask) : null;
+  const note = showDetail && !agentNote ? ask.description?.trim() || null : null;
   const blocked = !!blockedReason;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -127,11 +131,17 @@ export function PermissionCard({
       <div className="text-[14px] font-medium leading-snug text-foreground">
         Waiting for permission to {verbFor(ask.toolName ?? "")}
       </div>
+      {why && <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/80" data-testid="permission-reason">{why}</p>}
       {detail && (
         <pre className="mt-2 max-h-60 max-w-full overflow-auto whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground [overflow-wrap:anywhere]" data-testid="permission-detail"><code>{detail}</code></pre>
       )}
       {directory && <p className="mt-2 break-words text-xs text-muted-foreground">{workdir ? "Working directory" : "Session directory"}: <code>{directory}</code></p>}
-      {reason && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{reason}</p>}
+      {agentNote && (
+        <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground" data-testid="permission-agent-note">
+          <span className="font-medium text-foreground/70">Agent:</span> <span>{agentNote}</span>
+        </p>
+      )}
+      {note && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{note}</p>}
     </AskShell>
   );
 }

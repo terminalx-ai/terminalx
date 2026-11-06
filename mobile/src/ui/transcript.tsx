@@ -1,12 +1,12 @@
 import { memo, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Terminal as TerminalIcon } from "lucide-react-native";
-import { COMPACTING_LINE, compactionStatus, messageTime } from "@terminalx/portable/transcript";
+import { askAgentNote, COMPACTING_LINE, compactionStatus, messageTime } from "@terminalx/portable/transcript";
 import type { PendingAsk, Turn, WorkItem } from "@terminalx/portable/transcript";
 import { Button, Card } from "./primitives";
 import { useTheme } from "./theme";
 import { Markdown, MarkdownBlock } from "./Markdown";
-import { LinkedText } from "./LinkedText";
+import { LinkedText, linkedText } from "./LinkedText";
 import { deliveryNote, type TurnRow } from "./transcript-rows";
 
 // How a conversation is drawn: the same cards for a session on a paired Mac
@@ -15,10 +15,14 @@ import { deliveryNote, type TurnRow } from "./transcript-rows";
 export function PermissionCard({ ask, connected, answering, error, onRespond }: { ask: PendingAsk; connected: boolean; answering: boolean; error?: string; onRespond(optionId: string): void }) {
   const { palette } = useTheme();
   const options = ask.kind === "permission" ? ask.options ?? [] : [];
+  const agentNote = askAgentNote(ask);
   return <Card style={[styles.permission, { borderColor: `${palette.warning}66` }]}>
     <Text style={[styles.permissionLabel, { color: palette.warning }]}>Permission waiting</Text>
     <LinkedText style={[styles.cardTitle, { color: palette.ink }]}>{ask.title ?? ask.toolName ?? "Permission request"}</LinkedText>
-    {ask.description ? <LinkedText style={[styles.body, { color: palette.muted }]}>{ask.description}</LinkedText> : null}
+    {/* Why the card is up, in the desktop card's words (#775), apart from what the agent says of the call. */}
+    {ask.reason ? <Text testID="permission-reason" style={[styles.body, { color: palette.ink }]}>{ask.reason}</Text> : null}
+    {agentNote ? <Text testID="permission-agent-note" selectable style={[styles.body, { color: palette.muted }]}><Text style={styles.agentLabel}>Agent: </Text>{linkedText(agentNote)}</Text>
+      : ask.description ? <LinkedText style={[styles.body, { color: palette.muted }]}>{ask.description}</LinkedText> : null}
     {ask.input !== undefined ? <LinkedText style={[styles.monoSmall, { color: palette.muted }]}>{safeJson(ask.input)}</LinkedText> : null}
     {options.length ? <View style={styles.permissionActions}>{options.map((option) => <Button key={option.id} label={option.label} kind={option.kind === "deny" ? "danger" : option.kind === "allow_once" ? "primary" : "secondary"} disabled={!connected || answering} onPress={() => onRespond(option.id)} style={styles.permissionAction} />)}</View> : <Text style={[styles.body, { color: palette.muted }]}>Answer this request from your Mac.</Text>}
     {!connected ? <Text style={[styles.permissionHint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
@@ -53,7 +57,7 @@ function WorkRow({ item }: { item: WorkItem }) {
   const { palette } = useTheme();
   if (item.kind === "text") return <View><Markdown text={item.text} /><MessageTime ts={item.messageTs} /></View>;
   if (item.kind === "reasoning") return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{item.text}</LinkedText>;
-  if (item.kind === "tool") return <View style={[styles.tool, { backgroundColor: palette.raised }]}><TerminalIcon size={14} color={palette.muted} /><LinkedText numberOfLines={2} style={[styles.toolText, { color: palette.muted }]}>{`${item.call.title ?? item.call.name}${item.call.abandoned ? " · stopped" : ""}`}</LinkedText></View>;
+  if (item.kind === "tool") return <View style={[styles.tool, { backgroundColor: palette.raised }]}><TerminalIcon size={14} color={palette.muted} /><View style={styles.toolBody}><LinkedText numberOfLines={2} style={[styles.toolLine, { color: palette.muted }]}>{`${item.call.title ?? item.call.name}${item.call.abandoned ? " · stopped" : ""}`}</LinkedText>{item.call.result?.safetyCheck ? <Text testID="tool-safety-check" style={[styles.toolLine, { color: palette.warning }]}>{item.call.result.safetyCheck}</Text> : null}</View></View>;
   if (item.kind === "tool_group") return <View style={[styles.tool, { backgroundColor: palette.raised }]}><TerminalIcon size={14} color={palette.muted} /><Text style={[styles.toolText, { color: palette.muted }]}>{item.name} · {item.calls.length} calls</Text></View>;
   if (item.kind === "error") return <LinkedText style={[styles.body, { color: palette.danger }]}>{item.text}</LinkedText>;
   if (item.kind === "queued") return <View><LinkedText style={[styles.reasoning, { color: palette.muted }]}>{`Queued · ${item.text}`}</LinkedText><MessageTime ts={item.messageTs} />{item.inputOccupied || item.withdrawn ? <Text style={[styles.reasoning, { color: palette.warning }]}>{deliveryNote(item)}</Text> : null}</View>;
@@ -92,6 +96,9 @@ const styles = StyleSheet.create({
   compacting: { fontSize: 13, lineHeight: 19, paddingHorizontal: 3, paddingTop: 12 },
   tool: { minHeight: 38, borderRadius: 10, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 11, paddingVertical: 8 },
   toolText: { flex: 1, fontSize: 13 },
+  toolBody: { flex: 1, gap: 2 },
+  toolLine: { fontSize: 13 },
+  agentLabel: { fontWeight: "600" },
   permission: { padding: 15, gap: 7, marginTop: 10 },
   permissionLabel: { fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 },
   permissionActions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 },

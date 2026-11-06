@@ -412,6 +412,7 @@ impl OpenCode {
                     input: p["metadata"].clone(),
                     title: p["title"].as_str().map(String::from),
                     description: p["pattern"].as_str().map(String::from).or(patterns).map(|s| format!("Pattern: {s}")),
+                    reason: None,
                     options: vec![
                         PermissionOption { id: "once".into(), label: "Allow once".into(), kind: PermissionOptionKind::AllowOnce },
                         PermissionOption { id: "always".into(), label: "Always allow".into(), kind: PermissionOptionKind::AllowAlways },

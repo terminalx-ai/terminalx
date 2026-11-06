@@ -1203,7 +1203,7 @@ fn codex_readers_serialize_drain_through_application() {
             manager.apply(&mut rt.lock().unwrap(), Payload::PermissionRequested {
                 cwd: None,
                 request_id: "continuation-approval".into(), tool_use_id: "next-tool".into(), tool_name: "Bash".into(),
-                input: json!({ "command": "ls" }), title: None, description: None, options: vec![],
+                input: json!({ "command": "ls" }), title: None, description: None, reason: None, options: vec![],
             }, None);
             applied_tx.send(()).unwrap();
         });
@@ -1929,7 +1929,7 @@ fn drained_old_launch_cannot_settle_successor() {
         rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
             cwd: None,
             request_id: "successor-approval".into(), tool_use_id: "successor-tool".into(), tool_name: "Bash".into(),
-            input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+            input: json!({"command":"ls"}), title: None, description: None, reason: None, options: vec![],
         }, None);
         let before = {
             let mut rt = rig.rt.lock().unwrap();
@@ -1986,7 +1986,7 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
             rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
                 cwd: None,
                 request_id: "retained".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
-                input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+                input: json!({"command":"ls"}), title: None, description: None, reason: None, options: vec![],
             }, None);
             // Notification must not turn a successor from Working to Waiting.
             if event == "Notification" { rig.rt.lock().unwrap().status = TabStatus::InProgress; }
@@ -2188,7 +2188,7 @@ fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
                     rig.manager.apply(&mut rt, Payload::PermissionRequested {
                         cwd: None,
                         request_id: "successor".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
-                        input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+                        input: json!({"command":"ls"}), title: None, description: None, reason: None, options: vec![],
                     }, None);
                 }
                 "stop" => { rig.manager.release_cli(&mut rt); }
@@ -2243,7 +2243,7 @@ fn delayed_idle_restart_defers_to_new_work_on_the_same_launch() {
             rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
                 cwd: None,
                 request_id: "same-launch-approval".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
-                input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+                input: json!({"command":"ls"}), title: None, description: None, reason: None, options: vec![],
             }, None);
             Some(receipt)
         } else { None };
@@ -2303,7 +2303,7 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
             rig.manager.apply(&mut rt, Payload::PermissionRequested {
                 cwd: None,
                 request_id: "successor".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
-                input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+                input: json!({"command":"ls"}), title: None, description: None, reason: None, options: vec![],
             }, None);
         }
         let before = rig.events();

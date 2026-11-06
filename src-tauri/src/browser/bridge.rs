@@ -435,8 +435,9 @@ mod tests {
     fn three_timeouts_close_the_session_and_reset_the_lane() {
         let tmp = tempfile::tempdir().unwrap();
         let fake = tmp.path().join("agent-browser");
-        // Sleeps unless asked to close, and records every argv it sees.
-        std::fs::write(&fake, "#!/bin/sh\necho \"$@\" >> \"$AB_LOG\"\ncase \"$*\" in *close*) echo '{\"success\":true,\"data\":{\"closed\":true}}';; *) sleep 5;; esac\n").unwrap();
+        // Snapshot hangs; setup and close succeed. Exec leaves no sleeping
+        // grandchild holding the output pipes after the client is killed.
+        std::fs::write(&fake, "#!/bin/sh\necho \"$@\" >> \"$AB_LOG\"\ncase \"$*\" in *snapshot*) exec sleep 30;; *) echo '{\"success\":true,\"data\":{}}';; esac\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let log_path = tmp.path().join("log");
@@ -444,14 +445,23 @@ mod tests {
         env.vars.push(("AB_LOG".into(), log_path.to_string_lossy().into_owned()));
         let bridge = Bridge::with_binary(env, fake);
         let session = bridge.session("default", tmp.path().join("profile"), tmp.path().join("downloads"));
-        for _ in 0..CONSECUTIVE_TIMEOUT_LIMIT {
+        bridge.with_session(&session, |ctx| ctx.ensure_tab("t0")).unwrap();
+        for attempt in 1..=CONSECUTIVE_TIMEOUT_LIMIT {
             let err = bridge
                 .with_session(&session, |ctx| ctx.run(&["snapshot"], ExecOptions { timeout: Duration::from_millis(1200), stdin: None }))
                 .unwrap_err();
             assert_eq!(err.code, "browser_timeout");
+            // A child can time out before it executes its logging statement.
+            // Count observed timeouts, not how many children got CPU time.
+            bridge.with_session(&session, |ctx| {
+                let restarted = attempt == CONSECUTIVE_TIMEOUT_LIMIT;
+                assert_eq!(ctx.lane.consecutive_timeouts, if restarted { 0 } else { attempt });
+                assert_eq!(ctx.lane.launched, !restarted);
+                assert_eq!(ctx.lane.active_tab.as_deref(), if restarted { None } else { Some("t0") });
+            });
         }
         let log = std::fs::read_to_string(&log_path).unwrap();
-        assert_eq!(log.matches("snapshot").count(), 3);
+        assert_eq!(log.lines().filter(|line| line.ends_with(" close")).count(), 1, "{log}");
         assert!(log.lines().last().unwrap().contains("close"), "{log}");
         bridge.with_session(&session, |ctx| {
             assert_eq!(ctx.lane.consecutive_timeouts, 0);

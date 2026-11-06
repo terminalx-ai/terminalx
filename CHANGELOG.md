@@ -6,6 +6,18 @@
   sign-in terminal. Pushing a repository without a remote now offers a URL
   field, or creation of a GitHub repository when signed in. Git failures show
   a readable explanation with command output behind **Show details**. (PRO-166)
+- Show each permission request once, and retire it as soon as Allow or Deny
+  is confirmed, including answers from the terminal or another card. Late
+  duplicate requests stay retired; clicking a stale card explains that the
+  request was already answered without submitting another decision. (PRO-160)
+- Keep local agent installation and login status current when returning to the
+  app, after an embedded sign-in command exits, and every two minutes while
+  Settings → Agents is open. Each card's badge and setup instructions now use
+  the same readiness check, so they cannot disagree about installation or
+  login. (PRO-170)
+- Return to the welcome screen with **Home** in either sidebar layout or ⌘K,
+  even after opening projects or sessions. Open local project, Open GitHub
+  project and Quick start remain available there. (PRO-183)
 
 ## 0.2.24
 
