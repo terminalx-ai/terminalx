@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { DEFAULT_PERMISSION_MODE, pickerMode, useModels } from "@/lib/models";
+import { FIRST_RUN_PERMISSION_MODE, pickerMode, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import { chooseMode } from "@/lib/dialogs";
 import { getPrefs, setPrefs, usePrefs, type Prefs } from "@/lib/prefs";
@@ -79,7 +79,7 @@ export function handoffStart(source: LaunchSettings, harnesses: HarnessInfo[], m
   const effort = [own ? source.effort : undefined, prefs.lastEffort[harness]].find((wanted) => !!wanted && !!model?.efforts.includes(wanted)) ?? null;
   const permissionMode = source.permissionMode
     ? (pickerMode(source.permissionMode)?.id ?? UNOFFERED_START_MODE)
-    : (pickerMode(prefs.lastMode)?.id ?? DEFAULT_PERMISSION_MODE);
+    : (pickerMode(prefs.lastMode)?.id ?? FIRST_RUN_PERMISSION_MODE);
   return { harness, model: model?.id ?? "", effort, permissionMode };
 }
 
@@ -115,7 +115,8 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     : model?.defaultEffort && model.efforts.includes(model.defaultEffort)
       ? model.defaultEffort
       : model?.efforts[0] ?? null;
-  const mode = pickerMode(chosen ? chosen.permissionMode : prefs.lastMode)?.id ?? DEFAULT_PERMISSION_MODE;
+  // A mode the picker cannot read, saved or the form's, is no choice: the new chat starts where a fresh profile does.
+  const mode = pickerMode(chosen ? chosen.permissionMode : prefs.lastMode)?.id ?? FIRST_RUN_PERMISSION_MODE;
 
   const change = (patch: Partial<LaunchSettings>) => {
     const current = latest.current;

@@ -17,7 +17,9 @@ const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// The launch mode of any session or tab whose creator did not name one —
 /// the desktop, the CLI, the relay, a cloud launch, an automation — and of a
-/// stored tab that has none. Only an explicit mode overrides it.
+/// stored tab that has none. Only an explicit mode overrides it. The desktop's
+/// own new chats name theirs: the reader's last pick, Ask every time until
+/// they make one (`FIRST_RUN_PERMISSION_MODE` in packages/portable).
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 /// A requested mode, or the default when none was named. Blank is not a mode.

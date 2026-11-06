@@ -114,13 +114,18 @@ export async function copyShareLink(sessionId: string) {
   if (link) await copyText(link.url);
   else openSessionShare(sessionId);
 }
+/**
+ * A new link's settings (PRO-162): guests read only, and each one waits for the
+ * host to admit them. Driving the session, or joining unseen, is for the host
+ * to turn on for a link, never what a forwarded link does by default.
+ */
 export function defaultShareSettings(): ShareSettings {
   return {
     audience: "anyone",
-    role: "driver",
+    role: "viewer",
     people: [],
     expiresAt: Date.now() + 3_600_000,
-    approveEachPerson: false,
+    approveEachPerson: true,
     canApprove: false,
     maximumPeople: 8,
     singleUse: false,

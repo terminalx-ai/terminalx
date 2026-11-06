@@ -268,8 +268,8 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
         </DialogHeader>
         <p className="mb-4 rounded-md bg-veil-raised p-3 text-sm">
           Guests can see the existing transcript and terminal content. A driver can ask the agent to change files and
-          run commands on this machine. Anyone signed in who receives a forwarded link can join; use named accounts or
-          approval to control this.
+          run commands on this machine. Anyone signed in who receives a forwarded link can ask to join; while Approve
+          each person is on, each one waits until you admit them.
         </p>
         {status.state !== "signed-in" ? (
           <Button onClick={() => void signIn()}>Sign in to share</Button>

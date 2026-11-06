@@ -762,7 +762,7 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     view.unmount();
     render(<NewSessionView />);
     const agent = screen.getByTestId("agent-menu");
-    expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium");
+    expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium, Ask every time");
     expect(agent.getAttribute("title")).toMatch(/^Codex · /);
   });
 

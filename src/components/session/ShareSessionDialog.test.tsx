@@ -26,9 +26,13 @@ const open = async () => {
   await screen.findByRole("button", { name: "Create share link" });
 };
 describe("Share session", () => {
-  it("creates signed-in driver access with permission approval explicitly off and a finite expiry", async () => {
+  it("creates a read-only link that admits each person only once approved, with a finite expiry (PRO-162)", async () => {
     await open();
     expect(screen.getByText(/Guests can see the existing transcript/)).toBeTruthy();
+    // The form shows the defaults it will send.
+    expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer");
+    expect((screen.getByLabelText("Approve each person") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("Guests may approve permissions") as HTMLInputElement).checked).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -38,7 +42,8 @@ describe("Share session", () => {
           directOnly: true,
           settings: expect.objectContaining({
             audience: "anyone",
-            role: "driver",
+            role: "viewer",
+            approveEachPerson: true,
             canApprove: false,
             maximumPeople: 8,
             singleUse: false,
@@ -70,6 +75,20 @@ describe("Share session", () => {
         }),
       ),
     );
+  });
+  it("lets the host make a driver link that admits people unasked, and starts the next link from the defaults again", async () => {
+    await open();
+    fireEvent.change(screen.getByLabelText("Default access"), { target: { value: "driver" } });
+    fireEvent.click(screen.getByLabelText("Approve each person"));
+    fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "session_share_create",
+        expect.objectContaining({ settings: expect.objectContaining({ role: "driver", approveEachPerson: false }) }),
+      ),
+    );
+    await waitFor(() => expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer"));
+    expect((screen.getByLabelText("Approve each person") as HTMLInputElement).checked).toBe(true);
   });
   it("requires sign-in before offering to create a link", async () => {
     mocks.signedIn = false;
