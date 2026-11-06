@@ -79,9 +79,10 @@ export function inTerminal(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest(".xterm, .terminal-host");
 }
 
-/** Escape belongs to an open surface before background tabs or reminders. */
-export function hasEscapeOverlay(): boolean {
-  return !!document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]');
+/** Escape belongs to an open surface before background tabs or reminders. A surface may exclude its own inline list. */
+export function hasEscapeOverlay(except?: Element | null): boolean {
+  return Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]'))
+    .some((element) => element !== except);
 }
 
 /** Stop binding keys while something records them (the Shortcuts tab). Returns the resume. */
