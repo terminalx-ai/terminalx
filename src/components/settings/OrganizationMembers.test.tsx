@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { organizationMembers, type OrganizationRoster } from "@/lib/organizationMembers";
+import { resetPeople } from "@/lib/cloudPeople";
 import { OrganizationMembers } from "./OrganizationMembers";
 
 vi.mock("@/lib/organizationMembers", async (importOriginal) => ({
@@ -42,7 +43,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   api.list.mockResolvedValue(roster());
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetPeople(); });
 
 it("lists members and pending invitations with their status", async () => {
   await renderAs();
@@ -282,4 +283,32 @@ it("says the outcome is unknown when a sent change loses its response", async ()
   fireEvent.click(screen.getByRole("button", { name: "Remove member@example.com" }));
   fireEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
   await screen.findByText(/may or may not have been applied/);
+});
+
+it("opens the shared profile from an avatar and the row menu, and copies user info with a toast", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  await renderAs();
+  fireEvent.click(screen.getByRole("button", { name: "View profile: Olive Owner" }));
+  const profile = await screen.findByRole("dialog", { name: "Profile of Olive Owner" });
+  expect(within(profile).getByText("owner@example.com")).toBeTruthy();
+  fireEvent.keyDown(profile, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  const openMenu = () => fireEvent.keyDown(screen.getByRole("button", { name: "Actions for Olive Owner" }), { key: "ArrowDown" });
+  openMenu();
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Copy user info" }));
+  await screen.findByText("User info copied.");
+  expect(writeText).toHaveBeenCalledWith("Name: Olive Owner\nEmail: owner@example.com\nUser ID: owner-1");
+  openMenu();
+  fireEvent.click(await screen.findByRole("menuitem", { name: "View profile" }));
+  expect(await screen.findByRole("dialog", { name: "Profile of Olive Owner" })).toBeTruthy();
+});
+
+it("reports a failed clipboard write without a success toast", async () => {
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) } });
+  await renderAs();
+  fireEvent.keyDown(screen.getByRole("button", { name: "Actions for Olive Owner" }), { key: "ArrowDown" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Copy user info" }));
+  await screen.findByText("Could not copy user info. Try again.");
+  expect(screen.queryByText("User info copied.")).toBeNull();
 });

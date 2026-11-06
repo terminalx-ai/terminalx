@@ -28,6 +28,8 @@ pub struct OrganizationMember {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub photo_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
     pub role: String,
 }
 
@@ -394,6 +396,16 @@ mod tests {
     }
 
     const ROSTER: &str = r#"{"members":[{"userId":"user-1","email":"owner@example.com","role":"owner"}],"pendingInvites":[{"email":"new@example.com","role":"member","createdAt":1,"expiresAt":2,"status":"pending"}],"viewerRole":"owner","canManageMembers":true}"#;
+
+    #[test]
+    fn preserves_membership_creation_time_and_accepts_older_rosters() {
+        let old: OrganizationRoster = serde_json::from_str(ROSTER).unwrap();
+        assert_eq!(old.members[0].created_at, None);
+        let json = ROSTER.replace("\"role\":\"owner\"", "\"role\":\"owner\",\"createdAt\":1234567890000");
+        let roster: OrganizationRoster = serde_json::from_str(&json).unwrap();
+        assert_eq!(roster.members[0].created_at, Some(1234567890000));
+        assert_eq!(serde_json::to_value(&roster).unwrap()["members"][0]["createdAt"], 1234567890000_i64);
+    }
 
     #[test]
     fn lists_a_member_organizations_roster_by_its_own_path_without_a_revision() {

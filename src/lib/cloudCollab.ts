@@ -1,3 +1,4 @@
+import { invalidateOrganizationRoster } from "@/lib/organizationRoster";
 import { useCallback, useSyncExternalStore } from "react";
 import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import {
@@ -277,6 +278,7 @@ export function onAccessChanged(listener: AccessListener): () => void {
 
 export function notifyAccessChanged(orgId: string | null | undefined) {
   if (!orgId) return;
+  invalidateOrganizationRoster(orgId);
   for (const listener of [...accessListeners]) {
     try {
       listener(orgId);

@@ -27,6 +27,7 @@ vi.mock("@/lib/account", () => ({ useAccount: () => account }));
 
 import { CloudShareDialog, CloudShareDialogHost, openShareDialog, shareErrorMessage, yourAccessText } from "./CloudShareDialog";
 import { personName, resetPeople } from "@/lib/cloudPeople";
+import { invalidateOrganizationRoster } from "@/lib/organizationRoster";
 import { onAccessChanged } from "@/lib/cloudCollab";
 
 const share = (fields: Partial<CloudWorkspaceShare> = {}): CloudWorkspaceShare => ({
@@ -148,12 +149,17 @@ describe("share dialog", () => {
     );
   });
 
-  it("reads the organization's members again each time it opens, so someone removed since is not offered (#501)", async () => {
+  it("reuses the roster on consecutive opens, then removes departed members after invalidation", async () => {
     dialog();
     await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeTruthy());
     cleanup();
+    dialog();
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeTruthy());
+    expect(mocks.members).toHaveBeenCalledTimes(1);
+    cleanup();
     // Bob is removed from the organization while the dialog is closed.
     mocks.members.mockResolvedValue({ members: [{ userId: "u-me", email: "me@example.com", displayName: "Me", role: "owner" }, { userId: "u-erin", email: "erin@example.com", displayName: "Erin", role: "member" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "r2" });
+    invalidateOrganizationRoster("org-1");
     dialog();
     await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy());
     expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeNull();
@@ -272,7 +278,7 @@ describe("share dialog", () => {
   });
 
   it("says why nobody can be added when another organization's members cannot be read, and still manages the shares", async () => {
-    mocks.membersIn.mockRejectedValueOnce({ code: "cloud_organization_unavailable", status: null });
+    mocks.membersIn.mockRejectedValueOnce({ code: "cloud_organization_unavailable", status: null }).mockRejectedValueOnce({ code: "cloud_organization_unavailable", status: null });
     render(<CloudShareDialog orgId="org-2" workspaceId="ws-1" name="Payments" onClose={() => undefined} />);
     const row = await screen.findByTestId("cloud-share-row");
     const note = await screen.findByTestId("cloud-share-roster-error");
@@ -280,7 +286,9 @@ describe("share dialog", () => {
     expect(screen.queryByLabelText("Add person")).toBeNull();
     fireEvent.click(within(row).getByRole("button", { name: "Revoke Alice" }));
     await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-2"));
-    // Retry reads them again.
+    // The access event also refreshes the roster; retry still recovers a refusal.
+    await waitFor(() => expect(mocks.membersIn).toHaveBeenCalledTimes(2));
+    await screen.findByTestId("cloud-share-roster-error");
     fireEvent.click(within(screen.getByTestId("cloud-share-roster-error")).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.queryByTestId("cloud-share-roster-error")).toBeNull());
     await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Dana/)).toBeTruthy());
@@ -569,4 +577,12 @@ describe("a creator who is not an owner or admin", () => {
     await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-1"));
     expect(mocks.access).not.toHaveBeenCalled();
   });
+});
+
+it("opens the shared profile from a share avatar", async () => {
+  dialog();
+  fireEvent.click(await screen.findByRole("button", { name: "View profile: Alice" }));
+  const profile = await screen.findByRole("dialog", { name: "Profile of Alice" });
+  expect(within(profile).getByText("alice@example.com")).toBeTruthy();
+  expect(within(profile).getByText("Member")).toBeTruthy();
 });

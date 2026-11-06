@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Loader2, Lock, UserPlus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -6,8 +6,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { useAccount } from "@/lib/account";
 import { api, type CloudShareRole, type CloudWorkspaceShare, type CloudWorkspaceShares } from "@/lib/api";
 import { VISIBILITY_ADMIN_REASON, notifyAccessChanged } from "@/lib/cloudCollab";
-import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
-import type { OrganizationMember } from "@/lib/organizationMembers";
+import { rememberPeople } from "@/lib/cloudPeople";
+import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { MemberProfile } from "@/components/people/MemberProfile";
 
 /**
  * This person's access in words: Owner, Admin, Creator, Driver or Viewer.
@@ -131,9 +132,10 @@ export function CloudShareDialog({
   // organization's (every one is live, PRO-71) is read by its own id.
   const defaultOrg = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
   const [listed, setListed] = useState<CloudWorkspaceShares | null>(null);
-  const [members, setMembers] = useState<OrganizationMember[]>([]);
-  /** Why the organization's members could not be read; nobody can be added then. */
-  const [rosterError, setRosterError] = useState<string | null>(null);
+  const org = orgId ?? status.identity?.organizationId;
+  const rosterState = useOrganizationRoster(org);
+  const members = rosterState.roster?.members ?? [];
+  const rosterError = rosterState.error ? codeOf(rosterState.error) : null;
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -142,7 +144,6 @@ export function CloudShareDialog({
   const [confirming, setConfirming] = useState<Confirming>(null);
   /** The workspace was made organization-visible, but the share that was the reason for it did not go through. */
   const [unshared, setUnshared] = useState<{ person: Person; why: string } | null>(null);
-  const org = orgId ?? status.identity?.organizationId;
 
   const reload = useCallback(async () => {
     try {
@@ -157,19 +158,10 @@ export function CloudShareDialog({
     }
   }, [workspaceId, orgId]);
 
-  // Read again on every open, not once per session: someone removed from the organization since is not offered (#501).
-  // Only the newest read is shown: an older answer that arrives late never replaces it.
-  const membersRead = useRef(0);
-  const loadMembers = useCallback(() => {
-    const read = ++membersRead.current;
-    const latest = () => read === membersRead.current;
-    setRosterError(null);
-    if (defaultOrg) return void loadRoster({ fresh: true }).then((next) => latest() && setMembers(next));
-    void loadRosterIn(orgId!, { fresh: true }).then(
-      (next) => latest() && setMembers(next),
-      (e: unknown) => latest() && setRosterError(codeOf(e)),
-    );
-  }, [defaultOrg, orgId]);
+  const contextRevision = status.context?.revision ?? "";
+  const loadMembers = useCallback((fresh = true) => {
+    void readOrganizationRoster(org, { fresh, active: defaultOrg, contextRevision }).catch(() => {});
+  }, [org, defaultOrg, contextRevision]);
 
   /** A refusal that says the person left the organization: what is shown of them is out of date, so both lists are read again. */
   const leftOrganization = (e: unknown, userId: string) => {
@@ -181,7 +173,7 @@ export function CloudShareDialog({
 
   useEffect(() => {
     void reload();
-    loadMembers();
+    loadMembers(false);
   }, [reload, loadMembers]);
 
   const manage = listed?.you.canManageShares ?? false;
@@ -405,6 +397,7 @@ export function CloudShareDialog({
               <ul className="flex flex-col divide-y divide-hairline rounded-md border border-hairline" aria-label="People with access">
                 {listed.shares.map((share) => (
                   <li key={share.userId} className="flex items-center gap-2 px-3 py-2" data-testid="cloud-share-row">
+                    <MemberProfile className="size-7" member={members.find((member) => member.userId === share.userId) ?? { userId: share.userId, email: share.email, displayName: share.name ?? undefined, role: "" }} />
                     <div className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate text-sm">{share.name || share.email}</span>
                       {share.name && <span className="truncate text-muted-foreground">{share.email}</span>}
@@ -458,7 +451,7 @@ export function CloudShareDialog({
                     ? "This organization's members can only be read while it is your default organization (Settings). You can still change or revoke the shares above."
                     : `Could not load this organization's members (${rosterError}), so nobody can be added right now. You can still change or revoke the shares above.`}
                 </span>
-                <Button size="sm" variant="outline" onClick={loadMembers}>
+                <Button size="sm" variant="outline" onClick={() => loadMembers()}>
                   Retry
                 </Button>
               </p>

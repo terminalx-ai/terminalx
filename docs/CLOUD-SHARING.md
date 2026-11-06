@@ -881,3 +881,21 @@ and attachments may carry `userId`. The file is re-read on every refresh.
   the new role. The revocation closes the connection, drops the queued
   follow-up and rotates the key. An outsider (not a member) never gets an
   attachment; that is the API's 404 and is tested there.
+
+### Cached organization roster and profiles (PRO-128)
+
+`organizationRoster.ts` keeps one in-memory roster per organization. Concurrent
+reads coalesce, consecutive Share-dialog opens reuse the result for one minute,
+and subscribed surfaces refresh expired rosters. Membership mutations replace the
+cached roster, retiring earlier reads; access/presence changes invalidate that
+organization. The desktop has no dedicated organization-event feed yet, so the
+expiry and Members refresh action also reconcile changes made elsewhere. Sign-out
+and leaving an organization discard its details and late responses.
+
+The Share dialog, Members page, participants bar and session-header faces use
+`MemberProfile`: a photo (initials if absent or broken), name, email, organization
+role, membership join date and a presence slot. Workspace driver/viewer roles stay
+on the surrounding workspace UI. Members' action menus offer View profile and
+Copy user info (name, email, user ID), with clipboard success/failure feedback.
+The desktop roster API and native bridge carry membership `createdAt` as epoch
+milliseconds; older servers omit it and profiles say the join date is unavailable.

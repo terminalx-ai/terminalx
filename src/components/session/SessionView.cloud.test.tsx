@@ -358,6 +358,10 @@ let enqueued: { kind: string; tabId: string; payload: Record<string, unknown> }[
 
 function cloudHandlers() {
   guard.handlers = {
+    organization_members_in: ({ orgId }) => {
+      expect(orgId).toBe(ORG);
+      return guard.handlers.organization_members?.({}) ?? { members: [], pendingInvites: [], viewerRole: "member", canManageMembers: false, contextRevision: "" };
+    },
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
     cloud_agent_outbox: () => outbox,

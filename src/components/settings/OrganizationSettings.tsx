@@ -82,7 +82,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
       </div>
       {active ? (
         <>
-          <OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} />
+          <OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} organizationId={organization.id} />
           <OrganizationCompute contextRevision={contextRevision} />
           {logins}
           {routes}
