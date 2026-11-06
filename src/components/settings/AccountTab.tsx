@@ -39,6 +39,8 @@ export function AccountTab() {
             {identity.organization && <div className="mt-0.5 truncate text-xs text-faint">{identity.organization}</div>}
           </div>
         </div>
+        <MachineNameSettings />
+        <WorkStatusSettings />
         <p className="text-xs leading-relaxed text-muted-foreground">
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
@@ -57,11 +59,10 @@ export function AccountTab() {
             </Button>
           </div>
         )}
-        <MachineNameSettings />
-        <WorkStatusSettings />
         {pairing.status.host && (
-          <div className="rounded-lg border border-hairline px-3 py-3">
-            <div className="text-xs font-medium">What this Mac shares</div>
+          <details className="rounded-lg border border-hairline px-3 py-3">
+            <summary className="cursor-pointer text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/40">Advanced</summary>
+            <div className="mt-3 text-xs font-medium">What this Mac shares</div>
             <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
               The account directory receives exactly the seven binding fields below so your signed-in phone can find this Mac. Sessions, projects, worktrees, transcripts, paths, scrollback, and device credentials never leave through account binding. The work status above names, for each session linked to an issue, only the issue, the session’s title and branch, its state and when it was last active.
             </p>
@@ -78,7 +79,7 @@ export function AccountTab() {
             <p className="mt-3 text-[11px] leading-relaxed text-faint">
               Relay proof also sends app version {pairing.status.host.appVersion}; the directory derives liveness from the last heartbeat{pairing.status.host.lastSeenAt ? ` at ${new Date(pairing.status.host.lastSeenAt).toLocaleString()}` : ""}.
             </p>
-          </div>
+          </details>
         )}
         {status.lastError && <p className="text-xs text-warning">{status.lastError}</p>}
         {confirmingSignOut ? (
