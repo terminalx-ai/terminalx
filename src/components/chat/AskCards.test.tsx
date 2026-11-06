@@ -102,6 +102,17 @@ const bypassAsk: PendingAsk = {
   options: [{ id: "allow", label: "Allow", kind: "allow_once" }, { id: "deny", label: "Deny", kind: "deny" }],
 };
 
+it("offers the exact command's session allowance and sends its option id", () => {
+  const answer = vi.fn();
+  render(<PermissionCard ask={{ ...bypassAsk, reason: undefined, options: [
+    { id: "allow", label: "Allow", kind: "allow_once" },
+    { id: "terminalx:allow_session", label: "Allow for this session", kind: "allow_session" },
+    { id: "deny", label: "Deny", kind: "deny" },
+  ] }} onAnswer={answer} />);
+  fireEvent.click(screen.getByRole("button", { name: "Allow for this session" }));
+  expect(answer).toHaveBeenCalledWith("terminalx:allow_session");
+});
+
 it("says Claude's safety check asked in bypass mode, and labels the agent's description as the agent's (#775)", () => {
   const answer = vi.fn();
   render(<PermissionCard ask={bypassAsk} onAnswer={answer} />);

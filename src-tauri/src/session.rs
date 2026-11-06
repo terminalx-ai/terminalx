@@ -118,6 +118,8 @@ pub(crate) struct DecisionSender {
     /// The hook that waits: `PermissionRequest` or `PreToolUse`, which a
     /// handover carries with the wait (#765).
     gate: String,
+    /// Exact command and directory offered on this card, never a prefix.
+    session_command: Option<String>,
 }
 
 impl DecisionSender {
@@ -1062,6 +1064,9 @@ pub struct SessionManager {
     status: Arc<crate::status::StatusState>,
     control: crate::hooks::ControlEndpoint,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
+    /// Explicit command grants for this tab's conversation. Kept across
+    /// turns and CLI restarts; forgotten when the owner runtime exits.
+    session_commands: Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
     /// One writer per pane, so two prompts sent in quick succession cannot
     /// interleave their paste and their Enter, nor overtake one another.
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
@@ -1321,8 +1326,7 @@ fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl 
 /// same command reaches `PreToolUse` and `PermissionRequest` under different
 /// ids but with the same input, minus the justification Codex adds.
 fn tool_key(tool_name: &str, input: &Value) -> String {
-    let target = ["command", "file_path", "path", "pattern", "query", "url"].iter().find_map(|k| input.get(*k).and_then(Value::as_str)).unwrap_or_default();
-    format!("{tool_name}\u{1}{target}")
+    serde_json::json!([tool_name, crate::harness::read_only::execution_input(input)]).to_string()
 }
 
 /// Why a permission hook's card is up, in TerminalX's words (#775): the
@@ -1403,6 +1407,7 @@ impl SessionManager {
             status,
             control,
             tabs: Arc::new(Mutex::new(HashMap::new())),
+            session_commands: Arc::default(),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2240,6 +2245,9 @@ impl SessionManager {
             for (request_id, pending) in &runtime.pending {
                 let mut options = vec!["allow".to_string(), "deny".to_string()];
                 options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
+                if matches!(&runtime.engine, Engine::Cli(p) if p.decisions.get(request_id).is_some_and(|d| d.session_command.is_some())) {
+                    options.insert(1, crate::harness::read_only::SESSION_OPTION.to_string());
+                }
                 out.push(PendingPermission {
                     session_id: runtime.session_id.clone(),
                     tab_id: runtime.tab_id.clone(),
@@ -3246,6 +3254,7 @@ impl SessionManager {
         crate::session_ops::delete_session_blocking(self.sink.as_ref(), session_id, &|_| {})
             .map_err(anyhow::Error::msg)?;
         self.tabs.lock().unwrap().retain(|_, tab| tab.lock().unwrap().session_id != session_id);
+        self.session_commands.lock().unwrap().retain(|key, _| !key.starts_with(&format!("{session_id}/")));
         Ok(())
     }
 
@@ -3337,11 +3346,18 @@ impl SessionManager {
             bail!("the agent is no longer running; the request lapsed");
         }
         let ask = rt.pending.get(request_id).cloned().ok_or_else(|| anyhow!("that request is no longer open"))?;
+        let session_command = if option_id == crate::harness::read_only::SESSION_OPTION {
+            match &rt.engine {
+                Engine::Cli(p) => p.decisions.get(request_id).and_then(|d| d.session_command.clone()),
+                _ => None,
+            }.ok_or_else(|| anyhow!("that request does not offer a session command allowance"))?
+        } else { String::new() };
         let (allow, label) = match &mut rt.engine {
             Engine::Cli(p) => {
                 let (decision, label) = match option_id {
                     "deny" => (Decision::Deny, "Denied".to_string()),
                     "allow" => (Decision::Allow, "Allowed".to_string()),
+                    crate::harness::read_only::SESSION_OPTION => (Decision::Allow, "Allowed for this session".to_string()),
                     s if s.starts_with("suggest:") => {
                         let i: usize = s[8..].parse().unwrap_or(usize::MAX);
                         let sugg = ask.suggestions.get(i).cloned().ok_or_else(|| anyhow!("unknown option"))?;
@@ -3373,6 +3389,10 @@ impl SessionManager {
             }
             Engine::None => bail!("no engine"),
         };
+        // Only remember a grant after the waiting hook accepted its answer.
+        if option_id == crate::harness::read_only::SESSION_OPTION {
+            self.session_commands.lock().unwrap().entry(key_of(session_id, tab_id)).or_default().insert(session_command);
+        }
         rt.pending.remove(request_id);
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
         if rt.pending.is_empty() && !matches!(rt.engine, Engine::Cli(_)) {
@@ -5965,6 +5985,38 @@ impl SessionManager {
         let suggestions: Vec<Value> = frame.payload["permission_suggestions"].as_array().cloned().unwrap_or_default();
         let gate = frame.event.as_str();
 
+        // An automatic discovery allowance only skips TerminalX's Ask gate.
+        // Codex's own PermissionRequest (sandbox/network escalation), and
+        // Claude's safety checks in bypass mode, always remain a decision.
+        let cwd = input["workdir"].as_str().or_else(|| input["cwd"].as_str()).or_else(|| frame.payload["cwd"].as_str());
+        let cwd = cwd.and_then(|cwd| {
+            let path = Path::new(cwd);
+            if path.is_absolute() { Some(path.to_path_buf()) }
+            else { frame.payload["cwd"].as_str().filter(|base| Path::new(base).is_absolute()).map(|base| Path::new(base).join(path)) }
+        });
+        let cwd = cwd.as_deref().and_then(Path::to_str);
+        let session_command = {
+            let rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
+            if !p.origin.accepts(frame) { return HookReply::default(); }
+            let mode = if kind == CliKind::Claude { frame.payload["permission_mode"].as_str().unwrap_or(&p.mode) } else { &p.mode };
+            let ask_gate = codex::asks_every_tool(mode)
+                && ((kind == CliKind::Codex && gate == "PreToolUse") || kind == CliKind::Claude);
+            if ask_gate {
+                let key = crate::harness::read_only::session_key(&tool_name, &input, cwd);
+                let granted = key.as_ref().is_some_and(|key| self.session_commands.lock().unwrap()
+                    .get(&rt.key()).is_some_and(|commands| commands.contains(key)));
+                let discovery = store::settings::load().agents.read_only_commands
+                    && crate::harness::read_only::allows(&tool_name, &input, cwd);
+                if granted || discovery {
+                    // Do not cache this in `answered`: a subsequent provider
+                    // escalation still needs its own approval card.
+                    return reply_for(kind, gate, Decision::Allow);
+                }
+                key
+            } else { None }
+        };
+
         // Codex raises `PermissionRequest` for a command the reader has just
         // been asked about at `PreToolUse`. Reusing that answer is what keeps
         // one tool to one card.
@@ -5991,6 +6043,7 @@ impl SessionManager {
                 sender: tx,
                 caller: if local_owner { crate::hooks::Caller::current() } else { crate::hooks::Caller::default() },
                 gate: gate.to_string(),
+                session_command: session_command.clone(),
             });
             // The event carries no tool_use_id — it fires before the call is
             // recorded — so the card stands on its own rather than attaching
@@ -6009,7 +6062,17 @@ impl SessionManager {
                         .map(String::from),
                     reason: asked_because(kind, gate, &frame.payload, &p.mode, &tool_name),
                     cwd: frame.payload["cwd"].as_str().filter(|s| !s.trim().is_empty()).map(String::from),
-                    options: claude::mapper::build_options(&suggestions),
+                    options: {
+                        let mut options = claude::mapper::build_options(&suggestions);
+                        if session_command.is_some() {
+                            options.insert(1, crate::events::PermissionOption {
+                                id: crate::harness::read_only::SESSION_OPTION.into(),
+                                label: "Allow for this session".into(),
+                                kind: crate::events::PermissionOptionKind::AllowSession,
+                            });
+                        }
+                        options
+                    },
                     tool_name: tool_name.clone(),
                     input: input.clone(),
                 }
@@ -6629,6 +6692,10 @@ mod tests {
         assert_eq!(pre, request);
         assert_ne!(pre, tool_key("Bash", &json!({"command": "rm -rf dist"})));
         assert_ne!(pre, tool_key("Read", &json!({"command": "rm -rf build"})));
+        let cmd = tool_key("exec_command", &json!({"cmd":"touch note", "workdir":"/workspace/app"}));
+        assert_ne!(cmd, tool_key("exec_command", &json!({"cmd":"rm file", "workdir":"/workspace/app"})));
+        assert_ne!(cmd, tool_key("exec_command", &json!({"cmd":"touch note", "workdir":"/workspace/other"})));
+        assert_ne!(cmd, tool_key("exec_command", &json!({"cmd":"touch note", "workdir":"/workspace/app", "shell":"other-shell"})));
     }
 
     #[test]

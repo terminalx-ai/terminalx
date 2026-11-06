@@ -408,6 +408,11 @@ fn a_pretool_report_from_a_replaced_launch_is_not_acknowledged() {
 /// records it, and what the hook was told. The reader answers `answer`.
 fn permission_card(kind: CliKind, mode: &str, gate: &str, payload: Value, answer: Decision) -> (Value, HookReply) {
     let rig = Rig::in_mode(kind, mode);
+    // These tests exercise cards, including discovery commands whose cards
+    // the default read-only policy would now skip.
+    let mut settings = store::settings::load();
+    settings.agents.read_only_commands = false;
+    store::settings::save(&settings).unwrap();
     let manager = rig.manager.clone();
     let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(), payload };
     let worker = std::thread::spawn(move || manager.on_hook(frame));
@@ -440,6 +445,121 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
         assert_eq!(payload["reason"], reason, "{gate}: why the card is up");
         assert_eq!(payload["input"], input, "display context must not rewrite the provider's tool arguments");
     }
+}
+
+fn command_frame(rig: &Rig, gate: &str, command: &str, cwd: &str) -> HookFrame {
+    HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
+        payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":{"command": command}}) }
+}
+
+/// Exercise the real response path, including validation of session options.
+fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: bool) {
+    let manager = rig.manager.clone();
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(!worker.is_finished(), "the command must ask");
+        assert!(Instant::now() < deadline, "the command must publish a card");
+        std::thread::sleep(MOMENT);
+    };
+    let pending = rig.manager.pending_permissions();
+    assert_eq!(pending[0].options.iter().any(|id| id == crate::harness::read_only::SESSION_OPTION), session_option);
+    let event = rig.events().into_iter().rev().find_map(|event| match event.payload {
+        Payload::PermissionRequested { options, .. } => Some(options), _ => None,
+    }).unwrap();
+    assert_eq!(event.iter().any(|o| o.id == crate::harness::read_only::SESSION_OPTION), session_option);
+    if !session_option {
+        assert!(rig.manager.respond_permission(SESSION, TAB, &request, crate::harness::read_only::SESSION_OPTION).is_err());
+    }
+    rig.manager.respond_permission(SESSION, TAB, &request, option).unwrap();
+    assert!(worker.join().unwrap().output.is_some());
+    rig.manager.forget_tool_answers(&mut rig.rt.lock().unwrap());
+}
+
+#[test]
+fn ask_mode_discovery_skips_cards_for_both_clis_but_writes_and_network_ask() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        for command in ["pwd; rg --files", "ls; cat file", "cat file | grep -n hello"] {
+            let reply = rig.manager.on_hook(command_frame(&rig, gate, command, "/workspace/app"));
+            assert_eq!(reply.output, Some(if kind == CliKind::Codex { codex::pty::pre_tool_decision(true) } else { claude::pty::permission_decision(true, None, vec![]) }));
+            assert!(rig.manager.pending_permissions().is_empty());
+            assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
+        }
+        for command in ["pwd; touch file", "ls && rm file", "cat file | curl example.com", "ls > file"] {
+            answer_command(&rig, command_frame(&rig, gate, command, "/workspace/app"), "deny", true);
+        }
+    }
+}
+
+#[test]
+fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        assert!(rig.manager.on_hook(command_frame(&rig, gate, "pwd", "/workspace/app")).output.is_some());
+        let mut settings = store::settings::load();
+        settings.agents.read_only_commands = false;
+        store::settings::save(&settings).unwrap();
+        answer_command(&rig, command_frame(&rig, gate, "pwd", "/workspace/app"), "deny", true);
+    }
+}
+
+#[test]
+fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let option = crate::harness::read_only::SESSION_OPTION;
+        // Allow once does not create a session grant.
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), "allow", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), option, true);
+        rig.hook("Stop", json!({}));
+        let cards = rig.events().iter().filter(|event| matches!(event.payload, Payload::PermissionRequested { .. })).count();
+        let mut repeat = command_frame(&rig, gate, "touch note", "/workspace/app");
+        repeat.payload["tool_input"]["description"] = json!("Create the note for the next step");
+        assert!(rig.manager.on_hook(repeat).output.is_some());
+        assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PermissionRequested { .. })).count(), cards);
+        answer_command(&rig, command_frame(&rig, gate, "touch other", "/workspace/app"), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note; rm file", "/workspace/app"), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/other"), "deny", true);
+        // A grant for another tab cannot authorize this one.
+        let grants = rig.manager.session_commands.lock().unwrap().remove(&key_of(SESSION, TAB)).unwrap();
+        rig.manager.session_commands.lock().unwrap().insert(key_of(SESSION, "another-tab"), grants);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), "deny", true);
+    }
+}
+
+#[test]
+fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", "/workspace/app")).output.is_some());
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
+    answer_command(&rig, command_frame(&rig, "PreToolUse", "touch note", "/workspace/app"), crate::harness::read_only::SESSION_OPTION, true);
+    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "touch note", "/workspace/app")).output.is_some());
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "touch note", "/workspace/app"), "deny", false);
+}
+
+#[test]
+fn a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.answered.insert(tool_key("exec_command", &json!({"cmd":"touch note", "workdir":"/workspace/app"})), true);
+    }
+    let mut frame = command_frame(&rig, "PreToolUse", "", "/workspace/app");
+    frame.payload["tool_name"] = json!("exec_command");
+    frame.payload["tool_input"] = json!({"cmd":"rm file", "workdir":"/workspace/app"});
+    answer_command(&rig, frame, "deny", true);
+}
+
+#[test]
+fn claude_read_only_safety_requests_in_bypass_still_ask() {
+    let rig = Rig::in_mode(CliKind::Claude, "bypassPermissions");
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
 }
 
 /// #775: TerminalX's Claude hooks only ever deny, so in bypass mode a card

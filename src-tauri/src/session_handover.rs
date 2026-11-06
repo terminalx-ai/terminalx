@@ -106,6 +106,8 @@ pub(crate) struct AskRecord {
     pub input: Value,
     #[serde(default)]
     pub suggestions: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_command: Option<String>,
 }
 
 /// The app's CLI in a tab, as the tab drives it.
@@ -445,6 +447,10 @@ impl SessionManager {
             status: rt.status,
             pending: rt.pending.iter().map(|(id, ask)| AskRecord {
                 request_id: id.clone(), tool_use_id: ask.tool_use_id.clone(), tool_name: ask.tool_name.clone(), input: ask.input.clone(), suggestions: ask.suggestions.clone(),
+                session_command: match &rt.engine {
+                    Engine::Cli(p) => p.decisions.get(id).and_then(|d| d.session_command.clone()),
+                    _ => None,
+                },
             }).collect(),
             queued: rt.queued.clone(),
             turn_open: rt.turn_open,
@@ -622,7 +628,7 @@ impl SessionManager {
                 Ok(connection) if local_owner => crate::hooks::Caller::of(Arc::new(connection)),
                 _ => crate::hooks::Caller::default(),
             };
-            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone() });
+            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone(), session_command: ask.session_command.clone() });
             (p.harness, p.origin.token.clone(), p.generation)
         };
         let manager = self.clone();
