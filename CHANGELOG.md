@@ -5,8 +5,9 @@
 - Install Claude Code or Codex and sign in to it without opening Terminal.
   **Install and sign in**, on the welcome screen, in Settings → Agents and in
   the new-session view, runs the provider's official native installer in an
-  embedded terminal (no Node or npm needed), then the agent's own sign-in in
-  the same terminal, which opens the browser. Installation and login are
+  embedded terminal (fetched over HTTPS only; no Node or npm needed), then the
+  agent's own sign-in in the same terminal, which opens the browser. One setup
+  runs per agent at a time, and another window shows it. Installation and login are
   checked again after each step, so every view turns Ready by itself. A folder
   that is not writable, no connection to the provider, a failed download or a
   failed installer each get their own explanation and **Try again**; Cancel

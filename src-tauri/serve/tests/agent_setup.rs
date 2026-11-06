@@ -1,6 +1,7 @@
 //! An agent's sign-in through the runtime's own call (PRO-152): the command
 //! comes from the registry, the pane belongs to no session and is no shell
-//! tab, one step runs at a time, and the next step goes on in the same pane.
+//! tab, one step runs at a time per agent whichever pane asks, a window that
+//! did not start it can find it, and the next step goes on in the same pane.
 //! The wrapper's exit codes and install → sign-in → ready with a stubbed
 //! installer are `harness::setup::tests::e2e` in the desktop crate.
 
@@ -51,9 +52,15 @@ fn a_sign_in_runs_in_a_setup_pane_of_no_session_made_from_the_registry() {
 
     serve.control("runtime.pty.agentSetup", step(id, "claude", "login"));
     wait_until("the sign-in to start", || output(&serve, id).0.contains("stand-in sign-in").then_some(()));
-    let again = serve.try_control("runtime.pty.agentSetup", step(id, "claude", "login"));
-    assert_eq!(again["ok"], false, "{again}");
-    assert!(again.to_string().contains("Claude Code is already being set up"), "{again}");
+    // Not again, and not from another window's pane for the same agent either.
+    for pane in [id, "setup:claude:other-window"] {
+        let again = serve.try_control("runtime.pty.agentSetup", step(pane, "claude", "login"));
+        assert_eq!(again["ok"], false, "{again}");
+        assert!(again.to_string().contains("Claude Code is already being set up"), "{again}");
+    }
+    // That window finds the run instead, to show it.
+    assert_eq!(serve.control("runtime.pty.agentSetupRunning", json!({ "harness": "claude" })), json!({ "pane": id, "step": "login" }));
+    assert_eq!(serve.control("runtime.pty.agentSetupRunning", json!({ "harness": "codex" })), serde_json::Value::Null);
     // No window lists it as a shell tab of some session.
     let shells = serve.control("runtime.pty.visibleShells", json!({}));
     assert!(!shells.to_string().contains(id), "{shells}");
@@ -64,6 +71,7 @@ fn a_sign_in_runs_in_a_setup_pane_of_no_session_made_from_the_registry() {
         (!running).then_some((text, running))
     });
     assert!(first.contains("==> Signing in to Claude Code"), "{first}");
+    assert_eq!(serve.control("runtime.pty.agentSetupRunning", json!({ "harness": "claude" })), serde_json::Value::Null);
 
     // The next step runs in the place of the last, which stays above it.
     serve.control("runtime.pty.agentSetup", step(id, "claude", "login"));

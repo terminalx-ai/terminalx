@@ -57,14 +57,27 @@ same run that Settings shows.
   again twice, 1.5 s apart, before the sign-in is given up on.
 - The welcome screen shows the setup when no agent is installed, when every
   installed agent is signed out (a sign-in left half way), and for the rest of
-  the session once a run has started there.
+  the session once a run has started there. Whether every agent is signed out
+  comes from the window's last answer for each agent (any check counts, and
+  one from the last five minutes is used as it is), asked for one agent at a
+  time and stopping at the first that is not signed out. A reader who is set
+  up costs one check at most, and the welcome screen does not check again
+  when the app comes back to the front.
 
 Each step runs in a pane of no session, `setup:<agent>:<run>`
 (`src-tauri/src/harness/setup.rs`). The webview names the agent and the step.
 The runtime (`runtime.pty.agentSetup`) makes the command from the harness
-registry and refuses one while the pane still runs. The pane is not a shell
-tab: no window lists it, and the Resources view calls it "<Agent> setup". A
-small POSIX wrapper around each step decides the exit code:
+registry. It runs one step at a time per agent, whichever pane asks: while
+any of the agent's setup panes runs, another start is refused, decided under
+one lock. Two installers would write the same folders, and two sign-ins
+would wait on the same local callback. A window that is refused (another
+window started the run, or this one did before its page was loaded again)
+asks `runtime.pty.agentSetupRunning` for the run's pane and step, and follows
+that run as if it had started it. The pane is not a shell tab: no window
+lists it, and the Resources view calls it "<Agent> setup". A small POSIX
+wrapper around each step decides the exit code. Its `curl` calls (the
+download, and the check made after a failure) allow only HTTPS, for
+redirects as well (`--proto =https --proto-redir =https`).
 
 | Exit | Meaning | Shown as |
 | --- | --- | --- |
@@ -76,8 +89,15 @@ small POSIX wrapper around each step decides the exit code:
 
 Every failure offers **Try again**, which reruns the failed step in the same
 terminal, and the setup guide. **Cancel** kills the step and leaves no error.
+A step canceled while it was still starting is killed again once its start
+returns, since the first kill may have reached the runtime before the step.
 An exit of a canceled run that arrives late is ignored, and the next run uses
-a new pane. Windows has no installer here (`installable` is false), so only the
+a new pane.
+
+A terminal can be in one place at a time. When two views show the same run
+(the new-chat dialog over the welcome screen), the one mounted last holds the
+terminal and the other says where it is. When that view goes, the one before
+it takes the terminal back (`useSetupTerminalHost`). Windows has no installer here (`installable` is false), so only the
 commands to copy are shown there.
 
 Tests: `harness::setup::tests::e2e` runs install → sign-in → Ready, and each

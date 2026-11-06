@@ -3,11 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-import { announceReadiness, checkAgentReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, type AgentReadiness } from "./agentReadiness";
+import { announceReadiness, checkAgentReadiness, forgetReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, useAllSignedOut, type AgentReadiness } from "./agentReadiness";
 
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-10-26T14:00:00Z", version: "0.164.0" });
 const exits = new Set<() => void>();
 beforeEach(() => {
+  forgetReadiness();
   listen.mockImplementation(async (_event, callback) => {
     exits.add(callback);
     return () => exits.delete(callback);
@@ -185,5 +186,41 @@ describe("new-chat readiness discovery", () => {
     rerender({ agents: harnesses, enabled: false });
     await waitFor(() => expect(result.current.checking).toBe(false));
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("whether every installed agent is signed out (PRO-152)", () => {
+  const states = (map: Record<string, AgentReadiness["state"]>) =>
+    invoke.mockImplementation(async (_command: string, args: { harness: string }) => answer(map[args.harness]));
+  const probed = () => invoke.mock.calls.map(([, args]) => (args as { harness: string }).harness);
+
+  it("stops at the first agent that is not signed out, and asks nothing again soon after", async () => {
+    states({ claude: "ready", codex: "signed_out" });
+    const first = renderHook(() => useAllSignedOut(["claude", "codex"]));
+    await waitFor(() => expect(probed()).toEqual(["claude"]));
+    expect(first.result.current).toBe(false);
+    first.unmount();
+
+    // Home again a moment later, and the app back in front: no new checks.
+    const again = renderHook(() => useAllSignedOut(["claude", "codex"]));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await act(async () => {});
+    expect(probed()).toEqual(["claude"]);
+    expect(again.result.current).toBe(false);
+  });
+
+  it("is true only once every one is known signed out, and follows later answers", async () => {
+    states({ claude: "signed_out", codex: "signed_out" });
+    const { result } = renderHook(() => useAllSignedOut(["claude", "codex"]));
+    await waitFor(() => expect(result.current).toBe(true));
+    expect(probed()).toEqual(["claude", "codex"]);
+    // Signed in from a setup run, or found so by any other check.
+    act(() => announceReadiness("codex", answer("ready")));
+    expect(result.current).toBe(false);
+    act(() => announceReadiness("codex", answer("signed_out")));
+    expect(result.current).toBe(true);
+    states({ claude: "ready", codex: "signed_out" });
+    await act(async () => { await checkAgentReadiness("claude"); });
+    expect(result.current).toBe(false);
   });
 });

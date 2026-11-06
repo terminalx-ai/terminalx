@@ -27,6 +27,7 @@ vi.mock("@/lib/sessions", () => ({ ...sessions, useSessionStore: () => store }))
 const { StartScreen } = await import("./StartScreen");
 const { ProjectStartDialogHost } = await import("./ProjectStartDialogs");
 const { openProjectStart } = await import("@/lib/projectStart");
+const { forgetReadiness } = await import("@/lib/agentReadiness");
 
 const claude = { id: "claude", name: "Claude Code", available: true, installHint: "npm i -g claude", installUrl: "https://example.com/claude" } as HarnessInfo;
 const codex = { id: "codex", name: "Codex", available: false, installHint: "npm i -g codex", installUrl: "https://example.com/codex" } as HarnessInfo;
@@ -42,6 +43,7 @@ async function emitDrop(payload: { type: string; paths?: string[] }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  forgetReadiness();
   dragDropListener.mockResolvedValue(vi.fn());
   store.harnesses = [claude];
   account.status = { state: "signed-out" };

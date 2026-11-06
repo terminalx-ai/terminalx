@@ -180,6 +180,22 @@ describe("installing from the card (PRO-152)", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "agent_setup_start")).toHaveLength(2);
   });
 
+  it("keeps the terminal in the view in front, and gives it back when that view closes", async () => {
+    invoke.mockImplementation(async (command: string) => (command === "check_agent_readiness" ? answer("missing") : null));
+    const behind = render(<ul><AgentSetupCard harness={harness} /></ul>);
+    fireEvent.click(await screen.findByRole("button", { name: "Install Codex and sign in" }));
+    const pane = (await screen.findByTestId("terminal-view")).getAttribute("data-pane")!;
+
+    // A second view of the same run (the new-chat dialog over the welcome screen).
+    const front = render(<ul><AgentSetupCard harness={harness} /></ul>);
+    await waitFor(() => expect(within(front.container).queryByTestId("terminal-view")).toBeTruthy());
+    expect(within(behind.container).queryByTestId("terminal-view")).toBeNull();
+    expect(within(behind.container).getByText("The output is showing in the view in front.")).toBeTruthy();
+
+    front.unmount();
+    await waitFor(() => expect(within(behind.container).getByTestId("terminal-view").getAttribute("data-pane")).toBe(pane));
+  });
+
   it("says what went wrong, keeps the output, and tries again", async () => {
     invoke.mockImplementation(async (command: string) => (command === "check_agent_readiness" ? answer("missing") : null));
     render(<ul><AgentSetupCard harness={harness} /></ul>);

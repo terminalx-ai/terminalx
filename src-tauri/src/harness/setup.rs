@@ -59,6 +59,45 @@ impl Step {
             _ => bail!("unknown setup step"),
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Login => "login",
+        }
+    }
+}
+
+/// Each agent's last step started in this runtime, by agent: its pane and
+/// which step. Only a hint for [`current`]: the pane's own state is the truth.
+static RUNS: std::sync::Mutex<std::collections::BTreeMap<String, (String, Step)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Start `step` for `harness` in pane `id` with `spawn`, unless one of the
+/// agent's setup panes still runs (`running` lists them): two installers
+/// would write the same folders, and two sign-ins wait on the same local
+/// callback. Another window, or a page loaded again during a run, would
+/// otherwise start one under a pane of its own. Decided under one lock, so
+/// two requests at once cannot both pass.
+pub fn begin(harness: &str, id: &str, step: Step, running: impl Fn() -> Vec<String>, spawn: impl FnOnce() -> Result<()>) -> Result<()> {
+    let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    if !running().is_empty() {
+        bail!("{} is already being set up.", super::display_name(harness));
+    }
+    spawn()?;
+    runs.insert(harness.to_string(), (id.to_string(), step));
+    Ok(())
+}
+
+/// The setup step running for `harness` now, if one is, for a window that
+/// did not start it: its pane and which step. `running` lists the agent's
+/// setup panes that still run.
+pub fn current(harness: &str, running: &[String]) -> Option<(String, Step)> {
+    let runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    match runs.get(harness) {
+        Some((pane, step)) if running.contains(pane) => Some((pane.clone(), *step)),
+        // Started by a runtime this one took over from (#765): its step is not known here.
+        _ => running.first().map(|pane| (pane.clone(), Step::Install)),
+    }
 }
 
 /// Whether `id` is a setup pane for `harness`: `setup:<harness>:<run>`, the
@@ -75,6 +114,10 @@ pub fn pane_harness(id: &str) -> Option<&str> {
     (token(harness) && token(run)).then_some(harness)
 }
 
+/// What `curl` may fetch, and be redirected to: only HTTPS, so nothing on the
+/// way can swap the script for one it serves over plain HTTP.
+const PROTOCOLS: &str = "=https";
+
 /// The command a setup pane runs for this step, made from the registry.
 pub fn command(harness: &str, step: Step) -> Result<String> {
     let spec = super::REGISTRY.iter().find(|spec| spec.id == harness && super::visible(spec.id)).context("unknown agent")?;
@@ -84,18 +127,19 @@ pub fn command(harness: &str, step: Step) -> Result<String> {
     }
     let home = dirs::home_dir().context("no home directory")?;
     Ok(match step {
-        Step::Install => install_line(spec.name, setup.installer, setup.runner, &setup.writes.iter().map(|dir| home.join(dir)).collect::<Vec<_>>()),
+        Step::Install => install_line(spec.name, setup.installer, PROTOCOLS, setup.runner, &setup.writes.iter().map(|dir| home.join(dir)).collect::<Vec<_>>()),
         Step::Login => {
             // Just installed: the miss from before must not be believed.
             crate::binpath::invalidate();
             let Some(binary) = crate::binpath::resolve(spec.binary) else { bail!("{} is not installed.", spec.name) };
-            login_line(spec.name, setup.probe, &binary, setup.login)
+            login_line(spec.name, setup.probe, PROTOCOLS, &binary, setup.login)
         }
     })
 }
 
-/// Arguments: the agent's name, the installer's address, how many folders
-/// follow, the folders, then what runs the downloaded script.
+/// Arguments: the agent's name, the installer's address, the protocols `curl`
+/// may use ([`PROTOCOLS`]), how many folders follow, the folders, then what
+/// runs the downloaded script.
 ///
 /// The scripts are passed in single quotes through the user's login shell
 /// (`$SHELL -l -c "exec …"`, `pty::Terminals::spawn`), so they hold no single
@@ -103,8 +147,9 @@ pub fn command(harness: &str, step: Step) -> Result<String> {
 /// `@NAME@` is the [`exit`] code of that name.
 const INSTALL: &str = r##"name=$1
 url=$2
-count=$3
-shift 3
+protocols=$3
+count=$4
+shift 4
 echo "==> Installing $name with its official installer"
 echo "    $url"
 echo
@@ -123,7 +168,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/terminalx-setup.XXXXXX") || exit @NO_PERMISSION
 cleanup() { rm -rf -- "$tmp"; }
 trap cleanup EXIT
 echo "==> Downloading the installer"
-curl -fsSL --connect-timeout 20 -o "$tmp/install.sh" "$url"
+curl --proto "$protocols" --proto-redir "$protocols" -fsSL --connect-timeout 20 -o "$tmp/install.sh" "$url"
 status=$?
 case $status in
   0) ;;
@@ -149,15 +194,16 @@ if [ "$status" -eq 0 ]; then
   exit 0
 fi
 if [ "$status" -ge 128 ]; then exit "$status"; fi
-if ! curl -fsSL --connect-timeout 10 -o /dev/null "$url"; then exit @OFFLINE@; fi
+if ! curl --proto "$protocols" --proto-redir "$protocols" -fsSL --connect-timeout 10 -o /dev/null "$url"; then exit @OFFLINE@; fi
 exit @INSTALL@
 "##;
 
-/// Arguments: the agent's name, a page to ask after a failure, then the
-/// CLI and its sign-in arguments.
+/// Arguments: the agent's name, a page to ask after a failure, the protocols
+/// `curl` may use for it, then the CLI and its sign-in arguments.
 const LOGIN: &str = r#"name=$1
 probe=$2
-shift 2
+protocols=$3
+shift 3
 echo "==> Signing in to $name"
 echo "    Your browser opens to finish. If it does not, open the link below."
 echo
@@ -165,19 +211,19 @@ echo
 status=$?
 if [ "$status" -eq 0 ]; then exit 0; fi
 if [ "$status" -ge 128 ]; then exit "$status"; fi
-if ! curl -fsSL --connect-timeout 10 -o /dev/null "$probe"; then exit @OFFLINE@; fi
+if ! curl --proto "$protocols" --proto-redir "$protocols" -fsSL --connect-timeout 10 -o /dev/null "$probe"; then exit @OFFLINE@; fi
 exit @LOGIN@
 "#;
 
-fn install_line(name: &str, installer: &str, runner: &[&str], writes: &[PathBuf]) -> String {
-    let mut args = vec![name.to_string(), installer.to_string(), writes.len().to_string()];
+fn install_line(name: &str, installer: &str, protocols: &str, runner: &[&str], writes: &[PathBuf]) -> String {
+    let mut args = vec![name.to_string(), installer.to_string(), protocols.to_string(), writes.len().to_string()];
     args.extend(writes.iter().map(|dir| dir.to_string_lossy().into_owned()));
     args.extend(runner.iter().map(|word| word.to_string()));
     wrapped(INSTALL, &args)
 }
 
-fn login_line(name: &str, probe: &str, binary: &Path, login: &[&str]) -> String {
-    let mut args = vec![name.to_string(), probe.to_string(), binary.to_string_lossy().into_owned()];
+fn login_line(name: &str, probe: &str, protocols: &str, binary: &Path, login: &[&str]) -> String {
+    let mut args = vec![name.to_string(), probe.to_string(), protocols.to_string(), binary.to_string_lossy().into_owned()];
     args.extend(login.iter().map(|word| word.to_string()));
     wrapped(LOGIN, &args)
 }
@@ -216,6 +262,31 @@ mod tests {
         }
         // Not a shell tab of a session called "setup", either.
         assert!(!crate::pty::is_shell_id("setup:claude:r1"));
+    }
+
+    #[test]
+    fn one_setup_runs_per_agent_and_another_window_can_find_it() {
+        // Its own agent name, so tests at once do not share a run.
+        let agent = "one-at-a-time-test";
+        let started = std::cell::Cell::new(0);
+        let spawn = || { started.set(started.get() + 1); Ok(()) };
+        begin(agent, "setup:x:a", Step::Install, Vec::new, spawn).unwrap();
+        assert_eq!(current(agent, &["setup:x:a".into()]), Some(("setup:x:a".into(), Step::Install)));
+        // While it runs, no other pane (or the same one) starts a step for this agent.
+        for pane in ["setup:x:b", "setup:x:a"] {
+            let refused = begin(agent, pane, Step::Login, || vec!["setup:x:a".into()], spawn).unwrap_err();
+            assert!(refused.to_string().contains("already being set up"), "{refused}");
+        }
+        assert_eq!(started.get(), 1);
+        // Once it has ended, the next step goes on, and is the one reported.
+        begin(agent, "setup:x:a", Step::Login, Vec::new, spawn).unwrap();
+        assert_eq!(current(agent, &["setup:x:a".into()]), Some(("setup:x:a".into(), Step::Login)));
+        assert_eq!(current(agent, &[]), None);
+        // A pane this runtime did not start (handed over): found, step not known.
+        assert_eq!(current(agent, &["setup:x:z".into()]), Some(("setup:x:z".into(), Step::Install)));
+        // A step that cannot start is not recorded.
+        assert!(begin(agent, "setup:x:c", Step::Install, Vec::new, || anyhow::bail!("spawn failed")).is_err());
+        assert_eq!(current(agent, &["setup:x:a".into()]), Some(("setup:x:a".into(), Step::Login)));
     }
 
     #[test]
@@ -261,6 +332,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, Mutex};
         use std::time::{Duration, Instant};
+
+        /// The stubs are served over `file://` and a closed local port; the
+        /// app itself allows only HTTPS ([`PROTOCOLS`]).
+        const TEST_PROTOCOLS: &str = "=https,http,file";
 
         /// A stand-in `claude`: a version, a login status read from a file
         /// next to it, and a sign-in that writes that file.
@@ -333,8 +408,12 @@ esac
             }
 
             fn install(&self, id: &str, installer: &str) -> Option<i32> {
+                self.install_with(id, installer, TEST_PROTOCOLS)
+            }
+
+            fn install_with(&self, id: &str, installer: &str, protocols: &str) -> Option<i32> {
                 let writes = [".local/bin", ".local/share/claude", ".claude"].map(|dir| self.home().join(dir));
-                self.run(id, &install_line("Claude Code", installer, &["sh"], &writes))
+                self.run(id, &install_line("Claude Code", installer, protocols, &["sh"], &writes))
             }
 
             fn output(&self, id: &str) -> String {
@@ -354,7 +433,7 @@ esac
             assert_eq!((installed.state, installed.version.as_deref()), (State::SignedOut, Some("2.1.318")));
 
             // Sign-in follows in the same terminal: what the installer printed stays above it.
-            let login = login_line("Claude Code", &world.url("install.sh"), &claude, &["auth", "login"]);
+            let login = login_line("Claude Code", &world.url("install.sh"), TEST_PROTOCOLS, &claude, &["auth", "login"]);
             assert_eq!(world.run("setup:claude:r1", &login), Some(0));
             let output = world.output("setup:claude:r1");
             let (installing, signing_in) = (output.find("downloading claude-darwin-arm64").unwrap(), output.find("Opening the browser to sign in").unwrap());
@@ -373,13 +452,16 @@ esac
             // Refused, and something that is not an installer (a captive portal's page).
             assert_eq!(world.install("setup:claude:gone", &world.url("missing.sh")), Some(exit::DOWNLOAD));
             assert_eq!(world.install("setup:claude:html", &world.url("page.html")), Some(exit::DOWNLOAD));
+            // What the app allows: HTTPS only, so a script from anywhere else is not run.
+            assert_eq!(world.install_with("setup:claude:plain", &world.url("install.sh"), PROTOCOLS), Some(exit::DOWNLOAD));
+            assert!(!world.home().join(".local/bin/claude").exists());
             // The script ran and failed, while the provider still answers.
             assert_eq!(world.install("setup:claude:broken", &world.url("broken.sh")), Some(exit::INSTALL));
             assert!(world.output("setup:claude:broken").contains("Checksum verification failed"));
             // A sign-in that does not finish.
-            let failing = login_line("Claude Code", &world.url("install.sh"), Path::new("/usr/bin/false"), &[]);
+            let failing = login_line("Claude Code", &world.url("install.sh"), TEST_PROTOCOLS, Path::new("/usr/bin/false"), &[]);
             assert_eq!(world.run("setup:claude:login", &failing), Some(exit::LOGIN));
-            let offline = login_line("Claude Code", "http://127.0.0.1:9/", Path::new("/usr/bin/false"), &[]);
+            let offline = login_line("Claude Code", "http://127.0.0.1:9/", TEST_PROTOCOLS, Path::new("/usr/bin/false"), &[]);
             assert_eq!(world.run("setup:claude:login-offline", &offline), Some(exit::OFFLINE));
             // A folder it must write that is not writable: nothing is downloaded.
             std::fs::create_dir_all(world.home().join(".claude")).unwrap();

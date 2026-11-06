@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { agentSetup, errorMessage, pty, type AgentSetupStep } from "@/lib/api";
 import { announceReadiness, checkAgentReadiness, type AgentReadiness } from "@/lib/agentReadiness";
 import { refreshHarnesses } from "@/lib/sessions";
@@ -124,6 +124,12 @@ function hearExits(): Promise<void> {
 
 const SIZE = { cols: 100, rows: 14 };
 
+/** Whether this window's flow for the agent is running the step in `pane`. */
+function runningIn(harness: string, pane: string): boolean {
+  const flow = flows[harness];
+  return flow?.phase === "running" && flow.pane === pane;
+}
+
 async function run(harness: string, step: AgentSetupStep, pane: string, chain: boolean) {
   put(harness, { phase: "running", step, pane, chain });
   await hearExits();
@@ -131,13 +137,40 @@ async function run(harness: string, step: AgentSetupStep, pane: string, chain: b
     // The view has been laid out by now when it was already showing the pane.
     const term = peekInstance(pane)?.term;
     await agentSetup.start(pane, harness, step, term?.cols ?? SIZE.cols, term?.rows ?? SIZE.rows);
+    // Canceled while it was starting: that kill may have reached the
+    // runtime before the step did, and the step would run out of sight.
+    if (!runningIn(harness, pane)) {
+      void pty.kill(pane).catch(() => {});
+      return;
+    }
     // A view that fitted the terminal before the pane existed told nobody.
     const fitted = peekInstance(pane)?.term;
     if (fitted) void pty.resize(pane, fitted.cols, fitted.rows).catch(() => {});
   } catch (cause) {
-    const flow = flows[harness];
-    if (flow?.phase === "running" && flow.pane === pane) put(harness, { phase: "failed", step, pane, chain, problem: "start", detail: errorMessage(cause) });
+    if (!runningIn(harness, pane)) return;
+    // The agent is being set up already: another window started it, or this
+    // one did before its page was loaded again. Show that run.
+    if (await adopt(harness, pane)) return;
+    put(harness, { phase: "failed", step, pane, chain, problem: "start", detail: errorMessage(cause) });
   }
+}
+
+/**
+ * Follow the agent's step that runs already, in place of `instead`, the
+ * pane this window was about to start. Whether there was one.
+ */
+async function adopt(harness: string, instead: string): Promise<boolean> {
+  const found = await agentSetup.running(harness).catch(() => null);
+  if (!found || !runningIn(harness, instead)) return false;
+  disposeInstance(instead);
+  put(harness, { phase: "running", step: found.step, pane: found.pane, chain: found.step === "install" });
+  // It may have ended before this window listened for its exit.
+  const still = await agentSetup.running(harness).catch(() => null);
+  if (still?.pane !== found.pane && runningIn(harness, found.pane)) {
+    put(harness, { phase: "idle" });
+    void checkAgentReadiness(harness).then((value) => announceReadiness(harness, value));
+  }
+  return true;
 }
 
 /** How long to wait before asking again about a CLI that was just installed. */
@@ -223,9 +256,40 @@ export function cancelAgentSetup(harness: string) {
 /** Put a failed run's output away. */
 export const dismissAgentSetup = cancelAgentSetup;
 
+/**
+ * The views showing each setup pane, in the order they mounted. A terminal
+ * can be in one place only: the last view to mount holds it, and when that
+ * one goes (a new-chat dialog closed over the welcome screen) the one
+ * before it takes it back.
+ */
+const hosts = new Map<string, symbol[]>();
+const hostListeners = new Set<() => void>();
+const subscribeHosts = (changed: () => void) => {
+  hostListeners.add(changed);
+  return () => { hostListeners.delete(changed); };
+};
+function setHosts(pane: string, views: symbol[]) {
+  if (views.length) hosts.set(pane, views);
+  else hosts.delete(pane);
+  for (const listener of [...hostListeners]) listener();
+}
+
+/** Whether this view holds `pane`'s terminal; until it has mounted, only when no other view does. */
+export function useSetupTerminalHost(pane: string | null): boolean {
+  const [view] = useState(() => Symbol("setup view"));
+  useEffect(() => {
+    if (!pane) return;
+    setHosts(pane, [...(hosts.get(pane) ?? []), view]);
+    return () => setHosts(pane, (hosts.get(pane) ?? []).filter((other) => other !== view));
+  }, [pane, view]);
+  const holder = () => !!pane && (hosts.get(pane)?.at(-1) ?? view) === view;
+  return useSyncExternalStore(subscribeHosts, holder, holder);
+}
+
 /** For tests: forget every flow. */
 export function resetAgentSetupFlows() {
   flows = {};
   exits = null;
+  hosts.clear();
   for (const listener of listeners) listener();
 }

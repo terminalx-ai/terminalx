@@ -2244,6 +2244,11 @@ export const agentSetup = {
    */
   start: (id: string, harness: string, step: AgentSetupStep, cols: number, rows: number) =>
     invoke<void>("agent_setup_start", { id, harness, step, cols, rows }),
+  /**
+   * The agent's step that runs now, wherever it was started (another window,
+   * or this one before a reload): the runtime runs one at a time per agent.
+   */
+  running: (harness: string) => invoke<{ pane: string; step: AgentSetupStep } | null>("agent_setup_running", { harness }),
 };
 
 // ---- terminals

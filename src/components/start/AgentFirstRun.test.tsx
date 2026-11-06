@@ -31,6 +31,7 @@ vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { 
 
 const { StartScreen } = await import("./StartScreen");
 const { resetAgentSetupFlows } = await import("@/lib/agentSetupFlow");
+const { forgetReadiness } = await import("@/lib/agentReadiness");
 
 const caps = { images: true, steer: true, permissionModes: true, effort: true, slashCommands: true, atMentions: true, fork: true, resume: true };
 const agent = (id: string, name: string): HarnessInfo => ({ id, name, binary: id, available: false, installable: true, installHint: `install ${id}`, installUrl: `https://example.com/${id}`, caps });
@@ -42,6 +43,7 @@ const exit = (id: string, code: number) => act(async () => handlers.forEach((han
 
 beforeEach(() => {
   vi.clearAllMocks();
+  forgetReadiness();
   resetAgentSetupFlows();
   handlers.clear();
   installed = { claude: "missing", codex: "missing" };

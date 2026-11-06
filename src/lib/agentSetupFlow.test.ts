@@ -12,9 +12,9 @@ vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@/lib/sessions", () => ({ refreshHarnesses }));
 vi.mock("@/lib/terminal", () => ({ disposeInstance, peekInstance: () => undefined }));
 
-import { useAgentReadiness, type AgentReadiness } from "./agentReadiness";
+import { forgetReadiness, useAgentReadiness, type AgentReadiness } from "./agentReadiness";
 import {
-  SETUP_EXIT, afterCheck, afterExit, cancelAgentSetup, getAgentSetupFlow, resetAgentSetupFlows, retryAgentSetup, startAgentSetup, type AgentSetupFlow,
+  SETUP_EXIT, afterCheck, afterExit, cancelAgentSetup, getAgentSetupFlow, resetAgentSetupFlows, retryAgentSetup, startAgentSetup, useSetupTerminalHost, type AgentSetupFlow,
 } from "./agentSetupFlow";
 
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-11-06T09:00:00Z", version: state === "missing" ? null : "2.1.318" });
@@ -30,6 +30,7 @@ const calls = (command: string) => invoke.mock.calls.filter(([name]) => name ===
 
 beforeEach(() => {
   resetAgentSetupFlows();
+  forgetReadiness();
   handlers.clear();
   probes = ["missing"];
   listen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
@@ -46,6 +47,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 const running = (step: "install" | "login", chain = true): AgentSetupFlow => ({ phase: "running", step, pane: "setup:claude:r1", chain });
@@ -143,12 +145,19 @@ describe("the setup flow (PRO-152)", () => {
   });
 
   it("asks again about a CLI whose first run after its install cannot tell its login", async () => {
+    vi.useFakeTimers();
     await act(() => startAgentSetup("codex", "install", { chain: true }));
     const pane = (calls("agent_setup_start")[0] as { id: string }).id;
     probes = ["unknown", "unknown", "signed_out"];
     await act(async () => emit("pty_exit", { id: pane, code: 0 }));
-    await waitFor(() => expect(getAgentSetupFlow("codex")).toMatchObject({ phase: "running", step: "login" }), { timeout: 5000 });
+    expect(getAgentSetupFlow("codex")).toMatchObject({ phase: "checking" });
+    // Twice, a moment apart.
+    await act(() => vi.advanceTimersByTimeAsync(1500));
+    expect(calls("check_agent_readiness")).toHaveLength(2);
+    await act(() => vi.advanceTimersByTimeAsync(1500));
+    expect(getAgentSetupFlow("codex")).toMatchObject({ phase: "running", step: "login" });
     expect(calls("check_agent_readiness")).toHaveLength(3);
+    vi.useRealTimers();
 
     // After a sign-in, an unknown login is taken as it is.
     probes = ["unknown"];
@@ -171,13 +180,77 @@ describe("the setup flow (PRO-152)", () => {
     expect((calls("agent_setup_start")[1] as { id: string }).id).not.toBe(pane);
   });
 
-  it("says why a step could not start, and runs one step at a time", async () => {
+  it("stops a step that was canceled while it was still starting", async () => {
+    let started: () => void = () => {};
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_setup_start") return new Promise<void>((resolve) => { started = resolve; });
+      return null;
+    });
+    const starting = startAgentSetup("claude", "install", { chain: true });
+    await waitFor(() => expect(calls("agent_setup_start")).toHaveLength(1));
+    const pane = (calls("agent_setup_start")[0] as { id: string }).id;
+    act(() => cancelAgentSetup("claude"));
+    expect(calls("pty_kill")).toEqual([{ id: pane }]);
+    // The kill went ahead of the spawn; once the spawn lands it is killed too.
+    await act(async () => { started(); await starting; });
+    expect(calls("pty_kill")).toEqual([{ id: pane }, { id: pane }]);
+    expect(getAgentSetupFlow("claude")).toEqual({ phase: "idle" });
+  });
+
+  it("shows the run another window started instead of starting a second one", async () => {
+    let elsewhere: { pane: string; step: string } | null = { pane: "setup:claude:other", step: "install" };
     invoke.mockImplementation(async (command: string) => {
       if (command === "agent_setup_start") throw new Error("Claude Code is already being set up.");
+      if (command === "agent_setup_running") return elsewhere;
+      if (command === "check_agent_readiness") return answer(probes[0]);
       return null;
     });
     await act(() => startAgentSetup("claude", "install", { chain: true }));
+    expect(getAgentSetupFlow("claude")).toEqual({ phase: "running", step: "install", pane: "setup:claude:other", chain: true });
+    // Its exit is this window's to follow, as if it had started it.
+    probes = ["signed_out"];
+    await act(async () => emit("pty_exit", { id: "setup:claude:other", code: 0 }));
+    await waitFor(() => expect(calls("agent_setup_start").at(-1)).toMatchObject({ id: "setup:claude:other", step: "login" }));
+
+    // One that ended before this window listened: nothing runs, and the views hear where it got to.
+    resetAgentSetupFlows();
+    let asked = 0;
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_setup_start") throw new Error("Claude Code is already being set up.");
+      if (command === "agent_setup_running") return asked++ === 0 ? elsewhere : null;
+      if (command === "check_agent_readiness") return answer("ready");
+      return null;
+    });
+    const { result } = renderHook(() => useAgentReadiness("claude"));
+    await act(() => startAgentSetup("claude", "install", { chain: true }));
+    expect(getAgentSetupFlow("claude")).toEqual({ phase: "idle" });
+    await waitFor(() => expect(result.current.value?.state).toBe("ready"));
+
+    // Refused with nothing to show: the reason is said.
+    resetAgentSetupFlows();
+    elsewhere = null;
+    asked = 1;
+    await act(() => startAgentSetup("claude", "install", { chain: true }));
     expect(getAgentSetupFlow("claude")).toMatchObject({ phase: "failed", problem: "start", detail: "Claude Code is already being set up." });
+  });
+
+  it("puts a terminal in the view in front, and back in the one behind when it goes", () => {
+    const behind = renderHook(() => useSetupTerminalHost("setup:claude:r1"));
+    expect(behind.result.current).toBe(true);
+    const front = renderHook(() => useSetupTerminalHost("setup:claude:r1"));
+    expect([behind.result.current, front.result.current]).toEqual([false, true]);
+    front.unmount();
+    expect(behind.result.current).toBe(true);
+    expect(renderHook(() => useSetupTerminalHost(null)).result.current).toBe(false);
+  });
+
+  it("says why a step could not start, and runs one step at a time", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_setup_start") throw new Error("The background service is not running.");
+      return null;
+    });
+    await act(() => startAgentSetup("claude", "install", { chain: true }));
+    expect(getAgentSetupFlow("claude")).toMatchObject({ phase: "failed", problem: "start", detail: "The background service is not running." });
 
     invoke.mockImplementation(async () => null);
     await act(() => startAgentSetup("claude", "install", { chain: true }));

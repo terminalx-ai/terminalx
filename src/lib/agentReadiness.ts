@@ -17,15 +17,29 @@ export const READINESS_LABELS: Record<AgentReadiness["state"], string> = {
   unknown: "Login not checked",
 };
 
+/** The last answer for each agent from any check in this window, and when it came. */
+const known = new Map<string, { value: AgentReadiness; at: number }>();
+/** Everything that follows every answer, for any agent. */
+const hearing = new Set<(harness: string, value: AgentReadiness) => void>();
+function remember(harness: string, value: AgentReadiness) {
+  known.set(harness, { value, at: Date.now() });
+  for (const hear of [...hearing]) hear(harness, value);
+}
+
+/** How long an answer is good enough for a view that only needs a rough idea (the welcome screen). */
+export const RECENT_ANSWER_MS = 5 * 60_000;
+
 export async function checkAgentReadiness(harness: string): Promise<AgentReadiness> {
+  let value: AgentReadiness = { state: "unknown", checkedAt: null, version: null };
   try {
-    const value = await invoke<AgentReadiness>("check_agent_readiness", { harness });
-    if (value && value.state in READINESS_LABELS) return value;
+    const answer = await invoke<AgentReadiness>("check_agent_readiness", { harness });
+    if (answer && answer.state in READINESS_LABELS) value = answer;
   } catch {
     // Failure to probe is not evidence of invalid credentials. Never display
     // raw errors from a provider, and never block an existing login on a guess.
   }
-  return { state: "unknown", checkedAt: null, version: null };
+  remember(harness, value);
+  return value;
 }
 
 export function readinessBlock(harness: string, value: AgentReadiness): string | null {
@@ -43,6 +57,7 @@ const announced = new Set<(harness: string, value: AgentReadiness) => void>();
  * and a check of its own still under way no longer replaces it.
  */
 export function announceReadiness(harness: string, value: AgentReadiness) {
+  remember(harness, value);
   for (const take of [...announced]) take(harness, value);
 }
 
@@ -53,10 +68,12 @@ export function onReadiness(listener: (harness: string, value: AgentReadiness) =
 }
 
 /**
- * Whether every installed agent is signed out, by a check of each when the
- * view mounts, when the app comes back, and on every announced answer. Not
- * all in yet, or any answer but signed out (ready, or a login that cannot
- * be told), is `false`.
+ * Whether every installed agent is signed out. An answer from the last few
+ * minutes is taken as it is; the others are asked for one at a time, and the
+ * first agent that is not signed out settles it, so a reader who is set up
+ * costs one check at most, and none when anything else checked lately.
+ * Every later answer counts too. Not all in yet, or any answer but signed
+ * out (ready, or a login that cannot be told), is `false`.
  */
 export function useAllSignedOut(harnesses: readonly string[]): boolean {
   const key = harnesses.join(",");
@@ -68,13 +85,25 @@ export function useAllSignedOut(harnesses: readonly string[]): boolean {
     const take = (id: string, value: AgentReadiness) => {
       if (live && ids.includes(id)) setStates((before) => ({ ...before, [id]: value.state }));
     };
-    const check = () => { for (const id of ids) void checkAgentReadiness(id).then((value) => take(id, value)); };
-    check();
-    const stopResume = onAppResume(check);
-    const stopHearing = onReadiness(take);
-    return () => { live = false; stopResume(); stopHearing(); };
+    // Every answer, from any check in this window as well as announced ones.
+    hearing.add(take);
+    void (async () => {
+      for (const id of ids) {
+        const recent = known.get(id);
+        const value = recent && Date.now() - recent.at < RECENT_ANSWER_MS ? recent.value : await checkAgentReadiness(id);
+        if (!live) return;
+        take(id, value);
+        if (value.state !== "signed_out") return;
+      }
+    })();
+    return () => { live = false; hearing.delete(take); };
   }, [key]);
   return harnesses.length > 0 && harnesses.every((id) => states[id] === "signed_out");
+}
+
+/** For tests: forget every answer. */
+export function forgetReadiness() {
+  known.clear();
 }
 
 export function useAgentReadiness(harness: string | null, poll = false) {

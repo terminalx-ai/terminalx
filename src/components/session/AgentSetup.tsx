@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { copyText } from "@/lib/clipboard";
 import { READINESS_LABELS, type AgentReadiness } from "@/lib/agentReadiness";
-import { cancelAgentSetup, dismissAgentSetup, retryAgentSetup, setupActive, startAgentSetup, useAgentSetupFlow, type AgentSetupFlow, type SetupProblem } from "@/lib/agentSetupFlow";
+import { cancelAgentSetup, dismissAgentSetup, retryAgentSetup, setupActive, startAgentSetup, useAgentSetupFlow, useSetupTerminalHost, type AgentSetupFlow, type SetupProblem } from "@/lib/agentSetupFlow";
 import type { HarnessInfo } from "@/types/session";
 
 /** What the status line says while a setup run is under way or has stopped. */
@@ -104,6 +104,7 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
 /** A run under way, or stopped: what it is doing, why it stopped, and its terminal. */
 function SetupRun({ harness, flow }: { harness: HarnessInfo; flow: Extract<AgentSetupFlow, { phase: "running" | "checking" | "failed" }> }) {
   const pane = flow.pane;
+  const host = useSetupTerminalHost(pane);
   return <div className="mt-2 min-w-0">
     {flow.phase === "failed" ? <div role="alert" className="rounded-md bg-destructive/10 px-2.5 py-2 text-destructive">
       <p>{problemText(flow.problem, harness, flow.detail)}</p>
@@ -123,7 +124,9 @@ function SetupRun({ harness, flow }: { harness: HarnessInfo; flow: Extract<Agent
     </div>}
     {pane && <div data-testid="agent-setup-terminal" aria-label={`${harness.name} setup output`} role="region"
       className="mt-2 h-52 min-w-0 overflow-hidden rounded-md bg-background py-1 hairline">
-      <TerminalView id={pane} visible redraw={false} />
+      {host
+        ? <TerminalView id={pane} visible redraw={false} />
+        : <p className="flex h-full items-center justify-center px-3 text-center text-faint">The output is showing in the view in front.</p>}
     </div>}
   </div>;
 }
