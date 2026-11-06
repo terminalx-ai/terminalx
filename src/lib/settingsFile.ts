@@ -23,11 +23,12 @@ function publish(file: SettingsFileStatus | null, error = file?.error ?? null) {
 }
 
 function apply(file: SettingsFileStatus) {
-  if (connected) {
-    const values = Object.assign({}, file.preferences, ...pending);
-    applyFilePreferences(values);
-    applyFileTheme(values);
-  }
+  // A newly opened window can receive the backend's last valid view while
+  // an invalid edit prevents migration. Show it without changing legacy data.
+  const legacy = connected ? {} : { ...legacyUserPreferences(), ...legacyThemePreferences() };
+  const values = Object.assign({}, legacy, file.preferences, ...pending);
+  applyFilePreferences(values, connected);
+  applyFileTheme(values, connected);
   publish(file);
 }
 

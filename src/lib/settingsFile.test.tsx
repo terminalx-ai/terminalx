@@ -142,6 +142,30 @@ describe("user preference files", () => {
     expect(prefs.getPrefs().sounds).toBe(true);
   });
 
+  it("opens on the last valid file view without replacing legacy choices before migration succeeds", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ sounds: false, fontScale: "lg" }));
+    localStorage.setItem("raccoon.theme", "moss");
+    file.exists = true;
+    file.error = "preferences.sounds, line 3: expected true or false";
+    file.preferences = { sounds: true, theme: "ember" };
+    const settings = await import("./settingsFile");
+    const prefs = await import("./prefs");
+    await settings.bootSettingsFile();
+    expect(prefs.getPrefs()).toMatchObject({ sounds: true, fontScale: "lg" });
+    expect(document.documentElement.dataset.theme).toBe("ember");
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).sounds).toBe(false);
+    expect(localStorage.getItem("raccoon.theme")).toBe("moss");
+
+    file.error = null;
+    file.preferences = {};
+    await act(async () => mocks.listeners.get("settings_file_changed")!());
+    await waitFor(() => expect(file.preferences.sounds).toBe(false));
+    expect(file.preferences.theme).toBe("moss");
+    expect(prefs.getPrefs().sounds).toBe(false);
+    expect(document.documentElement.dataset.theme).toBe("moss");
+    expect(localStorage.getItem("raccoon.theme")).toBeNull();
+  });
+
   it("offers Create only for a missing file and displays its actual path", async () => {
     const settings = await import("./settingsFile");
     const { SettingsFileRow } = await import("../components/settings/SettingsFile");

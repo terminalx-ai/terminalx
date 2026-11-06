@@ -83,7 +83,7 @@ async function mount(label: "floating" | `chat-${string}` = "floating") {
 
 const called = (command: string) => mocks.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
 
-beforeEach(() => {
+beforeEach(async () => {
   localStorage.clear();
   mocks.listeners.clear();
   mocks.ask.mockReset();
@@ -123,7 +123,10 @@ beforeEach(() => {
         throw new Error(`Unexpected command: ${command}`);
     }
   });
-});
+  // Load the module graph during setup. Each mount still resets its stores,
+  // while the behavior deadline measures the shell instead of Vite compilation.
+  await import("./FloatingShell");
+}, 60_000);
 
 afterEach(() => {
   cleanup();

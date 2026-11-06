@@ -277,17 +277,18 @@ const fileKeys = Object.keys(userPreferenceDefaults).filter((key) => key !== "th
 export function legacyUserPreferences(): Record<string, unknown> {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "{}");
-    return Object.fromEntries(fileKeys.filter((key) => key in saved || (key === "shortcutsVersion" && "shortcuts" in saved)).map((key) => [key, state[key]]));
+    const legacy = load();
+    return Object.fromEntries(fileKeys.filter((key) => key in saved || (key === "shortcutsVersion" && "shortcuts" in saved)).map((key) => [key, legacy[key]]));
   } catch { return {}; }
 }
 
 export function connectPreferenceFile(writer: FileWriter) { fileWriter = writer; }
 
 /** Apply a complete file view: removing a key restores its default. */
-export function applyFilePreferences(values: Record<string, unknown>) {
+export function applyFilePreferences(values: Record<string, unknown>, persist = true) {
   const patch = Object.fromEntries(fileKeys.map((key) => [key, values[key] ?? DEFAULTS[key]]));
   state = { ...state, ...patch };
-  persistLocal();
+  if (persist) persistLocal();
   applyFontScale();
   for (const listener of listeners) listener();
 }

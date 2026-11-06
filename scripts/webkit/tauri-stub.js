@@ -3,6 +3,18 @@
 window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3 };
 (() => {
   const f = window.__PW_FIXTURE__;
+  // The native file survives a webview reload. Keep its fixture separate from
+  // the legacy preferences whose migration the layout checks exercise.
+  const settingsKey = "__pw_settings_file__";
+  const settings = JSON.parse(sessionStorage.getItem(settingsKey) || "null") ?? {
+    file: { path: "/Users/demo/.raccoon/settings.json", exists: false, error: null, preferences: {} },
+    migrated: false,
+  };
+  const saveSettings = () => {
+    sessionStorage.setItem(settingsKey, JSON.stringify(settings));
+    window.__PW_STUB__.emit("settings_file_changed", null);
+    return structuredClone(settings.file);
+  };
   const ORG = "org-a";
   const now = Date.now();
   const projects = Array.from({ length: f.localProjects }, (_, i) => ({ path: `/repos/p${i}`, name: `local-${i}` }));
@@ -14,6 +26,15 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [ws("w1", "parity-test"), ws("w2", "demo workspace")], repositories: [], quota: { used: 2, limit: 3 }, fetchedAt: now,
     sessions: { w1: { sessions: Array.from({ length: 12 }, (_, i) => session(`s${i}`, i === 11 ? "Last session" : `Session ${i}`)), capabilities: ["session/2"], at: now }, w2: { sessions: [session("s3", "Demo session")], capabilities: null, at: now } } } } };
   const answers = {
+    settings_file_status: () => structuredClone(settings.file),
+    update_user_preferences: ({ patch, migrate }) => {
+      if (migrate && (settings.migrated || (!settings.file.exists && !Object.keys(patch).length))) return structuredClone(settings.file);
+      settings.file.preferences = migrate ? { ...patch, ...settings.file.preferences } : { ...settings.file.preferences, ...patch };
+      settings.file.exists = true;
+      settings.migrated ||= migrate;
+      return saveSettings();
+    },
+    create_settings_file: () => { settings.file.exists = true; return saveSettings(); },
     // Layout fixtures have no app update. The generic plugin handle below is
     // truthy and would otherwise become a bogus Update after the startup check.
     "plugin:updater|check": null,
@@ -172,6 +193,7 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const listening = new Map();
   window.__PW_STUB__ = {
     answers,
+    settingsFile: settings.file,
     fixture: f,
     emit(event, payload) {
       for (const { eventId, handler } of listening.get(event) ?? []) callbacks.get(handler)?.({ event, id: eventId, payload });

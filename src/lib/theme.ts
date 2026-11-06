@@ -24,16 +24,20 @@ const MODE_KEY = "raccoon.mode";
 let fileWriter: ((patch: Record<string, unknown>) => void) | null = null;
 
 export function legacyThemePreferences(): Record<string, unknown> {
-  return { ...(readStorage(THEME_KEY) ? { theme: state.theme } : {}), ...(readStorage(MODE_KEY) ? { mode: state.mode } : {}) };
+  const theme = readStorage(THEME_KEY);
+  const mode = readStorage(MODE_KEY);
+  return { ...(theme ? { theme: coerceTheme(theme) } : {}), ...(mode ? { mode: coerceMode(mode) } : {}) };
 }
 
 export function connectThemeFile(writer: (patch: Record<string, unknown>) => void) { fileWriter = writer; }
 
-export function applyFileTheme(values: Record<string, unknown>) {
+export function applyFileTheme(values: Record<string, unknown>, clearLegacy = true) {
   const theme = coerceTheme(values.theme);
   const mode = coerceMode(values.mode);
   state = { theme, mode, resolvedMode: resolveMode(theme, mode) };
-  try { localStorage.removeItem(THEME_KEY); localStorage.removeItem(MODE_KEY); } catch { /* storage unavailable */ }
+  if (clearLegacy) {
+    try { localStorage.removeItem(THEME_KEY); localStorage.removeItem(MODE_KEY); } catch { /* storage unavailable */ }
+  }
   emit();
 }
 
