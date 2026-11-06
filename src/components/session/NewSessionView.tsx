@@ -125,7 +125,12 @@ export function NewSessionView({
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const readiness = useAgentReadinessList(store.harnesses, !cloud);
-  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
+  // Fresh local probes take precedence over discovery cached before an install or removal.
+  const harnesses = store.harnesses.map((item) => {
+    const state = readiness.values?.[item.id]?.state;
+    return state && state !== "unknown" ? { ...item, available: state !== "missing" } : item;
+  });
+  const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
   const { harness, modelId, effort, mode } = agentSelection;
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
