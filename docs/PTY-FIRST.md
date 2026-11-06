@@ -819,6 +819,25 @@ Acknowledging `PreToolUse` does *not* satisfy the sandbox, so an escalating comm
 must not cost two cards, so the answer is remembered for the turn under the
 tool and its target and reused for the request that follows.
 
+This was checked again against the real Codex 0.166.0 TUI on 2026-11-06, for
+PRO-160, with a stand-in model. The checks covered a session's first command
+and later ones, plain and escalated, and the same command run twice. The
+model's `exec_command` call (`cmd`, `sandbox_permissions`, `justification`)
+reaches both hooks as `tool_name: "Bash"` with `tool_input.command`.
+
+- `PreToolUse` also carries the call's `tool_use_id`.
+- `PermissionRequest` has no `tool_use_id`. It adds the justification as
+  `tool_input.description`.
+- `PermissionRequest` starts only after the `PreToolUse` hook process has
+  exited, 60–140 ms later, so the two gates never wait at the same time.
+- No hook fires twice for one call.
+- A command the sandbox blocks without asking to escalate fails back to the
+  model. Codex does not ask again to retry it outside the sandbox.
+
+`harness/codex/fixtures/permission_gates.jsonl` holds the first-command
+sequence verbatim, with only the paths rewritten. A test replays it through
+the hook handler and expects one card.
+
 Permission modes map as `plan → -a on-request -s read-only`, everything else
 `→ -a on-request -s workspace-write` (with the `PreToolUse` gate for "Ask every
 time"), and `bypassPermissions → --dangerously-bypass-approvals-and-sandbox`.

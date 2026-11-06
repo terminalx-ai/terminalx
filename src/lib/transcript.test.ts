@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { askAgentNote, buildTranscript, groupWork } from "./transcript";
 import type { AgentEvent, Payload } from "@/types/events";
+import codexPermissionGates from "./fixtures/codex-permission-gates.json";
 
 let seq = 0;
 function ev(payload: Payload, extra: Partial<AgentEvent> = {}): AgentEvent {
@@ -45,6 +46,21 @@ describe("buildTranscript", () => {
     if (request.payload.type !== "permission_requested") throw new Error("expected a permission request");
     events.push(ev({ ...request.payload, requestId: "another-request" }, { harness: "codex" }));
     expect(buildTranscript(events, true).pendingAsks.map(ask => ask.requestId)).toEqual(["another-request"]);
+  });
+
+  // PRO-160: what the backend logs for the first command of a real Codex
+  // 0.166.0 session in Ask every time, which Codex asks about at both of its
+  // gates (session_watch_tests.rs replays those hooks and expects this log).
+  // The request is logged again before its answer and after it, and the answer twice.
+  it("shows a real Codex session's request once, and not again once it is answered (PRO-160)", () => {
+    const [request, decision, reply] = codexPermissionGates as AgentEvent[];
+    const delivered = (events: AgentEvent[]) => events.map((event, i) => ({ ...event, id: `delivery-${i + 1}`, seq: i + 1 }));
+    const asked = delivered([request, request]);
+    expect(buildTranscript(asked, true).pendingAsks.map(ask => ask.requestId)).toEqual(["codex-request"]);
+    const answered = delivered([request, request, decision, request, decision, reply]);
+    for (let shown = 3; shown <= answered.length; shown++) {
+      expect(buildTranscript(answered.slice(0, shown), true).pendingAsks, `after ${shown} events`).toEqual([]);
+    }
   });
 
   // #667: what the agent (or its launch) last said rides under the error, and only under a failure.

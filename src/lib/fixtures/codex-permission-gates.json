@@ -1,0 +1,62 @@
+[
+  {
+    "id": "fixture-1",
+    "sessionId": "watched-session",
+    "tabId": "watched-tab",
+    "harness": "codex",
+    "seq": 1,
+    "ts": "",
+    "payload": {
+      "type": "permission_requested",
+      "requestId": "codex-request",
+      "toolUseId": "",
+      "toolName": "Bash",
+      "input": {
+        "command": "touch /workspace/outside-escalated.txt"
+      },
+      "cwd": "/workspace/app",
+      "title": "Bash touch /workspace/outside-escalated.txt",
+      "reason": "Approval is required because this session is set to Ask every time.",
+      "options": [
+        {
+          "id": "allow",
+          "label": "Allow",
+          "kind": "allow_once"
+        },
+        {
+          "id": "deny",
+          "label": "Deny",
+          "kind": "deny"
+        }
+      ]
+    }
+  },
+  {
+    "id": "fixture-2",
+    "sessionId": "watched-session",
+    "tabId": "watched-tab",
+    "harness": "codex",
+    "seq": 2,
+    "ts": "",
+    "payload": {
+      "type": "permission_decided",
+      "requestId": "codex-request",
+      "toolUseId": "",
+      "allowed": true,
+      "label": "Allowed",
+      "automatic": false
+    }
+  },
+  {
+    "id": "fixture-3",
+    "sessionId": "watched-session",
+    "tabId": "watched-tab",
+    "harness": "codex",
+    "seq": 3,
+    "ts": "",
+    "payload": {
+      "type": "assistant_text",
+      "text": "Case 2 done."
+    }
+  }
+]
