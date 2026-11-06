@@ -86,6 +86,18 @@ pull request is open. A new message to an archived session brings it back; so do
 `unarchive`. Archive only what the person asked to tidy; do not archive a session you are
 working in, or another agent's.
 
+### Set a session’s manual status
+
+```text
+terminalx sessions status <session> --status backlog|in_progress|in_review|done|canceled --json
+```
+
+This sets the session’s workflow status, independent of its agent’s activity. New and
+older sessions start in Backlog. The change is stored in the session index and reaches
+all windows and paired phones. Sessions sharing a branch keep their own statuses.
+Done and Canceled do not archive the session or stop its agent. The result includes
+`session.manualStatus`; `sessions list` and `sessions show` include it too.
+
 ### Start a session
 
 Keep work in the current conversation by default. Create another session only when the

@@ -1,3 +1,6 @@
+import { StatusGroups } from "./StatusGroups";
+import { ManualStatusIcon } from "@/components/session/ManualStatus";
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { useMemo, useState } from "react";
 import { Ellipsis, GitBranch, Pin, Settings, SquarePen } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -60,19 +63,20 @@ export function chatPreview(
  */
 export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
+  const { sidebarLayout, sidebarSort } = usePrefs();
   const [error, setError] = useState<string | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
   const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
   const filter = useSidebarFilter();
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
-  const showArchived = store.showArchived && !filter.active;
+  const showArchived = store.showArchived && filter.filter === "all";
   // Unread or Needs you: only the conversations that pass, and the open one.
   const conversations = useMemo(
-    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived),
-    [filter, store.sessions, store.selectedSessionId, showArchived],
+    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived, sidebarSort),
+    [filter, store.sessions, store.selectedSessionId, showArchived, sidebarSort],
   );
   // Show archived (#718): the archived ones, under a fold of their own at the end.
-  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions) : []), [showArchived, store.sessions]);
+  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions.filter((session) => filter.shows(session.id)), sidebarSort) : []), [showArchived, store.sessions, filter, sidebarSort]);
   const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
   const showAgents = useMemo(() => mixesAgents(listed), [listed]);
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
@@ -111,7 +115,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
-        {conversations.length === 0 && filter.active ? (
+        {conversations.length === 0 && archived.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
         ) : conversations.length === 0 && archived.length === 0 ? (
@@ -125,8 +129,8 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           </button>
         ) : (
           <ul className="flex flex-col gap-px">
-            {live.map((session) => chatRow(session))}
-            {removed.length > 0 && (
+            {sidebarLayout === "status" ? <StatusGroups sessions={conversations}>{(session) => chatRow(session)}</StatusGroups> : live.map((session) => chatRow(session))}
+            {sidebarLayout !== "status" && removed.length > 0 && (
               <RemovedWorkspaces
                 id="chats"
                 count={new Set(removed.map((session) => session.removedWorkspace?.path ?? session.id)).size}
@@ -137,7 +141,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
             )}
             {archived.length > 0 && (
               <ArchivedSessions id="list" count={archived.length} opened={archived.some((session) => session.id === store.selectedSessionId)}>
-                {archived.map((session) => chatRow(session, true))}
+                {sidebarLayout === "status" ? <StatusGroups sessions={archived} scope="local:archived">{(session) => chatRow(session, true)}</StatusGroups> : archived.map((session) => chatRow(session, true))}
               </ArchivedSessions>
             )}
           </ul>
@@ -221,6 +225,7 @@ function ChatRow({
             <ChatMark session={session} project={link?.project ?? null} agent={agent} live={status === "in_progress" && animations} />
             <span className="flex min-w-0 flex-1 flex-col">
               <span className="flex items-center gap-1.5">
+                <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /></span>
                 {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
                 <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{title}</span>
                 {session.worktreeRemoved && <span className="shrink-0 text-[10px] text-faint">removed</span>}

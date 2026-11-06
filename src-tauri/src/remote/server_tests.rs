@@ -1970,7 +1970,7 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
         &f.rpc,
         &manager,
         "session.update",
-        json!({ "sessionId": session.id, "title": "  Fix the login  ", "pinned": true, "clientRequestId": "request-upd-1" }),
+        json!({ "sessionId": session.id, "title": "  Fix the login  ", "pinned": true, "manualStatus": "in_review", "clientRequestId": "request-upd-1" }),
     )
     .await
     .unwrap();
@@ -1978,13 +1978,16 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
     let pushed = next_event(&mut events, "session.sessions").await;
     assert_eq!(pushed["sessions"].as_array().unwrap().len(), 1, "only this workspace's sessions");
     assert_eq!(pushed["sessions"][0]["title"], "Fix the login");
+    assert_eq!(pushed["sessions"][0]["manualStatus"], "in_review");
     call(&f.rpc, &manager, "session.update", json!({ "sessionId": session.id, "archived": true, "clientRequestId": "request-upd-2" }))
         .await
         .unwrap();
     let stored = index::get(&session.id).unwrap();
     assert!(stored.archived && stored.pinned && stored.title == "Fix the login");
+    assert_eq!(stored.manual_status, index::ManualStatus::InReview);
     for (params, expected) in [
         (json!({ "sessionId": session.id, "clientRequestId": "request-upd-3" }), "invalid_params"),
+        (json!({ "sessionId": session.id, "manualStatus": "invalid", "clientRequestId": "request-status-invalid" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "   ", "clientRequestId": "request-upd-4" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "x".repeat(201), "clientRequestId": "request-upd-5" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "x" }), "invalid_params"),

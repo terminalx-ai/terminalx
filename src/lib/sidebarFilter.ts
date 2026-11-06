@@ -1,3 +1,4 @@
+import { canonicalProject, sidebarProjectOf } from "@/lib/sidebarView";
 import { useMemo } from "react";
 import { isUnread, sessionColumn, type DashboardSession } from "@/lib/dashboard";
 import { getAccount, useAccount } from "@/lib/account";
@@ -21,7 +22,7 @@ import { cloudProjectKey, cloudWorkspaceKey } from "@/types/target";
  * catalog and this desktop's caches. Filtering never attaches to, resumes or
  * wakes a workspace.
  *
- * The choice is kept per person (prefs), so it survives a relaunch and one
+ * The choice is kept per window and person (prefs), so it survives a relaunch and one
  * account's filter is never applied to another's sidebar.
  */
 export type SidebarFilter = "all" | "unread" | "needs";
@@ -99,24 +100,29 @@ export function useSidebarFilter(): SidebarFilterState {
   const cloud = useCloudDashboard();
   const catalog = useCloudCatalog();
   const { status } = useAccount();
-  const filter: SidebarFilter = (usePrefs().sidebarFilters[filterOwner(status)] as SidebarFilter | undefined) ?? "all";
+  const prefs = usePrefs();
+  const project = prefs.sidebarProject && canonicalProject(prefs.sidebarProject);
+  const filter: SidebarFilter = (prefs.sidebarFilters[filterOwner(status)] as SidebarFilter | undefined) ?? "all";
   const selected = store.selectedSessionId;
   const { visibleIds } = useOrganizationVisibility();
   return useMemo(() => {
-    if (filter === "all") return { ...EVERYTHING, count: 0 };
+    if (filter === "all" && !project) return { ...EVERYTHING, count: 0 };
     const sessions = new Set<string>();
     const projects = new Set<string>();
     const workspaces = new Set<string>();
     let count = 0;
     for (const session of [...store.sessions, ...cloud.filter((session) => visibleIds.has(session.orgId))] as DashboardSession[]) {
+      const projectPath = sidebarProjectOf(session, store.chatsPath);
+      if (project && projectPath !== project) continue;
       const passes = sessionPassesFilter(filter, session);
-      if (passes) count++;
+      if (passes && (!session.archived || store.showArchived)) count++;
       if (!passes && session.id !== selected) continue;
       sessions.add(session.id);
-      projects.add(session.projectPath);
+      if (projectPath) projects.add(projectPath);
     }
     if (filter === "needs") {
       for (const { workspaceKey, projectKey } of workspacesNeedingYou(catalog, liveCloudOrgIds(status).filter((id) => visibleIds.has(id)))) {
+        if (project && projectKey !== project) continue;
         workspaces.add(workspaceKey);
         projects.add(projectKey);
       }
@@ -125,10 +131,10 @@ export function useSidebarFilter(): SidebarFilterState {
       filter,
       active: true,
       shows: (sessionId) => sessions.has(sessionId),
-      showsProject: (projectKey) => projects.has(projectKey),
-      showsWorkspace: (workspaceKey) => workspaces.has(workspaceKey),
+      showsProject: (projectKey) => (!project || canonicalProject(projectKey) === project) && (filter === "all" || projects.has(canonicalProject(projectKey))),
+      showsWorkspace: (workspaceKey) => filter === "all" || workspaces.has(workspaceKey),
       count,
-      empty: SIDEBAR_FILTERS.find((entry) => entry.id === filter)?.empty ?? "",
+      empty: SIDEBAR_FILTERS.find((entry) => entry.id === filter)?.empty || "No sessions in this project.",
     };
-  }, [filter, selected, store.sessions, cloud, catalog, status, visibleIds]);
+  }, [filter, project, selected, store.sessions, store.chatsPath, store.showArchived, cloud, catalog, status, visibleIds]);
 }

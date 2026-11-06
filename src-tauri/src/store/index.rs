@@ -425,6 +425,18 @@ impl<'de> Deserialize<'de> for SessionKind {
     }
 }
 
+/// A person's workflow status, independent of what any agent tab is doing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualStatus {
+    #[default]
+    Backlog,
+    InProgress,
+    InReview,
+    Done,
+    Canceled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -474,6 +486,8 @@ pub struct SessionEntry {
     pub archive: ArchiveMark,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub manual_status: ManualStatus,
     #[serde(default)]
     pub tabs: Vec<TabEntry>,
     #[serde(default)]
@@ -907,11 +921,35 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: vec![],
             active_tab: None,
             link: None,
             unknown: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn manual_status_defaults_and_survives_index_updates() {
+        let _home = crate::store::temp_home();
+        let mut legacy = serde_json::to_value(entry("one")).unwrap();
+        legacy.as_object_mut().unwrap().remove("manualStatus");
+        let legacy: SessionEntry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.manual_status, ManualStatus::Backlog);
+        save(&[legacy, entry("two")]).unwrap();
+        for (status, wire) in [(ManualStatus::Backlog, "backlog"), (ManualStatus::InProgress, "in_progress"), (ManualStatus::InReview, "in_review"), (ManualStatus::Done, "done"), (ManualStatus::Canceled, "canceled")] {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(status), ..Default::default() };
+            assert!(!patch.is_empty());
+            crate::session_ops::update_session_meta("one", &patch).unwrap();
+            // An unrelated metadata edit must retain the manual status.
+            crate::session_ops::update_session_meta("one", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+            let saved = load().unwrap();
+            assert_eq!(saved[0].manual_status, status);
+            assert_eq!(serde_json::to_value(&saved[0]).unwrap()["manualStatus"], wire);
+            assert!(!saved[0].archived);
+            assert_eq!(saved[1].manual_status, ManualStatus::Backlog);
+        }
+        assert!(serde_json::from_value::<crate::session_ops::SessionPatch>(serde_json::json!({"manualStatus":"broken"})).is_err());
     }
 
     fn tab(id: &str) -> TabEntry {

@@ -30,7 +30,7 @@ import { SidebarTitlebar } from "./SidebarTitlebar";
 import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
-import { usePrefs } from "@/lib/prefs";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { branchMerged, conversationBranch } from "@/lib/checkout";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
@@ -57,25 +57,26 @@ import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
-import { compareMessageActivity, conversationTime } from "@/lib/messageActivity";
+import { compareSidebarSessions, type SidebarSort } from "@/lib/sidebarView";
+import { ManualStatusIcon, ManualStatusMenu } from "@/components/session/ManualStatus";
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
+import { conversationTime } from "@/lib/messageActivity";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
 export { conversationTitle };
 
-const byRecency = (a: SessionEntry, b: SessionEntry) => compareMessageActivity(a, b, a.id, b.id);
-
 /**
  * Every live conversation as one list, pinned first, then newest. The open one stays even when archived, unless
  * Show archived is on (`showArchived`): it is then among the archived, whose fold it keeps open.
  */
-export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false): SessionEntry[] {
-  return sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId)).sort(byRecency);
+export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false, sort: SidebarSort = "updated"): SessionEntry[] {
+  return sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId)).sort((a, b) => compareSidebarSessions(a, b, sort));
 }
 
 /** The archived conversations, as Show archived lists them (#718): pinned first, then newest. */
-export function archivedConversations(sessions: SessionEntry[]): SessionEntry[] {
-  return sessions.filter((session) => session.archived).sort(byRecency);
+export function archivedConversations(sessions: SessionEntry[], sort: SidebarSort = "updated"): SessionEntry[] {
+  return sessions.filter((session) => session.archived).sort((a, b) => compareSidebarSessions(a, b, sort));
 }
 
 /**
@@ -132,6 +133,7 @@ export function groupConversations(
   /** List every open project, one with no conversations yet too: one just added is there at once (off while a filter narrows the list). */
   everyProject = false,
   showArchived = false,
+  sort: SidebarSort = "updated",
 ): { groups: ConversationGroup[]; chats: SessionEntry[]; archivedChats: SessionEntry[] } {
   const groups = new Map<string, ConversationGroup>();
   const chats: SessionEntry[] = [];
@@ -148,8 +150,8 @@ export function groupConversations(
     group.branches[session.id] = link.branch;
     groups.set(key, group);
   };
-  for (const session of orderConversations(sessions, selectedId, showArchived)) add(session, false);
-  if (showArchived) for (const session of archivedConversations(sessions)) add(session, true);
+  for (const session of orderConversations(sessions, selectedId, showArchived, sort)) add(session, false);
+  if (showArchived) for (const session of archivedConversations(sessions, sort)) add(session, true);
   if (everyProject) {
     for (const project of projects) {
       const key = canon(project.path);
@@ -159,7 +161,7 @@ export function groupConversations(
   }
   // A populated group follows its messages; opening its project is not a message.
   const latest = (group: ConversationGroup) => group.sessions.length
-    ? Math.max(...group.sessions.map((session) => Date.parse(conversationTime(session)) || 0))
+    ? Math.max(...group.sessions.map((session) => Date.parse(sort === "created" ? session.created : conversationTime(session)) || 0))
     : Date.parse(group.project?.lastOpened ?? "") || 0;
   const ordered = [...groups.values()].sort((a, b) => Number(!!b.project?.pinned) - Number(!!a.project?.pinned) || latest(b) - latest(a) || a.path.localeCompare(b.path));
   return { groups: ordered, chats, archivedChats };
@@ -214,6 +216,7 @@ const PEEK = 3;
 export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const filter = useSidebarFilter();
+  const { sidebarSort } = usePrefs();
   const [error, setError] = useState<string | null>(null);
   // A chat on its way into a project: the dialog that chooses how its new session starts there.
   const [moving, setMoving] = useState<{ session: SessionEntry; source: TabEntry; project: Project; worktree: boolean } | null>(null);
@@ -224,10 +227,10 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   // Unread or Needs you: only the conversations that pass (and the open one), and so only their projects.
   const listed = useMemo(() => (filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions), [filter, store.sessions]);
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
-  const showArchived = store.showArchived && !filter.active;
+  const showArchived = store.showArchived && filter.filter === "all";
   const { groups, chats, archivedChats } = useMemo(
-    () => groupConversations(listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived),
-    [listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived],
+    () => groupConversations(listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, sidebarSort),
+    [listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, sidebarSort],
   );
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -354,7 +357,7 @@ export function FilteredEmpty({ text }: { text: string }) {
   return (
     <div className="px-3 py-6 text-center text-[12px] text-faint" data-testid="sidebar-filter-empty">
       {text}{" "}
-      <button type="button" className="underline underline-offset-2 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => setSidebarFilter("all")}>
+      <button type="button" className="underline underline-offset-2 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => { setSidebarFilter("all"); setPrefs({ sidebarProject: null }); }}>
         Show all sessions
       </button>
     </div>
@@ -956,6 +959,7 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
           <Separator />
         </>
       )}
+      <ManualStatusMenu sessionId={session.id} status={session.manualStatus} contextMenu={contextMenu} />
       <Item onSelect={() => void pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </Item>
@@ -1080,6 +1084,7 @@ function ConversationRow({
             aria-label={named === "branch" ? `${branchName ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
+            <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /></span>
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             {named === "branch" ? (
               <>

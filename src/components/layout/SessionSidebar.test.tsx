@@ -476,7 +476,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {

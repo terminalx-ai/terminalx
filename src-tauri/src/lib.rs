@@ -589,6 +589,7 @@ pub fn run() {
             commands::set_shown_session,
             commands::archive_idle_sessions,
             commands::set_session_pinned,
+            commands::set_session_status,
             commands::set_active_tab,
             commands::delete_session,
             commands::list_harnesses,

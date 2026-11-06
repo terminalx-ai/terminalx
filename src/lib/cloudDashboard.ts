@@ -48,6 +48,7 @@ export interface CloudDashboardTab extends DashboardTab {
 }
 
 export interface CloudDashboardSession extends DashboardSession, MessageActivity {
+  manualStatus?: import("@/types/session").ManualStatus;
   kind: "cloud";
   /** `cloud:<orgId>:<workspaceId>:<sessionId>`; also `id`. */
   key: string;
@@ -185,6 +186,7 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
       created: row.created,
       lastMessageAt: row.lastMessageAt,
       pinned: row.pinned,
+      manualStatus: row.manualStatus,
       hasMessages: row.hasMessages,
       archived: row.archived,
       connected,

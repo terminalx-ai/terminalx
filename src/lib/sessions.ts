@@ -89,7 +89,7 @@ let state: State = {
   newIssueRequested: false,
   selectedAutomationId: null,
   skillsFilter: null,
-  showArchived: false,
+  showArchived: getPrefs().sidebarShowArchived,
   selectedProject: null,
   workspaces: {},
   workspacesLoading: {},
@@ -585,6 +585,7 @@ export function debug(message: string) {
 
 /** Show archived: each project's archived sessions, and the chats', under a fold of their own (#718). */
 export function setShowArchived(v: boolean) {
+  setPrefs({ sidebarShowArchived: v });
   set({ showArchived: v });
 }
 

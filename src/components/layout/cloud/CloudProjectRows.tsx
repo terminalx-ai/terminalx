@@ -1,3 +1,6 @@
+import { ManualStatusIcon, ManualStatusMenu } from "@/components/session/ManualStatus";
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
+import { StatusGroups } from "../StatusGroups";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -398,14 +401,16 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   const filter = useSidebarFilter();
   const menu = useRowMenu();
   const [error, run] = useRowError();
+  const { sidebarSort, sidebarLayout } = usePrefs();
   const { sessions: every, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: open, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const sessions = useMemo(() => {
-    if (!filter.active) return every;
-    const found = every.filter((row) => filter.shows(row.key));
+    const sorted = sidebarSort === "created" ? [...every].sort((a, b) => Number(b.pinned) - Number(a.pinned) || (Date.parse(b.created) || 0) - (Date.parse(a.created) || 0) || a.key.localeCompare(b.key)) : every;
+    if (!filter.active) return sorted;
+    const found = sorted.filter((row) => filter.shows(row.key));
     // The list says this workspace waits for a person, and no session known here says which: all of them show
     // (or, for one never opened on this desktop, the line that opens it).
-    return !found.length && filter.showsWorkspace(node.key) ? every : found;
-  }, [every, filter, node.key]);
+    return !found.length && filter.showsWorkspace(node.key) ? sorted : found;
+  }, [every, filter, node.key, sidebarSort]);
   const activity = useWorkspaceActivity(node, every, !known || every.every((row) => row.source !== "live"));
   // Each session's mark as the Dashboard shows it: the live tabs while connected, else the server's list.
   const dashboard = useCloudDashboard();
@@ -422,11 +427,10 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   const openable = workspaceOpenable(node.item, activity.tone);
   // Filtered: a workspace with no such session has no rows, unless the server's list alone says it waits for a person.
   if (filter.active && !sessions.length && !filter.showsWorkspace(node.key)) return null;
+  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
   const rows = (
     <>
-      {sessions.map((row) => (
-        <CloudSessionItem key={row.key} row={row} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} selected={store.selectedSessionId === row.key} />
-      ))}
+      {sidebarLayout === "status" ? <StatusGroups sessions={sessions} scope={node.key}>{sessionRow}</StatusGroups> : sessions.map(sessionRow)}
       {sessions.length === 0 && (
         <li className="truncate px-2 py-1 text-[12px] text-faint" data-testid="cloud-workspace-empty" data-workspace={workspace.id} title={workspaceCard(node.item, activity)}>
           {known ? (
@@ -499,7 +503,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
  * manages the workspace, on a runtime with session/2) renames, pins, archives
  * and deletes it, as a local conversation's does.
  */
-function CloudSessionItem({ row, status, manage, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; selected: boolean }) {
+function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(row.title);
@@ -579,6 +583,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
             aria-current={selected ? "true" : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
+            <span title={manualStatusLabel(row.manualStatus)}><ManualStatusIcon status={row.manualStatus} /></span>
             {row.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint")}>{row.title}</span>
             <StatusMark status={status} />
@@ -609,6 +614,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
                 >
                   <Pencil /> Rename
                 </DropdownMenuItem>
+                {canSetStatus && <ManualStatusMenu sessionId={row.sessionId} status={row.manualStatus} onChange={(manualStatus) => updateCloudSession(row, { manualStatus })} />}
                 <DropdownMenuItem onSelect={() => void act(() => updateCloudSession(row, { pinned: !row.pinned }))}>
                   <Pin /> {row.pinned ? "Unpin" : "Pin"}
                 </DropdownMenuItem>

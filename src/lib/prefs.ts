@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { appWindow } from "@/lib/appWindow";
 import { FIRST_RUN_PERMISSION_MODE } from "@terminalx/portable/agentSettings";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
 import type { IssueListFilter } from "@/lib/issueListFilter";
@@ -82,9 +83,12 @@ export interface Prefs {
   /**
    * The sidebar's shape: "simple" groups the conversations under their
    * projects; "list" is one flat list of chats, newest first, as a messaging
-   * app draws it.
+   * app draws it; "status" groups individual sessions by their manual status.
    */
-  sidebarLayout: "simple" | "list";
+  sidebarLayout: "simple" | "list" | "status";
+  sidebarSort: "updated" | "created";
+  sidebarProject: string | null;
+  sidebarShowArchived: boolean;
   /**
    * Cloud projects the reader added with "+ Add project", per organization:
    * repository identities (`host/owner/name`). Projects with workspaces show
@@ -163,6 +167,9 @@ const DEFAULTS: Prefs = {
   bypassConfirmed: false,
   sidebarSections: {},
   sidebarLayout: "simple",
+  sidebarSort: "updated",
+  sidebarProject: null,
+  sidebarShowArchived: false,
   hiddenOrganizations: [],
   organizationDisplay: "all",
   selectedOrganization: null,
@@ -178,6 +185,14 @@ const DEFAULTS: Prefs = {
 };
 
 const KEY = "raccoon.prefs";
+// Window layout choices have their own record; another window cannot overwrite them.
+const WINDOW_KEYS = ["sidebarLayout", "sidebarSort", "sidebarProject", "sidebarShowArchived", "sidebarFilters", "sidebarSections"] as const;
+const windowKey = () => `${KEY}.sidebar.${appWindow()}`;
+function windowChoices(value: unknown): Partial<Prefs> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const prefs = value as Partial<Prefs>;
+  return Object.fromEntries(WINDOW_KEYS.filter((key) => key in prefs).map((key) => [key, prefs[key]]));
+}
 
 /** One personal section of an organization's cloud projects. */
 export interface CloudSidebarSection {
@@ -206,14 +221,23 @@ function cleanCloudSections(value: unknown): Prefs["cloudSections"] {
 function load(): Prefs {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...DEFAULTS };
-    const parsed = JSON.parse(raw);
+    const legacy = raw ? JSON.parse(raw) : {};
+    const savedWindow = localStorage.getItem(windowKey());
+    let own = windowChoices(legacy);
+    try { if (savedWindow) own = windowChoices(JSON.parse(savedWindow)); } catch { /* Ignore only the broken window record. */ }
+    const parsed = { ...legacy, ...windowChoices(own) };
     const prefs = { ...DEFAULTS, ...parsed };
     prefs.hiddenOrganizations = Array.isArray(prefs.hiddenOrganizations) ? [...new Set(prefs.hiddenOrganizations.filter((id: unknown) => typeof id === "string"))] : [];
     prefs.organizationDisplay = prefs.organizationDisplay === "one" ? "one" : "all";
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
     // The project tree ("detailed") is gone; anyone who had it gets the default.
-    prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
+    prefs.sidebarLayout = ["list", "status"].includes(prefs.sidebarLayout) ? prefs.sidebarLayout : "simple";
+    prefs.sidebarSort = prefs.sidebarSort === "created" ? "created" : "updated";
+    prefs.sidebarProject = typeof prefs.sidebarProject === "string" ? prefs.sidebarProject : null;
+    prefs.sidebarShowArchived = prefs.sidebarShowArchived === true;
+    for (const key of ["sidebarFilters", "sidebarSections"] as const) {
+      if (!prefs[key] || typeof prefs[key] !== "object" || Array.isArray(prefs[key])) prefs[key] = {};
+    }
     prefs.autocorrect = prefs.autocorrect === true;
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     prefs.issueCloudProject = typeof prefs.issueCloudProject === "string" && prefs.issueCloudProject.startsWith("cloud:") ? prefs.issueCloudProject : null;
@@ -256,7 +280,7 @@ function load(): Prefs {
     }
     if (migrated) {
       try {
-        localStorage.setItem(KEY, JSON.stringify(prefs));
+        localStorage.setItem(KEY, JSON.stringify({ ...prefs, ...windowChoices({ ...DEFAULTS, ...legacy }) }));
       } catch {
         // Still use the migrated preferences when storage is unavailable.
       }
@@ -277,7 +301,13 @@ export function getPrefs(): Prefs {
 export function setPrefs(patch: Partial<Prefs>) {
   state = { ...state, ...patch };
   try {
-    localStorage.setItem(KEY, JSON.stringify(state));
+    // Keep the old shared choices as migration defaults for windows that have
+    // not saved their own record yet. Never replace them with this window's view.
+    let legacy: Partial<Prefs> = {};
+    try { legacy = windowChoices(JSON.parse(localStorage.getItem(KEY) ?? "{}")); } catch { /* Replace corrupt shared preferences below. */ }
+    const global = { ...legacy, ...Object.fromEntries(Object.entries(state).filter(([key]) => !WINDOW_KEYS.includes(key as typeof WINDOW_KEYS[number]))) };
+    localStorage.setItem(KEY, JSON.stringify(global));
+    localStorage.setItem(windowKey(), JSON.stringify(windowChoices(state)));
   } catch {
     /* ignore */
   }
@@ -297,7 +327,7 @@ applyFontScale();
 // shortcut changed in one window is the shortcut in every window at once.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
-    if (e.key !== KEY || e.storageArea !== localStorage) return;
+    if ((e.key !== KEY && e.key !== windowKey()) || e.storageArea !== localStorage) return;
     state = load();
     applyFontScale();
     for (const l of listeners) l();

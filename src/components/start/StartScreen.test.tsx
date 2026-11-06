@@ -192,7 +192,7 @@ describe("the start screen", () => {
     expect(notice.textContent).toContain("No agent is installed");
     // Installed from here, not by way of Settings or the provider's site.
     expect(await screen.findByRole("button", { name: "Install Claude Code and sign in" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
     expect(openUrl).not.toHaveBeenCalled();
     // The commands to run by hand are one press away, not in the way.
     expect(screen.queryByText(codex.installHint)).toBeNull();
@@ -216,14 +216,14 @@ describe("the start screen", () => {
     const { unmount } = render(<StartScreen onOpenSettings={vi.fn()} />);
     expect((await screen.findByTestId("start-no-agent")).textContent).toContain("No agent is signed in");
     expect(await screen.findByRole("button", { name: "Sign in to Claude Code" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
+    // Each agent's readiness probe settles independently.
+    expect(await screen.findByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
     unmount();
 
     claudeState = "ready";
     render(<StartScreen onOpenSettings={vi.fn()} />);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("check_agent_readiness", { harness: "claude" }));
-    await act(async () => {});
-    expect(screen.queryByTestId("start-no-agent")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("start-no-agent")).toBeNull());
   });
 
   it("claims nothing about agents before the probe has answered", () => {
