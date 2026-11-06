@@ -831,15 +831,26 @@ code-mode `exec` hands the turn back to the model once its yield time
 passes (30 s by default) while a call inside it waits on a card. The model
 then sees `Script running with cell ID …` and should call `wait`, but it can
 run the same command again instead. That repeat is a second request for the
-same input at the same gate, while the first is still waiting. Filed as a
-card, it was an identical card that stayed live after Allow, and answering
-it ran the command a second time (PRO-160). A request whose gate, tool and
-input match a card the same launch still waits on files no card. It is
-refused at once with `This command is already waiting for approval in
-another call. Wait for that call's result instead of running it again.`
-The model reads that as `Command blocked by PreToolUse hook: …`. The call
-that is waiting keeps its card and the reader's answer. The check runs
-under the same lock that files a card, so two such hooks cannot both pass.
+same command while the first is still waiting. Filed as a card, it was an
+identical card that stayed live after Allow, and answering it ran the
+command a second time (PRO-160).
+
+The repeat can reach either gate while the first waits at either one. Its
+`PreToolUse` can arrive while the first waits to leave the sandbox, and in
+any mode its `PermissionRequest` can carry a reworded justification. So a
+repeat is told by what it runs, not by which gate asks or by the agent's
+words. That is the tool and its input, less `description` and
+`justification` and less a command's trailing whitespace. A request that
+matches a card the same launch still waits on, at either gate, files no
+card. It is refused at once with `This command is already waiting for
+approval in another call. Wait for that call's result instead of running it
+again.` The model reads that as `Command blocked by PreToolUse hook: …`. The
+call that is waiting keeps its card and the reader's answer.
+
+The check runs under the same lock that files a card, so two such hooks
+cannot both pass. A call's own `PermissionRequest` is not a repeat: it
+starts only after that call's `PreToolUse` hook has been answered, and an
+answered card no longer waits.
 
 What the hooks say was recorded from the real Codex 0.166.0 TUI on
 2026-11-06, with a stand-in model. Every model Codex lists is code-mode
@@ -862,12 +873,17 @@ justification})` or `tools.apply_patch(…)`.
 - A command the sandbox blocks without asking to escalate fails back to the
   model. Codex does not ask to retry it outside the sandbox.
 
-`harness/codex/fixtures/permission_gates_*.jsonl` hold three of these
-recordings, with only the paths rewritten: a session's first escalated
-command, a denied command run again, and a command run again while its card
-waits. The tests replay each one through the hook handler, starting and
-ending hooks as they did, and expect each reply to be what the recorded
-hook printed.
+`harness/codex/fixtures/permission_gates_*.jsonl` hold five of these
+recordings, with only the paths rewritten:
+- a session's first escalated command;
+- a denied command run again;
+- a command run again while its first card waits;
+- a command run again while its card to leave the sandbox waits;
+- in auto mode, a command run again with its justification reworded.
+
+The tests replay each one through the hook handler, starting and ending
+hooks as they did, and expect each reply to be what the recorded hook
+printed.
 
 Permission modes map as `plan → -a on-request -s read-only`, everything else
 `→ -a on-request -s workspace-write` (with the `PreToolUse` gate for "Ask every

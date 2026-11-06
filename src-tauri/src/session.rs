@@ -1311,6 +1311,26 @@ fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl 
     Ok(v)
 }
 
+/// What a permission hook asks to run, for telling a repeat of a call that
+/// still waits on a card (PRO-160). It is the tool's input less the agent's
+/// own words about it (`description`, `justification`). Codex adds those
+/// at `PermissionRequest`, and a model running the call again may reword
+/// them. It also leaves out a command's trailing whitespace, since Codex
+/// drops a patch's last newline at `PermissionRequest`.
+fn asked_to_run(input: &Value) -> Value {
+    let mut what = input.clone();
+    if let Some(fields) = what.as_object_mut() {
+        fields.remove("description");
+        fields.remove("justification");
+        for key in ["command", "cmd"] {
+            if let Some(Value::String(command)) = fields.get_mut(key) {
+                command.truncate(command.trim_end().len());
+            }
+        }
+    }
+    what
+}
+
 /// Why a permission hook's card is up, in TerminalX's words (#775): the
 /// gate that asked, which the agent's own description of the call never
 /// says. None when the session's own mode asked, which needs no telling.
@@ -5955,12 +5975,16 @@ impl SessionManager {
             if !p.origin.accepts(frame) { return HookReply::default(); }
             // PRO-160: Codex's code-mode `exec` hands the turn back to the
             // model while a call inside it waits on its card, and the model
-            // may run the same call again. A second card for it is the one a
-            // reader answers twice, and the command then runs twice. Judged
-            // under the same lock that files a card, so two hooks cannot both
-            // pass; the model is told why, and the waiting call has the answer.
-            if kind == CliKind::Codex && rt.pending.iter().any(|(id, ask)| ask.tool_name == tool_name && ask.input == input
-                && p.decisions.get(id).is_some_and(|waiting| waiting.gate == gate)) {
+            // may run the same command again. Its repeat can reach either
+            // gate while the first waits at either one: its `PreToolUse`
+            // while the first waits to leave the sandbox, or its
+            // `PermissionRequest` with the justification reworded. A second
+            // card for it is the one a reader answers twice, and the command
+            // then runs twice. Judged under the same lock that files a card,
+            // so two hooks cannot both pass; the model is told why, and the
+            // waiting call has the answer.
+            let what = asked_to_run(&input);
+            if kind == CliKind::Codex && rt.pending.iter().any(|(id, ask)| ask.tool_name == tool_name && p.decisions.contains_key(id) && asked_to_run(&ask.input) == what) {
                 return HookReply { output: Some(codex::pty::already_waiting(gate)), refused: None };
             }
             let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
@@ -6592,6 +6616,19 @@ mod tests {
         // rather than smuggled into a field that would fail closed.
         let odd = out(CliKind::Codex, "PermissionRequest", Decision::AllowWith(json!({"type": "addRules"})));
         assert_eq!(odd["hookSpecificOutput"]["decision"], json!({"behavior": "allow"}));
+    }
+
+    /// What runs is the call, whichever gate asks and however the agent
+    /// words it (PRO-160); a different command or input is another call.
+    #[test]
+    fn a_repeat_is_told_by_what_it_runs() {
+        let pre = asked_to_run(&json!({"command": "touch /x"}));
+        assert_eq!(pre, asked_to_run(&json!({"command": "touch /x", "description": "May I write /x?"})));
+        assert_eq!(pre, asked_to_run(&json!({"command": "touch /x", "description": "I need /x."})));
+        assert_eq!(asked_to_run(&json!({"command": "*** Begin Patch\n*** End Patch\n"})), asked_to_run(&json!({"command": "*** Begin Patch\n*** End Patch"})));
+        assert_ne!(pre, asked_to_run(&json!({"command": "touch /y"})));
+        assert_ne!(pre, asked_to_run(&json!({"command": "touch /x", "workdir": "/elsewhere"})));
+        assert_ne!(asked_to_run(&json!({"server": "a", "args": {"q": 1}})), asked_to_run(&json!({"server": "a", "args": {"q": 2}})));
     }
 
     #[test]

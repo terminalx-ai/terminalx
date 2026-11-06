@@ -454,6 +454,12 @@ const DENIED: &str = include_str!("harness/codex/fixtures/permission_gates_denie
 /// the model runs the same command again. The hook that recorded it turned
 /// the repeat away as TerminalX now does.
 const REPEATED_WHILE_WAITING: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_waiting.jsonl");
+/// The same, with the command allowed and its card to leave the sandbox left
+/// for a while: the model's repeat reaches `PreToolUse`, the other gate.
+const REPEATED_WHILE_LEAVING_SANDBOX: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_leaving_sandbox.jsonl");
+/// In auto mode, where only the sandbox asks: the model's repeat reaches
+/// `PermissionRequest` with its justification reworded.
+const REPEATED_REWORDED_IN_AUTO: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_reworded_in_auto.jsonl");
 
 /// Replay a recording through the tab's hook handler, as its hooks started
 /// and ended. A permission hook that files a card is answered as the
@@ -545,6 +551,36 @@ fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
         ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
         ("Allowed".into(), None, None),
     ], "one card for the command, then one for running it outside the sandbox");
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// A repeat is the same command whichever gate it reaches and whichever gate
+/// the first call waits at: here the first waits to leave the sandbox and
+/// the repeat asks at `PreToolUse`. It files no card, and the command runs once.
+#[test]
+fn a_command_run_again_while_it_waits_to_leave_the_sandbox_files_no_second_card() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, REPEATED_WHILE_LEAVING_SANDBOX);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_EVERY_TIME.into()), None),
+        ("Allowed".into(), None, None),
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ]);
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// The model's words are not what runs: a repeat whose justification is
+/// reworded is still the command already waiting, in a mode where only the
+/// sandbox asks.
+#[test]
+fn a_command_run_again_with_a_reworded_justification_files_no_second_card() {
+    let rig = Rig::in_mode(CliKind::Codex, "auto");
+    let cards = replay_codex_hooks(&rig, REPEATED_REWORDED_IN_AUTO);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ]);
     stale_clicks_do_nothing(&rig, &cards);
 }
 

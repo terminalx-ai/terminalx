@@ -15,8 +15,10 @@
 - Stop a Codex command from showing two identical approval cards when the
   model runs it again while its first card is still waiting. Codex hands the
   turn back to the model once a script has waited for its yield time (30
-  seconds by default). The repeat now files no card, Codex is told the
-  command is already waiting, and the command runs once. (PRO-160)
+  seconds by default). The repeat now files no card, whichever approval it
+  or the waiting command has reached and however the model words its reason.
+  Codex is told the command is already waiting, and the command runs once.
+  (PRO-160)
 - Ask separately before a Codex command leaves its sandbox. In Ask every
   time, allowing a command no longer also allows Codex to run it outside the
   sandbox. That request gets its own card, which says so and shows Codex's
