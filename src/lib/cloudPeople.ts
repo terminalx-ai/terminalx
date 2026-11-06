@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
-import type { OrganizationMember } from "@/lib/organizationMembers";
-import { cachedOrganizationRosters, readOrganizationRoster, resetOrganizationRosters, subscribeOrganizationRosters } from "@/lib/organizationRoster";
+import { organizationMembers, type OrganizationMember } from "@/lib/organizationMembers";
+import { cachedOrganizationRosters, readOrganizationRoster, resetOrganizationRosters, rosterCacheEnabled, subscribeOrganizationRosters } from "@/lib/organizationRoster";
 
 /**
  * Names for the user ids a shared cloud workspace reports (presence, notes,
@@ -10,6 +10,8 @@ import { cachedOrganizationRosters, readOrganizationRoster, resetOrganizationRos
 const known = new Map<string, string>();
 const listeners = new Set<() => void>();
 let version = 0;
+let roster: Promise<OrganizationMember[]> | null = null;
+let epoch = 0;
 
 function changed() {
   version++;
@@ -27,14 +29,59 @@ export function rememberPeople(people: { userId: string; name?: string | null; d
   if (any) changed();
 }
 
-/** Compatibility for name-only consumers; all surfaces share the roster store. */
-export async function loadRoster(options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
-  try { return (await readOrganizationRoster(null, { ...options, active: true })).members; }
-  catch { return []; }
+/**
+ * The organization's members, loaded once per session (and remembered as
+ * names). `fresh` reads them again: a list that offers people to share with
+ * must not offer someone removed since (#501).
+ */
+export function loadRoster(options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
+  if (rosterCacheEnabled()) return readOrganizationRoster(null, { ...options, active: true }).then((listed) => listed.members, () => []);
+  if (roster && !options.fresh) return roster;
+  const current = epoch;
+  const pending: Promise<OrganizationMember[]> = Promise.resolve()
+    .then(() => organizationMembers.list())
+    .then((listed) => {
+      if (current !== epoch) return [];
+      rememberPeople(listed?.members ?? []);
+      return listed?.members ?? [];
+    })
+    .catch(() => {
+      // Only this read is forgotten: a newer one that started meanwhile stays.
+      if (roster === pending) roster = null;
+      return [];
+    });
+  roster = pending;
+  return pending;
 }
 
-export async function loadRosterIn(orgId: string, options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
-  return (await readOrganizationRoster(orgId, options)).members;
+/** Rosters of organizations other than the default one, per organization, for this session. */
+const rosters = new Map<string, Promise<OrganizationMember[]>>();
+
+/**
+ * The members of the organization a workspace is in, which need not be the
+ * default one (every organization is live, PRO-71), read once per session
+ * unless `fresh`. Rejects with the reason when they cannot be read (an older
+ * server, or the organization was left), so a dialog can say so instead of
+ * offering nobody.
+ */
+export function loadRosterIn(orgId: string, options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
+  if (rosterCacheEnabled(orgId)) return readOrganizationRoster(orgId, options).then((listed) => listed.members);
+  const current = epoch;
+  let pending = options.fresh ? undefined : rosters.get(orgId);
+  if (!pending) {
+    pending = Promise.resolve()
+      .then(() => organizationMembers.listIn(orgId))
+      .then((listed) => {
+        if (current !== epoch) return [];
+        rememberPeople(listed?.members ?? []);
+        return listed?.members ?? [];
+      });
+    rosters.set(orgId, pending);
+    pending.catch(() => {
+      if (rosters.get(orgId) === pending) rosters.delete(orgId);
+    });
+  }
+  return pending;
 }
 
 subscribeOrganizationRosters(changed);
@@ -47,8 +94,11 @@ export function personName(userId: string | null | undefined): string {
 
 /** Forget names and the roster (sign-out, organization switch, tests). */
 export function resetPeople() {
+  epoch++;
   known.clear();
   resetOrganizationRosters();
+  roster = null;
+  rosters.clear();
   changed();
 }
 

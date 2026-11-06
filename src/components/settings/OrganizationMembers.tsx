@@ -13,7 +13,8 @@ import {
   type PendingInvite,
 } from "@/lib/organizationMembers";
 
-import { readOrganizationRoster, replaceOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { readOrganizationRoster, mutateOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { useFeatureFlag, featureFlags } from "@/lib/featureFlags";
 import { MemberProfile } from "@/components/people/MemberProfile";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/menu";
 
@@ -23,17 +24,22 @@ const roleLabel = (role: string) => ROLE_LABEL[role] ?? role;
 const MEMBERS_RETRY_DELAY_MS = 400;
 const selectClass = "h-7 rounded-md border border-hairline bg-background px-1.5 text-xs disabled:opacity-60";
 
-export function OrganizationMembers({
-  accountEmail,
-  contextRevision,
-  organizationId,
-}: {
+interface OrganizationMembersProps {
   accountEmail: string;
   organizationId?: string;
   /** The account's context revision; a change reloads the roster. */
   contextRevision: string;
-}) {
-  const { roster, error: rosterError, loading: rosterLoading } = useOrganizationRoster(organizationId);
+}
+export function OrganizationMembers(props: OrganizationMembersProps) {
+  const profiles = useFeatureFlag(featureFlags.teamRoster, props.organizationId);
+  // A rollout kill unmounts open profiles, action menus and pending UI callbacks.
+  return <OrganizationMembersContent key={profiles ? "profiles" : "legacy"} {...props} profiles={profiles} />;
+}
+function OrganizationMembersContent({ accountEmail, contextRevision, organizationId, profiles }: OrganizationMembersProps & { profiles: boolean }) {
+  const cached = useOrganizationRoster(organizationId, profiles);
+  const [localRoster, setLocalRoster] = useState<OrganizationRoster | null>(null);
+  const { error: rosterError, loading: rosterLoading } = cached;
+  const roster = profiles ? cached.roster : localRoster;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -53,9 +59,13 @@ export function OrganizationMembers({
     const context = contextEpoch.current;
     const fresh = () => current === loadSeq.current && context === contextEpoch.current;
     setLoading(true);
+    const read = (freshRead: boolean) => profiles
+      ? readOrganizationRoster(organizationId, { active: true, contextRevision, fresh: freshRead })
+      : organizationMembers.list();
     try {
+      let next: OrganizationRoster;
       try {
-        await readOrganizationRoster(organizationId, { active: true, contextRevision, fresh: refresh });
+        next = await read(refresh);
       } catch (failure) {
         // The first read after Settings opens often races the account
         // session's own refresh. Ask once more, shortly after, before saying
@@ -63,9 +73,10 @@ export function OrganizationMembers({
         if (!isTransientMembersError(failure) || !fresh()) throw failure;
         await new Promise((resolve) => setTimeout(resolve, MEMBERS_RETRY_DELAY_MS));
         if (!fresh()) return;
-        await readOrganizationRoster(organizationId, { active: true, contextRevision, fresh: true });
+        next = await read(true);
       }
       if (fresh()) {
+        if (!profiles) setLocalRoster(next);
         if (!keepError) setError(null);
       }
     } catch (failure) {
@@ -73,9 +84,10 @@ export function OrganizationMembers({
     } finally {
       if (fresh()) setLoading(false);
     }
-  }, [organizationId, contextRevision]);
+  }, [organizationId, contextRevision, profiles]);
 
   useEffect(() => {
+    setLocalRoster(null);
     setIssued(null);
     setConfirmRemove(null);
     setBusy(null);
@@ -92,18 +104,20 @@ export function OrganizationMembers({
     setBusy(key);
     setError(null);
     try {
-      const next = await run(roster.contextRevision);
+      const next = await (profiles
+        ? mutateOrganizationRoster(organizationId, contextRevision, () => run(roster.contextRevision))
+        : run(roster.contextRevision));
       if (current !== contextEpoch.current) return null;
       // Newer than any list read still in flight; retire those reads.
       loadSeq.current += 1;
       setLoading(false);
-      replaceOrganizationRoster(organizationId, next, contextRevision);
+      if (!profiles) setLocalRoster(next);
       return next;
     } catch (failure) {
       if (current !== contextEpoch.current) return null;
       setError(membersErrorMessage(failure));
       // The server is authoritative; re-read so the list shows what it holds.
-      void load(true);
+      void load(true, !profiles);
       return null;
     } finally {
       if (current === contextEpoch.current) setBusy(null);
@@ -166,6 +180,7 @@ export function OrganizationMembers({
           <MemberRow
             key={member.userId}
             member={member}
+            profiles={profiles}
             isSelf={member.email.toLowerCase() === self}
             manage={manage}
             busy={busy}
@@ -257,6 +272,7 @@ export function OrganizationMembers({
 
 function MemberRow({
   member,
+  profiles,
   isSelf,
   manage,
   busy,
@@ -267,6 +283,7 @@ function MemberRow({
   onConfirmRemove,
 }: {
   member: OrganizationMember;
+  profiles: boolean;
   isSelf: boolean;
   manage: boolean;
   busy: string | null;
@@ -315,7 +332,7 @@ function MemberRow({
   return (
     <li className="py-2" aria-label={member.email}>
       <div className="flex items-center gap-2">
-        <MemberProfile member={member} className="size-7" open={profileOpen} onOpenChange={setProfileOpen} />
+        {profiles && <MemberProfile member={member} className="size-7" open={profileOpen} onOpenChange={setProfileOpen} />}
         <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium">
             {name}
@@ -344,7 +361,7 @@ function MemberRow({
         ) : (
           <span className="text-[11px] text-muted-foreground">{roleLabel(member.role)}</span>
         )}
-        <DropdownMenu modal={false}>
+        {profiles && <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon-xs" aria-label={`Actions for ${name}`}><MoreHorizontal /></Button>
           </DropdownMenuTrigger>
@@ -352,7 +369,7 @@ function MemberRow({
             <DropdownMenuItem onSelect={() => setProfileOpen(true)}>View profile</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void copyInfo()}>Copy user info</DropdownMenuItem>
           </DropdownMenuContent>
-        </DropdownMenu>
+        </DropdownMenu>}
       </div>
       {copyNotice && <div role="status" className="fixed bottom-4 right-4 z-(--z-menu) rounded-lg bg-popover px-4 py-3 text-xs shadow-surface hairline">{copyNotice}</div>}
       {confirming && (

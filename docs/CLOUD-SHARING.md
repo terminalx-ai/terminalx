@@ -899,3 +899,12 @@ on the surrounding workspace UI. Members' action menus offer View profile and
 Copy user info (name, email, user ID), with clipboard success/failure feedback.
 The desktop roster API and native bridge carry membership `createdAt` as epoch
 milliseconds; older servers omit it and profiles say the join date is unavailable.
+
+The roster enhancement is controlled per organization by `team.roster.v1` from
+PRO-252. A missing or false capability keeps the prior per-dialog reads, names
+and noninteractive initials. A capability refresh that kills the flag unmounts
+profiles and member action menus, clears cached details, stops polling and
+retires in-flight cache reads/mutations. The additive API timestamp remains
+available independently of rollout. Deploy PRO-252's server foundation and its
+desktop hook before enabling this feature; `src/lib/featureFlags.ts` is identical
+to the shared foundation copy.

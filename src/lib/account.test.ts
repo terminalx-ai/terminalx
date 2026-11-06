@@ -70,6 +70,23 @@ describe("account status after a silent token refresh", () => {
     await vi.waitFor(() => expect(account.getAccount().status.identity?.organizationId).toBe("org-b"));
     expect(mocks.invoke.mock.calls[0]).toEqual(["account_refresh_roles", { force: false }]);
   });
+
+  it("purges the roster cache when account refresh kills the flag without changing context", async () => {
+    const account = await import("./account");
+    const { readOrganizationRoster, cachedOrganizationRosters } = await import("./organizationRoster");
+    const enabled = signedIn(true);
+    enabled.organizations[0].cloud!.flags = { "team.roster.v1": true };
+    mocks.listeners.get("account_status")!({ payload: enabled });
+    mocks.invoke.mockImplementation(async (command: string) => command === "organization_members"
+      ? { members: [{ userId: "a", email: "a@example.com", role: "owner" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "s:1" }
+      : []);
+    await readOrganizationRoster("org-a");
+    expect(cachedOrganizationRosters()).toHaveLength(1);
+    mocks.listeners.get("account_status")!({ payload: signedIn(true) });
+    expect(account.getAccount().status.context?.revision).toBe("s:1");
+    expect(cachedOrganizationRosters()).toEqual([]);
+  });
+
 });
 
 describe("a role changed elsewhere (an owner demotes this admin)", () => {

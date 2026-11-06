@@ -6,7 +6,7 @@ vi.mock("@/lib/organizationMembers", () => ({ organizationMembers: mocks }));
 import { cachedOrganizationRosters, forgetOrganizationRoster, invalidateOrganizationRoster, readOrganizationRoster, replaceOrganizationRoster, resetOrganizationRosters, ROSTER_MAX_AGE_MS, setRosterContext, useOrganizationRoster } from "./organizationRoster";
 const roster = (id = "alice"): OrganizationRoster => ({ members: [{ userId: id, email: `${id}@example.com`, displayName: id, role: "member", photoUrl: `https://example.com/${id}.png`, createdAt: 1234 }], pendingInvites: [], viewerRole: "member", canManageMembers: false, contextRevision: "revision" });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
-beforeEach(() => { mocks.list.mockReset().mockResolvedValue(roster()); mocks.listIn.mockReset().mockResolvedValue(roster()); });
+beforeEach(() => { setRosterContext("active", "revision", ["active", "org-a", "org-b"]); mocks.list.mockReset().mockResolvedValue(roster()); mocks.listIn.mockReset().mockResolvedValue(roster()); });
 afterEach(() => { cleanup(); resetOrganizationRosters(); vi.useRealTimers(); });
 describe("organization roster cache", () => {
   it("coalesces concurrent consumers, reuses results and separates organizations", async () => {
@@ -19,7 +19,7 @@ describe("organization roster cache", () => {
     expect(mocks.listIn).toHaveBeenCalledTimes(2);
   });
   it("shares active organization reads with its explicit organization id", async () => {
-    setRosterContext("org-a", "rev-a");
+    setRosterContext("org-a", "rev-a", ["org-a"]);
     await readOrganizationRoster();
     await readOrganizationRoster("org-a");
     expect(mocks.list).toHaveBeenCalledTimes(1);
@@ -45,11 +45,12 @@ describe("organization roster cache", () => {
     const old = readOrganizationRoster("org-a");
     replaceOrganizationRoster("org-a", roster("bob"), "rev");
     pending.resolve(roster());
-    await expect(old).rejects.toMatchObject({ code: "account_context_changed" });
+    expect((await old).members[0].userId).toBe("bob");
     expect((await readOrganizationRoster("org-a")).members[0].userId).toBe("bob");
   });
   it("discards late reads after sign-out and after leaving an organization", async () => {
     for (const clear of [() => resetOrganizationRosters(), () => forgetOrganizationRoster("org-a")]) {
+      setRosterContext("active", "revision", ["org-a"]);
       const pending = deferred<OrganizationRoster>();
       mocks.listIn.mockReturnValueOnce(pending.promise);
       const old = readOrganizationRoster("org-a");
@@ -71,4 +72,44 @@ describe("organization roster cache", () => {
     await readOrganizationRoster("org-a", { active: true, contextRevision: "new-context" });
     expect(mocks.list).toHaveBeenCalledTimes(1);
   });
+});
+
+it("does not cache or poll when the flag is missing", async () => {
+  setRosterContext("org-a", "rev-a", []);
+  vi.useFakeTimers();
+  renderHook(() => useOrganizationRoster("org-a", false));
+  await readOrganizationRoster("org-a");
+  await readOrganizationRoster("org-a");
+  expect(mocks.list).toHaveBeenCalledTimes(2);
+  expect(cachedOrganizationRosters()).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("a same-revision rollout kill clears data, stops polling and retires pending responses", async () => {
+  vi.useFakeTimers();
+  renderHook(() => useOrganizationRoster("org-a"));
+  await act(() => readOrganizationRoster("org-a"));
+  const pending = deferred<OrganizationRoster>();
+  mocks.listIn.mockReturnValueOnce(pending.promise);
+  let old!: Promise<OrganizationRoster>;
+  act(() => { old = readOrganizationRoster("org-a", { fresh: true }); });
+  act(() => setRosterContext("active", "revision", []));
+  expect(cachedOrganizationRosters()).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+  pending.resolve(roster());
+  await expect(old).rejects.toMatchObject({ code: "account_context_changed" });
+  expect(cachedOrganizationRosters()).toEqual([]);
+});
+
+it("does not let a mutation repopulate a killed or different account cache", async () => {
+  const { mutateOrganizationRoster } = await import("./organizationRoster");
+  for (const clear of [() => setRosterContext("active", "revision", []), () => resetOrganizationRosters()]) {
+    setRosterContext("active", "revision", ["org-a"]);
+    const pending = deferred<OrganizationRoster>();
+    const saved = mutateOrganizationRoster("org-a", "revision", () => pending.promise);
+    clear();
+    pending.resolve(roster());
+    await saved;
+    expect(cachedOrganizationRosters()).toEqual([]);
+  }
 });

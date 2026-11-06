@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { refreshRosterFlags } from "@/test/rosterFlags";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { organizationMembers, type OrganizationRoster } from "@/lib/organizationMembers";
 import { resetPeople } from "@/lib/cloudPeople";
@@ -14,6 +15,8 @@ vi.mock("@/lib/organizationMembers", async (importOriginal) => ({
     remove: vi.fn(),
   },
 }));
+
+vi.mock("@/lib/account", async () => (await import("@/test/rosterFlags")).rosterFlagAccountMock);
 
 const api = vi.mocked(organizationMembers);
 
@@ -41,6 +44,7 @@ const renderAs = async (email = "admin@example.com", contextRevision = "account-
 
 beforeEach(() => {
   vi.resetAllMocks();
+  refreshRosterFlags();
   api.list.mockResolvedValue(roster());
 });
 afterEach(() => { cleanup(); resetPeople(); });
@@ -311,4 +315,55 @@ it("reports a failed clipboard write without a success toast", async () => {
   fireEvent.click(await screen.findByRole("menuitem", { name: "Copy user info" }));
   await screen.findByText("Could not copy user info. Try again.");
   expect(screen.queryByText("User info copied.")).toBeNull();
+});
+
+it("keeps the existing members controls without profile or copy surfaces while the flag is absent", async () => {
+  refreshRosterFlags([]);
+  await renderAs();
+  expect(screen.queryByRole("button", { name: /View profile|Actions for/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "Remove member@example.com" })).toBeTruthy();
+  cleanup();
+  await renderAs();
+  expect(api.list).toHaveBeenCalledTimes(2);
+});
+
+it("unmounts an open profile and row actions on an account refresh kill", async () => {
+  await renderAs();
+  fireEvent.click(screen.getByRole("button", { name: "View profile: Olive Owner" }));
+  await screen.findByRole("dialog", { name: "Profile of Olive Owner" });
+  act(() => refreshRosterFlags([]));
+  await screen.findByRole("list", { name: "Organization members" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.queryByRole("button", { name: /View profile|Actions for/ })).toBeNull();
+});
+
+it("reconciles a successful removal after Members closes", async () => {
+  const { readOrganizationRoster } = await import("@/lib/organizationRoster");
+  let finish!: (value: OrganizationRoster) => void;
+  api.remove.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+  const view = await renderAs();
+  fireEvent.click(screen.getByRole("button", { name: "Remove member@example.com" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
+  view.unmount();
+  await act(async () => finish(roster({ members: roster().members.filter((member) => member.userId !== "member-1") })));
+  expect((await readOrganizationRoster("org-1")).members.some((member) => member.userId === "member-1")).toBe(false);
+  expect(api.list).toHaveBeenCalledTimes(1);
+});
+
+it.each(["older-first", "newer-first"])("ignores a retired Members read after an event refresh (%s)", async (order) => {
+  const { invalidateOrganizationRoster } = await import("@/lib/organizationRoster");
+  let older!: (value: OrganizationRoster) => void;
+  let newer!: (value: OrganizationRoster) => void;
+  api.list.mockReturnValueOnce(new Promise((resolve) => { older = resolve; }));
+  api.list.mockReturnValueOnce(new Promise((resolve) => { newer = resolve; }));
+  render(<OrganizationMembers organizationId="org-1" accountEmail="admin@example.com" contextRevision="account-1" />);
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
+  act(() => invalidateOrganizationRoster("org-1"));
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    if (order === "older-first") { older(roster()); await Promise.resolve(); newer(roster()); }
+    else { newer(roster()); await Promise.resolve(); older(roster()); }
+  });
+  await screen.findByRole("list", { name: "Organization members" });
+  expect(screen.queryByText("Your account or organization changed. The list has been refreshed.")).toBeNull();
 });

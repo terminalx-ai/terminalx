@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Loader2, Lock, UserPlus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -6,8 +6,10 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { useAccount } from "@/lib/account";
 import { api, type CloudShareRole, type CloudWorkspaceShare, type CloudWorkspaceShares } from "@/lib/api";
 import { VISIBILITY_ADMIN_REASON, notifyAccessChanged } from "@/lib/cloudCollab";
-import { rememberPeople } from "@/lib/cloudPeople";
+import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
+import type { OrganizationMember } from "@/lib/organizationMembers";
 import { MemberProfile } from "@/components/people/MemberProfile";
 
 /**
@@ -133,9 +135,12 @@ export function CloudShareDialog({
   const defaultOrg = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
   const [listed, setListed] = useState<CloudWorkspaceShares | null>(null);
   const org = orgId ?? status.identity?.organizationId;
-  const rosterState = useOrganizationRoster(org);
-  const members = rosterState.roster?.members ?? [];
-  const rosterError = rosterState.error ? codeOf(rosterState.error) : null;
+  const profiles = useFeatureFlag(featureFlags.teamRoster, org);
+  const rosterState = useOrganizationRoster(org, profiles);
+  const [legacyMembers, setLegacyMembers] = useState<OrganizationMember[]>([]);
+  const [legacyError, setLegacyError] = useState<string | null>(null);
+  const members = profiles ? rosterState.roster?.members ?? [] : legacyMembers;
+  const rosterError = profiles ? rosterState.error ? codeOf(rosterState.error) : null : legacyError;
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -159,9 +164,20 @@ export function CloudShareDialog({
   }, [workspaceId, orgId]);
 
   const contextRevision = status.context?.revision ?? "";
+  const membersRead = useRef(0);
   const loadMembers = useCallback((fresh = true) => {
-    void readOrganizationRoster(org, { fresh, active: defaultOrg, contextRevision }).catch(() => {});
-  }, [org, defaultOrg, contextRevision]);
+    if (profiles) {
+      void readOrganizationRoster(org, { fresh, active: defaultOrg, contextRevision }).catch(() => {});
+      return;
+    }
+    const read = ++membersRead.current;
+    setLegacyError(null);
+    const pending = defaultOrg ? loadRoster({ fresh: true }) : loadRosterIn(orgId!, { fresh: true });
+    void pending.then(
+      (next) => { if (read === membersRead.current) setLegacyMembers(next); },
+      (error: unknown) => { if (read === membersRead.current) setLegacyError(codeOf(error)); },
+    );
+  }, [org, orgId, defaultOrg, contextRevision, profiles]);
 
   /** A refusal that says the person left the organization: what is shown of them is out of date, so both lists are read again. */
   const leftOrganization = (e: unknown, userId: string) => {
@@ -174,6 +190,7 @@ export function CloudShareDialog({
   useEffect(() => {
     void reload();
     loadMembers(false);
+    return () => { membersRead.current++; };
   }, [reload, loadMembers]);
 
   const manage = listed?.you.canManageShares ?? false;
@@ -397,7 +414,7 @@ export function CloudShareDialog({
               <ul className="flex flex-col divide-y divide-hairline rounded-md border border-hairline" aria-label="People with access">
                 {listed.shares.map((share) => (
                   <li key={share.userId} className="flex items-center gap-2 px-3 py-2" data-testid="cloud-share-row">
-                    <MemberProfile className="size-7" member={members.find((member) => member.userId === share.userId) ?? { userId: share.userId, email: share.email, displayName: share.name ?? undefined, role: "" }} />
+                    {profiles && <MemberProfile className="size-7" member={members.find((member) => member.userId === share.userId) ?? { userId: share.userId, email: share.email, displayName: share.name ?? undefined, role: "" }} />}
                     <div className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate text-sm">{share.name || share.email}</span>
                       {share.name && <span className="truncate text-muted-foreground">{share.email}</span>}

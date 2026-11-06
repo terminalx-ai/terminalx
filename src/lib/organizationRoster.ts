@@ -15,6 +15,7 @@ interface Entry {
   snapshot: RosterSnapshot;
   updatedAt: number;
   sequence: number;
+  generation: number;
   request?: Promise<OrganizationRoster>;
   contextRevision?: string;
   options: ReadOptions;
@@ -25,12 +26,13 @@ const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 let activeOrg: string | null = null;
 let activeRevision = "";
+let enabledOrganizations = new Set<string>();
 const keyOf = (orgId?: string | null) => orgId || activeOrg || ACTIVE;
 
 function entryFor(key: string): Entry {
   let entry = entries.get(key);
   if (!entry) {
-    entry = { snapshot: EMPTY, updatedAt: 0, sequence: 0, options: {}, listeners: new Set() };
+    entry = { snapshot: EMPTY, updatedAt: 0, sequence: 0, generation: 0, options: {}, listeners: new Set() };
     entries.set(key, entry);
   }
   return entry;
@@ -47,26 +49,39 @@ export function cachedOrganizationRosters(): OrganizationRoster[] {
   return [...entries.values()].flatMap((entry) => entry.snapshot.roster ? [entry.snapshot.roster] : []);
 }
 
-/** Called by the account store before publishing a new account context. */
-export function setRosterContext(orgId: string | null, revision: string) {
-  if (activeOrg === orgId && activeRevision === revision) return;
+export function rosterCacheEnabled(orgId?: string | null): boolean {
+  return enabledOrganizations.has(keyOf(orgId));
+}
+
+/** Account refreshes reconcile rollout kills even when the context revision is unchanged. */
+export function setRosterContext(orgId: string | null, revision: string, enabledOrgIds: readonly string[] = []) {
+  const contextChanged = activeOrg !== orgId || activeRevision !== revision;
+  const previous = enabledOrganizations;
+  enabledOrganizations = new Set(enabledOrgIds);
   activeOrg = orgId;
   activeRevision = revision;
   for (const [key, entry] of entries) {
-    // Context revisions authorize mutations only in the context that read them.
+    if (!rosterCacheEnabled(key)) {
+      forgetOrganizationRoster(key);
+      continue;
+    }
+    if (!contextChanged && previous.has(key)) continue;
+    entry.generation++;
     entry.contextRevision = undefined;
     entry.sequence++;
     entry.request = undefined;
     entry.updatedAt = 0;
     entry.options = { active: key === orgId || key === ACTIVE, contextRevision: revision };
-    if (orgId && entry.listeners.size) void readOrganizationRoster(key, entry.options).catch(() => {});
+    if (entry.listeners.size) void readOrganizationRoster(key, entry.options).catch(() => {});
   }
 }
 
 export function readOrganizationRoster(orgId?: string | null, options: ReadOptions = {}): Promise<OrganizationRoster> {
   const key = keyOf(orgId);
-  const entry = entryFor(key);
   const active = options.active ?? (key === activeOrg || key === ACTIVE);
+  if (!rosterCacheEnabled(key)) return active ? organizationMembers.list() : organizationMembers.listIn(key);
+  const entry = entryFor(key);
+  const generation = entry.generation;
   const contextRevision = active ? options.contextRevision ?? activeRevision : undefined;
   const compatible = !active || entry.contextRevision === contextRevision;
   if (!options.fresh && compatible) {
@@ -77,15 +92,22 @@ export function readOrganizationRoster(orgId?: string | null, options: ReadOptio
   entry.options = { active, contextRevision };
   entry.contextRevision = contextRevision;
   const current = () => entries.get(key) === entry && entry.sequence === sequence;
-  const request = Promise.resolve()
+  const superseded = (): OrganizationRoster | Promise<OrganizationRoster> => {
+    if (entry.generation !== generation || !rosterCacheEnabled(key)) throw { code: "account_context_changed" };
+    if (entry.request && entry.request !== request) return entry.request;
+    if (entry.updatedAt > 0 && entry.snapshot.roster) return entry.snapshot.roster;
+    throw { code: "organization_roster_superseded" };
+  };
+  const request: Promise<OrganizationRoster> = Promise.resolve()
     .then(() => active ? organizationMembers.list() : organizationMembers.listIn(key))
     .then((roster) => {
-      if (!current()) throw { code: "account_context_changed" };
+      if (!current()) return superseded();
       entry.updatedAt = Date.now();
       entry.request = undefined;
       publish(entry, { roster, loading: false, error: null });
       return roster;
     }, (error: unknown) => {
+      if (!current()) return superseded();
       if (current()) {
         entry.request = undefined;
         // A refusal may mean membership ended: do not keep exposing old details.
@@ -102,6 +124,7 @@ export function readOrganizationRoster(orgId?: string | null, options: ReadOptio
 
 /** A mutation's authoritative result retires any older read. */
 export function replaceOrganizationRoster(orgId: string | null | undefined, roster: OrganizationRoster, contextRevision: string) {
+  if (!rosterCacheEnabled(orgId)) return;
   const entry = entryFor(keyOf(orgId));
   entry.sequence++;
   entry.request = undefined;
@@ -110,8 +133,25 @@ export function replaceOrganizationRoster(orgId: string | null | undefined, rost
   publish(entry, { roster, loading: false, error: null });
 }
 
+/** Reconcile committed changes independently of the Members component's lifetime. */
+export async function mutateOrganizationRoster(orgId: string | null | undefined, contextRevision: string, run: () => Promise<OrganizationRoster>) {
+  const key = keyOf(orgId);
+  const entry = entryFor(key);
+  const generation = entry.generation;
+  const current = () => entry.generation === generation && rosterCacheEnabled(key);
+  try {
+    const roster = await run();
+    if (current()) replaceOrganizationRoster(key, roster, contextRevision);
+    return roster;
+  } catch (error) {
+    if (current()) invalidateOrganizationRoster(key);
+    throw error;
+  }
+}
+
 /** Membership/access events refresh mounted consumers and expire idle caches. */
 export function invalidateOrganizationRoster(orgId: string) {
+  if (!rosterCacheEnabled(orgId)) return;
   const entry = entries.get(keyOf(orgId));
   if (!entry) return;
   entry.updatedAt = 0;
@@ -122,13 +162,18 @@ export function invalidateOrganizationRoster(orgId: string) {
 export function forgetOrganizationRoster(orgId: string) {
   const entry = entries.get(keyOf(orgId));
   if (!entry) return;
+  entry.generation++;
   entry.sequence++;
   entry.request = undefined;
   entry.updatedAt = 0;
+  if (entry.timer) { clearInterval(entry.timer); entry.timer = undefined; }
   publish(entry, EMPTY);
 }
 export function resetOrganizationRosters() {
+  enabledOrganizations.clear();
   for (const entry of entries.values()) {
+    entry.generation++;
+    if (entry.timer) { clearInterval(entry.timer); entry.timer = undefined; }
     entry.sequence++;
     entry.request = undefined;
     entry.updatedAt = 0;
@@ -138,13 +183,14 @@ export function resetOrganizationRosters() {
   activeOrg = null;
   activeRevision = "";
 }
-export function useOrganizationRoster(orgId?: string | null): RosterSnapshot {
+export function useOrganizationRoster(orgId?: string | null, enabled = true): RosterSnapshot {
   const key = keyOf(orgId);
   const subscribe = useCallback((listener: () => void) => {
+    if (!enabled || !rosterCacheEnabled(key)) return () => {};
     const entry = entryFor(key);
     entry.listeners.add(listener);
     if (!entry.timer) entry.timer = setInterval(() => {
-      if (entry.snapshot.roster) void readOrganizationRoster(key, entry.options).catch(() => {});
+      if (rosterCacheEnabled(key) && entry.snapshot.roster) void readOrganizationRoster(key, entry.options).catch(() => {});
     }, ROSTER_MAX_AGE_MS);
     return () => {
       entry.listeners.delete(listener);
@@ -153,6 +199,6 @@ export function useOrganizationRoster(orgId?: string | null): RosterSnapshot {
         entry.timer = undefined;
       }
     };
-  }, [key]);
-  return useSyncExternalStore(subscribe, () => entries.get(key)?.snapshot ?? EMPTY, () => EMPTY);
+  }, [key, enabled]);
+  return useSyncExternalStore(subscribe, () => enabled ? entries.get(key)?.snapshot ?? EMPTY : EMPTY, () => EMPTY);
 }

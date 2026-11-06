@@ -10,6 +10,7 @@ import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
 import { forgetOtherSetups, forgetSetups } from "@/lib/organizationSetup";
 import { claimCloudMirrorOwner, purgeCloudMirrors } from "@/lib/cloudMirror";
 import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
+import { featureFlagEnabled, featureFlags } from "@/lib/featureFlags";
 import { forgetOrganizationRoster, setRosterContext } from "@/lib/organizationRoster";
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
@@ -102,7 +103,8 @@ function applyStatus(status: AccountStatus) {
     const left = new Set(leftMemberships(state.status, status));
     if (left.size > 0) void purgeCloudMirrors((orgId) => !left.has(orgId));
   }
-  setRosterContext(status.identity?.organizationId ?? null, status.context?.revision ?? "");
+  setRosterContext(status.identity?.organizationId ?? null, status.context?.revision ?? "",
+    status.organizations?.filter((org) => featureFlagEnabled(status, featureFlags.teamRoster, org.id)).map((org) => org.id) ?? []);
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);

@@ -1,3 +1,4 @@
+import { refreshRosterFlags, rosterFlagAccount } from "@/test/rosterFlags";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceShare, CloudWorkspaceShares } from "@/lib/api";
@@ -22,8 +23,8 @@ vi.mock("@/lib/api", () => ({
 }));
 vi.mock("@/lib/organizationMembers", () => ({ organizationMembers: { list: mocks.members, listIn: mocks.membersIn } }));
 // The account's default organization decides whether the roster applies.
-const account = vi.hoisted(() => ({ status: { identity: { organizationId: "org-1", email: "me@example.com" } } as unknown }));
-vi.mock("@/lib/account", () => ({ useAccount: () => account }));
+const account = rosterFlagAccount;
+vi.mock("@/lib/account", async () => (await import("@/test/rosterFlags")).rosterFlagAccountMock);
 
 import { CloudShareDialog, CloudShareDialogHost, openShareDialog, shareErrorMessage, yourAccessText } from "./CloudShareDialog";
 import { personName, resetPeople } from "@/lib/cloudPeople";
@@ -45,6 +46,7 @@ const share = (fields: Partial<CloudWorkspaceShare> = {}): CloudWorkspaceShare =
 let listed: CloudWorkspaceShares;
 
 beforeEach(() => {
+  refreshRosterFlags();
   listed = { shares: [share()], you: { role: "manager", canApprove: true, canManageShares: true } };
   mocks.shares.mockReset().mockImplementation(async () => listed);
   mocks.put.mockReset().mockImplementation(async (_ws: string, userId: string, role: string, canApprove: boolean) => {
@@ -229,7 +231,7 @@ describe("share dialog", () => {
 
     // The account's own organization list wins over the roster, and is there before the roster loads.
     const before = account.status;
-    account.status = { identity: { organizationId: "org-1", email: "me@example.com" }, organizations: [{ id: "org-1", name: "Acme", role: "admin" }] };
+    account.status = { ...account.status, identity: { organizationId: "org-1", email: "me@example.com", name: "Me", organization: "Acme" }, organizations: [{ id: "org-1", name: "Acme", role: "admin" }] };
     dialog();
     expect((await screen.findByTestId("cloud-share-you")).textContent).toBe("Your access: Admin (an organization admin: manages this workspace and who it is shared with).");
     account.status = before;
@@ -585,4 +587,25 @@ it("opens the shared profile from a share avatar", async () => {
   const profile = await screen.findByRole("dialog", { name: "Profile of Alice" });
   expect(within(profile).getByText("alice@example.com")).toBeTruthy();
   expect(within(profile).getByText("Member")).toBeTruthy();
+});
+
+it("falls back to per-open roster reads without profile avatars when the flag is missing", async () => {
+  refreshRosterFlags([]);
+  dialog();
+  await screen.findByTestId("cloud-share-row");
+  await waitFor(() => expect(mocks.members).toHaveBeenCalledTimes(1));
+  expect(screen.queryByRole("button", { name: /View profile/ })).toBeNull();
+  cleanup();
+  dialog();
+  await waitFor(() => expect(mocks.members).toHaveBeenCalledTimes(2));
+});
+
+it("closes a Share profile when capability refresh removes the flag", async () => {
+  dialog();
+  fireEvent.click(await screen.findByRole("button", { name: "View profile: Alice" }));
+  await screen.findByRole("dialog", { name: "Profile of Alice" });
+  act(() => refreshRosterFlags([]));
+  expect(screen.queryByRole("dialog", { name: "Profile of Alice" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /View profile/ })).toBeNull();
+  expect(screen.getByTestId("cloud-share-dialog")).toBeTruthy();
 });
