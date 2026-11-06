@@ -26,6 +26,14 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
             let taken: std::collections::HashSet<_> = sessions.iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.follow.pane.as_deref()).collect();
             return Ok(serde_json::to_value(terminals.shells().into_iter().filter(|shell| !taken.contains(shell.id.as_str())).collect::<Vec<_>>())?);
         }
+        // The setup step running for an agent (PRO-152), for a window that did not start it.
+        if method == "agentSetupRunning" {
+            let harness = string(&params, "harness")?;
+            return Ok(match crate::harness::setup::current(harness, &setup_panes(terminals, harness)) {
+                Some((pane, step)) => json!({ "pane": pane, "step": step.name() }),
+                None => Value::Null,
+            });
+        }
         if method == "busyMany" {
             let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
             if ids.len() > 4096 || ids.iter().any(|id| id.is_empty() || id.len() > 256) { bail!("invalid pane list"); }
@@ -68,6 +76,23 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 if let Some(shell) = terminals.shell(id) { sink.emit("pty_opened", &shell); }
                 Ok(Value::Null)
             }
+            // An agent's install or sign-in (PRO-152), in a pane of no
+            // session. The step's command is the registry's, never the caller's.
+            "agentSetup" => {
+                manager.accepting_work()?;
+                let harness = string(&params, "harness")?;
+                if !crate::harness::setup::is_pane(harness, id) { bail!("invalid setup pane id"); }
+                let step = crate::harness::setup::Step::parse(string(&params, "step")?)?;
+                let command = crate::harness::setup::command(harness, step)?;
+                let (cols, rows) = size()?;
+                let home = dirs::home_dir().context("no home directory")?;
+                // One step at a time per agent, whichever pane or window asks.
+                crate::harness::setup::begin(harness, id, step, || setup_panes(terminals, harness), || {
+                    // In the place of the step before, whose output stays above this one's.
+                    terminals.respawn(sink.clone(), id, crate::pty::PaneSpec { cwd: &home.to_string_lossy(), cols, rows, command: Some(&command), env: &[] })
+                })?;
+                Ok(Value::Null)
+            }
             "write" => {
                 let data = string(&params, "data")?;
                 if data.len() > 1024 * 1024 { bail!("terminal input is too large"); }
@@ -96,6 +121,11 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
     } else {
         bail!("unsupported local runtime operation")
     }
+}
+
+/// An agent's setup panes whose step still runs.
+fn setup_panes(terminals: &crate::pty::Terminals, harness: &str) -> Vec<String> {
+    terminals.panes().into_iter().filter(|pane| pane.running && crate::harness::setup::is_pane(harness, &pane.id)).map(|pane| pane.id).collect()
 }
 
 pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> Result<Value> {

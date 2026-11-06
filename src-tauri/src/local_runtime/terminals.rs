@@ -29,6 +29,16 @@ impl Terminals {
         self.0.call("runtime.pty.githubLogin", json!({"id":id}))
     }
 
+    /// Run an agent's install or sign-in step in setup pane `id` (PRO-152).
+    pub fn agent_setup(&self, id: &str, harness: &str, step: &str, cols: u16, rows: u16) -> Result<()> {
+        self.0.call("runtime.pty.agentSetup", json!({"id":id,"harness":harness,"step":step,"cols":cols,"rows":rows}))
+    }
+
+    /// The setup step running for an agent, as `{pane, step}`, or null.
+    pub fn agent_setup_running(&self, harness: &str) -> Result<serde_json::Value> {
+        self.0.quick("runtime.pty.agentSetupRunning", json!({"harness":harness}))
+    }
+
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<()> {
         self.0.quick("runtime.pty.write", json!({"id":id,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))
     }

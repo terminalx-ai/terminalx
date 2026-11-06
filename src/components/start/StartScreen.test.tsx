@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, Project } from "@/types/session";
 
@@ -27,6 +27,7 @@ vi.mock("@/lib/sessions", () => ({ ...sessions, useSessionStore: () => store }))
 const { StartScreen } = await import("./StartScreen");
 const { ProjectStartDialogHost } = await import("./ProjectStartDialogs");
 const { openProjectStart } = await import("@/lib/projectStart");
+const { forgetReadiness } = await import("@/lib/agentReadiness");
 
 const claude = { id: "claude", name: "Claude Code", available: true, installHint: "npm i -g claude", installUrl: "https://example.com/claude" } as HarnessInfo;
 const codex = { id: "codex", name: "Codex", available: false, installHint: "npm i -g codex", installUrl: "https://example.com/codex" } as HarnessInfo;
@@ -42,11 +43,13 @@ async function emitDrop(payload: { type: string; paths?: string[] }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  forgetReadiness();
   dragDropListener.mockResolvedValue(vi.fn());
   store.harnesses = [claude];
   account.status = { state: "signed-out" };
   sessions.addProject.mockImplementation(async (path: string) => ({ path, name: path.split("/").pop() }) as Project);
   invoke.mockImplementation(async (command: string) => {
+    if (command === "check_agent_readiness") return { state: "missing", checkedAt: null, version: null };
     if (command === "github_repositories") return { status: "ready", repositories: [], truncated: false };
     if (command === "project_start_defaults") return { projectsDir: "/home/me/Projects", suggestedName: "my-project" };
     throw new Error(`unexpected command ${command}`);
@@ -180,20 +183,47 @@ describe("the start screen", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("That folder is a cloud mirror.");
   });
 
-  it("says so when no agent is installed, with the install action and a re-check", () => {
-    store.harnesses = [{ ...claude, available: false }, codex];
+  it("says so when no agent is installed, with each agent's install action and a re-check", async () => {
+    store.harnesses = [{ ...claude, available: false, installable: true }, { ...codex, installable: true }];
     const onOpenSettings = vi.fn();
     render(<StartScreen onOpenSettings={onOpenSettings} />);
 
     const notice = screen.getByTestId("start-no-agent");
     expect(notice.textContent).toContain("No agent is installed");
-    fireEvent.click(screen.getByRole("button", { name: /Set up Codex/ }));
-    expect(onOpenSettings).toHaveBeenCalledWith("agents");
+    // Installed from here, not by way of Settings or the provider's site.
+    expect(await screen.findByRole("button", { name: "Install Claude Code and sign in" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
     expect(openUrl).not.toHaveBeenCalled();
+    // The commands to run by hand are one press away, not in the way.
+    expect(screen.queryByText(codex.installHint)).toBeNull();
+    const codexRow = screen.getByRole("region", { name: "Codex setup" });
+    fireEvent.click(within(codexRow).getByRole("button", { name: "Run it yourself" }));
+    expect(within(codexRow).getByText(codex.installHint)).toBeTruthy();
+    expect(screen.queryByText(claude.installHint)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Check again/ }));
     expect(sessions.refreshHarnesses).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
     expect(onOpenSettings).toHaveBeenCalledWith("agents");
+  });
+
+  it("offers sign-in when every installed agent is signed out, and nothing once one is ready", async () => {
+    store.harnesses = [{ ...claude, installable: true }, { ...codex, installable: true }];
+    let claudeState = "signed_out";
+    invoke.mockImplementation(async (command: string, args: { harness: string }) => {
+      if (command === "check_agent_readiness") return { state: args.harness === "claude" ? claudeState : "missing", checkedAt: null, version: null };
+      throw new Error(`unexpected command ${command}`);
+    });
+    const { unmount } = render(<StartScreen onOpenSettings={vi.fn()} />);
+    expect((await screen.findByTestId("start-no-agent")).textContent).toContain("No agent is signed in");
+    expect(await screen.findByRole("button", { name: "Sign in to Claude Code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
+    unmount();
+
+    claudeState = "ready";
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("check_agent_readiness", { harness: "claude" }));
+    await act(async () => {});
+    expect(screen.queryByTestId("start-no-agent")).toBeNull();
   });
 
   it("claims nothing about agents before the probe has answered", () => {

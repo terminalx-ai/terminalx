@@ -255,6 +255,28 @@ pub fn permission_decision(allow: bool) -> Value {
     json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision } })
 }
 
+/// Why a `PermissionRequest` card is up: Codex's sandbox stopped the call and
+/// asks to run it outside, which is more than running the command. In Ask
+/// every time the reader may just have allowed the command itself.
+pub const OUTSIDE_SANDBOX: &str = "Codex asks to run this outside its sandbox.";
+
+/// What the model is told when it runs a call again while the same call
+/// still waits on the reader's card (PRO-160).
+pub const ALREADY_WAITING: &str = "This command is already waiting for approval in another call. Wait for that call's result instead of running it again.";
+
+/// The reply either permission hook prints for that repeat. It blocks only
+/// the repeat. The call already waiting keeps its card and gets the reader's answer.
+pub fn already_waiting(gate: &str) -> Value {
+    if gate == "PreToolUse" {
+        return json!({ "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": ALREADY_WAITING,
+        }});
+    }
+    json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": { "behavior": "deny", "message": ALREADY_WAITING } } })
+}
+
 /// The reply a `PreToolUse` hook prints to gate a tool the reader has been
 /// asked about. A denial has to carry a reason — Codex rejects
 /// `permissionDecision: "deny"` without one — and the model is shown it as

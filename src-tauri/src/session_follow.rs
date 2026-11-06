@@ -453,7 +453,6 @@ impl SessionManager {
             turn_tail: Default::default(),
             transcript_turn: None,
             transcript_end_owed: false,
-            answered: HashMap::new(),
             command: format!("{} (started in this terminal)", crate::harness::display_name(agent.harness)),
             // No hook of the app's was given to this CLI, so no frame can be
             // its: the token is one nobody holds, and no path is under the root.

@@ -1959,8 +1959,6 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
             let rig = Rig::of(CliKind::Codex, "");
             rig.compose("active turn", 0);
             rig.cli_takes("active turn");
-            // This control reuses consent only with a verified execution
-            // directory; command-only Codex frames now always ask.
             let input = json!({"command":"ls", "workdir":"/workspace/app"});
             let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: event.into(),
                 payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":input, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
@@ -1983,7 +1981,6 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
                     p.origin.token = crate::hooks::mint_token();
                 }
                 p.ready = ready.clone();
-                p.answered.insert(tool_key("Bash", &input), true);
             }
             let receipt = rig.compose_confirmed("still awaiting acceptance");
             rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
@@ -1998,6 +1995,10 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
                 (rt.last_activity, rt.status, rt.seq)
             };
             resume_tx.send(()).unwrap();
+            if event == "PermissionRequest" && !replace {
+                // The launch that asked is still the tab's: its hook asks on a card of its own.
+                rig.manager.respond_permission(SESSION, TAB, &new_card(&rig, "retained"), "allow").unwrap();
+            }
             let reply = worker.join().unwrap();
             if replace {
                 let rt = rig.rt.lock().unwrap();
@@ -2071,8 +2072,20 @@ fn stale_stop_reply_cannot_fabricate_successor_output() {
     assert!(rig.turn_open());
 }
 
+/// The card a hook files after `known`, once it has filed it.
+fn new_card(rig: &Rig, known: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(card) = rig.rt.lock().unwrap().pending.keys().find(|id| *id != known).cloned() { return card; }
+        assert!(Instant::now() < deadline, "the hook must file a card");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A permission hook that waited while its launch was replaced asks for
+/// nothing in the successor: no card is filed for it, and it is not allowed.
 #[test]
-fn delayed_permission_lookup_cannot_reuse_successor_consent() {
+fn a_delayed_permission_hook_asks_only_for_its_own_launch() {
     for replace in [false, true] {
         let rig = Rig::of(CliKind::Codex, "");
         let input = json!({"command":"ls", "workdir":"/workspace/app"});
@@ -2096,9 +2109,11 @@ fn delayed_permission_lookup_cannot_reuse_successor_consent() {
                 p.generation += 1;
                 p.origin.token = crate::hooks::mint_token();
             }
-            p.answered.insert(tool_key("Bash", &input), true);
         }
         resume_tx.send(()).unwrap();
+        if !replace {
+            rig.manager.respond_permission(SESSION, TAB, &new_card(&rig, ""), "allow").unwrap();
+        }
         let reply = worker.join().unwrap();
         assert_eq!(reply == reply_for(CliKind::Codex, "PermissionRequest", Decision::Allow), !replace);
         assert!(rig.rt.lock().unwrap().pending.is_empty());

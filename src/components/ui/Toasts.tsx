@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, MessageCircleQuestion, X } from "@/icons";
+import { AlertCircle, CheckCircle2, MessageCircleQuestion, Play, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { dismissNotice, openNotice, useNotices } from "@/lib/notify";
@@ -13,7 +13,7 @@ export function Toasts() {
     <div className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto">
       {notices.map((n) => {
         const tab = store.sessions.find((s) => s.id === n.sessionId)?.tabs.find((t) => t.id === n.tabId);
-        const Icon = n.kind === "waiting" ? MessageCircleQuestion : n.kind === "failed" ? AlertCircle : CheckCircle2;
+        const Icon = n.kind === "started" ? Play : n.kind === "waiting" ? MessageCircleQuestion : n.kind === "failed" ? AlertCircle : CheckCircle2;
         return (
           <div
             key={n.id}
