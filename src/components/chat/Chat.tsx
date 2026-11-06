@@ -334,8 +334,8 @@ export function Chat({
   }, []);
 
   // A prompt's mark was clicked: its turn's top under the top of the view.
-  // A turn not drawn is gone to where the list has it, then settled on
-  // exactly once it is drawn and measured.
+  // The view goes to where the list has the turn, then settles on it exactly
+  // once it is drawn and measured.
   const pendingJump = useRef<string | null>(null);
   const jumpTo = useCallback(
     (key: string) => {
@@ -343,11 +343,8 @@ export function Chat({
       const index = turnList.current.findIndex((t) => t.key === key);
       if (!el || index < 0) return;
       follow(false);
-      const node = el.querySelector<HTMLElement>(`[data-turn="${CSS.escape(key)}"]`);
-      if (node) {
-        el.scrollTo({ top: el.scrollTop + node.getBoundingClientRect().top - el.getBoundingClientRect().top - 12, behavior: "smooth" });
-        return;
-      }
+      // Instant, then settled once drawn: turns drawn on the way are measured and shift
+      // scrollTop, which would stop a smooth scroll short and move its destination.
       pendingJump.current = key;
       el.scrollTop = listTop(el) + tops.current[index] - 12;
       lastTop.current = el.scrollTop;
