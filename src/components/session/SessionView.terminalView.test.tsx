@@ -1249,7 +1249,7 @@ describe("#644 on a cloud agent tab", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "continue after switch" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(enqueued).toEqual(["send"]));
-    expect(guard.calls.filter(({ command }) => command === "cloud_agent_enqueue").at(-1)?.args).toMatchObject({ text: "continue after switch" });
+    expect(guard.calls.filter(({ command }) => command === "cloud_agent_enqueue").at(-1)?.args.payload).toMatchObject({ text: "continue after switch" });
   });
 
   it("lets the reader keep chatting while a native switch waits (#816)", async () => {

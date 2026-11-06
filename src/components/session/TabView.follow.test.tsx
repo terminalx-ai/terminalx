@@ -9,7 +9,7 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  */
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} },
+  views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} },
   start: vi.fn(),
   forget: vi.fn(),
   leave: vi.fn(),
