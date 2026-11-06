@@ -14,6 +14,33 @@ are explicit to make later comparisons reproducible.
 No after result or 20-minute target attainment is claimed. Step 1’s measurement
 acceptance criterion remains open until its after column has real observations.
 
+## Publication checkpoint (2026-11-06, 13:45 UTC)
+
+The validated Step 1 implementation is committed in `5e9ce715` and `f1bae20c`.
+Read-only GitHub queries found no pull request and zero CI runs for
+`raccoon/pro-267-run-ci-s-linux-tests-on-our-own`. The post-split sample is
+therefore **0 of the required 10 successful runs**; there are no after timings
+to report. The frozen ten-run baseline above was reproduced from its saved
+input without replacing it with a different sample.
+
+Publication remains with TerminalX. Its installed 0.2.23 pipeline guide and
+matching release source were checked: `advance` from the work stage records
+"Taken as done by a person", settles the pending author-blocked state and
+creates a PR with an issue-closing `Fixes PRO-267` reference. It also requests
+an independent reviewer inheriting the author's agent, model and permission
+mode. There is no documented publish-only option preserving the incomplete
+issue. The action was not invoked; this is a capability limitation, not a
+reported runtime approval refusal.
+
+A person/app publication path must publish **Step 1: split portable CI from
+macOS**, keep PRO-267 open for Steps 2 and 3 and their measurements, and retain
+the human-only infrastructure, settings and activation decisions. Once that
+PR exists, record its URL and CI run links here. During the rollout, select
+only runs actually using the split workflow; a date window alone can include
+other PRs still using the old workflow. Do not count reruns of one attempt as
+independent first-attempt observations or fill the after table with local test
+durations.
+
 ## Method
 
 Whole-run duration is `run_started_at` to the last successful job’s
