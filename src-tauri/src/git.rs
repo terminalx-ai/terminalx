@@ -29,6 +29,14 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// NUL-separated file names must be decoded without lossy substitutions.
+pub(crate) fn file_names(cwd: &Path, args: &[&str]) -> Result<Vec<String>> {
+    let out = git().current_dir(cwd).args(args).output()?;
+    anyhow::ensure!(out.status.success(), "git file listing failed: {}", String::from_utf8_lossy(&out.stderr));
+    let names = String::from_utf8(out.stdout).context("A file name is not valid UTF-8")?;
+    Ok(names.split('\0').filter(|name| !name.is_empty()).map(String::from).collect())
+}
+
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code
 /// and stdout, or `None` when git could not be started or was killed.
 pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
@@ -688,6 +696,9 @@ pub struct WorktreeBase {
     /// an existing branch, and for sessions made before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// Copy outcome at creation, retained for clients that were not connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_copy: Option<crate::worktree_files::CopyReport>,
 }
 
 const WORKTREE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -763,7 +774,7 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     let from = Some(base.clone()).filter(|b| b != "HEAD");
     Ok(CreatedWorktree {
         name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched, warning, from }),
+        worktree_base: Some(WorktreeBase { commit, fetched, warning, from, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
     })
 }
 
@@ -804,7 +815,7 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         branch: local,
         base: commit.clone(),
         base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None, from: None }),
+        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None, from: None, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
     })
 }
 
