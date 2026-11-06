@@ -60,7 +60,9 @@ it.each(["signout", "account", "profile", "role"])("fences a late send after %s 
   if (change === "profile") account.status.context.revision = "2";
   if (change === "role") account.status.organizations[0].role = "member";
   for (const listener of account.listeners) listener();
-  forgetOtherSetups(null);
+  if (change === "signout") forgetOtherSetups(null);
   await act(async () => held.resolve({ clientCommandId: "old-command" } as never));
-  expect(loadSetups("admin@example.com")).toEqual([]); expect(selectCloudSession).toHaveBeenCalledTimes(1);
+  if (change === "signout") expect(loadSetups("admin@example.com")).toEqual([]);
+  else expect(loadSetups("admin@example.com")[0].draft?.sent).toBeUndefined();
+  expect(selectCloudSession).toHaveBeenCalledTimes(1);
 });
