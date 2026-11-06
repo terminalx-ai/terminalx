@@ -18,7 +18,7 @@ it("owns one subscriber per account, preserving it across organization switches 
   bootCloudInbox(); bootCloudInbox();
   expect(mocks.listeners).toHaveLength(1);
   const update = (account: string, inbox = true) => {
-    mocks.status = { state: "signed-in", desktopInbox: inbox, context: { account, scope: "org", revision: "1" } } as AccountStatus;
+    mocks.status = { state: "signed-in", desktopInbox: inbox, organizations: [{ id: "org", cloud: { enabled: true, flags: { "team.events.v1": true } } }], context: { account, scope: "org", revision: "1" } } as AccountStatus;
     mocks.listeners[0]();
   };
   update("A", false); expect(mocks.subscribe).not.toHaveBeenCalled();
@@ -27,13 +27,13 @@ it("owns one subscriber per account, preserving it across organization switches 
   update("B"); expect(mocks.stop).toHaveBeenCalledOnce(); expect(mocks.subscribe).toHaveBeenCalledTimes(2);
   mocks.status = { state: "signed-out" } as AccountStatus; mocks.listeners[0]();
   expect(mocks.stop).toHaveBeenCalledTimes(2);
-  expect(mocks.markers).toHaveBeenLastCalledWith(null);
+  expect(mocks.markers).toHaveBeenLastCalledWith(null, expect.any(Function));
 });
 
 it("retains and replays an event when its required catalog invalidation fails", async () => {
   vi.useFakeTimers();
   const { subscribeInbox } = await vi.importActual<typeof import("./desktopInbox")>("./desktopInbox");
-  mocks.status = { state: "signed-in", desktopInbox: true, catalogFeed: true, context: { account: "retry", scope: "org", revision: "1" } } as AccountStatus;
+  mocks.status = { state: "signed-in", desktopInbox: true, catalogFeed: true, organizations: [{ id: "org", cloud: { enabled: true, flags: { "team.events.v1": true } } }], context: { account: "retry", scope: "org", revision: "1" } } as AccountStatus;
   mocks.listeners[0]();
   const effects = mocks.subscribe.mock.calls.at(-1)![1];
   const batch = { cursor: "1", more: false, events: [{ id: "1", orgId: "org", workspaceId: "ws", type: "share.added", payload: {} }] };
@@ -53,4 +53,16 @@ it("retains and replays an event when its required catalog invalidation fails", 
     expect(receipt).toHaveBeenCalledWith("1");
     expect(mocks.refresh).toHaveBeenCalledWith("org");
   } finally { cancel(); vi.useRealTimers(); }
+});
+
+it("pauses the account subscriber when all organization event flags turn off and resumes when enabled", () => {
+  const stopCount = mocks.stop.mock.calls.length;
+  const subscribeCount = mocks.subscribe.mock.calls.length;
+  mocks.status = { ...mocks.status, organizations: [{ id: "org", cloud: { enabled: true, flags: {} } }] } as AccountStatus;
+  mocks.listeners[0]();
+  expect(mocks.stop).toHaveBeenCalledTimes(stopCount + 1);
+  expect(mocks.markers).toHaveBeenLastCalledWith(null, expect.any(Function));
+  mocks.status = { ...mocks.status, organizations: [{ id: "org", cloud: { enabled: true, flags: { "team.events.v1": true } } }] } as AccountStatus;
+  mocks.listeners[0]();
+  expect(mocks.subscribe).toHaveBeenCalledTimes(subscribeCount + 1);
 });

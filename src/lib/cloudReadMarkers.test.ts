@@ -59,4 +59,22 @@ describe("server read reconciliation", () => {
     expect(JSON.parse(localStorage.getItem("terminalx.read-markers.A") ?? "[]")).toEqual([]);
   });
 
+  it("pauses writes and reconciliation for disabled organizations, retaining pending reads for re-enable", async () => {
+    invoke.mockRejectedValueOnce(new Error("offline"));
+    queueReadMarker(marker);
+    await vi.advanceTimersByTimeAsync(0);
+    setReadMarkerAccount("A", () => false);
+    invoke.mockClear();
+    mergeReadMarkers([{ ...marker, readSeq: 20 }]);
+    queueReadMarker({ ...marker, readSeq: 30 });
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(isServerRead(marker)).toBe(false);
+    invoke.mockResolvedValue(marker);
+    setReadMarkerAccount("A", () => true);
+    await flushReadMarkers();
+    expect(invoke).toHaveBeenCalledWith("desktop_read_marker", { owner: "A", marker });
+    expect(isServerRead({ ...marker, readSeq: 20 })).toBe(false);
+  });
+
 });

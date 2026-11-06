@@ -9,14 +9,16 @@ let owner: string | null = null;
 let retry: ReturnType<typeof setTimeout> | undefined;
 let sending = false;
 let generation = 0;
+let enabled = (_orgId: string) => true;
 const storageKey = (account: string) => `terminalx.read-markers.${account}`;
 const valid = (m: ReadMarker) => !!m && [m.orgId, m.workspaceId, m.sessionId, m.tabId].every(v => typeof v === "string" && v.length > 0 && v.length <= 128) && Number.isSafeInteger(m.readSeq) && m.readSeq >= 0;
 function persist() {
   if (!owner) return;
   try { localStorage.setItem(storageKey(owner), JSON.stringify([...pending.values()])); } catch { /* memory still retries */ }
 }
-export function setReadMarkerAccount(next: string | null) {
-  if (owner === next) return;
+export function setReadMarkerAccount(next: string | null, enabledForOrg: (orgId: string) => boolean = () => true) {
+  enabled = enabledForOrg;
+  if (owner === next) { void flushReadMarkers(); return; }
   owner = next;
   generation++;
   clearTimeout(retry);
@@ -34,27 +36,28 @@ export function subscribeReadMarkers(listener: () => void) { listeners.add(liste
 export function mergeReadMarkers(incoming: readonly ReadMarker[]) {
   let changed = false;
   for (const marker of incoming) {
-    if (!valid(marker)) continue;
+    if (!owner || !enabled(marker.orgId) || !valid(marker)) continue;
     const k = key(marker);
     if (!markers.has(k) || markers.get(k)!.readSeq < marker.readSeq) { markers.set(k, marker); changed = true; }
   }
   if (changed) for (const listener of listeners) listener();
 }
-export function isServerRead(marker: ReadMarker): boolean { return (markers.get(key(marker))?.readSeq ?? -1) >= marker.readSeq; }
+export function isServerRead(marker: ReadMarker): boolean { return !!owner && enabled(marker.orgId) && (markers.get(key(marker))?.readSeq ?? -1) >= marker.readSeq; }
 export function queueReadMarker(marker: ReadMarker) {
-  if (!owner || !valid(marker) || isServerRead(marker)) return;
+  if (!owner || !enabled(marker.orgId) || !valid(marker) || isServerRead(marker)) return;
   pending.set(key(marker), marker);
   mergeReadMarkers([marker]);
   persist();
   void flushReadMarkers();
 }
 export async function flushReadMarkers() {
-  if (!owner || sending || !pending.size) return;
+  if (!owner || sending || ![...pending.values()].some(marker => enabled(marker.orgId))) return;
   sending = true;
   const account = owner, run = generation;
   let failed = false;
   try {
     for (const [k, marker] of [...pending]) {
+      if (!enabled(marker.orgId)) continue;
       try {
         const saved = await invoke<ReadMarker>("desktop_read_marker", { owner: account, marker });
         if (run !== generation) return;
@@ -74,7 +77,7 @@ export async function flushReadMarkers() {
   finally {
     if (run === generation) {
       sending = false;
-      if (pending.size) retry = setTimeout(() => void flushReadMarkers(), failed ? 5000 : 0);
+      if ([...pending.values()].some(marker => enabled(marker.orgId))) retry = setTimeout(() => void flushReadMarkers(), failed ? 5000 : 0);
     }
   }
 }

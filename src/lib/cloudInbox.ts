@@ -3,6 +3,7 @@ import { getAccount, subscribeAccount } from "@/lib/account";
 import { invalidateCloudCatalog } from "@/lib/cloudCatalog";
 import { flushReadMarkers, mergeReadMarkers, setReadMarkerAccount, type ReadMarker } from "@/lib/cloudReadMarkers";
 import { subscribeInbox, type InboxBatch, type InboxEvent } from "@/lib/desktopInbox";
+import { featureFlagEnabled, featureFlags } from "@/lib/featureFlags";
 import { noteOrganizationEvent } from "@/lib/notify";
 
 let started = false;
@@ -10,12 +11,13 @@ let active: string | null = null;
 let stop: (() => void) | undefined;
 const saved = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
 const save = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* memory cursor remains */ } };
+const enabled = (orgId: string) => featureFlagEnabled(getAccount().status, featureFlags.teamEvents, orgId);
 function sync() {
   const status = getAccount().status;
-  const owner = status.state === "signed-in" && status.desktopInbox === true ? status.context?.account ?? null : null;
+  const owner = status.state === "signed-in" && status.desktopInbox === true && status.organizations?.some(org => enabled(org.id)) ? status.context?.account ?? null : null;
+  setReadMarkerAccount(owner, enabled);
   if (owner === active) return;
   stop?.(); stop = undefined; active = owner;
-  setReadMarkerAccount(owner);
   if (!owner) return;
   const cursorKey = `terminalx.inbox.${owner}`;
   const deviceKey = "terminalx.inbox.device";
@@ -29,7 +31,7 @@ function sync() {
     return refresh;
   };
   const event = async (e: InboxEvent) => {
-    if (active !== owner) return;
+    if (active !== owner || !enabled(e.orgId)) return;
     if (e.type === "read-marker.changed" && e.workspaceId) {
       mergeReadMarkers([{ ...e.payload, orgId: e.orgId, workspaceId: e.workspaceId } as ReadMarker]);
     } else await refreshCatalog(e.orgId);

@@ -885,8 +885,8 @@ and attachments may carry `userId`. The file is re-read on every refresh.
 
 ### Live inbox and account read markers (PRO-125)
 
-On servers advertising `cloud.desktop.inbox.v1`, the desktop keeps one
-account-bound native SSE subscriber to
+On servers advertising `cloud.desktop.inbox.v1`, with `team.events.v1` enabled
+for at least one organization, the desktop keeps one account-bound native SSE subscriber to
 `GET /v1/desktop/inbox/stream`, with `Last-Event-ID` naming its last processed
 per-user sequence. Tokens stay native. The server sends `inbox` events whose
 JSON data is `{ events, cursor, more }`, including a heartbeat every second,
@@ -918,4 +918,8 @@ that user. Catalog answers include a `readMarkers` array, with `orgId` and
 `workspaceId` added, and incorporate it in the catalog cursor/304 calculation.
 A marker clears only replies at or below its observed transcript sequence;
 newer replies remain unread. Offline reads are queued per account and retried.
+Missing or disabled organization flags preserve the existing polling and local unread
+behavior. Turning every flag off cancels the subscriber and pauses pending marker
+writes; re-enabling resumes them. Events and markers for disabled organizations do
+not change their rows or issue notifications. The flag helper is shared with PRO-252.
 Deploy the paired server migration/routes before this desktop release.
