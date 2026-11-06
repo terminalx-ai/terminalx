@@ -46,15 +46,12 @@ impl SessionObserver for Observer {
         // Another thread may hold the lock for a moment, as the input thread a
         // typed `/effort` starts does. Only the caller holding it never lets go.
         let deadline = Instant::now() + Duration::from_secs(10);
-        let rt = loop {
+        loop {
             match rt.try_lock() {
-                Ok(rt) => break rt,
+                Ok(_) => break,
                 Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => std::thread::sleep(MOMENT),
                 Err(_) => panic!("completion must release the tab lock before calling the observer"),
             }
-        };
-        if let Engine::Cli(p) = &rt.engine {
-            assert!(p.answered.is_empty(), "the turn's tool answers must be forgotten before notifying the observer");
         }
         self.completed.lock().unwrap().push((session.into(), tab.into(), message));
     }
@@ -244,7 +241,6 @@ impl Rig {
                 turn_tail: Default::default(),
                 transcript_turn: None,
                 transcript_end_owed: false,
-                answered: HashMap::new(),
                 command: "claude".into(),
                 origin: Origin { token: token.clone(), transcript_root: dir.path().to_path_buf(), conversation: None },
                 by_hand: None,
@@ -432,7 +428,7 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).
     for (gate, input, description, reason) in [
         ("PreToolUse", json!({"command":"git status --short --branch"}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
-        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), Value::Null),
+        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), json!(codex::pty::OUTSIDE_SANDBOX)),
     ] {
         let (payload, _) = permission_card(CliKind::Codex, "manual", gate, json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}), Decision::Deny);
         assert_eq!(payload["cwd"], "/workspace/app", "the hook's directory must reach the recorded permission event");
@@ -442,81 +438,146 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
     }
 }
 
-/// Every hook Codex 0.166.0 ran, in order, for the first prompt of a fresh
-/// session in Ask every time (`-a on-request -s workspace-write`), whose one
-/// command the model asked to run outside the sandbox. Recorded from the real
-/// TUI against a stand-in model on 2026-11-06; only the paths are rewritten.
-const CODEX_PERMISSION_GATES: &str = include_str!("harness/codex/fixtures/permission_gates.jsonl");
+/// Codex 0.166.0's hooks for one command the model asks to run outside the
+/// sandbox, as a session's first command, recorded from the real TUI in Ask
+/// every time (`-a on-request -s workspace-write`) against a stand-in model on
+/// 2026-11-06. The model is a code-mode one, as every model Codex lists is:
+/// it writes a script for Codex's `exec` tool, and the script runs the
+/// command. Each hook has a start record with its stdin and an end record
+/// with what it printed, so hooks that waited at once are replayed that way.
+/// Only paths are rewritten.
+const FIRST_COMMAND: &str = include_str!("harness/codex/fixtures/permission_gates_first_command.jsonl");
+/// The same, with the command denied, and the model running it once more.
+const DENIED: &str = include_str!("harness/codex/fixtures/permission_gates_denied.jsonl");
+/// The same, with the card left for a while: `exec` hands the turn back to
+/// the model after its yield time while the call waits on the card, and
+/// the model runs the same command again. The hook that recorded it turned
+/// the repeat away as TerminalX now does.
+const REPEATED_WHILE_WAITING: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_waiting.jsonl");
 
-/// PRO-160: one call is one card. Codex asks at `PreToolUse`, with the call's
-/// `tool_use_id`, and only once that hook has returned asks again at
-/// `PermissionRequest` for the same `Bash` command, with no `tool_use_id` and
-/// the model's justification as its `description`. The second gate takes the
-/// reader's answer to the first. Answered, the card takes no second answer,
-/// and the decision is logged once. A denied command is blocked at
-/// `PreToolUse`, so Codex never asks again for it.
-#[test]
-fn the_first_escalating_codex_command_is_one_card_across_both_gates() {
-    for (option, decision) in [("allow", Decision::Allow), ("deny", Decision::Deny)] {
-        let rig = Rig::in_mode(CliKind::Codex, "manual");
-        let mut cards = Vec::new();
-        for line in CODEX_PERMISSION_GATES.lines() {
-            let record: Value = serde_json::from_str(line).unwrap();
-            let event = record["event"].as_str().unwrap().to_string();
-            if option == "deny" && matches!(event.as_str(), "PermissionRequest" | "PostToolUse") { continue; }
+/// Replay a recording through the tab's hook handler, as its hooks started
+/// and ended. A permission hook that files a card is answered as the
+/// recorded hook was, when the recording says it ended, and every reply must
+/// be what that hook printed. Returns the cards filed, in order.
+fn replay_codex_hooks(rig: &Rig, recording: &str) -> Vec<String> {
+    let mut running = HashMap::new();
+    let mut cards: Vec<String> = Vec::new();
+    for line in recording.lines() {
+        let record: Value = serde_json::from_str(line).unwrap();
+        let (hook, event) = (record["hook"].as_u64().unwrap(), record["event"].as_str().unwrap().to_string());
+        let asks = matches!(event.as_str(), "PreToolUse" | "PermissionRequest");
+        if record["phase"] == "start" {
             let mut payload = record["payload"].clone();
             // The transcript is the rig's own file, which its tail reads.
             payload.as_object_mut().unwrap().remove("transcript_path");
-            if !matches!(event.as_str(), "PreToolUse" | "PermissionRequest") {
+            if !asks {
                 rig.hook(&event, payload);
                 continue;
             }
-            // A gate either parks on a card for the reader, or answers at once.
             let manager = rig.manager.clone();
             let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: event.clone(), payload };
             let (replied, reply) = std::sync::mpsc::channel();
             std::thread::spawn(move || replied.send(manager.on_hook(frame)).unwrap());
             let deadline = Instant::now() + Duration::from_secs(10);
-            let reply = loop {
-                if let Ok(reply) = reply.try_recv() { break reply; }
-                let card = rig.rt.lock().unwrap().pending.keys().next().cloned();
-                if let Some(card) = card {
-                    rig.manager.respond_permission(SESSION, TAB, &card, option).unwrap();
-                    cards.push(card);
-                    break reply.recv_timeout(Duration::from_secs(10)).expect("the answered gate replies");
-                }
-                assert!(Instant::now() < deadline, "{event}: neither a card nor a reply");
+            let (card, early) = loop {
+                if let Some(card) = rig.rt.lock().unwrap().pending.keys().find(|id| !cards.contains(id)).cloned() { break (Some(card), None); }
+                if let Ok(early) = reply.try_recv() { break (None, Some(early)); }
+                assert!(Instant::now() < deadline, "hook {hook} ({event}): neither a card nor a reply");
                 std::thread::sleep(MOMENT);
             };
-            let expected = if event == "PreToolUse" { decision.clone() } else { Decision::Allow };
-            assert_eq!(reply, reply_for(CliKind::Codex, &event, expected), "{option}: {event} says the reader's answer");
-        }
-        assert_eq!(cards.len(), 1, "{option}: one command, one card");
-        let requested = |events: &[AgentEvent]| events.iter().filter(|e| matches!(e.payload, Payload::PermissionRequested { .. })).count();
-        let decided = |events: &[AgentEvent]| events.iter().filter(|e| matches!(&e.payload, Payload::PermissionDecided { automatic: false, .. })).count();
-        let events = rig.events();
-        assert_eq!((requested(&events), decided(&events)), (1, 1), "{option}: {:?}", rig.kinds());
-        assert!(rig.rt.lock().unwrap().pending.is_empty(), "{option}: no card is left open");
-        if option == "allow" {
-            // What the tab logged is what the frontend replays, with the
-            // request logged again before and after its answer (`transcript.test.ts`).
-            // Only ids, times and the request id the app minted are normalized.
-            let mut normalized = events.clone();
-            for event in &mut normalized {
-                event.id = format!("fixture-{}", event.seq);
-                event.ts.clear();
-                event.message_ts = None;
-                if let Payload::PermissionRequested { request_id, .. } | Payload::PermissionDecided { request_id, .. } = &mut event.payload {
-                    *request_id = "codex-request".into();
+            cards.extend(card.clone());
+            running.insert(hook, (reply, card, early));
+        } else if let Some((reply, card, early)) = running.remove(&hook) {
+            let recorded = record["reply"].clone();
+            let said = &recorded["hookSpecificOutput"];
+            let allowed = said["permissionDecision"] != "deny" && said["decision"]["behavior"] != "deny";
+            let reply = match (card, early) {
+                (_, Some(early)) => early,
+                (Some(card), None) => {
+                    rig.manager.respond_permission(SESSION, TAB, &card, if allowed { "allow" } else { "deny" }).unwrap();
+                    reply.recv_timeout(Duration::from_secs(10)).expect("the answered hook replies")
                 }
-            }
-            let expected: Value = serde_json::from_str(include_str!("../../src/lib/fixtures/codex-permission-gates.json")).unwrap();
-            assert_eq!(serde_json::to_value(normalized).unwrap(), expected);
+                (None, None) => unreachable!(),
+            };
+            assert_eq!(reply.output, Some(recorded), "hook {hook} ({event}) prints what the recorded hook printed");
         }
-        // A stale card clicked later answers nothing and logs nothing.
-        assert!(rig.manager.respond_permission(SESSION, TAB, &cards[0], option).is_err());
-        assert_eq!(rig.events().len(), events.len(), "{option}: a stale answer is not logged");
     }
+    assert!(running.is_empty(), "every hook the recording started ended");
+    cards
+}
+
+/// The tab's permission events after a replay: each card's reason and the
+/// agent's own words, and each decision's label.
+fn permission_log(rig: &Rig) -> Vec<(String, Option<String>, Option<String>)> {
+    rig.events().into_iter().filter_map(|event| match event.payload {
+        Payload::PermissionRequested { reason, description, .. } => Some(("asked".into(), reason, description)),
+        Payload::PermissionDecided { label, .. } => Some((label, None, None)),
+        _ => None,
+    }).collect()
+}
+
+/// A stale card clicked after the replay answers nothing and logs nothing.
+fn stale_clicks_do_nothing(rig: &Rig, cards: &[String]) {
+    let logged = rig.events().len();
+    for card in cards {
+        assert!(rig.manager.respond_permission(SESSION, TAB, card, "allow").is_err(), "{card} is no longer open");
+    }
+    assert_eq!(rig.events().len(), logged, "a stale answer is not logged");
+    assert!(rig.rt.lock().unwrap().pending.is_empty(), "no card is left open");
+}
+
+const ASK_EVERY_TIME: &str = "Approval is required because this session is set to Ask every time.";
+const JUSTIFICATION: &str = "Probe: may I create a file outside the workspace?";
+
+/// PRO-160 as it was seen: a reader takes a while over a session's first
+/// card, the model's `exec` yields while the call waits, and the model runs
+/// the same command again. Before, the repeat filed a second, identical
+/// card that stayed live after Allow, and answering it ran the command
+/// again. Now the repeat files no card and is turned away with a reason the
+/// model reads, and the command runs once.
+#[test]
+fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, REPEATED_WHILE_WAITING);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_EVERY_TIME.into()), None),
+        ("Allowed".into(), None, None),
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ], "one card for the command, then one for running it outside the sandbox");
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// Allowing the command at `PreToolUse` does not let it out of the sandbox:
+/// Codex then asks for that at `PermissionRequest`, on its own card, which
+/// says so and carries the model's justification.
+#[test]
+fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowed_too() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, FIRST_COMMAND);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_EVERY_TIME.into()), None),
+        ("Allowed".into(), None, None),
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ]);
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// A denied command is blocked at `PreToolUse`, and Codex does not ask about
+/// it again. When the model runs it once more, that run is asked about too:
+/// an earlier answer stands for nothing but the call it was given to.
+#[test]
+fn a_denied_codex_command_run_again_is_asked_about_again() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, DENIED);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_EVERY_TIME.into()), None),
+        ("Denied".into(), None, None),
+        ("asked".into(), Some(ASK_EVERY_TIME.into()), None),
+        ("Denied".into(), None, None),
+    ]);
+    stale_clicks_do_nothing(&rig, &cards);
 }
 
 /// #775: TerminalX's Claude hooks only ever deny, so in bypass mode a card
@@ -631,26 +692,6 @@ fn a_stop_hook_still_notifies_automation_when_only_a_hook_opened_the_turn() {
     rig.hook("UserPromptSubmit", json!({ "prompt": "hello" }));
     rig.hook("Stop", json!({}));
     assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), None)]);
-}
-
-#[test]
-fn the_watcher_forgets_tool_answers_for_the_completed_turn() {
-    let rig = Rig::of(CliKind::Codex, "");
-    rig.append(include_str!("harness/codex/fixtures/rollout.jsonl"));
-    {
-        let mut rt = rig.rt.lock().unwrap();
-        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
-        p.answered.insert(tool_key("Bash", &json!({ "command": "ls" })), true);
-        p.answered.insert(tool_key("Bash", &json!({ "command": "rm file" })), false);
-    }
-    assert!(rig.turn_open());
-    assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Ended));
-    rig.advance(PATIENCE.settle);
-    rig.tick();
-    assert!(!rig.turn_open());
-    let rt = rig.rt.lock().unwrap();
-    let Engine::Cli(p) = &rt.engine else { unreachable!() };
-    assert!(p.answered.is_empty(), "neither allowed nor denied answers carry into the next turn");
 }
 
 #[test]

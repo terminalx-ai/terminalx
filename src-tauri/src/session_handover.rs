@@ -170,8 +170,6 @@ pub(crate) struct CliRecord {
     pub transcript_turn: Option<String>,
     #[serde(default)]
     pub transcript_end_owed: bool,
-    #[serde(default)]
-    pub answered: HashMap<String, bool>,
     pub command: String,
     /// The secret this launch's hooks show, and where its transcript may be.
     pub token: String,
@@ -514,7 +512,6 @@ impl SessionManager {
             turn_tail: TurnTailRecord { said, anticipated, closed },
             transcript_turn: p.transcript_turn.map(|mark| mark_name(mark).to_string()),
             transcript_end_owed: p.transcript_end_owed,
-            answered: p.answered.clone(),
             command: p.command.clone(),
             token: p.origin.token.clone(),
             transcript_root: p.origin.transcript_root.clone(),
@@ -598,7 +595,6 @@ impl SessionManager {
             turn_tail: tui::TurnTail::from_parts(cli.turn_tail.said, cli.turn_tail.anticipated, cli.turn_tail.closed),
             transcript_turn: cli.transcript_turn.as_deref().and_then(mark_of),
             transcript_end_owed: cli.transcript_end_owed,
-            answered: cli.answered,
             command: cli.command,
             origin: Origin { token: cli.token, transcript_root: cli.transcript_root, conversation: cli.conversation },
             by_hand: None,
@@ -633,7 +629,7 @@ impl SessionManager {
                     None => return reply_for(kind, &gate, Decision::Deny),
                 }
             } else { None };
-            let waiting = Waiting { kind, gate, request_id: ask.request_id, tool_name: ask.tool_name, input: ask.input, local_owner };
+            let waiting = Waiting { kind, gate, request_id: ask.request_id, local_owner };
             manager.await_decision(&rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.generation == generation && p.origin.token == token))
         });
     }

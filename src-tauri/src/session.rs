@@ -133,8 +133,6 @@ struct Waiting {
     /// `PermissionRequest` or `PreToolUse`: which reply the hook prints.
     gate: String,
     request_id: String,
-    tool_name: String,
-    input: Value,
     local_owner: bool,
 }
 
@@ -811,10 +809,6 @@ pub struct CliTab {
     /// the transcript records is then that turn's, and says nothing about
     /// whichever turn is open by the time it is read.
     pub transcript_end_owed: bool,
-    /// Tools already answered for in this turn, by the command they name.
-    /// Codex fires `PreToolUse` and then `PermissionRequest` for the same
-    /// call, and one tool must not cost the reader two cards.
-    pub answered: HashMap<String, bool>,
     /// What the pane is running, for the terminal view's header and for a
     /// window that has to be told about a pane it did not see start.
     pub command: String,
@@ -1317,21 +1311,15 @@ fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl 
     Ok(v)
 }
 
-/// What one tool call is, for the purpose of not asking about it twice. The
-/// same command reaches `PreToolUse` and `PermissionRequest` under different
-/// ids but with the same input, minus the justification Codex adds.
-fn tool_key(tool_name: &str, input: &Value) -> String {
-    let target = ["command", "file_path", "path", "pattern", "query", "url"].iter().find_map(|k| input.get(*k).and_then(Value::as_str)).unwrap_or_default();
-    format!("{tool_name}\u{1}{target}")
-}
-
 /// Why a permission hook's card is up, in TerminalX's words (#775): the
 /// gate that asked, which the agent's own description of the call never
 /// says. None when the session's own mode asked, which needs no telling.
 ///
-/// Codex in Ask every time is asked by the app, at `PreToolUse`; its
-/// sandbox asks for itself at `PermissionRequest`, with the agent's
-/// justification. TerminalX's Claude hooks only ever deny, so a Claude
+/// Codex in Ask every time is asked by the app, at `PreToolUse`. Its
+/// sandbox asks for itself at `PermissionRequest`, in any mode, when a call
+/// is to run outside it, with the agent's justification as the call's
+/// description. That is a wider grant than running the command, and the
+/// reader is told so (PRO-160). TerminalX's Claude hooks only ever deny, so a Claude
 /// `PermissionRequest` in bypass mode comes from a check bypass does not
 /// cover: Claude Code's own safety check. The hook's `permission_mode` is
 /// the mode Claude is in when it asks, and decides; the tab's is the
@@ -1340,8 +1328,11 @@ fn tool_key(tool_name: &str, input: &Value) -> String {
 /// commands.
 fn asked_because(kind: CliKind, gate: &str, payload: &Value, tab_mode: &str, tool_name: &str) -> Option<String> {
     match kind {
-        CliKind::Codex => (gate == "PreToolUse" && codex::asks_every_tool(tab_mode))
-            .then(|| "Approval is required because this session is set to Ask every time.".into()),
+        CliKind::Codex => match gate {
+            "PreToolUse" => codex::asks_every_tool(tab_mode).then(|| "Approval is required because this session is set to Ask every time.".into()),
+            "PermissionRequest" => Some(codex::pty::OUTSIDE_SANDBOX.into()),
+            _ => None,
+        },
         CliKind::Claude => {
             let mode = payload["permission_mode"].as_str().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(tab_mode);
             (gate == "PermissionRequest" && mode == "bypassPermissions").then(|| claude::mapper::safety_check_reason(tool_name).into())
@@ -4120,7 +4111,6 @@ impl SessionManager {
             turn_tail: Default::default(),
             transcript_turn: None,
             transcript_end_owed: false,
-            answered: HashMap::new(),
             command: launch.command,
             origin: Origin { token, transcript_root: launch.transcript_root, conversation: launch.conversation },
             by_hand: None,
@@ -4547,7 +4537,6 @@ impl SessionManager {
                                 _ => unreachable!(),
                             };
                             if !already_closed {
-                                self.forget_tool_answers(&mut rt);
                                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                             }
                         }
@@ -4785,7 +4774,6 @@ impl SessionManager {
             };
             if mark == Some(tui::TurnMark::Aborted) {
                 // Interrupted in its own screen: not a turn that finished.
-                self.forget_tool_answers(&mut rt);
                 self.end_open_turn(&mut rt, TurnStatus::Aborted, None);
                 let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
                 drop(rt);
@@ -5860,7 +5848,6 @@ impl SessionManager {
                     }
                 }
                 self.record_activity(&rt, TabStatus::Completed, store::activity::Source::Live);
-                self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                 drop(rt);
                 self.observer.automation_failed(&frame.session, &frame.tab, "The automation turn was interrupted.");
@@ -5886,11 +5873,10 @@ impl SessionManager {
         reply
     }
 
-    /// Finish a Stop hook or a watcher-closed turn. Forget its answers while
-    /// still holding the tab lock, then release it before notifying automation
-    /// or scheduling a settings restart that may re-enter the tab.
-    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, mut rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
-        self.forget_tool_answers(&mut rt);
+    /// Finish a Stop hook or a watcher-closed turn. Release the tab lock
+    /// before notifying automation or scheduling a settings restart that may
+    /// re-enter the tab.
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         let tail = match &rt.engine { Engine::Cli(p) => Some(p.tail.clone()), _ => None };
         drop(rt);
@@ -5941,13 +5927,6 @@ impl SessionManager {
         });
     }
 
-    /// Answers only stand for the turn they were given in.
-    fn forget_tool_answers(&self, rt: &mut TabRuntime) {
-        if let Engine::Cli(p) = &mut rt.engine {
-            p.answered.clear();
-        }
-    }
-
     /// Turn a permission hook into the chat's own card and wait for it to be
     /// answered. The hook thread parks here, which is exactly what holds the
     /// CLI's tool call up until the reader decides.
@@ -5965,28 +5944,26 @@ impl SessionManager {
         let suggestions: Vec<Value> = frame.payload["permission_suggestions"].as_array().cloned().unwrap_or_default();
         let gate = frame.event.as_str();
 
-        // Codex raises `PermissionRequest` for a command the reader has just
-        // been asked about at `PreToolUse`. Reusing that answer is what keeps
-        // one tool to one card.
-        if kind == CliKind::Codex {
-            let key = tool_key(&tool_name, &input);
-            let already = {
-                let rt = rt_arc.lock().unwrap();
-                match &rt.engine {
-                    Engine::Cli(p) if p.origin.accepts(frame) => p.answered.get(&key).copied(),
-                    _ => None,
-                }
-            };
-            if let Some(allow) = already {
-                return reply_for(kind, gate, if allow { Decision::Allow } else { Decision::Deny });
-            }
-        }
-
+        // Every hook that asks is asked on its own card, whichever gate it is
+        // and whatever was answered before: Codex's sandbox asking at
+        // `PermissionRequest` after the reader allowed the command at
+        // `PreToolUse` wants more than the reader granted (PRO-160).
         let (tx, rx) = std::sync::mpsc::channel::<Decision>();
         {
             let mut rt = rt_arc.lock().unwrap();
-            let Engine::Cli(p) = &mut rt.engine else { return HookReply::default() };
+            let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
             if !p.origin.accepts(frame) { return HookReply::default(); }
+            // PRO-160: Codex's code-mode `exec` hands the turn back to the
+            // model while a call inside it waits on its card, and the model
+            // may run the same call again. A second card for it is the one a
+            // reader answers twice, and the command then runs twice. Judged
+            // under the same lock that files a card, so two hooks cannot both
+            // pass; the model is told why, and the waiting call has the answer.
+            if kind == CliKind::Codex && rt.pending.iter().any(|(id, ask)| ask.tool_name == tool_name && ask.input == input
+                && p.decisions.get(id).is_some_and(|waiting| waiting.gate == gate)) {
+                return HookReply { output: Some(codex::pty::already_waiting(gate)), refused: None };
+            }
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
             p.decisions.insert(request_id.clone(), DecisionSender {
                 sender: tx,
                 caller: if local_owner { crate::hooks::Caller::current() } else { crate::hooks::Caller::default() },
@@ -6020,7 +5997,7 @@ impl SessionManager {
             );
             self.apply(&mut rt, payload, None);
         }
-        let waiting = Waiting { kind, gate: gate.to_string(), request_id, tool_name, input, local_owner };
+        let waiting = Waiting { kind, gate: gate.to_string(), request_id, local_owner };
         // Teardown or a settings restart may replace this CLI while the hook
         // waits. An answer for that old launch cannot start the new one's work.
         self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)))
@@ -6031,7 +6008,7 @@ impl SessionManager {
     /// CLI that asked. A frame handed over by the runtime this one replaced
     /// waits here too, for the card it asked for there (#765).
     fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<Decision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
-        let Waiting { kind, gate, request_id, tool_name, input, local_owner } = waiting;
+        let Waiting { kind, gate, request_id, local_owner } = waiting;
         let gate = gate.as_str();
         let wait = match kind {
             CliKind::Claude => claude::pty::PERMISSION_WAIT,
@@ -6049,9 +6026,6 @@ impl SessionManager {
         }
         if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
-            if let Some(d) = &answer {
-                p.answered.insert(tool_key(&tool_name, &input), !matches!(d, Decision::Deny));
-            }
         }
         match answer {
             Some(decision) => {
@@ -6618,17 +6592,6 @@ mod tests {
         // rather than smuggled into a field that would fail closed.
         let odd = out(CliKind::Codex, "PermissionRequest", Decision::AllowWith(json!({"type": "addRules"})));
         assert_eq!(odd["hookSpecificOutput"]["decision"], json!({"behavior": "allow"}));
-    }
-
-    #[test]
-    fn one_tool_is_the_same_tool_whichever_hook_asks_about_it() {
-        // Codex adds its justification to the input when it escalates; the
-        // command is what says these are one call, so the reader is asked once.
-        let pre = tool_key("Bash", &json!({"command": "rm -rf build"}));
-        let request = tool_key("Bash", &json!({"command": "rm -rf build", "description": "Delete the build tree?"}));
-        assert_eq!(pre, request);
-        assert_ne!(pre, tool_key("Bash", &json!({"command": "rm -rf dist"})));
-        assert_ne!(pre, tool_key("Read", &json!({"command": "rm -rf build"})));
     }
 
     #[test]
