@@ -11,7 +11,8 @@ Failures retain a typed stage: local identity, authorization, assignment, contro
 WebSocket connection, host proof, or established control session. A phone's relay
 connection has its own stages: the host data leg (phone attach), the E2EE
 handshake and device login (phone handshake), and after login (phone session).
-Categories are service unavailable (HTTP 5xx), authentication (401, or a refused
+Categories are service unavailable (HTTP 5xx), service restart/replacement,
+assignment changed, remote closed, authentication (401, or a refused
 device credential), access denied (403), account entitlement, rate limited (429),
 network, timeout, protocol, local storage, network changed, woke from sleep, local
 runtime, and unknown. A 403 alone is not classified as lack of entitlement. Unknown errors are
@@ -64,7 +65,7 @@ files are mode 0600 on Unix. Invalid or non-allowlisted old records are discarde
 
 Records contain only timestamp, event, attempt, retry count, and optional typed
 failure stage/category/HTTP status. Control-channel events are `started`,
-`failed` and `connected`; host-binding rounds add `recovered` (below). Each phone
+`failed`, `connected` and `retry-requested`; host-binding rounds add `recovered` (below). Each phone
 connection through Relay adds
 `phone-requested` (the cell's `conn-open`), `phone-attached` (host data leg open),
 `phone-authenticated` (device login accepted), and `phone-closed` or `phone-failed`
@@ -119,6 +120,83 @@ Coverage includes:
 The loopback supervisor fixture supplies assignment failures and generated host
 identity at the connection boundary; HTTP authorization/assignment are exercised
 separately. It does not use a real account, production endpoint, or Keychain.
+
+## Footer explanations and prompt redraw (PRO-196)
+
+The account footer's Relay status opens an interactive explanation on hover,
+click, or keyboard focus. It shows the backend's safe cause, keeps that cause
+visible during reconnection, and offers Retry while offline. Retry wakes the
+existing supervisor's backoff, including its 90-second maximum, and records a
+`retry-requested` event. It does not start a second supervisor or interrupt a
+connection that has already recovered. Local terminals do not depend on Relay.
+
+Control closes now distinguish a remote close, service restart/replacement,
+assignment change, authentication rejection, timeout and rate limit by documented
+numeric close codes. No remote reason string is displayed or logged. Valid
+WebSocket Ping/Pong frames are handled during both host proof and the established
+session; previously these were rejected as non-text protocol messages, ending an
+otherwise working connection. JSON heartbeat behavior is unchanged.
+
+Investigation on November 6: the available local production diagnostics contain a
+`control-session` / `protocol` failure at November 5, 05:46:44 UTC, followed by
+`connected` at 05:46:47 UTC. This confirms automatic recovery on that machine,
+but the clean VM's diagnostic file was not supplied, so its exact drop cannot be
+attributed to that event or to WebSocket heartbeats. The loopback regression
+reproduces the heartbeat rejection and verifies the fix, including a service
+close whose sensitive reason never reaches diagnostics.
+
+The drawer redraw was reproduced using a clean macOS zsh 5.9 PTY with a long
+prompt and an unsubmitted command: changing xterm's grid before parsing the
+previous resize's redraw leaves a duplicate prompt. Draining xterm alone only
+covers already delivered output; a redraw can still be in IPC or cloud transit.
+Resize observations settle for 100 ms and serialize requests to the PTY, keeping
+only the latest pending size. On macOS/Linux the reader and resize path share
+a read lock. Before `ioctl`, resize snapshots and drains the bytes already in
+the kernel at the old dimensions. Both paths enqueue under that lock, so a
+previous read cannot be published after the new size. The bounded output queue
+reserves space for this drain; resize never waits on an emitter which may need
+the caller's remote terminal lock. A full reserve refuses the resize before
+reading bytes or applying `ioctl`.
+Darwin queries the slave's output queue with `TIOCOUTQ`; `FIONREAD` on its
+master describes input to the slave and can report zero despite readable output.
+Linux uses `FIONREAD` for pending master reads.
+
+Each successful resize enqueues a zero-byte completion behind the old bytes,
+including for silent programs such as `sleep` or `tail -f`. Completions are never
+coalesced with program output. Local view frames retain metadata through splitting
+and carry a four-byte dimension header across Tauri; cloud `pty.output` carries
+an optional `size` object and `pty.resize-complete` carries ordered completions.
+Size-only completions consume no PTY byte offset but do consume transport budget.
+Attachments queue a size snapshot at the producer, after pending output/replay,
+so returning viewers also learn a silent pane's current dimensions.
+
+The renderer queues a size barrier immediately before each batch in xterm's own
+write queue, so old output is parsed at its original width even after newer
+resize requests have completed. Output-driven changes never resize the PTY back.
+Standalone cloud size notifications cannot move the parser ahead of sized
+output. There is no separate unbounded output buffer, and byte acknowledgements
+exclude framing. Older runtimes without metadata retain acknowledged sizing;
+the ordering guarantee requires the updated runtime. Raw scrollback replay
+remains compatible and does not acquire invented historical dimensions.
+
+The real-parser regression uses captured zsh escape sequences, demonstrates the
+old duplicate, and checks delayed delivery beyond the timer, fragmented escape
+sequences, input preservation, serialized RPCs, disposal and legacy peers.
+Native tests hold the reader while a captured redraw is waiting in the kernel,
+verify its old dimensions and the following size-only completion, and resize
+with the emitter blocked and read queue full. Transport tests cover completion
+framing, cursor preservation, silent resizes and returning viewers.
+Pending fits are cancelled when the view unmounts and never resize an
+evicted or replaced terminal.
+
+```sh
+pnpm exec vitest run src/components/account/AccountSidebarEntry.test.tsx src/lib/terminalResize.real.test.ts
+pnpm build && node scripts/webkit/account-row.mjs
+cargo test --manifest-path src-tauri/Cargo.toml --lib pairing::
+cargo test --manifest-path src-tauri/Cargo.toml --lib pty::
+cargo test --manifest-path src-tauri/Cargo.toml --lib remote::server::tests
+cargo test --manifest-path src-tauri/Cargo.toml --lib local_runtime::stream::tests
+```
 
 ## Validation result
 

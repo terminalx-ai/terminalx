@@ -83,6 +83,7 @@ export function AgentCard({
             column === "needs" && "bg-warning",
             column === "working" && "bg-info animate-pulse-soft",
             column === "done" && "bg-add",
+            column === "not-started" && "bg-faint",
           )}
         />
 
@@ -199,7 +200,7 @@ export function CloudAgentCard({
   }, [focused]);
   const state = column === "needs"
     ? waiting?.failure ? "Workspace needs recovery" : waiting?.waitingOn ? `Wants to use ${waiting.waitingOn}` : "Waiting for your decision"
-    : column === "working" ? "Working" : session.stopped ? "Workspace stopped" : "Finished";
+    : column === "working" ? "Working" : column === "not-started" ? "Not started" : session.stopped ? "Workspace stopped" : "Finished";
 
   return (
     <DropdownMenu>
@@ -228,6 +229,7 @@ export function CloudAgentCard({
             column === "needs" && "bg-warning",
             column === "working" && "bg-info animate-pulse-soft",
             column === "done" && "bg-add",
+            column === "not-started" && "bg-faint",
           )}
         />
 

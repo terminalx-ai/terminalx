@@ -10,3 +10,9 @@ it("compares instants, falls back only for absent/invalid message time, and merg
   expect(keepMessageTime({ ...old, lastMessageAt: "2026-10-02T00:00:00Z" }, old).lastMessageAt).toBe(old.lastMessageAt);
   expect(keepMessageTime({ created: old.created, pinned: false, lastMessageAt: undefined }, old).lastMessageAt).toBe(old.lastMessageAt);
 });
+
+it("retains legacy message presence across delayed metadata without manufacturing a time", () => {
+  const previous = { hasMessages: true, lastMessageAt: undefined };
+  expect(keepMessageTime({ hasMessages: false }, previous)).toEqual({ hasMessages: true });
+  expect(keepMessageTime({ lastMessageAt: null }, previous)).toEqual({ hasMessages: true, lastMessageAt: null });
+});

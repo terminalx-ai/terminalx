@@ -10,6 +10,9 @@ import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
 import { READER_SCROLL_EVENT, scrollToInOwnScroller } from "@/lib/shellScroll";
 import { elementWithId, SEEK_ANCHOR_EVENT } from "@/lib/chatLinks";
 import { DisclosureMemory, type Disclosures } from "./disclosures";
+import { usePrefs } from "@/lib/prefs";
+import { PromptMap } from "./PromptMap";
+import { turnDivider } from "@/lib/turnDivider";
 
 const NEAR_BOTTOM_PX = 40;
 /** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
@@ -324,11 +327,69 @@ export function Chat({
     setSeeking(null);
   }, [seeking, readView]);
 
+  /** Where the list of turns starts inside the scroller's content, in scroll coordinates. */
+  const listTop = useCallback((el: HTMLElement) => {
+    const spacer = topSpacer.current;
+    return spacer ? spacer.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop : 0;
+  }, []);
+
+  // A prompt's mark was clicked: its turn's top under the top of the view.
+  // The view goes to where the list has the turn, then settles on it exactly
+  // once it is drawn and measured.
+  const pendingJump = useRef<string | null>(null);
+  const jumpTo = useCallback(
+    (key: string) => {
+      const el = scroller.current;
+      const index = turnList.current.findIndex((t) => t.key === key);
+      if (!el || index < 0) return;
+      follow(false);
+      // Instant, then settled once drawn: turns drawn on the way are measured and shift
+      // scrollTop, which would stop a smooth scroll short and move its destination.
+      pendingJump.current = key;
+      el.scrollTop = listTop(el) + tops.current[index] - 12;
+      lastTop.current = el.scrollTop;
+      readView();
+    },
+    [follow, readView, listTop],
+  );
+  useLayoutEffect(() => {
+    const key = pendingJump.current;
+    const el = scroller.current;
+    const node = key && el?.querySelector<HTMLElement>(`[data-turn="${CSS.escape(key)}"]`);
+    if (!el || !node) return;
+    pendingJump.current = null;
+    el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+    lastTop.current = el.scrollTop;
+    readView();
+  });
+  /** The turn under the reading line, a third down the view, from the list's tops: most turns are not drawn. */
+  const readingTurn = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return 0;
+    const line = el.scrollTop + el.clientHeight / 3 - listTop(el);
+    return Math.max(0, Math.min(turnList.current.length - 1, firstAfter(tops.current, line) - 1));
+  }, [listTop]);
+  const { promptMap } = usePrefs();
+
+  // The footer floats over the transcript's foot; the transcript ends in a spacer as tall as it.
+  const footerRef = useRef<HTMLDivElement>(null);
+  const [footerHeight, setFooterHeight] = useState(0);
+  useLayoutEffect(() => {
+    const el = footerRef.current;
+    if (!el) return;
+    const measureFooter = () => setFooterHeight(el.offsetHeight);
+    measureFooter();
+    const ro = new ResizeObserver(measureFooter);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           <DisclosureMemory value={disclosures}>
@@ -360,16 +421,17 @@ export function Chat({
                 // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
+                divider={turnDivider(turns[start + i - 1], t)}
               />
             );
           })}
           <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
           {sending && <SendingMessage message={sending} cwd={cwd} />}
           {transcript.compacting && (
-            <div className="mb-3 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
+            <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
           )}
           {transcript.retry && progressing && (
-            <div className="mb-3 px-1.5 text-[13px] text-warning">
+            <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-warning">
               Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
               {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
             </div>
@@ -383,10 +445,20 @@ export function Chat({
               )}
             </div>
           ))}
+          {/* Room to scroll the last of the transcript out from under the footer. Inside the content, so growing it re-pins. */}
+          <div aria-hidden style={{ height: footerHeight }} />
           </DisclosureMemory>
         </div>
       </div>
-      <div className="relative shrink-0">
+      {promptMap && (
+        <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: footerHeight }}>
+          <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} locate={readingTurn} />
+        </div>
+      )}
+      </div>
+      {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes. */}
+      <div ref={footerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-10 [&>*]:pointer-events-auto">
+        <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_70%)]" />
         {/* Above the composer, never behind it: the composer is see-through. */}
         <div
           className={cn(

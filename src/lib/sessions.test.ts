@@ -275,43 +275,35 @@ describe("a refreshed session list", () => {
 });
 
 describe("new chat", () => {
-  const chats = "/home/me/.raccoon/Chats";
-
-  function answer(harnesses: { id: string; available: boolean }[]) {
-    mocks.invoke.mockImplementation(async (command: string, args?: { req?: { tab?: { harness: string } } }) => {
-      if (command === "list_harnesses") return harnesses;
-      if (command === "chats_dir") return chats;
-      if (command === "create_session") return { ...attached, id: "chat-1", projectPath: chats, cwd: chats, title: "Chat", tabs: [{ ...attached.tabs[0], harness: args!.req!.tab!.harness }] };
-      throw new Error(`Unexpected command: ${command}`);
-    });
-  }
-
-  it("starts Claude in the Chats folder, in place, without making it a project", async () => {
-    answer([{ id: "codex", available: true }, { id: "claude", available: true }]);
-    await sessions.refreshHarnesses();
-
-    const session = await sessions.startChat();
-
-    expect(mocks.invoke).not.toHaveBeenCalledWith("add_project", expect.anything());
-    expect(mocks.invoke).toHaveBeenCalledWith("create_session", {
-      req: expect.objectContaining({ projectPath: chats, cwd: chats, useWorktree: false, tab: expect.objectContaining({ harness: "claude" }) }),
-    });
-    expect(sessions.getSessionStore().selectedSessionId).toBe(session.id);
-    expect(sessions.getSessionStore().chatsPath).toBe(chats);
-    expect(sessions.getSessionStore().projects.some((project) => project.path === chats)).toBe(false);
+  it("opens the shared composer without creating a session or scratch folder, even with no agents", async () => {
+    sessions.selectSession(attached.id);
+    mocks.invoke.mockClear();
+    await sessions.startChat();
+    expect(sessions.getSessionStore()).toMatchObject({ view: "new", selectedSessionId: null, newSessionQuick: true, newSessionReturn: { sessionId: attached.id } });
+    expect(sessions.getSessionStore().sessions).toEqual([attached]);
+    expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat", "chats_dir", "add_project"].includes(command))).toBe(false);
+    sessions.closeNewSession();
+    expect(sessions.getSessionStore()).toMatchObject({ selectedSessionId: attached.id, newSessionQuick: false });
   });
 
-  it("falls back to another installed agent and refuses when there is none", async () => {
-    answer([{ id: "claude", available: false }, { id: "codex", available: true }]);
-    await sessions.refreshHarnesses();
-    expect((await sessions.startChat()).tabs[0].harness).toBe("codex");
+  it("switches between project and project-less destinations without starting anything", async () => {
+    mocks.invoke.mockClear();
+    await sessions.startChat();
+    sessions.startSessionIn(projectPath, null);
+    expect(sessions.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath, cwd: null } });
+    await sessions.startChat();
+    expect(sessions.getSessionStore()).toMatchObject({ newSessionQuick: true, newSessionPreset: null, cloudSessionPreset: null });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  });
 
-    answer([{ id: "claude", available: false }]);
-    await sessions.refreshHarnesses();
-    await expect(sessions.startChat()).rejects.toThrow("Install and sign in to an agent");
+  it("keeps the project branch or checkout as an unsent composer destination", async () => {
+    await sessions.startChat({ projectPath, fromBranch: "feature/login" });
+    expect(sessions.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath, cwd: null, fromBranch: "feature/login" } });
+    await sessions.startChat({ projectPath, cwd: worktreePath });
+    expect(sessions.getSessionStore().newSessionPreset).toEqual({ projectPath, cwd: worktreePath });
+    expect(sessions.getSessionStore().sessions).toEqual([attached]);
   });
 });
-
 
 describe("resting navigation", () => {
   it("boots at welcome and keeps explicit creation and deep links", () => {
@@ -364,14 +356,14 @@ it("retains newer message time when delayed metadata events and refreshes arrive
   expect(sessions.getSessionStore().sessions[0].lastMessageAt).toBe(latest);
 });
 
-it("subscribes before boot backfill and merges its newer time into a stale initial list", async () => {
+it.each([true, false])("retains boot backfill activity across a stale list (verified timestamps: %s)", async (verified) => {
   vi.resetModules();
   mocks.listeners.clear();
   sessions = await import("./sessions");
   let resolveList!: (entries: SessionEntry[]) => void;
   const pending = new Promise<SessionEntry[]>((resolve) => { resolveList = resolve; });
-  const initial = { ...attached, lastMessageAt: "2026-10-02T00:00:00Z" };
-  const newer = { ...attached, lastMessageAt: "2026-10-05T00:00:00Z" };
+  const initial = { ...attached, lastMessageAt: verified ? "2026-10-02T00:00:00Z" : undefined };
+  const newer = { ...attached, lastMessageAt: verified ? "2026-10-05T00:00:00Z" : undefined, hasMessages: true };
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "list_projects") return { projects: [{ path: projectPath, name: "Synthetic" }], lastSelected: projectPath };
     if (command === "list_sessions") {
@@ -394,7 +386,7 @@ it("subscribes before boot backfill and merges its newer time into a stale initi
   expect(sessions.getSessionStore().sessions[0]).toEqual(newer);
   // The same listener continues normal updates after initialization.
   mocks.listeners.get("session_updated")!({ payload: { ...initial, title: "Synthetic rename" } });
-  expect(sessions.getSessionStore().sessions[0]).toMatchObject({ title: "Synthetic rename", lastMessageAt: newer.lastMessageAt });
+  expect(sessions.getSessionStore().sessions[0]).toMatchObject({ title: "Synthetic rename", lastMessageAt: newer.lastMessageAt, hasMessages: true });
 });
 
 describe("a new live connection", () => {

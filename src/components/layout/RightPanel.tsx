@@ -7,11 +7,11 @@ import { useShortcut } from "@/lib/hotkeys";
 import type { ShortcutId } from "@/lib/shortcuts";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { ChangesPanel } from "@/components/changes/ChangesPanel";
-import { RepoPanel, type RepoView } from "@/components/changes/RepoPanel";
-import { PrPanel } from "@/components/changes/PrPanel";
+import { BranchTab } from "@/components/changes/BranchTab";
 import { FileTree } from "@/components/files/FileTree";
 import { TerminalDock } from "@/components/terminal/TerminalDock";
 import { ComputerPanel } from "@/components/computer/ComputerPanel";
+import { BrowserPanel } from "@/components/browser/BrowserPanel";
 import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
 import { api } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
@@ -22,10 +22,11 @@ import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type Pa
 
 export type { PanelTab };
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
+  // Branch holds the pull request; Changes holds committing and history.
+  { id: "branch", label: "Branch", shortcut: "panel.repository" },
   { id: "changes", label: "Changes", shortcut: "panel.changes" },
-  { id: "repo", label: "Repo", shortcut: "panel.repository" },
-  { id: "pr", label: "PR", shortcut: "panel.pullRequests" },
   { id: "files", label: "Files", shortcut: "panel.files" },
+  { id: "browser", label: "Browser" },
   { id: "ports", label: "Ports" },
   { id: "computer", label: "Computer" },
 ];
@@ -41,6 +42,7 @@ export function RightPanel({
   gitNote,
   branch,
   baseRef,
+  from,
   events = [],
   version = 0,
   live = false,
@@ -59,14 +61,17 @@ export function RightPanel({
   ports,
   terminals = false,
   computer = false,
+  browser = false,
 }: {
   cwd: string;
   isGit?: boolean;
-  /** Why there is no Changes, Repo or PR, shown above Files when `isGit` is false and the reason is worth saying. */
+  /** Why there is no Branch or Changes, shown above Files when `isGit` is false and the reason is worth saying. */
   gitNote?: string;
   /** Undefined asks the panel to resolve the checkout branch itself. */
   branch?: string | null;
   baseRef?: string | null;
+  /** The ref the session's worktree was made from: the Branch tab reads the branch against it. */
+  from?: string | null;
   events?: AgentEvent[];
   version?: number;
   live?: boolean;
@@ -79,11 +84,11 @@ export function RightPanel({
   settleSessionId?: string;
   /** Present only for a managed, non-main workspace. */
   workspace?: { projectPath: string; name: string };
-  /** Where Changes, Repo and PR read Git; the local checkout at `cwd` when absent. */
+  /** Where Branch and Changes read Git; the local checkout at `cwd` when absent. */
   gitSource?: GitSource;
   /** Where Files reads; the local checkout at `cwd` when absent. */
   fileSource?: FileSource;
-  /** A cloud workspace with several repositories: which one Changes, Repo and PR show. */
+  /** A cloud workspace with several repositories: which one Branch and Changes show. */
   repositories?: { list: string[]; selected: string | null; onSelect: (repo: string | null) => void };
   /** Shown above the panels when this attachment may read but not change the workspace. */
   readOnlyReason?: string | null;
@@ -93,14 +98,17 @@ export function RightPanel({
   terminals?: boolean;
   /** A local session's panel: the Computer tab, a desktop to watch and that agents can use. */
   computer?: boolean;
+  /** A local session's panel: the Browser tab, the workspace's pages beside the chat, shared with the agent. */
+  browser?: boolean;
 }) {
   const prefs = usePrefs();
   // A cloud session's panel (the one with Ports) reopens on the tab it last showed.
   const remembers = !!ports && !!sessionId;
-  const [selectedTab, setTab] = useState<PanelTab>(() => takePanelTab() ?? (remembers ? rememberedPanelTab(sessionId!) : null) ?? "changes");
+  // Null until a tab is picked: the first one depends on the Git source, which a cloud session learns after drawing.
+  const [picked, setTab] = useState<PanelTab | null>(() => takePanelTab() ?? (remembers ? rememberedPanelTab(sessionId!) : null));
   useEffect(() => {
-    if (remembers) rememberPanelTab(sessionId!, selectedTab);
-  }, [remembers, sessionId, selectedTab]);
+    if (remembers && picked) rememberPanelTab(sessionId!, picked);
+  }, [remembers, sessionId, picked]);
   // A menu elsewhere asked for a tab (the session's "Ports and previews").
   useEffect(
     () =>
@@ -110,12 +118,29 @@ export function RightPanel({
       }),
     [],
   );
-  const [repoView, setRepoView] = useState<RepoView>("uncommitted");
+  const [focusPr, setFocusPr] = useState(0);
   const [refreshTick, setRefreshTick] = useState(0);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const fallback: PanelTab = isGit ? "changes" : "files";
+  // The branch picture reads this computer's checkout; a cloud workspace's Branch tab is its pull request alone, and its panel opens on Changes.
+  const branchPicture = !gitSource?.cloud;
+  const selectedTab: PanelTab = picked ?? (branchPicture ? "branch" : "changes");
   const tab: PanelTab =
-    selectedTab === "ports" ? (ports ? "ports" : fallback) : selectedTab === "computer" ? (computer ? "computer" : fallback) : isGit ? selectedTab : "files";
+    selectedTab === "ports"
+      ? ports
+        ? "ports"
+        : fallback
+      : selectedTab === "computer"
+        ? computer
+          ? "computer"
+          : fallback
+        : selectedTab === "browser"
+          ? browser && sessionId
+            ? "browser"
+            : fallback
+        : isGit
+          ? selectedTab
+          : "files";
   const dragging = useRef<{ x: number; w: number } | null>(null);
 
   useEffect(() => {
@@ -133,8 +158,11 @@ export function RightPanel({
   const targetLabel = !isGit ? "Folder" : tab === "changes" && labelMode === "base" ? null : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
 
   useShortcut("panel.changes", () => setTab("changes"));
-  useShortcut("panel.repository", () => setTab("repo"));
-  useShortcut("panel.pullRequests", () => setTab("pr"));
+  useShortcut("panel.repository", () => setTab("branch"));
+  useShortcut("panel.pullRequests", () => {
+    setTab("branch");
+    setFocusPr((n) => n + 1);
+  });
   useShortcut("panel.files", () => setTab("files"));
 
   const onDown = useCallback(
@@ -172,7 +200,7 @@ export function RightPanel({
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
       />
       <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 px-2">
-        {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : isGit || t.id === "files")).map((t) => (
+        {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : t.id === "browser" ? browser && !!sessionId : isGit || t.id === "files")).map((t) => (
           <WithTooltip key={t.id} label={t.label} shortcut={t.shortcut}>
             <button
               type="button"
@@ -227,6 +255,31 @@ export function RightPanel({
       <div className="min-h-0 flex-1">
         {isGit && (
           <>
+            <div className={cn("h-full", tab !== "branch" && "hidden")}>
+              <BranchTab
+                key={`${sessionId ?? ""}:${refreshTick}`}
+                focusPr={focusPr}
+                branch={branchPicture ? { cwd, active: tab === "branch", version, sessionId, from } : null}
+                pr={{
+                  sessionId,
+                  cwd,
+                  source: gitSource,
+                  branch: resolvedBranch,
+                  active: tab === "branch",
+                  busy: live,
+                  onSettle:
+                    settleSessionId && workspace
+                      ? () => openWorkspaceRemove({ projectPath: workspace.projectPath, path: cwd, name: workspace.name, mode: "settle", sessionId: settleSessionId })
+                      : undefined,
+                  workspace: workspace
+                    ? {
+                        projectPath: workspace.projectPath,
+                        onDelete: () => openWorkspaceDelete(workspace.projectPath, cwd, workspace.name),
+                      }
+                    : undefined,
+                }}
+              />
+            </div>
             <div className={cn("h-full", tab !== "changes" && "hidden")}>
               <ChangesPanel
                 key={refreshTick}
@@ -238,37 +291,6 @@ export function RightPanel({
                 active={tab === "changes"}
                 live={live}
                 workingTree={workingTree}
-                onViewUncommitted={() => {
-                  setRepoView("uncommitted");
-                  setTab("repo");
-                }}
-              />
-            </div>
-            <div className={cn("h-full", tab !== "repo" && "hidden")}>
-              <RepoPanel key={refreshTick} cwd={cwd} source={gitSource} active={tab === "repo"} view={repoView} onViewChange={setRepoView} />
-            </div>
-            <div className={cn("h-full", tab !== "pr" && "hidden")}>
-              <PrPanel
-                sessionId={sessionId}
-                key={`${sessionId ?? ""}:${refreshTick}`}
-                cwd={cwd}
-                source={gitSource}
-                branch={resolvedBranch}
-                active={tab === "pr"}
-                busy={live}
-                onSettle={
-                  settleSessionId && workspace
-                    ? () => openWorkspaceRemove({ projectPath: workspace.projectPath, path: cwd, name: workspace.name, mode: "settle", sessionId: settleSessionId })
-                    : undefined
-                }
-                workspace={
-                  workspace
-                    ? {
-                        projectPath: workspace.projectPath,
-                        onDelete: () => openWorkspaceDelete(workspace.projectPath, cwd, workspace.name),
-                      }
-                    : undefined
-                }
               />
             </div>
           </>
@@ -281,6 +303,8 @@ export function RightPanel({
         )}
         {/* Only while shown: it holds a live connection to the desktop. */}
         {computer && tab === "computer" && <ComputerPanel active />}
+        {/* Only while shown: it streams the page. */}
+        {browser && sessionId && tab === "browser" && <BrowserPanel sessionId={sessionId} cwd={cwd} active />}
         <div className={cn("h-full", tab !== "files" && "hidden")}>
           <FileTree
             key={refreshTick}

@@ -1815,6 +1815,11 @@ pub fn continue_launch(host: &dyn Host, session_id: &str, tab_id: &str, options:
 /// `issue_body` is the issue's text as the session was started with it, kept
 /// for the reviewer where the tracker cannot be read again (a cloud workspace).
 pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
+    start_with_switches(host, session_id, tab_id, auto_merge, None, issue_body)
+}
+
+/// Explicit launch choices override defaults independently.
+pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
     let session = host.session(session_id)?;
     let issue = session.issue.clone();
     if session.tab(tab_id).is_none() {
@@ -1840,6 +1845,9 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
                 let value = value && !step.p.cloud && !host.cloud();
                 store::set_switches(&step.p.id, |pipeline| pipeline.auto_merge = value)?;
                 step.record("autoMerge", if value { "Automatic merge enabled for the new author." } else { "Automatic merge disabled for the new author." });
+            }
+            if let Some(value) = resolve_conflicts {
+                store::set_switches(&step.p.id, |pipeline| pipeline.resolve_conflicts = value)?;
             }
             step.p.author = next;
             step.enter(Stage::Work, "The new author conversation is continuing the work.");
@@ -1880,7 +1888,7 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         author: SessionRef { session_id: session_id.to_string(), tab_id: tab_id.to_string() },
         reviewer: None,
         auto_merge,
-        resolve_conflicts: settings.resolve_conflicts_at_start(from_issue),
+        resolve_conflicts: resolve_conflicts.unwrap_or_else(|| settings.resolve_conflicts_at_start(from_issue)),
         resolutions: 0,
         resolver: None,
         resolution: None,
@@ -2049,27 +2057,59 @@ pub fn run_local_checks(host: &dyn Host, id: &str) {
 }
 
 pub fn set_resolve_conflicts(host: &dyn Host, id: &str, value: bool) -> Result<Pipeline> {
-    let pipeline = store::set_switches(id, |pipeline| { pipeline.resolve_conflicts = value; })?;
+    set_resolve_conflicts_by(host, id, value, super::SwitchActor::System)
+}
+
+pub fn set_resolve_conflicts_by(host: &dyn Host, id: &str, value: bool, actor: super::SwitchActor) -> Result<Pipeline> {
+    let pipeline = store::set_switches(id, |pipeline| {
+        if pipeline.resolve_conflicts != value {
+            pipeline.resolve_conflicts = value;
+            record_switch(host, pipeline, "resolveConflicts", "Automatic conflict resolution", value, actor);
+        }
+    })?;
     host.changed(&pipeline);
     Ok(pipeline)
+}
+
+fn record_switch(host: &dyn Host, pipeline: &mut Pipeline, kind: &str, label: &str, value: bool, actor: super::SwitchActor) {
+    let who = match &actor {
+        super::SwitchActor::Person => "the person in the app".into(),
+        super::SwitchActor::System => "TerminalX".into(),
+        super::SwitchActor::Cli { session_id: Some(id), .. } if *id == pipeline.author.session_id => format!("author session {id} through the CLI"),
+        super::SwitchActor::Cli { session_id: Some(id), .. } => format!("session {id} through the CLI"),
+        super::SwitchActor::Cli { session_id: None, .. } => "the CLI (outside a session)".into(),
+    };
+    let state = if value { "on" } else { "off" };
+    let event = pipeline.record(&stamp(host.now()), kind, format!("{label} turned {state} by {who}."));
+    if let super::SwitchActor::Cli { session_id, .. } = &actor { event.session_id = session_id.clone(); }
+    event.actor = Some(actor);
 }
 
 /// Flip "Merge automatically when the review is addressed" for one issue.
 /// Off takes effect at once, even against a step that is about to merge. On
 /// merges a pull request that was only waiting for the switch.
 pub fn set_auto_merge(host: &dyn Host, id: &str, value: bool) -> Result<Pipeline> {
+    set_auto_merge_by(host, id, value, super::SwitchActor::Person)
+}
+
+pub fn set_auto_merge_by(host: &dyn Host, id: &str, value: bool, actor: super::SwitchActor) -> Result<Pipeline> {
     let stored = store::get(id)?;
     if value && (stored.cloud || host.cloud()) {
         bail!("{} is in a cloud workspace, which never merges by itself. Merge it from the issue page once it is ready.", stored.label());
     }
-    let was = stored.auto_merge;
-    let switched = store::set_switches(id, |pipeline| pipeline.auto_merge = value)?;
-    if was == value {
+    let mut changed = false;
+    let switched = store::set_switches(id, |pipeline| {
+        if pipeline.auto_merge != value {
+            changed = true;
+            pipeline.auto_merge = value;
+            record_switch(host, pipeline, "autoMerge", "Automatic merge", value, actor);
+        }
+    })?;
+    if !changed {
         return Ok(switched);
     }
     host.changed(&switched);
     run(host, id, true, OnError::NeedsYou, |step| {
-        step.record("autoMerge", if value { "Automatic merge turned on." } else { "Automatic merge turned off." });
         match (&step.p.merge_requested, value) {
             // Turning it off stops a merge that has not been asked for. One
             // GitHub already took is GitHub's to complete, and saying

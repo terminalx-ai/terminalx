@@ -25,7 +25,7 @@ import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
 import { clearNewSessionPreset, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
-import { readinessBlock, useAgentReadiness } from "@/lib/agentReadiness";
+import { readinessBlock, useAgentReadinessList } from "@/lib/agentReadiness";
 import { AgentSetup } from "./AgentSetup";
 import { AgentMenu } from "./AgentMenu";
 import { BranchPicker, type BranchTarget } from "./BranchPicker";
@@ -63,7 +63,7 @@ export function NewSessionView({
   onCreated,
   useWorktree: controlledUseWorktree,
   onUseWorktreeChange,
-  quick = false,
+  quick: quickOverride,
   compact = false,
   modal = false,
 }: {
@@ -78,6 +78,7 @@ export function NewSessionView({
   modal?: boolean;
 }) {
   const store = useSessionStore();
+  const quick = quickOverride ?? store.newSessionQuick ?? false;
   const prefs = usePrefs();
   // In the dialog, an unsent prompt outlives a stray Escape or click outside: it is there again when the dialog reopens.
   const [text, setText] = useState(() => (modal ? dialogDraft : ""));
@@ -119,13 +120,18 @@ export function NewSessionView({
   const project = quick ? null : (store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null);
   // A quick chat cuts no worktree, whatever the folder it is pointed at.
   const isGit = quick ? false : cloud ? true : project?.kind !== "folder";
-  const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
+  const useWorktree = isGit && (!!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
-  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
+  const readiness = useAgentReadinessList(store.harnesses, !cloud);
+  // Fresh local probes take precedence over discovery cached before an install or removal.
+  const harnesses = store.harnesses.map((item) => {
+    const state = readiness.values?.[item.id]?.state;
+    return state && state !== "unknown" ? { ...item, available: state !== "missing" } : item;
+  });
+  const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
   const { harness, modelId, effort, mode } = agentSelection;
-  const readiness = useAgentReadiness(cloud ? null : harness?.id ?? null);
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
     quick ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
@@ -310,7 +316,7 @@ export function NewSessionView({
     setBusy(true);
     setError(null);
     try {
-      const checked = await readiness.refresh();
+      const checked = await readiness.refreshAgent(harness.id);
       const blocked = checked && readinessBlock(harness.name, checked);
       if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
@@ -336,7 +342,7 @@ export function NewSessionView({
     setBusy(true);
     setError(null);
     try {
-      const checked = await readiness.refresh();
+      const checked = await readiness.refreshAgent(harness.id);
       const blocked = checked && readinessBlock(harness.name, checked);
       if (blocked) { setError(blocked); return; }
       // The backend names an untitled session itself, so an image-only prompt
@@ -354,6 +360,7 @@ export function NewSessionView({
         onMain: !preset?.cwd && !useWorktree,
         worktreeName: !preset?.cwd && useWorktree ? worktreeName : null,
         checkoutBranch: !preset?.cwd && useWorktree ? checkoutBranch : null,
+        baseRef: !preset?.cwd && useWorktree ? preset?.fromBranch ?? null : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
       });
@@ -394,7 +401,7 @@ export function NewSessionView({
       <span className="truncate font-mono">{workspace?.name ?? preset.cwd.split("/").pop()}</span>
     </span>
   ) : useWorktree ? (
-    <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground" title={`Works on a new branch of its own, made from ${status?.defaultBranch ?? "the default branch"}, so it never touches your other work.`}>
+    <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground" title={`Works on a new branch of its own, made from ${preset?.fromBranch ?? status?.defaultBranch ?? "the default branch"}, so it never touches your other work.`}>
       <GitBranch className="size-3.5 shrink-0" />
       <span className="truncate">New branch</span>
     </span>
@@ -412,9 +419,16 @@ export function NewSessionView({
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
-          {!cloud && harness && <div className="mb-3"><AgentSetup harness={harness} value={readiness.value} checking={readiness.checking || busy} onRefresh={() => {
-            void refreshHarnesses().then(() => readiness.refresh()).catch(() => setError("Could not re-check installed agents. Try again."));
-          }} /></div>}
+          {!cloud && (
+            <div className="mb-3 space-y-2">
+              {!harness && <p role="status" className="px-1 text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
+              {(harness ? [harness] : store.harnesses).map((item) => (
+                <AgentSetup key={item.id} harness={item} value={readiness.values?.[item.id] ?? null} checking={readiness.checking || busy} onRefresh={() => {
+                  void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
+                }} />
+              ))}
+            </div>
+          )}
           {cloud && confirm && (
             <CloudCreateConfirm prepared={confirm} orgName={cloud.orgName} busy={busy} onConfirm={() => void confirmCreate()} onCancel={() => setConfirm(null)} />
           )}
@@ -511,7 +525,7 @@ export function NewSessionView({
                 </DropdownMenu>
               )}
               {localGit && project ? (
-                <BranchPicker projectPath={project.path} defaultBranch={status?.defaultBranch ?? "main"} target={branchTarget} onChange={pickBranch} />
+                <BranchPicker projectPath={project.path} defaultBranch={preset?.fromBranch ?? status?.defaultBranch ?? "main"} target={branchTarget} onChange={pickBranch} />
               ) : (
                 branchInfo
               )}
@@ -520,7 +534,7 @@ export function NewSessionView({
                   useWorktree={useWorktree}
                   onUseWorktreeChange={cloud ? setUseWorktree : undefined}
                   switchLabel={cloud ? "New worktree on the cloud workspace" : undefined}
-                  worktreeLabel={cloud ? "New worktree on the workspace" : `New branch from ${status?.defaultBranch ?? "the default branch"}`}
+                  worktreeLabel={cloud ? "New worktree on the workspace" : `New branch from ${preset?.fromBranch ?? status?.defaultBranch ?? "the default branch"}`}
                   currentBranch={cloud ? "the workspace's checkout" : (status?.branch ?? "the current branch")}
                   pipeline={pipelineLaunch}
                 />
@@ -593,6 +607,7 @@ export function NewSessionView({
             </div>
           </div>
 
+          {!cloud && <p className="mt-2 px-1 text-xs text-faint">Nothing starts until you press {quick ? "Ask" : "Create"}.</p>}
           {!cloud && harness && !available && (
             <p className="mt-2 px-1 text-xs text-muted-foreground">
               Install it with <code className="font-mono">{harness.installHint}</code>

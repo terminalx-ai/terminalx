@@ -386,7 +386,7 @@ issues, or change other issues, on your own initiative.
 ```text
 terminalx sessions create --project <project> --agent <agent> --issue <issue> \
   [--provider github|linear] [--prompt <text>] \
-  [--auto-merge|--no-auto-merge] [--no-pipeline] \
+  [--auto-merge|--no-auto-merge] [--resolve-conflicts|--no-resolve-conflicts] [--no-pipeline] \
   [--title <text>] [--name <name>] [--model <id>] [--effort <level>] [--mode <mode>] --json
 ```
 
@@ -400,9 +400,16 @@ work done and its checks passing, TerminalX pushes the branch, opens a pull requ
 the issue, has a separate reviewer session review it, takes the findings back to the author
 session, and reviews the new commit, up to the project's limit (three by default). It stops at
 `readyToMerge` unless automatic merging is on for the issue. `--auto-merge` and
-`--no-auto-merge` set that switch; without either the project's default applies, which for
-an issue is on (and conflict resolution with it) unless the project turned it off or has a
-person do the merge.
+`--no-auto-merge` set Merge when green; `--resolve-conflicts` and `--no-resolve-conflicts`
+set Resolve conflicts automatically independently. Without flags, both start on for an
+issue unless the project turned them off; Merge when green stays off where a person does
+the merge. A cloud workspace never merges.
+
+Leave both switches at their defaults unless the person explicitly asks to turn one off.
+Wanting screenshots or evidence to check a pull request is not a request to stop it merging.
+Do not put instructions in the session prompt that disable either switch without that request.
+If an issue start fails, report the failure and its recovery. Never silently fall back to a
+plain session with the issue pasted into its prompt: that loses the issue link and pipeline.
 `--no-pipeline` starts from the issue and stops at the code. `--on-main` implies no pipeline:
 there is no branch to open a pull request from.
 
@@ -413,6 +420,7 @@ has the pipeline turned off or the session is not on a branch of its own).
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
+terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
 
@@ -444,6 +452,9 @@ sentence, a structured `reason` when it is at `readyToMerge` or `needsYou`, the 
   is only ever made at the exact commit the reviewer approved, with its checks passed, and
   never where the project keeps the merge for a person. The person-only override is available only
   on the issue page in TerminalX; `merge` never grants that authority.
+- `resolve-conflicts on|off` changes automatic conflict resolution without changing Merge when
+  green. Both switch commands record the caller in pipeline history, including the session
+  and tab when run inside an agent tab; app changes are attributed to the person.
 
 Do not wait on a pipeline with `terminalx wait`: that waits for one session's turn. Poll
 `pipelines show` until `state` is `readyToMerge`, `needsYou`, `merged` or `stopped`.
@@ -554,6 +565,7 @@ session has no tab there, or its first prompt failed to start one (the message s
   `cloud_workspace_required`). The workspace's runtime carries it on to a pull request and a
   review as described above, and stops at Ready to merge: a cloud workspace never merges by
   itself, so `--auto-merge` is refused, and the merge is the person's, from the issue page.
+  `--resolve-conflicts` and `--no-resolve-conflicts` set conflict resolution independently.
   The response carries `pipeline`, or `null` with the reason in `pipelineNote`.
 
 `wait` returns `reason`: `permission` (the agent asks for a decision), `recovery` (the agent

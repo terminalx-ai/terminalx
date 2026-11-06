@@ -18,6 +18,12 @@ Leaving Agents removes that polling; the new-session view does not poll.
 Listeners and pending resume work are disposed on unmount or agent selection
 change, and an older result cannot replace a newer check.
 
+The new-chat list uses those same focus and PTY-exit triggers. It probes every
+local candidate even if cached discovery says it is missing. A known readiness
+result also supplies availability to the agent picker and composer, so installing
+and signing in enables a new chat on return without a manual re-check. An
+unknown login result keeps the discovery value; cloud agents are not probed.
+
 Each `AgentSetupCard` owns one readiness value for its header, setup body and
 install action. The session store's harness list supplies agent metadata, not
 the card's status. Both **Check again** and the section's **Re-check** remain

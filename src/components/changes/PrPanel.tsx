@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Check, ChevronDown, ChevronRight, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type GitHubConnectionStatus, type PullRequest } from "@/lib/api";
 import { AddRemote, CommandDetails, GitError, GitHubSetup } from "./GitRecovery";
@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
+import { NextLine } from "./NextStep";
 
 type WorkspaceCleanup = {
   projectPath: string;
@@ -45,6 +46,8 @@ export function PrPanel({
   busy,
   onSettle,
   workspace,
+  inline = false,
+  held = false,
 }: {
   cwd?: string;
   sessionId?: string;
@@ -57,6 +60,14 @@ export function PrPanel({
   onSettle?: () => void;
   /** A managed workspace that can use the guarded workspace cleanup flow. */
   workspace?: WorkspaceCleanup;
+  /** A section of the Branch tab, scrolled with it, rather than a panel of its own. */
+  inline?: boolean;
+  /**
+   * The branch has a step of its own to take first (inline only): the pull
+   * request is shown, but what to do with it (open one, mark ready, merge)
+   * waits, so there is one next step on the tab, not two.
+   */
+  held?: boolean;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
@@ -76,6 +87,8 @@ export function PrPanel({
   // Loading from the start: no pull requests is only said once they have been read.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** A failed read is said quietly inline; a failed click, plainly. */
+  const [errorFrom, setErrorFrom] = useState<"load" | "action">("load");
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -134,11 +147,13 @@ export function PrPanel({
         setLanded(landedWork);
         setCheckedWorkspace(workspaceCheck);
         setError(pullRequests.error ?? null);
+        setErrorFrom("load");
       })
       .catch((e) => {
         if (cancelled) return;
         setCheckedWorkspace(null);
         setError(source.errorMessage(e));
+        setErrorFrom("load");
       })
       .finally(() => !cancelled && setLoading(false));
     return () => {
@@ -197,6 +212,7 @@ export function PrPanel({
     } catch (e) {
       if (selected.current.generation !== generation) return false;
       setError(source.errorMessage(e));
+      setErrorFrom("action");
       // A refusal may still have changed something (a lost answer): read GitHub again.
       setTick((t) => t + 1);
       return false;
@@ -218,6 +234,7 @@ export function PrPanel({
     return <AddRemote key={source.key} source={source} onDone={() => setTick((value) => value + 1)} />;
   }
   if (available === false) {
+    if (inline) return held ? null : <div className="px-3"><NextLine tone="muted" text={<>Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span> to open a pull request</>} /></div>;
     return (
       <div className="px-3 py-4 text-xs text-muted-foreground">
         GitHub is unavailable. Check the workspace’s GitHub connection and refresh.
@@ -240,13 +257,19 @@ export function PrPanel({
     && canDeleteMergedWorkspace(checkedWorkspace.disposition);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto scrollbar-thin">
-      <div className="flex justify-end px-3 pt-2">
-        <Button size="xs" variant="ghost" disabled={loading || !!working} onClick={() => setTick((t) => t + 1)} aria-label="Refresh pull requests">
-          <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
-        </Button>
-      </div>
-      {error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} />)}
+    <div className={cn("flex flex-col", inline ? "gap-2" : "h-full min-h-0 overflow-y-auto scrollbar-thin")}>
+      {/* Inline, the tab's own refresh reads it again, and it is read every 30 seconds besides. */}
+      {!inline && (
+        <div className="flex items-center justify-end px-3 pt-2">
+          <Button size="xs" variant="ghost" disabled={loading || !!working} onClick={() => setTick((t) => t + 1)} aria-label="Refresh pull requests">
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
+          </Button>
+        </div>
+      )}
+      {error && inline && errorFrom === "load" ? (
+        // Not reaching GitHub is no fault of the reader's: said once, quietly, the detail on hover.
+        <p className="px-4 text-[11px] text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
+      ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
@@ -263,7 +286,7 @@ export function PrPanel({
           ) : null}
         </div>
       )}
-      {loading && prs.length === 0 && <div className="px-3 py-3 text-xs text-faint">Loading…</div>}
+      {loading && prs.length === 0 && !inline && <div className="px-3 py-3 text-xs text-faint">Loading…</div>}
       {visibleRows.map((row) => {
         const pr = row.pr;
         if (!pr) return <div key={row.identity} role="alert" className="border-b border-hairline px-3 py-3 text-xs">
@@ -272,6 +295,16 @@ export function PrPanel({
           <CommandDetails details={row.error} />
         </div>;
         const ready = mergeReadiness(pr);
+        if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
+          <>
+            {pr.isDraft && (
+              <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
+                {working === "ready" && <Loader2 className="animate-spin" />} Mark ready
+              </Button>
+            )}
+            {ready.ok && <MergeMenu disabled={!!working || loading || !fresh} working={working === "merge"} onMerge={(method) => merge(row, method)} />}
+          </>
+        )} />;
         return (
           <div key={row.identity} className="border-b border-hairline px-3 py-3">
             <div className="flex items-start gap-2">
@@ -340,7 +373,20 @@ export function PrPanel({
         );
       })}
 
-      {canCreate && !creating && source.canWrite && (
+      {inline && canCreate && !creating && source.canWrite && !held && (
+        <div className="px-3">
+          <NextLine
+            tone="good"
+            text={`Open a pull request into ${status?.defaultBranch ?? "the base"}`}
+            actions={
+              <Button size="xs" variant="accent" onClick={() => { setBase(status?.defaultBranch ?? null); setCreating(true); }} disabled={!status?.aheadOfBase}>
+                Create pull request
+              </Button>
+            }
+          />
+        </div>
+      )}
+      {!inline && canCreate && !creating && source.canWrite && (
         <div className="px-3 py-3">
           <div className="mb-2 text-xs text-muted-foreground">
             No pull request for <span className="font-mono">{currentBranch}</span>.
@@ -414,11 +460,101 @@ export function PrPanel({
           </div>
         </form>
       )}
-      {!loading && !error && prs.length === 0 && !canCreate && status && (
+      {!inline && !loading && !error && prs.length === 0 && !canCreate && status && (
         <div className="px-3 py-4 text-xs text-muted-foreground">
           {status.branch === status.defaultBranch ? "On the default branch; nothing to open a pull request from." : "Nothing here yet."}
         </div>
       )}
     </div>
+  );
+}
+
+const FAILING = ["failure", "error", "cancelled", "timed_out", "action_required"];
+const RUNNING = ["pending", "in_progress", "queued", "expected", "waiting"];
+
+function reviewLabel(decision: string): string {
+  return decision === "APPROVED" ? "approved" : decision === "CHANGES_REQUESTED" ? "changes requested" : decision === "REVIEW_REQUIRED" ? "review required" : decision.toLowerCase();
+}
+
+/**
+ * A pull request as one line of the Branch tab: its title (opens it), its
+ * number and state, its checks folded into a count (unfolded when one fails),
+ * then, unless the branch has a step first, what to do with it now.
+ */
+function InlinePr({ pr, ready, held, actions }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode }) {
+  const failing = pr.checks.filter((c) => FAILING.includes(c.state)).length;
+  const passed = pr.checks.filter((c) => !FAILING.includes(c.state) && !RUNNING.includes(c.state)).length;
+  const [checksOpen, setChecksOpen] = useState(failing > 0);
+  useEffect(() => {
+    if (failing > 0) setChecksOpen(true);
+  }, [failing]);
+  const state = pr.state === "OPEN" ? (pr.isDraft ? "Draft" : "Open") : pr.state === "MERGED" ? "Merged" : "Closed";
+  const tone = ready.ok ? "good" : failing > 0 || pr.mergeable === "CONFLICTING" || pr.reviewDecision === "CHANGES_REQUESTED" ? "bad" : "muted";
+  return (
+    <div className="flex flex-col gap-1.5 px-3" data-testid="branch-pr">
+      <div className="flex min-w-0 items-center gap-2 px-1">
+        {pr.state === "MERGED" ? (
+          <GitMerge className="size-3.5 shrink-0 text-merged" />
+        ) : pr.state === "OPEN" && pr.isDraft ? (
+          <GitPullRequestDraft className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : pr.state === "OPEN" ? (
+          <CircleDot className="size-3.5 shrink-0 text-add" />
+        ) : (
+          <X className="size-3.5 shrink-0 text-destructive" />
+        )}
+        <button type="button" onClick={() => void openUrl(pr.url)} className="group flex min-w-0 flex-1 items-center gap-1 text-left text-xs hover:underline" title={pr.title}>
+          <span className="truncate text-foreground">{pr.title}</span>
+          <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
+        </button>
+        <span className="shrink-0 text-[11px] text-faint">
+          #{pr.number} · {state}
+        </span>
+      </div>
+      {pr.checks.length > 0 && (
+        <div className="px-1 pl-6.5">
+          <button type="button" onClick={() => setChecksOpen((v) => !v)} aria-expanded={checksOpen} className="flex items-center gap-1 text-[11px] text-faint hover:text-foreground" data-testid="branch-pr-checks">
+            {checksOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            Checks {passed}/{pr.checks.length}
+            {failing > 0 && <span className="text-destructive"> · {failing} failing</span>}
+          </button>
+          {checksOpen && (
+            <div className="mt-0.5 flex flex-col gap-0.5">
+              {pr.checks.map((c) => (
+                <div key={c.name} aria-label={`${c.name}: ${c.state}`} className="flex items-center gap-2 text-xs">
+                  {FAILING.includes(c.state) ? (
+                    <CircleAlert className="size-3.5 text-destructive" />
+                  ) : RUNNING.includes(c.state) ? (
+                    <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                  ) : (
+                    <Check className="size-3.5 text-add" />
+                  )}
+                  <span className="truncate text-muted-foreground">{c.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {pr.state === "OPEN" && !held && (
+        <NextLine tone={tone} text={`${ready.label}${pr.reviewDecision ? ` · ${reviewLabel(pr.reviewDecision)}` : ""}`} actions={actions || undefined} />
+      )}
+    </div>
+  );
+}
+
+function MergeMenu({ disabled, working, onMerge }: { disabled: boolean; working: boolean; onMerge: (method: "merge" | "squash" | "rebase") => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="xs" className="bg-merge text-merge-foreground hover:opacity-90" disabled={disabled}>
+          {working ? <Loader2 className="animate-spin" /> : <GitMerge />} Merge
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => onMerge("merge")}>Merge commit</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onMerge("squash")}>Squash and merge</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onMerge("rebase")}>Rebase and merge</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

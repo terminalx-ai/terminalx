@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { ProjectRail } from "./ProjectRail";
+import { StarReminder } from "@/components/ui/StarReminder";
 
 /** How narrow and how wide the sidebar can be dragged. */
 export const SIDEBAR_MIN = 200;
@@ -63,19 +64,23 @@ export function Sidebar({
   }, []);
 
   return (
-    <aside className="relative flex h-full min-h-0 w-(--sidebar-w) shrink-0 overflow-clip">
-      <ProjectRail
-        onHide={onToggle}
-        onOpenSettings={onOpenSettings}
-        onOpenAccount={onOpenAccount}
-        onOpenHome={onOpenHome}
-        onOpenIssues={onOpenIssues}
-        onOpenAgents={onOpenAgents}
-        onOpenStats={onOpenStats}
-        onOpenAutomations={onOpenAutomations}
-        onOpenSkills={onOpenSkills}
-        onSearch={onSearch}
-      />
+    <aside className="relative flex h-full min-h-0 w-(--sidebar-w) shrink-0 flex-col overflow-clip">
+      <div className="min-h-0 flex-1">
+        <ProjectRail
+          onHide={onToggle}
+          onOpenSettings={onOpenSettings}
+          onOpenAccount={onOpenAccount}
+          onOpenHome={onOpenHome}
+          onOpenIssues={onOpenIssues}
+          onOpenAgents={onOpenAgents}
+          onOpenStats={onOpenStats}
+          onOpenAutomations={onOpenAutomations}
+          onOpenSkills={onOpenSkills}
+          onSearch={onSearch}
+        />
+      </div>
+      {/* Sidebar space never reduces the height available for input or approvals. */}
+      <StarReminder />
       <div
         role="separator"
         aria-orientation="vertical"

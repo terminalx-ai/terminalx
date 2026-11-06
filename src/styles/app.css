@@ -430,8 +430,8 @@
   background-color: var(--background);
 }
 
-/* Support reminders yield to approval and update dialogs. Keep their stack
-   space so higher-priority agent notices do not jump when a dialog opens. */
+/* Support reminders yield to approval and update dialogs. Keep their layout
+   space so the workspace does not jump when a dialog opens. */
 body:has([role="dialog"]) [data-star-reminder],
 body:has([role="alertdialog"]) [data-star-reminder] {
   visibility: hidden;

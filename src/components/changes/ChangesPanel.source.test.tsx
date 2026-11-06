@@ -44,7 +44,7 @@ afterEach(() => { cleanup(); localStorage.clear(); invoke.mockClear(); });
 
 it("diffs the turn's range and reads both sides through the given source", async () => {
   const source = fakeSource("cloud:w1|repo");
-  render(<ChangesPanel source={source} events={events} version={2} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
   fireEvent.click(await screen.findByRole("button", { name: /turn.ts/ }));
   expect((await screen.findByTestId("diff")).textContent).toBe("src/turn.ts:old->new");
@@ -55,17 +55,17 @@ it("diffs the turn's range and reads both sides through the given source", async
 
 it("shows the source's working tree against its head", async () => {
   const source = fakeSource("cloud:w2|repo");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} workingTree onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} workingTree />);
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
-  fireEvent.click(await screen.findByRole("button", { name: /turn.ts/ }));
-  await waitFor(() => expect(source.fileContentsAt).toHaveBeenCalledWith("src/turn.ts", "work-head", "snapshot"));
+  fireEvent.click(await screen.findByRole("button", { name: /dirty.ts/ }));
+  await waitFor(() => expect(source.fileContentsAt).toHaveBeenCalledWith("dirty.ts", "work-head", null));
   expect(invoke).not.toHaveBeenCalled();
 });
 
 it("reports a failed workspace diff in the source's words", async () => {
   const source = fakeSource("cloud:w3|repo");
   source.changesBetween.mockRejectedValueOnce("offline");
-  render(<ChangesPanel source={source} events={events} version={2} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
   expect(await screen.findByText("source: offline")).toBeTruthy();
 });
 
@@ -78,7 +78,7 @@ for (const cloud of [false, true]) {
       { path: "B", status: "modified", additions: 2, deletions: 1 },
       { path: "C", status: "added", additions: 1, deletions: 0 },
     ]);
-    const props = { source, events, version: 2, active: true, live: false, onViewUncommitted: () => {} };
+    const props = { source, events, version: 2, active: true, live: false };
     const view = render(<ChangesPanel {...props} />);
     expect(await screen.findByText("All changes · 3 files")).toBeTruthy();
     expect(source.changesBetween).toHaveBeenLastCalledWith("merge-base", "snapshot");
@@ -91,18 +91,18 @@ for (const cloud of [false, true]) {
 
 it("persists explicit scope and target per repository across reopening", async () => {
   const source = fakeSource("remember");
-  const props = { source, events, version: 2, active: true, live: false, onViewUncommitted: () => {} };
+  const props = { source, events, version: 2, active: true, live: false };
   const view = render(<ChangesPanel {...props} />);
   await screen.findByText(/Against main/);
   fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "release" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await screen.findByText(/Against release/);
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
-  await screen.findByText(/Against HEAD ·/);
+  await screen.findByRole("button", { name: /dirty.ts/ });
   view.unmount();
   const reopened = render(<ChangesPanel {...props} />);
   expect((screen.getByLabelText("Changes scope") as HTMLSelectElement).value).toBe("uncommitted");
-  await screen.findByText(/Against HEAD ·/);
+  await screen.findByRole("button", { name: /dirty.ts/ });
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "all" } });
   await screen.findByText(/Against release/);
   reopened.rerender(<ChangesPanel {...props} source={fakeSource("different-repo")} />);
@@ -114,7 +114,7 @@ it("persists explicit scope and target per repository across reopening", async (
 it("distinguishes loading, unavailable data, clean workspaces and missing turn snapshots", async () => {
   const source = fakeSource("states");
   source.changesBetween.mockResolvedValue([]);
-  const props = { source, events: [], version: 0, active: true, live: false, onViewUncommitted: () => {} };
+  const props = { source, events: [], version: 0, active: true, live: false };
   render(<ChangesPanel {...props} />);
   expect(screen.getByText("Loading changes…")).toBeTruthy();
   await screen.findByText("No changes in this scope.");
@@ -130,7 +130,7 @@ it("reads a rename's original path and surfaces file errors", async () => {
   const source = fakeSource("rename");
   source.changesBetween.mockResolvedValue([{ path: "new", oldPath: "old", status: "renamed", additions: 1, deletions: 0 }]);
   source.fileContentsAt.mockImplementation(async (path: string) => ({ before: path === "old" ? "original" : null, after: "updated" }));
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: /new/ }));
   expect((await screen.findByTestId("diff")).textContent).toBe("new:original->updated");
   fireEvent.click(screen.getByRole("button", { name: /new/ }));
@@ -147,7 +147,7 @@ it("refreshes after terminal edits, commits and branch changes on window focus",
   const listens = vi.spyOn(window, "addEventListener");
   try {
     const source = fakeSource("refresh");
-    render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+    render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
     await screen.findByRole("button", { name: /turn.ts/ });
     await waitFor(() => expect(listens).toHaveBeenCalledWith("focus", expect.any(Function)));
     source.changesBetween.mockResolvedValue([{ path: "terminal-edit", status: "added", additions: 1, deletions: 0 }]);
@@ -160,7 +160,7 @@ it("refreshes after terminal edits, commits and branch changes on window focus",
 it("does not reuse a previous turn when the latest prompt has no snapshot", async () => {
   const source = fakeSource("missing-latest");
   const latest: AgentEvent = { ...events[0], seq: 3, payload: { type: "user_message", text: "Status?", queued: false } };
-  render(<ChangesPanel source={source} events={[...events, latest]} version={3} active live onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[...events, latest]} version={3} active live />);
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
   await screen.findByText(/No turn snapshots are available/);
   expect(screen.queryByText(/Last turn ·/)).toBeNull();
@@ -168,7 +168,7 @@ it("does not reuse a previous turn when the latest prompt has no snapshot", asyn
 
 it("clears an invalid comparison and retries the same target on Apply", async () => {
   const source = fakeSource("invalid-target");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   await screen.findByRole("button", { name: /turn.ts/ });
   vi.mocked(source.reviewRange).mockRejectedValueOnce("invalid target");
   fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "missing" } });
@@ -183,7 +183,7 @@ it("refreshes while idle without requiring a new agent turn", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {
     const source = fakeSource("idle-refresh");
-    const view = render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+    const view = render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
     await screen.findByRole("button", { name: /turn.ts/ });
     source.changesBetween.mockResolvedValue([{ path: "terminal-edit", status: "added", additions: 1, deletions: 0 }]);
     await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
@@ -221,7 +221,7 @@ function merging(key: string, conflicted = ["CHANGELOG.md"]) {
 
 it("tells the base's files apart from conflicts and from what was changed while merging", async () => {
   const source = merging("merge-split");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
   expect(within(banner).getByText("Merging origin/main into this branch: not committed yet.")).toBeTruthy();
@@ -246,7 +246,7 @@ it("tells the base's files apart from conflicts and from what was changed while 
 
 it("commits the merge that was read once nothing is conflicted, and says why if it cannot", async () => {
   const source = merging("merge-commit", []);
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
   source.commitMerge.mockRejectedValueOnce("HEAD moved since the merge was read");
   fireEvent.click(within(banner).getByRole("button", { name: "Commit merge" }));
@@ -262,7 +262,7 @@ it("commits the merge that was read once nothing is conflicted, and says why if 
 
 it("aborts the merge only after a confirmation that says what goes and what stays", async () => {
   const source = merging("merge-abort");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
   fireEvent.click(within(banner).getByRole("button", { name: "Abort merge…" }));
   const dialog = await screen.findByRole("dialog", { name: "Abort the merge of origin/main?" });
@@ -287,7 +287,7 @@ it("aborts the merge only after a confirmation that says what goes and what stay
 
 it("says what is being merged in every scope, and splits only the uncommitted files", async () => {
   const source = merging("merge-all");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
   expect(within(banner).getByText(/Until it is committed, this counts what the merge brings in as the branch's own work/)).toBeTruthy();
   expect(screen.getByText("All changes · 5 files")).toBeTruthy();
@@ -296,13 +296,13 @@ it("says what is being merged in every scope, and splits only the uncommitted fi
 
 it("shows no merge for a source that cannot tell, and a merge that cannot be read in its words", async () => {
   const cloud = fakeSource("merge-cloud");
-  render(<ChangesPanel source={cloud} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={cloud} events={[]} version={0} active live={false} />);
   await screen.findByRole("button", { name: /turn.ts/ });
   expect(screen.queryByRole("region", { name: "Merge in progress" })).toBeNull();
   cleanup();
   const local = merging("merge-unreadable");
   local.unfinishedMerge.mockRejectedValue("index.lock exists");
-  render(<ChangesPanel source={local} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  render(<ChangesPanel source={local} events={[]} version={0} active live={false} />);
   expect((await screen.findByRole("alert")).textContent).toBe("Whether a merge is in progress could not be read: source: index.lock exists");
   expect(screen.getByText("All changes · 5 files")).toBeTruthy();
 });

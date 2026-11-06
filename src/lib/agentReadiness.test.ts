@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-import { checkAgentReadiness, readinessBlock, useAgentReadiness, type AgentReadiness } from "./agentReadiness";
+import { checkAgentReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, type AgentReadiness } from "./agentReadiness";
 
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-10-26T14:00:00Z", version: "0.164.0" });
 const exits = new Set<() => void>();
@@ -129,5 +129,76 @@ describe("agent readiness", () => {
     expect(result.current.value?.state).toBe("signed_out");
     rerender({ id: null });
     expect(result.current.value).toBeNull();
+  });
+});
+
+
+describe("new-chat readiness discovery", () => {
+  const harnesses = ["claude", "codex"].map((id) => ({ id, name: id, available: true, path: `/bin/${id}`, installHint: "", installUrl: "", description: "" }));
+
+  it("follows missing → installed → ready on return despite cached installation metadata", async () => {
+    invoke.mockResolvedValue(answer("missing"));
+    const { result } = renderHook(() => useAgentReadinessList([{ ...harnesses[1], available: false }]));
+    await waitFor(() => expect(result.current.values?.codex.state).toBe("missing"));
+    invoke.mockResolvedValue(answer("signed_out"));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(result.current.values?.codex.state).toBe("signed_out"));
+    invoke.mockResolvedValue(answer("ready"));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(result.current.values?.codex.state).toBe("ready"));
+    expect(invoke).toHaveBeenCalledTimes(3);
+  });
+
+  it("rechecks embedded login completion and removes all triggers when disabled", async () => {
+    vi.useFakeTimers();
+    invoke.mockResolvedValue(answer("signed_out"));
+    const { result, rerender, unmount } = renderHook(({ enabled }) => useAgentReadinessList([harnesses[1]], enabled), { initialProps: { enabled: true } });
+    await act(async () => {});
+    await act(async () => exits.forEach((notify) => notify()));
+    expect(result.current.values?.codex.state).toBe("signed_out");
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => exits.forEach((notify) => notify()));
+    expect(result.current.values?.codex.state).toBe("ready");
+    await act(async () => vi.advanceTimersByTimeAsync(360_000));
+    expect(invoke).toHaveBeenCalledTimes(3);
+
+    await act(async () => rerender({ enabled: false }));
+    window.dispatchEvent(new Event("focus"));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(result.current.values).toEqual({});
+    expect(exits.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    unmount();
+  });
+
+  it("waits for both probes before publishing defaults, then refreshes login changes", async () => {
+    let claude: (value: AgentReadiness) => void = () => {};
+    invoke.mockImplementation((_cmd, { harness }) => harness === "claude"
+      ? new Promise<AgentReadiness>((resolve) => { claude = resolve; }) : Promise.resolve(answer("ready")));
+    const { result } = renderHook(() => useAgentReadinessList(harnesses));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    expect(result.current.values).toBeNull();
+    await act(async () => claude(answer("signed_out")));
+    expect(result.current.values?.claude.state).toBe("signed_out");
+    expect(result.current.values?.codex.state).toBe("ready");
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.values?.claude.state).toBe("ready");
+  });
+
+  it("discards stale probes after installation changes and does not probe cloud agents", async () => {
+    let old: (value: AgentReadiness) => void = () => {};
+    invoke.mockImplementation(() => new Promise<AgentReadiness>((resolve) => { old = resolve; }));
+    const { result, rerender } = renderHook(({ agents, enabled }) => useAgentReadinessList(agents, enabled), { initialProps: { agents: [harnesses[0]], enabled: true } });
+    invoke.mockResolvedValue(answer("missing"));
+    rerender({ agents: [{ ...harnesses[0], available: false }], enabled: true });
+    await waitFor(() => expect(result.current.values?.claude.state).toBe("missing"));
+    await act(async () => old(answer("ready")));
+    expect(result.current.values?.claude.state).toBe("missing");
+    invoke.mockClear();
+    rerender({ agents: harnesses, enabled: false });
+    await waitFor(() => expect(result.current.checking).toBe(false));
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

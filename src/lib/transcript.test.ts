@@ -63,6 +63,19 @@ describe("buildTranscript", () => {
     expect(t.authFailed).toBe(true);
   });
 
+  it("puts a picture a tool made in the turn itself, where folding the tools does not hide it", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "Make a portrait", queued: false }),
+      toolStart("gen", "image_gen"),
+      ev({ type: "tool_call_completed", callId: "gen", result: { text: "/g/one.png", isError: false, images: [{ url: "/g/one.png", mediaType: "image/png" }] } }),
+      toolStart("read", "Bash"),
+      toolDone("read"),
+      ev({ type: "assistant_text", text: "Here it is." }),
+    ], true);
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["tool", "media", "tool", "text"]);
+    expect(t.turns[0].work[1]).toMatchObject({ kind: "media", paths: ["/g/one.png"] });
+  });
+
   it("ignores harness prompts without splitting the current turn or abandoning its tools (#388)", () => {
     const t = buildTranscript([
       ev({ type: "user_message", text: "Run the task", queued: false }),

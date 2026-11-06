@@ -67,6 +67,8 @@ function WorkRow({ item }: { item: WorkItem }) {
   // Running, it has no row: the conversation's `CompactingLine` says so (#644).
   if (item.kind === "compaction") { const status = compactionStatus(item); return status === null ? null : <Text style={[styles.reasoning, { color: palette.muted }]}>{status}</Text>; }
   if (item.kind === "retry") return <Text style={[styles.reasoning, { color: palette.warning }]}>Retrying · {item.attempt}/{item.maxRetries}</Text>;
+  // The files are on the computer the agent ran on, not this phone: named, not drawn.
+  if (item.kind === "media") return <Text style={[styles.reasoning, { color: palette.muted }]}>{`Made ${item.paths.map((path) => path.split(/[\\/]/).pop() || path).join(", ")}`}</Text>;
   return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{item.text}</LinkedText>;
 }
 
