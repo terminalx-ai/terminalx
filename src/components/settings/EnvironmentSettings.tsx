@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { RegisteredSetting, resolveSetting } from "./settingsRegistry";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useSessionStore } from "@/lib/sessions";
@@ -12,8 +13,8 @@ const inputClass = "w-full rounded-md border border-hairline bg-background px-3 
 export function EnvironmentSettings() {
   const { projects } = useSessionStore();
   const [project, setProject] = useState("");
-  return <div className="flex flex-col gap-5">
-    <p className="text-sm text-muted-foreground">Variables for new local agent and shell tabs. Repository values override user values. All values are stored in Keychain on this Mac.</p>
+  return <RegisteredSetting setting="environment.variables"><div className="flex flex-col gap-5">
+    <p className="text-sm text-muted-foreground">{resolveSetting("environment.variables").description}</p>
     <label className="flex flex-col gap-2 text-sm">Scope
       <select className={inputClass} value={project} onChange={(e) => setProject(e.target.value)}>
         <option value="">User — all repositories</option>
@@ -36,7 +37,7 @@ export function EnvironmentSettings() {
       </dl>
       <p className="mt-3 text-muted-foreground">The workspace path is the process working directory. Local launches do not allocate an environment variable for workspace paths or ports. HOME, LD_PRELOAD, DYLD_*, TERMINALX_* and RACCOON_* names are reserved.</p>
     </details>
-  </div>;
+  </div></RegisteredSetting>;
 }
 
 function EnvironmentTable({ project }: { project: string | null }) {
