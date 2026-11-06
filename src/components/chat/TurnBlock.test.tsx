@@ -9,6 +9,7 @@ import { TurnBlock } from "./TurnBlock";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Turn } from "@/lib/transcript";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
 import { setPrefs } from "@/lib/prefs";
 
 afterEach(cleanup);
@@ -55,6 +56,19 @@ it("keeps link activation separate from expanding reasoning and tool output", ()
   fireEvent.click(screen.getByRole("button", { name: "Expand tool output" }));
   expect(screen.getByRole("link", { name: "https://example.com/output" })).toBeDefined();
   expect(container.querySelector("button a")).toBeNull();
+});
+
+it("links a Codex file citation in a failed turn's final text (#776)", async () => {
+  const value = turn([]);
+  value.finalText = 'Wrote the workbook before the error.\n\n:codex-file-citation{path="/repo/out/report.xlsx" artifact_kind="workbook" purpose="output"}';
+  value.completed = { status: "error", ts: "2026-10-03T00:00:01Z" };
+  render(<TurnBlock turn={value} sessionId="s" cwd="/repo" stream={[]} working={false} />);
+  const link = screen.getByRole("link", { name: "report.xlsx" });
+  expect(link.getAttribute("title")).toBe("/repo/out/report.xlsx");
+  expect(link.dataset.fileChip).toBe("true");
+  expect(link.parentElement?.parentElement?.textContent).toBe("Wrote the workbook before the error.\n\nreport.xlsx");
+  fireEvent.click(link);
+  expect(invoke).toHaveBeenCalledWith("inspect_local_path", { base: "/repo", path: "/repo/out/report.xlsx" });
 });
 
 describe("a prompt's images", () => {
