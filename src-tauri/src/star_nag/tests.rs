@@ -2,8 +2,16 @@ use super::*;
 
 fn core(dir: &tempfile::TempDir) -> Core {
     let mut core = Core::load(dir.path().join("reminder.json"), "1", 0, 0).unwrap();
-    core.ready = true;
+    establish(&mut core);
     core
+}
+fn establish(core: &mut Core) {
+    let mut saved = core.saved.clone();
+    saved.first_seen_at = Some(-MIN_AGE_MS);
+    saved.finished_sessions = vec!["previous-1".into(), "previous-2".into(), "previous-3".into()];
+    core.save(saved).unwrap();
+    core.ready = true;
+    core.quiet_since = -QUIET_MS;
 }
 fn launches(core: &mut Core, count: u64, now: i64) {
     for _ in 0..count {
@@ -19,9 +27,123 @@ fn prompt(text: &str, queued: bool) -> AgentEvent {
 fn done(status: TurnStatus) -> AgentEvent {
     event(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None })
 }
+fn finish_session(core: &mut Core, session: &str, now: i64) {
+    for mut event in [prompt("finish the work", false), done(TurnStatus::Ok)] {
+        event.session_id = session.into();
+        core.observe(&event, now).unwrap();
+    }
+}
 fn show(core: &mut Core, status: StarStatus, now: i64) {
     let ticket = core.begin_check(now).expect("eligible");
     core.checked(ticket, status, now).unwrap();
+}
+
+#[test]
+fn fresh_install_waits_three_full_days_even_with_both_triggers_and_many_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Core::load(dir.path().join("reminder.json"), "1", 0, 0).unwrap();
+    c.ready = true;
+    launches(&mut c, INITIAL_THRESHOLD, 0);
+    for session in ["first", "second", "third", "fourth"] {
+        finish_session(&mut c, session, 0);
+    }
+    assert!(c.pending_usage && c.pending_completion);
+    assert_eq!(c.saved.finished_sessions.len(), MIN_FINISHED_SESSIONS, "history is bounded");
+    for now in [QUIET_MS, 24 * 60 * 60 * 1000 - 1, MIN_AGE_MS - 1] {
+        assert_eq!(c.begin_check(now), None, "neither trigger bypasses the grace period");
+    }
+    show(&mut c, StarStatus::NotStarred, MIN_AGE_MS);
+    assert!(c.view.visible);
+}
+
+#[test]
+fn age_and_work_starts_cannot_replace_three_distinct_successful_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Core::load(dir.path().join("reminder.json"), "1", 0, 0).unwrap();
+    c.ready = true;
+    launches(&mut c, INITIAL_THRESHOLD, MIN_AGE_MS);
+    for _ in 0..5 {
+        finish_session(&mut c, "same-session", MIN_AGE_MS);
+    }
+    // Another tab in the same session is still the same session.
+    for mut event in [prompt("another tab", false), done(TurnStatus::Ok)] {
+        event.session_id = "same-session".into();
+        event.tab_id = "other-tab".into();
+        c.observe(&event, MIN_AGE_MS).unwrap();
+    }
+    assert_eq!(c.saved.finished_sessions, ["same-session"]);
+    assert_eq!(c.begin_check(MIN_AGE_MS + QUIET_MS), None);
+    finish_session(&mut c, "second-session", MIN_AGE_MS);
+    assert_eq!(c.begin_check(MIN_AGE_MS + QUIET_MS), None);
+    finish_session(&mut c, "third-session", MIN_AGE_MS);
+    show(&mut c, StarStatus::NotStarred, MIN_AGE_MS + QUIET_MS);
+    assert!(c.view.visible);
+}
+
+#[test]
+fn only_live_meaningful_successes_count_as_finished_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Core::load(dir.path().join("reminder.json"), "1", 0, 0).unwrap();
+    c.observe(&done(TurnStatus::Ok), 0).unwrap();
+    for (text, queued, status) in [(" ", false, TurnStatus::Ok), ("work", true, TurnStatus::Ok), ("work", false, TurnStatus::Error), ("work", false, TurnStatus::Aborted)] {
+        c.observe(&prompt(text, queued), 0).unwrap();
+        c.observe(&done(status), 0).unwrap();
+    }
+    for mut event in [prompt("subagent work", false), done(TurnStatus::Ok)] {
+        event.subagent = Some(crate::events::SubagentRef { id: "child".into(), label: None });
+        c.observe(&event, 0).unwrap();
+    }
+    assert!(c.saved.finished_sessions.is_empty());
+    finish_session(&mut c, "live-session", 0);
+    assert_eq!(c.saved.finished_sessions, ["live-session"]);
+}
+
+#[test]
+fn age_and_finished_sessions_survive_restart_and_update_without_startup_eligibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reminder.json");
+    let mut c = Core::load(path.clone(), "1", 0, 100).unwrap();
+    finish_session(&mut c, "first", 100);
+    finish_session(&mut c, "second", 200);
+    let mut c = Core::load(path, "2", 0, MIN_AGE_MS + 100).unwrap();
+    c.ready = true;
+    assert_eq!(c.saved.first_seen_at, Some(100));
+    assert_eq!(c.saved.finished_sessions, ["first", "second"]);
+    assert_eq!(c.begin_check(MIN_AGE_MS + 100 + QUIET_MS), None);
+    finish_session(&mut c, "second", MIN_AGE_MS + 100);
+    assert_eq!(c.begin_check(MIN_AGE_MS + 100 + QUIET_MS), None);
+    finish_session(&mut c, "third", MIN_AGE_MS + 100);
+    show(&mut c, StarStatus::NotStarred, MIN_AGE_MS + 100 + QUIET_MS);
+    assert!(c.view.visible);
+}
+
+#[test]
+fn legacy_state_gets_a_grace_period_without_inventing_finished_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reminder.json");
+    std::fs::write(&path, r#"{"launches":1000,"usageSchema":1,"baseline":0,"appVersion":"1"}"#).unwrap();
+    let mut c = Core::load(path.clone(), "1", 1000, 100).unwrap();
+    c.ready = true;
+    c.work_started(1001, 100).unwrap();
+    assert_eq!(c.saved.first_seen_at, Some(100));
+    assert!(c.saved.finished_sessions.is_empty());
+    assert_eq!(c.begin_check(100 + QUIET_MS), None);
+    let c = Core::load(path, "1", 1001, 200).unwrap();
+    assert_eq!(c.saved.first_seen_at, Some(100), "migration must not restart the grace period");
+}
+
+#[test]
+fn usage_trigger_also_waits_for_idle_agents_and_quiet_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = core(&dir);
+    launches(&mut c, INITIAL_THRESHOLD, 0);
+    c.active.insert("waiting/tab".into());
+    assert_eq!(c.begin_check(QUIET_MS), None);
+    c.active.clear();
+    c.quiet_since = QUIET_MS;
+    assert_eq!(c.begin_check(2 * QUIET_MS - 1), None);
+    show(&mut c, StarStatus::NotStarred, 2 * QUIET_MS);
+    assert!(c.view.visible);
 }
 
 #[test]
@@ -249,7 +371,7 @@ fn migrating_to_work_starts_preserves_cooldown_backoff_and_completion_state() {
 fn lifetime_hydration_and_stale_notifications_do_not_trigger_usage() {
     let dir = tempfile::tempdir().unwrap();
     let mut c = Core::load(dir.path().join("reminder.json"), "1", 100, 0).unwrap();
-    c.ready = true;
+    establish(&mut c);
     c.work_started(100, 0).unwrap();
     c.work_started(99, 0).unwrap();
     assert_eq!(c.begin_check(0), None);
@@ -298,7 +420,7 @@ fn the_reminder_takes_the_runtimes_count_without_opening_the_lease() {
     nag.counted(41);
     {
         let mut core = nag.core.lock().unwrap();
-        core.ready = true;
+        establish(&mut core);
         assert_eq!(core.saved.launches, 42);
         assert_eq!(core.begin_check(0), None);
         core.work_started(42 + INITIAL_THRESHOLD, 0).unwrap();
