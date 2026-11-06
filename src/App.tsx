@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/AppShell";
 import { FloatingShell } from "@/components/floating/FloatingShell";
 import { isFloatingWindow } from "@/lib/appWindow";
+import { useNativeMenus } from "@/lib/nativeMenuBridge";
 
 /**
  * Both windows load this page. The main one draws the workbench; the floating
@@ -11,5 +12,6 @@ import { isFloatingWindow } from "@/lib/appWindow";
  * backend is the source of truth for both.
  */
 export default function App() {
+  useNativeMenus();
   return <TooltipProvider>{isFloatingWindow() ? <FloatingShell /> : <><AppShell /><IssueConfirmation /></>}<LocalRuntimeNotice /></TooltipProvider>;
 }

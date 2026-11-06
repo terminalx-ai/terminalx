@@ -113,6 +113,8 @@ mod project_start;
 mod pty;
 #[cfg(feature = "desktop")]
 mod quit;
+#[cfg(feature = "desktop")]
+mod native_menu;
 mod relay_e2ee;
 pub mod remote;
 mod session;
@@ -797,6 +799,8 @@ pub fn run() {
             commands::status_usage_refresh,
             commands::status_codex_reset,
             commands::status_resource_overview,
+            native_menu::set_native_menu,
+            native_menu::native_window_action,
             commands::status_resource_sample,
             commands::status_resource_kill,
             browser::ui::browser_pages,
@@ -817,6 +821,7 @@ pub fn run() {
             computer::computer_reset_permissions,
         ])
         .on_menu_event(|app, event| {
+            native_menu::dispatch(app, event.id().as_ref());
             if event.id().as_ref() == status::MENU_ID {
                 status::toggle_from_menu(app);
             }

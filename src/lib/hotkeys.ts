@@ -66,6 +66,16 @@ export const HOLD_DELAY_MS = 160;
 
 let hold: { code: string; binding: HeldBinding; started: boolean; timer: ReturnType<typeof setTimeout> | null } | null = null;
 let suspended = 0;
+const suspensionListeners = new Set<() => void>();
+
+export function hotkeysSuspended(): boolean {
+  return suspended > 0;
+}
+
+export function subscribeHotkeySuspension(listener: () => void): () => void {
+  suspensionListeners.add(listener);
+  return () => { suspensionListeners.delete(listener); };
+}
 
 export function isEditable(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -88,11 +98,13 @@ export function hasEscapeOverlay(): boolean {
 export function suspendHotkeys(): () => void {
   suspended++;
   endHold(true);
+  for (const listener of suspensionListeners) listener();
   let done = false;
   return () => {
     if (done) return;
     done = true;
     suspended--;
+    for (const listener of suspensionListeners) listener();
   };
 }
 
