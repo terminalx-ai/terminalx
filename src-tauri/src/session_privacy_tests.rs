@@ -382,7 +382,7 @@ fn deferred_child() {
 #[test]
 fn privacy_launch_lifecycle_preserves_ownership_and_acp_model_delivery() {
     for case in ["cli-commit-failure", "acp-off", "acp-on-before-start", "acp-cycle-before-start",
-        "acp-on-before-delivery", "acp-cycle-before-delivery"] {
+        "acp-on-before-delivery", "acp-cycle-before-delivery", "acp-refuse", "acp-refuse-new-local", "acp-refuse-new-same"] {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("child.log");
         let log = std::fs::File::create(&log_path).unwrap();
@@ -552,6 +552,7 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
     wait_for("first model request reached real stdio", || requests().iter().any(|v| v["method"] == "session/set_model" && v["params"]["modelId"] == "remote-model"));
     // A separate local launch default must survive cancellation of the model.
     rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap();
+    let retired_epoch = std::sync::atomic::AtomicU64::new(rig.rt.lock().unwrap().child.as_ref().unwrap().epoch);
     rig.manager.stop(SESSION, TAB).unwrap();
     let stopped = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
     assert_eq!(stopped.model, "original-model");
@@ -566,6 +567,12 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
     if case.ends_with("before-start") { toggle(); }
     launch();
     begin();
+    // A reply from a retired child cannot advance the replacement's
+    // request id 1, even though both adapters start their ids at one.
+    let before_stale = rig.events().len();
+    rig.manager.on_line_from(&rig.rt, r#"{"jsonrpc":"2.0","id":1,"error":{"message":"Old child failed initialization"}}"#, Some(&retired_epoch));
+    assert_eq!(rig.events().len(), before_stale, "retired replies cannot end the replacement's opening turn");
+    assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Acp(a) if a.session_id.is_none() && !a.ready));
     initialized();
     if case.ends_with("before-delivery") { toggle(); }
     opened();
@@ -574,11 +581,44 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
     wait_for("restarted ACP reached its prompt", || requests().iter().any(|v| v["method"] == "session/prompt"));
     let frames = requests();
     let models: Vec<_> = frames.iter().filter(|v| v["method"] == "session/set_model").collect();
-    if case == "acp-off" {
+    if case == "acp-off" || case.starts_with("acp-refuse") {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["params"]["modelId"], "remote-model");
         assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().requested_model.as_deref(), Some("remote-model"), "delivery still waits for the provider's response");
-        rig.manager.on_line(&rig.rt, &json!({"jsonrpc":"2.0","id":models[0]["id"],"result":{}}).to_string());
+        if case.starts_with("acp-refuse") {
+            let old = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+            let newer = if case.contains("new-") {
+                let model = if case.ends_with("same") { "remote-model" } else { "new-local-model" };
+                rig.manager.set_model(SESSION, TAB, model).unwrap();
+                let newer = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+                assert_ne!(old.model_request_id(), newer.model_request_id());
+                Some(newer)
+            } else { None };
+            let refused = json!({"jsonrpc":"2.0","id":models[0]["id"],"error":{"code":-32602,"message":"Unknown model"}}).to_string();
+            rig.manager.on_line(&rig.rt, &refused);
+            if let Some(newer) = newer {
+                let after = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+                assert_eq!(after.requested_model, newer.requested_model, "a late refusal cannot remove the newer local edit");
+                assert_eq!(after.model_request_id(), newer.model_request_id());
+                wait_for("new local model reached stdio", || requests().iter().filter(|v| v["method"] == "session/set_model").count() == 2);
+                let fresh = requests().into_iter().filter(|v| v["method"] == "session/set_model").last().unwrap();
+                rig.manager.on_line(&rig.rt, &json!({"jsonrpc":"2.0","id":fresh["id"],"error":{"code":-32602,"message":"New choice also refused"}}).to_string());
+            }
+            let rejected = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+            assert_eq!(rejected.model, "original-model");
+            assert_eq!(rejected.permission_mode, "plan");
+            assert!(rejected.requested_model.is_none() && rejected.request_privacy.is_empty());
+            // An old response replay is inert, and restarting cannot issue
+            // either rejected request as a fresh launch default.
+            rig.manager.on_line(&rig.rt, &refused);
+            rig.manager.stop(SESSION, TAB).unwrap();
+            std::fs::write(&requests_path, b"").unwrap();
+            launch(); begin(); initialized(); opened();
+            wait_for("restart after refusal reached prompt", || requests().iter().any(|v| v["method"] == "session/prompt"));
+            assert!(!requests().iter().any(|v| v["method"] == "session/set_model"));
+        } else {
+            rig.manager.on_line(&rig.rt, &json!({"jsonrpc":"2.0","id":models[0]["id"],"result":{}}).to_string());
+        }
     } else {
         assert!(models.is_empty(), "an expired remote request must not reach the restarted provider: {frames:?}");
     }
@@ -594,3 +634,6 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
     drop(rt);
     rig.manager.stop(SESSION, TAB).unwrap();
 }
+
+#[path = "session_acp_privacy_tests.rs"]
+mod acp_lifecycle;

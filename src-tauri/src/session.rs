@@ -2335,7 +2335,7 @@ impl SessionManager {
 
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
-        let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
+        let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone(), epoch: std::sync::atomic::AtomicU64::new(0) });
         let mut env = vec![
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
@@ -2349,7 +2349,8 @@ impl SessionManager {
         // (`cloud_config`) first, so a grant always wins.
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
-        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink.clone())?;
+        sink.epoch.store(child.epoch, std::sync::atomic::Ordering::Release);
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -2799,12 +2800,15 @@ impl SessionManager {
             None,
         )];
 
+        let acp_delivery = acp::Delivery { seq: events[0].seq, privacy: crate::data_privacy::remote_ticket(),
+            mobile: prompt.mobile.clone(), shared: prompt.shared_connection.clone() };
+        let acp_waits = matches!(&rt.engine, Engine::Acp(_));
         match &mut rt.engine {
             Engine::Acp(a) => {
                 let actions = if a.ready {
-                    a.prompt(prompt.agent.clone(), wire_images)
+                    a.prompt_with_delivery(prompt.agent.clone(), wire_images, Some(acp_delivery))
                 } else {
-                    a.start(prompt.agent.clone(), wire_images)
+                    a.start_with_delivery(prompt.agent.clone(), wire_images, Some(acp_delivery))
                 };
                 self.apply_actions(&mut rt, actions);
             }
@@ -2818,8 +2822,8 @@ impl SessionManager {
             }
             Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => bail!("no engine"),
         }
-        // A headless agent is given the prompt as it is written to it.
-        if let Some(event) = events.first() {
+        // ACP records delivery only at its admitted physical prompt write.
+        if let Some(event) = events.first().filter(|_| !acp_waits) {
             recovery::diagnose_send(&rt.diagnostics_path(), event.seq, "delivered", serde_json::json!({ "since_sent_ms": 0 }));
         }
         rt.open_turn();
@@ -2866,6 +2870,7 @@ impl SessionManager {
         if let Engine::Acp(a) = &mut rt.engine {
             a.model = Some(tab.requested_model.as_ref().unwrap_or(&tab.model).clone()).filter(|m| !m.is_empty());
             a.mode = tab.permission_mode.clone();
+            a.opening_model_request = Settings::of(tab).model_request_id().map(String::from);
         }
         Ok(privacy)
     }
@@ -2905,9 +2910,94 @@ impl SessionManager {
         Ok(())
     }
 
+    fn withdraw_acp_input(&self, rt: &mut TabRuntime) {
+        let actions = match &mut rt.engine { Engine::Acp(a) => a.withdraw_input(), _ => Vec::new() };
+        self.apply_actions(rt, actions);
+    }
+
+    /// Re-admit the original sender outside runtime, in the same lock order
+    /// as phone/share sends. The lease covers the complete physical frame.
+    /// The exact child and adapter request must still own it after admission.
+    fn write_acp_prompt(&self, runtime: std::sync::Weak<Mutex<TabRuntime>>, child: Option<Arc<crate::harness::host::LiveChild>>,
+        session: String, tab: String, write: acp::PromptWrite) {
+        let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
+        let mut started = Some(write.started);
+        let Some(runtime) = runtime.upgrade() else { return };
+        let current = |rt: &TabRuntime| !rt.stopping
+            && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
+            && matches!(&rt.engine, Engine::Acp(a) if a.delivery_current(write.id, write.delivery.seq));
+        let mut attempted = false;
+        let result = (|| -> Result<()> {
+            let privacy = write.delivery.privacy.as_ref()
+                .or_else(|| write.delivery.mobile.as_ref().map(|p| &p.grant.privacy))
+                .or_else(|| write.delivery.shared.as_ref().map(|p| &p.privacy));
+            let _privacy = privacy.map(|ticket| ticket.enter()).transpose()?;
+            let mut sharing = (write.delivery.mobile.is_some() || write.delivery.shared.is_some()).then(|| self.sharing.lock().unwrap());
+            let mut attachment = None;
+            if let Some(permit) = &write.delivery.shared {
+                let share = sharing.as_mut().and_then(|s| s.sessions.get_mut(&session)).context("Sharing ended before ACP delivery")?;
+                share.admit_at_writer(permit, &tab, chrono::Utc::now().timestamp_millis())?;
+                attachment = share.owner.as_ref().map(|owner| owner.attachment.clone());
+                let entry = index::get(&session)?;
+                anyhow::ensure!(entry.tab(&tab).is_some_and(|tab| settings::allowed_while_shared(&tab.permission_mode)), "Shared mode changed before ACP delivery");
+            }
+            if let Some(permit) = &write.delivery.mobile { permit.check_mode(&session, &tab)?; }
+            let _mobile = write.delivery.mobile.as_ref().map(|permit| permit.enter()).transpose()?;
+            let _owner = attachment.as_ref().map(|attachment| attachment.enter()).transpose()?;
+            let mut rt = runtime.lock().unwrap();
+            if !current(&rt) { return Ok(()); }
+            self.accepting_work()?;
+            crate::issue_pipeline::admission::check(&session, &tab)?;
+            attempted = true;
+            self.write(&rt, &write.line)?;
+            if let Engine::Acp(a) = &mut rt.engine { a.delivered(write.id); }
+            recovery::diagnose_send(&rt.diagnostics_path(), write.delivery.seq, "delivered", serde_json::json!({ "since_sent_ms": 0 }));
+            self.apply(&mut rt, started.take().unwrap(), None);
+            self.apply(&mut rt, Payload::ModelRequestStarted, None);
+            Ok(())
+        })();
+        let mut rt = runtime.lock().unwrap();
+        // Success retired the queued write; failure may have raced Stop or
+        // replacement. Never close a later turn or write into a new child.
+        if let Err(error) = result {
+            if !current(&rt) { return; }
+            if let Engine::Acp(a) = &mut rt.engine { a.withdraw_delivery(write.id); }
+            log::warn!("ACP prompt delivery stopped: {error:#}");
+            if attempted {
+                // A failed pipe may contain part of the frame. Keep ownership
+                // for Stop and never append another prompt or replay this one.
+                rt.stopping = true;
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+            }
+            self.prompt_withdrawn(&mut rt, write.delivery.seq, None);
+            self.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
+        }
+    }
+
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
         for a in actions {
             match a {
+                Action::AcpPrompt(write) => {
+                    let manager = self.clone();
+                    let runtime = rt.me.clone();
+                    let child = rt.child.clone();
+                    let session = rt.session_id.clone();
+                    let tab = rt.tab_id.clone();
+                    std::thread::spawn(move || manager.write_acp_prompt(runtime, child, session, tab, *write));
+                }
+                Action::AcpModelRefused { request_id, model, message } => {
+                    let mut dropped = None;
+                    let result = self.update_settings(rt, |settings| {
+                        dropped = if settings.model_request_id() == Some(request_id.as_str()) {
+                            settings.refused(Setting::Model, Some(&model))
+                        } else { None };
+                    });
+                    match result {
+                        Ok(_) if dropped.is_some() => { self.publish(rt, Payload::Status { text: format!("The agent did not change the model to {model}: {message}") }, None); }
+                        Err(error) => log::warn!("record ACP model refusal: {error:#}"),
+                        _ => {}
+                    }
+                }
                 Action::Http { tag, method, url, body } => {
                     let manager = self.clone();
                     let me = rt.me.clone();
@@ -2927,13 +3017,12 @@ impl SessionManager {
                 }
                 Action::Emit(p) => self.apply(rt, p, None),
                 Action::ThreadReady(id) => {
-                    let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
-                    std::thread::spawn(move || {
-                        let _ = index::update_tab(&s, &t, |tab| {
-                            tab.provider_session_id = Some(id);
-                            Ok(())
-                        });
-                    });
+                    // Ordered with this child's reply and Stop/replacement;
+                    // an old detached callback cannot rename the new session.
+                    if let Err(error) = index::update_tab(&rt.session_id, &rt.tab_id, |tab| {
+                        tab.provider_session_id = Some(id.clone());
+                        Ok(())
+                    }) { log::warn!("record provider session: {error:#}"); }
                 }
             }
         }
@@ -3250,6 +3339,9 @@ impl SessionManager {
                 self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Cancelled".into(), automatic: true }, None);
             }
             rt.stopping_pid = pid;
+            // Unsent ACP prompts have no provider turn to cancel and cannot
+            // be handed to the next launch as local input.
+            self.withdraw_acp_input(&mut rt);
             // Settle before waiting for the OS. Late exits cannot reopen this turn.
             self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
             // Its status is settled below.
@@ -3537,7 +3629,7 @@ impl SessionManager {
                 }
             }
             Engine::Acp(a) => {
-                let actions = a.set_model(model);
+                let actions = a.set_requested_model(model, after.model_request_id().map(String::from));
                 self.apply_actions(&mut rt, actions);
             }
             Engine::OpenCode(o) => o.model = Some(model.into()),
@@ -6308,8 +6400,11 @@ impl SessionManager {
         Ok(HandoffInfo { command, provider_session_id: tab.provider_session_id.clone(), harness: tab.harness.clone() })
     }
 
-    fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) {
+    fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) { self.on_line_from(rt_arc, line, None); }
+
+    fn on_line_from(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str, epoch: Option<&std::sync::atomic::AtomicU64>) {
         let mut rt = rt_arc.lock().unwrap();
+        if epoch.is_some_and(|epoch| rt.child.as_ref().is_none_or(|child| child.epoch != epoch.load(std::sync::atomic::Ordering::Acquire))) { return; }
         if rt.stopping && matches!(&rt.engine, Engine::Acp(_)) { return; }
         rt.last_activity = Instant::now();
         let _privacy = match self.prepare_acp_opening_settings(&mut rt) {
@@ -6485,7 +6580,9 @@ impl SessionManager {
                     // itself, so the message went in when it was written.
                     Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => Vec::new(),
                 };
-                let sent = !actions.is_empty();
+                // ACP may retain this local follow-up until its handshake
+                // completes. It owns the next turn even before it has writes.
+                let sent = !actions.is_empty() || matches!(&rt.engine, Engine::Acp(a) if a.waiting_for_session());
                 self.apply_actions(rt, actions);
                 if sent {
                     rt.open_turn();
@@ -6504,6 +6601,7 @@ impl SessionManager {
             return; // an older child; the live one is unaffected
         }
         crate::cloud_grants::forget_launch(&rt.key());
+        self.withdraw_acp_input(&mut rt);
         rt.child = None;
         rt.child_pid = None;
         rt.engine = Engine::None;
@@ -6529,11 +6627,12 @@ impl SessionManager {
 struct TabSink {
     manager: SessionManager,
     rt: Arc<Mutex<TabRuntime>>,
+    epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Sink for TabSink {
     fn stdout_line(&self, line: String) {
-        self.manager.on_line(&self.rt, &line);
+        self.manager.on_line_from(&self.rt, &line, Some(&self.epoch));
     }
     fn stderr_line(&self, line: String) {
         let key = self.rt.lock().map(|r| r.key()).unwrap_or_default();

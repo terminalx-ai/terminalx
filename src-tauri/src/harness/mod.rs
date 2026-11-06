@@ -30,6 +30,10 @@ use crate::events::Payload;
 /// line. Nothing here touches a process, so a whole exchange can be replayed.
 pub enum Action {
     Write(String),
+    /// A prompt whose actual write must re-admit its original sender.
+    AcpPrompt(Box<acp::PromptWrite>),
+    /// An opening/live user model request, correlated independently of value.
+    AcpModelRefused { request_id: String, model: String, message: String },
     Emit(Payload),
     /// The thread id the server minted; the manager records it as the
     /// tab's provider session id so resume works.

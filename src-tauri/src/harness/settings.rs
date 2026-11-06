@@ -183,6 +183,10 @@ impl Signal {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPrivacy {
+    // Correlates a provider refusal with the exact edit, including a newer
+    // local edit of the same value. Not authority to perform the edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<crate::data_privacy::Ticket>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,7 +196,7 @@ pub struct RequestPrivacy {
 }
 
 impl RequestPrivacy {
-    pub fn is_empty(&self) -> bool { self.model.is_none() && self.effort.is_none() && self.permission_mode.is_none() }
+    pub fn is_empty(&self) -> bool { self.model.is_none() && self.effort.is_none() && self.permission_mode.is_none() && self.model_request_id.is_none() }
 }
 
 /// The fields of a tab this module owns.
@@ -249,8 +253,10 @@ impl Settings {
             self.model = model.to_string();
             self.requested_model = None;
             self.request_privacy.model = None;
+            self.request_privacy.model_request_id = None;
         } else {
             self.requested_model = Some(model.to_string());
+            self.request_privacy.model_request_id = Some(uuid::Uuid::new_v4().to_string());
         }
     }
 
@@ -330,6 +336,7 @@ impl Settings {
         self.requested_effort = remote_effort;
         self.requested_permission_mode = remote_mode;
         self.request_privacy = privacy;
+        if self.requested_model.is_none() { self.request_privacy.model_request_id = None; }
     }
 
     /// Reserve every remote edit before applying any of them. An expired
@@ -349,8 +356,14 @@ impl Settings {
                 }
             }
         }
+        if self.requested_model.is_none() { self.request_privacy.model_request_id = None; }
+        else if self.request_privacy.model_request_id.is_none() {
+            self.request_privacy.model_request_id = Some(uuid::Uuid::new_v4().to_string());
+        }
         leases
     }
+
+    pub fn model_request_id(&self) -> Option<&str> { self.request_privacy.model_request_id.as_deref() }
 
     /// The provider says what it is running. `model` has already been through
     /// [`canonical_model`]. A report that matches a request settles it; one
@@ -361,6 +374,7 @@ impl Settings {
             if self.requested_model.as_deref() == Some(model) {
                 self.requested_model = None;
                 self.request_privacy.model = None;
+                self.request_privacy.model_request_id = None;
             }
             self.model = model.to_string();
         }
@@ -378,6 +392,7 @@ impl Settings {
         match setting {
             Setting::Model => {
                 self.request_privacy.model = None;
+                self.request_privacy.model_request_id = None;
                 if let Some(model) = self.requested_model.take() {
                     self.model = model;
                 }
@@ -403,7 +418,7 @@ impl Settings {
             return None;
         }
         match setting {
-            Setting::Model => self.request_privacy.model = None,
+            Setting::Model => { self.request_privacy.model = None; self.request_privacy.model_request_id = None; },
             Setting::Effort => self.request_privacy.effort = None,
         }
         waiting.take()
