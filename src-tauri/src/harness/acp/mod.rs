@@ -126,6 +126,7 @@ impl Acp {
     }
 
     /// The handshake, with the first prompt stashed until a session exists.
+    #[cfg(test)]
     pub fn start(&mut self, text: String, images: Vec<(String, String)>) -> Vec<Action> {
         self.start_with_delivery(text, images, None)
     }
@@ -243,6 +244,7 @@ impl Acp {
     /// Ask the agent for another model. Its reply is the answer the tab
     /// waits on (`harness::settings`): the model becomes current when it
     /// agrees, and the request is dropped with its reason when it does not.
+    #[cfg(test)]
     pub fn set_model(&mut self, model: &str) -> Vec<Action> { self.set_requested_model(model, None) }
 
     pub fn set_requested_model(&mut self, model: &str, request_id: Option<String>) -> Vec<Action> {
