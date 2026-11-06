@@ -11,6 +11,7 @@
 //! unacknowledged would stop the stream.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -55,9 +56,13 @@ type InputBatch = Vec<(String, Value)>;
 
 #[derive(Default)]
 pub struct Screencasts {
-    stops: Mutex<HashMap<String, watch::Sender<bool>>>,
+    /// Each live page's stream, by the generation that started it: a stream
+    /// still winding down after a stop must not clear the entries of the one
+    /// started after it, nor announce that the page's stream ended.
+    stops: Mutex<HashMap<String, (u64, watch::Sender<bool>)>>,
     /// The reader's input for each live page, handed to its stream.
-    inputs: Mutex<HashMap<String, mpsc::UnboundedSender<InputBatch>>>,
+    inputs: Mutex<HashMap<String, (u64, mpsc::UnboundedSender<InputBatch>)>>,
+    generations: AtomicU64,
     /// Frames delivered per page, for diagnostics and the live test.
     frames: Mutex<HashMap<String, u64>>,
 }
@@ -77,7 +82,7 @@ impl Screencasts {
         if let Some((method, _)) = events.iter().find(|(method, _)| !VIEW_METHODS.contains(&method.as_str())) {
             return Err(BrowserError::new("browser_input_refused", format!("{method} is not a browser view command.")));
         }
-        let sender = self.inputs.lock().unwrap_or_else(|e| e.into_inner()).get(page_id).cloned();
+        let sender = self.inputs.lock().unwrap_or_else(|e| e.into_inner()).get(page_id).map(|(_, sender)| sender.clone());
         let sender = sender.ok_or_else(|| BrowserError::new("browser_preview_not_live", "The page's preview is not live."))?;
         sender.send(events).map_err(|_| BrowserError::new("browser_preview_not_live", "The page's preview has ended."))
     }
@@ -98,14 +103,17 @@ impl Screencasts {
         super::cdp::mark_page(&rt, &target)?;
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-        self.stops.lock().unwrap_or_else(|e| e.into_inner()).insert(page_id.to_string(), stop_tx);
-        self.inputs.lock().unwrap_or_else(|e| e.into_inner()).insert(page_id.to_string(), input_tx);
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed) + 1;
+        self.stops.lock().unwrap_or_else(|e| e.into_inner()).insert(page_id.to_string(), (generation, stop_tx));
+        self.inputs.lock().unwrap_or_else(|e| e.into_inner()).insert(page_id.to_string(), (generation, input_tx));
         let page_id = page_id.to_string();
         let owner = rt.clone();
         tauri::async_runtime::spawn(async move {
             let outcome = stream(&owner, &page_id, port, &mut stop_rx, &mut input_rx).await;
-            owner.screencasts.stops.lock().unwrap_or_else(|e| e.into_inner()).remove(&page_id);
-            owner.screencasts.inputs.lock().unwrap_or_else(|e| e.into_inner()).remove(&page_id);
+            if !owner.screencasts.retire(&page_id, generation) {
+                // A newer stream has the page now; its state is the page's.
+                return;
+            }
             let payload = match outcome {
                 Ok(()) => StatePayload { page_id: page_id.clone(), state: "ended", message: None },
                 Err(message) => StatePayload { page_id: page_id.clone(), state: "error", message: Some(message) },
@@ -116,13 +124,31 @@ impl Screencasts {
     }
 
     pub fn stop(&self, page_id: &str) {
-        if let Some(stop) = self.stops.lock().unwrap_or_else(|e| e.into_inner()).remove(page_id) {
+        if let Some((_, stop)) = self.stops.lock().unwrap_or_else(|e| e.into_inner()).remove(page_id) {
             let _ = stop.send(true);
         }
     }
 
+    /// A stream's own clean-up: clears what it holds, unless a newer stream
+    /// holds the page. Says whether the page is still this stream's to report on.
+    fn retire(&self, page_id: &str, generation: u64) -> bool {
+        let mut stops = self.stops.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        if stops.get(page_id).is_some_and(|(owner, _)| *owner != generation) {
+            if inputs.get(page_id).is_some_and(|(owner, _)| *owner == generation) {
+                inputs.remove(page_id);
+            }
+            return false;
+        }
+        stops.remove(page_id);
+        if inputs.get(page_id).is_some_and(|(owner, _)| *owner == generation) {
+            inputs.remove(page_id);
+        }
+        true
+    }
+
     pub fn stop_all(&self) {
-        let stops: Vec<watch::Sender<bool>> = self.stops.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, s)| s).collect();
+        let stops: Vec<watch::Sender<bool>> = self.stops.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, (_, s))| s).collect();
         for stop in stops {
             let _ = stop.send(true);
         }
@@ -209,5 +235,36 @@ async fn handle_event(rt: &Arc<BrowserRuntime>, page_id: &str, connection: &mut 
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hold(casts: &Screencasts, page: &str) -> u64 {
+        let generation = casts.generations.fetch_add(1, Ordering::Relaxed) + 1;
+        let (stop, _) = watch::channel(false);
+        let (input, _) = mpsc::unbounded_channel();
+        casts.stops.lock().unwrap().insert(page.into(), (generation, stop));
+        casts.inputs.lock().unwrap().insert(page.into(), (generation, input));
+        generation
+    }
+
+    #[test]
+    fn a_stream_winding_down_leaves_the_one_started_after_it_alone() {
+        let casts = Screencasts::default();
+        let old = hold(&casts, "bp-1");
+        casts.stop("bp-1");
+        let new = hold(&casts, "bp-1");
+        // The old stream finishes after the new one started: nothing of the new one is cleared, and it does not report.
+        assert!(!casts.retire("bp-1", old));
+        assert!(casts.is_live("bp-1"));
+        assert_eq!(casts.inputs.lock().unwrap().get("bp-1").map(|(g, _)| *g), Some(new));
+        // The new stream, stopped in turn, clears its own and reports.
+        casts.stop("bp-1");
+        assert!(casts.retire("bp-1", new));
+        assert!(!casts.is_live("bp-1"));
+        assert!(casts.inputs.lock().unwrap().get("bp-1").is_none());
     }
 }
