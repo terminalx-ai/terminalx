@@ -16,7 +16,7 @@ pub const MAX_BYTES: usize = 1024 * 1024;
 type Values = BTreeMap<String, String>;
 type Index = BTreeMap<String, Scope>;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct Scope {
     names: BTreeSet<String>,
     revision: String,
@@ -27,6 +27,8 @@ pub struct Stamp {
     repository: Option<String>,
     user: String,
     repo: String,
+    #[serde(default)]
+    unavailable: bool,
 }
 
 // Deliberately no Debug/Serialize: resolved values must never enter diagnostics.
@@ -65,23 +67,22 @@ pub fn validate_name(name: &str) -> Result<()> {
             && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'),
         "Use a name matching [A-Z_][A-Z0-9_]* (at most 128 characters)."
     );
+    #[derive(Deserialize)]
+    struct Reserved {
+        names: Vec<String>,
+        prefixes: Vec<String>,
+    }
+    static RESERVED: std::sync::OnceLock<Reserved> = std::sync::OnceLock::new();
+    let reserved = RESERVED.get_or_init(|| {
+        serde_json::from_str(include_str!("environment_reserved.json"))
+            .expect("valid reserved environment names")
+    });
     ensure!(
-        !name.starts_with("TERMINALX_")
-            && !name.starts_with("RACCOON_")
-            && !matches!(
-                name,
-                "TERMINALX"
-                    | "RACCOON"
-                    | "TERM"
-                    | "COLORTERM"
-                    | "TERM_PROGRAM"
-                    | "PATH"
-                    | "CODEX_HOME"
-                    | "CLAUDECODE"
-                    | "CLAUDE_CODE_SESSION_ID"
-                    | "CLAUDE_CODE_CHILD_SESSION"
-                    | "CLAUDE_CODE_BRIDGE_SESSION_ID"
-            ),
+        !reserved.names.iter().any(|reserved| reserved == name)
+            && !reserved
+                .prefixes
+                .iter()
+                .any(|prefix| name.starts_with(prefix)),
         "This name is reserved by TerminalX."
     );
     Ok(())
@@ -167,7 +168,7 @@ impl Store<'_> {
         }
         let bytes = self.secrets.get(SERVICE, &scope.revision)
             .map_err(|_| anyhow::anyhow!("Could not read environment values from Keychain."))?
-            .context("Environment values are missing from Keychain. Restore the Keychain item before launching.")?;
+            .context("Environment values are missing from Keychain. Restore the Keychain item to use these overrides.")?;
         let values: Values = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("Invalid environment values in Keychain."))?;
         ensure!(
@@ -178,11 +179,16 @@ impl Store<'_> {
         Ok(values)
     }
 
-    fn change(&self, key: &str, update: impl FnOnce(&mut Values) -> Result<()>) -> Result<()> {
-        self.transaction(|| {
-            let mut index = self.index()?;
-            let old = index.get(key).cloned();
-            let mut values = self.values(old.as_ref())?;
+    fn change(&self, key: &str, update: impl Fn(&mut Values) -> Result<()>) -> Result<()> {
+        // Keychain may wait on OS consent. All reads, writes and deletes happen
+        // outside the file lock; only the compare-and-swap of metadata is locked.
+        for _ in 0..16 {
+            let old = self.index()?.get(key).cloned();
+            let mut values = match self.values(old.as_ref()) {
+                Ok(values) => values,
+                Err(_) if self.index()?.get(key) != old.as_ref() => continue,
+                Err(error) => return Err(error),
+            };
             update(&mut values)?;
             validate_values(&values)?;
             let scope = Scope {
@@ -190,27 +196,39 @@ impl Store<'_> {
                 revision: uuid::Uuid::new_v4().to_string(),
             };
             if !values.is_empty() {
-                let bytes = serde_json::to_vec(&values)?;
                 self.secrets
-                    .set(SERVICE, &scope.revision, &bytes)
+                    .set(SERVICE, &scope.revision, &serde_json::to_vec(&values)?)
                     .map_err(|_| {
                         anyhow::anyhow!(
                             "Could not save environment values to Keychain. Nothing changed."
                         )
                     })?;
             }
-            index.insert(key.into(), scope.clone());
-            if super::write_json(&self.root.join("environment.json"), &index).is_err() {
-                let _ = self.secrets.delete(SERVICE, &scope.revision);
-                bail!("Could not save the environment index. Nothing changed.");
+            let committed = self.transaction(|| {
+                let mut index = self.index()?;
+                if index.get(key) != old.as_ref() {
+                    return Ok(false);
+                }
+                index.insert(key.into(), scope.clone());
+                super::write_json(&self.root.join("environment.json"), &index).map_err(|_| {
+                    anyhow::anyhow!("Could not save the environment index. Nothing changed.")
+                })?;
+                Ok(true)
+            });
+            match committed {
+                Ok(true) => {
+                    if let Some(old) = old {
+                        let _ = self.secrets.delete(SERVICE, &old.revision);
+                    }
+                    return Ok(());
+                }
+                other => {
+                    let _ = self.secrets.delete(SERVICE, &scope.revision);
+                    other?;
+                }
             }
-            // An unreferenced item after a Keychain deletion failure contains no
-            // discoverable value in files and can never be injected again.
-            if let Some(old) = old {
-                let _ = self.secrets.delete(SERVICE, &old.revision);
-            }
-            Ok(())
-        })
+        }
+        bail!("Environment changed concurrently. Try saving again.")
     }
 
     fn save(&self, key: &str, inputs: Vec<Input>, previous: Option<&str>) -> Result<()> {
@@ -226,29 +244,44 @@ impl Store<'_> {
                     "Variable no longer exists."
                 );
             }
-            for Input { name, value } in inputs {
-                validate_name(&name)?;
+            for Input { name, value } in &inputs {
+                validate_name(name)?;
                 ensure!(
-                    !values.contains_key(&name),
+                    !values.contains_key(name),
                     "A variable with this name already exists in this scope."
                 );
-                values.insert(name, value);
+                values.insert(name.clone(), value.clone());
             }
             Ok(())
         })
     }
 
+    #[cfg(test)]
     fn resolve(&self, repository: Option<String>) -> Result<Launch> {
-        self.transaction(|| {
-            let index = self.index()?;
-            let mut values = self.values(index.get(USER))?;
-            if let Some(key) = &repository {
-                values.extend(self.values(index.get(key))?);
+        let index = self.index()?;
+        let mut cache = Cache::default();
+        for (key, scope) in &index {
+            if key == USER || repository.as_ref() == Some(key) {
+                cache.install(key, self.snapshot(key, &scope.revision)?, &index)?;
             }
-            Ok(Launch {
-                values,
-                stamp: stamp(&index, repository),
-            })
+        }
+        Ok(cache.resolve(Some(&index), repository))
+    }
+
+    fn snapshot(&self, key: &str, revision: &str) -> Result<Snapshot> {
+        let index = self.index()?;
+        let scope = index
+            .get(key)
+            .filter(|scope| scope.revision == revision)
+            .context("Environment changed. Try again.")?;
+        let values = self.values(Some(scope))?;
+        ensure!(
+            self.index()?.get(key) == Some(scope),
+            "Environment changed. Try again."
+        );
+        Ok(Snapshot {
+            revision: revision.into(),
+            values,
         })
     }
 }
@@ -271,10 +304,24 @@ fn stamp(index: &Index, repository: Option<String>) -> Stamp {
             .map(|s| s.revision.clone())
             .unwrap_or_default(),
         repository,
+        unavailable: false,
     }
 }
 
+#[derive(Default, Serialize, Deserialize)]
+pub struct Status {
+    pub changed: bool,
+    pub unavailable: bool,
+}
+
 impl Stamp {
+    pub fn status(&self) -> Result<Status> {
+        Ok(Status {
+            changed: self.unavailable || self.changed()?,
+            unavailable: self.unavailable,
+        })
+    }
+
     /// A pane handed over by a runtime predating environment overrides never
     /// received any. Keep its repository identity so later edits still warn.
     pub fn unconfigured(cwd: &str) -> Self {
@@ -289,18 +336,171 @@ impl Stamp {
     }
 }
 
+/// Only sent in a response to the registered desktop's private service. Never
+/// a control request, log record or handover field.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Snapshot {
+    revision: String,
+    values: Values,
+}
+
+#[derive(Default)]
+struct Cache {
+    scopes: BTreeMap<String, Snapshot>,
+}
+
+impl Cache {
+    fn install(&mut self, key: &str, snapshot: Snapshot, index: &Index) -> Result<()> {
+        let scope = index.get(key).context("Unknown environment scope.")?;
+        ensure!(snapshot.revision == scope.revision, "Environment changed.");
+        ensure!(
+            snapshot.values.keys().cloned().collect::<BTreeSet<_>>() == scope.names,
+            "Invalid environment snapshot."
+        );
+        validate_values(&snapshot.values)?;
+        self.scopes.insert(key.into(), snapshot);
+        Ok(())
+    }
+
+    fn resolve(&self, index: Option<&Index>, repository: Option<String>) -> Launch {
+        let Some(index) = index else {
+            return Launch {
+                values: Values::new(),
+                stamp: Stamp {
+                    repository,
+                    unavailable: true,
+                    ..Default::default()
+                },
+            };
+        };
+        let mut stamp = stamp(index, repository);
+        let mut values = Values::new();
+        for key in std::iter::once(USER).chain(stamp.repository.as_deref()) {
+            let Some(scope) = index.get(key).filter(|scope| !scope.names.is_empty()) else {
+                continue;
+            };
+            match self
+                .scopes
+                .get(key)
+                .filter(|cached| cached.revision == scope.revision)
+            {
+                Some(cached) => values.extend(cached.values.clone()),
+                None => {
+                    stamp.unavailable = true;
+                    break;
+                }
+            }
+        }
+        // No partial credential/endpoint combinations when one scope is missing.
+        if stamp.unavailable {
+            values.clear();
+        }
+        Launch { values, stamp }
+    }
+}
+
+fn cache() -> &'static std::sync::Mutex<Cache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn desktop_snapshot(key: &str, revision: &str) -> Result<Snapshot> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // A Keychain prompt may outlive the runtime's request timeout. Do not pile
+    // up more blocked reads behind it. No mutex or file lock is held here.
+    static READING: AtomicBool = AtomicBool::new(false);
+    ensure!(
+        !READING.swap(true, Ordering::AcqRel),
+        "Environment read is already in progress."
+    );
+    struct Reading;
+    impl Drop for Reading {
+        fn drop(&mut self) {
+            READING.store(false, Ordering::Release);
+        }
+    }
+    let _reading = Reading;
+    store()?.snapshot(key, revision)
+}
+
+fn refresh_cache(
+    cache: &std::sync::Mutex<Cache>,
+    store: &Store<'_>,
+    attempts: &mut BTreeMap<String, std::time::Instant>,
+    fetch: impl Fn(&str, &str) -> Result<Snapshot>,
+) -> Result<()> {
+    let index = store.index()?;
+    let pending: Vec<_> = {
+        let mut cache = cache.lock().unwrap();
+        cache.scopes.retain(|key, snapshot| {
+            index
+                .get(key)
+                .is_some_and(|scope| scope.revision == snapshot.revision)
+        });
+        index
+            .iter()
+            .filter(|(key, scope)| !scope.names.is_empty() && !cache.scopes.contains_key(*key))
+            .map(|(key, scope)| (key.clone(), scope.revision.clone()))
+            .collect()
+    };
+    attempts.retain(|revision, _| index.values().any(|scope| &scope.revision == revision));
+    for (key, revision) in pending {
+        if attempts
+            .get(&revision)
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(5))
+        {
+            continue;
+        }
+        attempts.insert(revision.clone(), std::time::Instant::now());
+        // This may wait for desktop consent. No runtime/cache/store lock is held.
+        if let Ok(snapshot) = fetch(&key, &revision) {
+            let current = store.index()?;
+            let _ = cache.lock().unwrap().install(&key, snapshot, &current);
+        }
+    }
+    Ok(())
+}
+
+/// Prefetch on a dedicated runtime worker. Only the desktop accesses Keychain;
+/// launches and metadata reads neither wait for this worker nor take its locks.
+/// The cache is intentionally absent from runtime handover; reattachment refills it.
+#[cfg(unix)]
+pub(crate) fn start(lifetime: &std::sync::Arc<crate::local_runtime::Lifetime>) -> Result<()> {
+    let lifetime = std::sync::Arc::downgrade(lifetime);
+    std::thread::Builder::new()
+        .name("environment-cache".into())
+        .spawn(move || {
+            let mut attempts = BTreeMap::new();
+            while let Some(lifetime) = lifetime.upgrade() {
+                if lifetime.is_stopping() {
+                    break;
+                }
+                if lifetime.window.available() {
+                    if let Ok(store) = store() {
+                        let _ = refresh_cache(cache(), &store, &mut attempts, |key, revision| {
+                            lifetime.window.environment_snapshot(key, revision)
+                        });
+                    }
+                }
+                drop(lifetime);
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        })?;
+    Ok(())
+}
+
+// Runtime launches use only the in-memory cache, never the Keychain. A missing
+// or failed read deliberately degrades to no overrides and a per-tab notice.
 #[cfg(not(test))]
-pub fn launch(cwd: &str) -> Result<Launch> {
-    let store = store()?;
-    // Retain repository identity even before its first variable is added, so
-    // that addition marks existing panes stale. Cloud runtimes have their own
-    // environment service and no local repository scope.
+pub fn launch(cwd: &str) -> Launch {
     let repo = if cfg!(target_os = "macos") {
         repository(Path::new(cwd))
     } else {
         None
     };
-    store.resolve(repo)
+    let index = store().and_then(|store| store.index());
+    cache().lock().unwrap().resolve(index.as_ref().ok(), repo)
 }
 
 // PTY fixtures must never read the developer's saved names or depend on the
@@ -312,13 +512,13 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub fn launch(_cwd: &str) -> Result<Launch> {
-    Ok(TEST_LAUNCH
+pub fn launch(_cwd: &str) -> Launch {
+    TEST_LAUNCH
         .with(|slot| slot.borrow_mut().take())
         .unwrap_or_else(|| Launch {
             values: Values::new(),
             stamp: Stamp::default(),
-        }))
+        })
 }
 
 pub fn list(project: Option<&str>) -> Result<Vec<Row>> {
@@ -349,12 +549,13 @@ pub fn reveal(project: Option<&str>, name: &str) -> Result<String> {
     validate_name(name)?;
     let key = scope_key(project)?;
     let store = store()?;
-    store.transaction(|| {
-        store
-            .values(store.index()?.get(&key))?
-            .remove(name)
-            .context("Variable no longer exists.")
-    })
+    let index = store.index()?;
+    let scope = index.get(&key).context("Variable no longer exists.")?;
+    store
+        .snapshot(&key, &scope.revision)?
+        .values
+        .remove(name)
+        .context("Variable no longer exists.")
 }
 
 pub fn save(project: Option<&str>, inputs: Vec<Input>, previous: Option<&str>) -> Result<()> {
@@ -371,16 +572,30 @@ pub fn delete(project: Option<&str>, name: &str) -> Result<()> {
 
 pub fn read_env_file(project: &str, path: &str) -> Result<String> {
     scope_key(Some(project))?;
+    let root = Path::new(project)
+        .canonicalize()
+        .context("Choose a local repository.")?;
+    let path = Path::new(path)
+        .canonicalize()
+        .context("Choose an existing .env file.")?;
+    ensure!(
+        path.starts_with(root)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == ".env" || name.starts_with(".env.")),
+        "Choose a .env or .env.* file inside this repository."
+    );
     use std::io::Read;
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
     let file = options
-        .open(path)
+        .open(&path)
         .map_err(|_| anyhow::anyhow!("Could not open the .env file."))?;
     ensure!(file.metadata()?.is_file(), "Choose a regular .env file.");
     let mut bytes = Vec::new();
@@ -445,6 +660,190 @@ mod tests {
             "user-secret"
         );
         assert!(b.stamp == store.resolve(Some("repo-b".into())).unwrap().stamp);
+    }
+
+    #[test]
+    fn keychain_operations_never_hold_the_environment_transaction_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let path = root.path().join("environment.lock");
+        secrets.on_call(move || {
+            super::super::transaction::run(&path, Duration::ZERO, || Ok(())).unwrap();
+        });
+        let store = Store {
+            root: root.path().into(),
+            secrets: &secrets,
+        };
+        add(&store, USER, "KEY", "first");
+        let revision = store.index().unwrap()[USER].revision.clone();
+        store.snapshot(USER, &revision).unwrap();
+        store
+            .change(USER, |values| {
+                values.insert("KEY".into(), "second".into());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    struct ReadFailure(MemorySecrets);
+    impl SecretStore for ReadFailure {
+        fn get(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+            bail!("denied private-value")
+        }
+        fn set(&self, service: &str, account: &str, secret: &[u8]) -> Result<()> {
+            self.0.set(service, account, secret)
+        }
+        fn delete(&self, service: &str, account: &str) -> Result<()> {
+            self.0.delete(service, account)
+        }
+    }
+
+    #[test]
+    fn failed_read_at_launch_omits_all_overrides_and_marks_the_tab_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let store = Store {
+            root: root.path().into(),
+            secrets: &secrets,
+        };
+        add(&store, USER, "KEY", "user-secret");
+        add(&store, "repo", "KEY", "repo-secret");
+        let index = store.index().unwrap();
+        let cache = std::sync::Mutex::new(Cache::default());
+        cache
+            .lock()
+            .unwrap()
+            .install(
+                "repo",
+                store.snapshot("repo", &index["repo"].revision).unwrap(),
+                &index,
+            )
+            .unwrap();
+        let failed = ReadFailure(secrets.clone());
+        let desktop = Store {
+            root: root.path().into(),
+            secrets: &failed,
+        };
+        refresh_cache(&cache, &store, &mut BTreeMap::new(), |key, revision| {
+            desktop.snapshot(key, revision)
+        })
+        .unwrap();
+        let launch = cache
+            .lock()
+            .unwrap()
+            .resolve(Some(&index), Some("repo".into()));
+        assert!(
+            launch.values.is_empty(),
+            "a missing user scope must not leave a partial configuration"
+        );
+        assert!(launch.stamp.unavailable);
+        assert!(!serde_json::to_string(&launch.stamp)
+            .unwrap()
+            .contains("secret"));
+        // Unlocking the desktop's Keychain restores future launches, not old tabs.
+        refresh_cache(&cache, &store, &mut BTreeMap::new(), |key, revision| {
+            store.snapshot(key, revision)
+        })
+        .unwrap();
+        let recovered = cache
+            .lock()
+            .unwrap()
+            .resolve(Some(&index), Some("repo".into()));
+        assert!(!recovered.stamp.unavailable);
+        assert_eq!(recovered.values["KEY"], "repo-secret");
+        assert!(launch.stamp.unavailable);
+        #[cfg(unix)]
+        {
+            TEST_LAUNCH.with(|slot| *slot.borrow_mut() = Some(launch));
+            let terminals = crate::pty::Terminals::new();
+            terminals
+                .spawn(
+                    std::sync::Arc::new(crate::sink::BroadcastSink::new(64)),
+                    "session:failed-read",
+                    crate::pty::PaneSpec {
+                        cwd: root.path().to_str().unwrap(),
+                        cols: 80,
+                        rows: 24,
+                        command: Some("/usr/bin/printf 'launched-without-overrides'"),
+                        env: &[],
+                    },
+                )
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !String::from_utf8_lossy(
+                &terminals
+                    .read_output("session:failed-read")
+                    .unwrap_or_default(),
+            )
+            .contains("launched-without-overrides")
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "failed Keychain read must not prevent a PTY launch"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            terminals.kill_all();
+        }
+        // Revisions fence a cache retained across a desktop disconnect.
+        add(&store, USER, "NEW_KEY", "new-secret");
+        assert!(
+            cache
+                .lock()
+                .unwrap()
+                .resolve(Some(&store.index().unwrap()), Some("repo".into()))
+                .stamp
+                .unavailable
+        );
+    }
+
+    #[test]
+    fn a_blocked_desktop_read_does_not_hold_launch_cache_or_store_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let store = Store {
+            root: root.path().into(),
+            secrets: &secrets,
+        };
+        add(&store, USER, "KEY", "secret");
+        let cache = std::sync::Mutex::new(Cache::default());
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let resume = std::sync::Mutex::new(resume);
+        secrets.on_call(move || {
+            entered.send(()).unwrap();
+            resume
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        });
+        std::thread::scope(|threads| {
+            let refreshing = threads.spawn(|| {
+                refresh_cache(&cache, &store, &mut BTreeMap::new(), |key, revision| {
+                    store.snapshot(key, revision)
+                })
+            });
+            waiting.recv_timeout(Duration::from_secs(10)).unwrap();
+            // This is the complete cache operation performed with a tab mutex
+            // held at launch. It completes even while Keychain is still blocked.
+            let launched = cache
+                .try_lock()
+                .expect("launch does not wait for Keychain")
+                .resolve(Some(&store.index().unwrap()), None);
+            assert!(launched.stamp.unavailable);
+            store.transaction(|| Ok(())).unwrap();
+            release.send(()).unwrap();
+            refreshing.join().unwrap().unwrap();
+        });
+        assert!(
+            !cache
+                .lock()
+                .unwrap()
+                .resolve(Some(&store.index().unwrap()), None)
+                .stamp
+                .unavailable
+        );
     }
 
     #[test]
@@ -573,6 +972,9 @@ mod tests {
             "CODEX_HOME",
             "PATH",
             "TERM",
+            "HOME",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
             "CLAUDECODE",
         ] {
             assert!(validate_name(name).is_err(), "{name}");
@@ -591,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_invalid_keychain_items_fail_closed_without_echoing_values() {
+    fn missing_or_invalid_keychain_items_are_rejected_without_echoing_values() {
         let dir = tempfile::tempdir().unwrap();
         let secrets = MemorySecrets::default();
         let store = Store {
@@ -667,12 +1069,22 @@ mod tests {
         );
         std::fs::write(&file, vec![b'x'; MAX_BYTES + 1]).unwrap();
         assert!(read_env_file(project, file.to_str().unwrap()).is_err());
+        let outside = tempfile::tempdir().unwrap();
+        let other = outside.path().join(".env");
+        std::fs::write(&other, "KEY=outside").unwrap();
+        assert!(read_env_file(project, other.to_str().unwrap()).is_err());
+        #[cfg(unix)]
+        {
+            let link = repo.path().join(".env.link");
+            std::os::unix::fs::symlink(&other, &link).unwrap();
+            assert!(read_env_file(project, link.to_str().unwrap()).is_err());
+        }
         std::fs::write(&file, [0xff]).unwrap();
         assert!(read_env_file(project, file.to_str().unwrap()).is_err());
         assert!(read_env_file(project, project).is_err());
         #[cfg(unix)]
         {
-            let fifo = repo.path().join("fifo");
+            let fifo = repo.path().join(".env.fifo");
             let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
             // SAFETY: a valid, NUL-terminated path in this test's private directory.
             assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);

@@ -44,7 +44,7 @@ pub async fn environment_read_file(project_path: String, path: String) -> CmdRes
 pub async fn environment_changed(
     state: tauri::State<'_, crate::AppState>,
     id: String,
-) -> CmdResult<bool> {
+) -> CmdResult<environment::Status> {
     let runtime = state
         .runtime()
         .ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;

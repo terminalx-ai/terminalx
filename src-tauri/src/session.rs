@@ -1720,9 +1720,9 @@ impl SessionManager {
         crate::automations::RuntimeHost { sink: self.sink.clone(), sessions: self.clone() }
     }
 
-    pub fn environment_changed(&self, id: &str) -> Result<bool> {
-        if self.terminals.environment_changed(id)? { return Ok(true); }
-        let Some(tab_id) = id.strip_prefix("tab:") else { return Ok(false); };
+    pub fn environment_changed(&self, id: &str) -> Result<crate::store::environment::Status> {
+        if let Some(status) = self.terminals.environment_changed(id)? { return Ok(status); }
+        let Some(tab_id) = id.strip_prefix("tab:") else { return Ok(Default::default()); };
         let tab = self.tabs.lock().unwrap().iter()
             .find(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == tab_id))
             .map(|(_, tab)| tab.clone());
@@ -1731,9 +1731,9 @@ impl SessionManager {
                 let rt = tab.lock().unwrap();
                 rt.child.as_ref().filter(|child| child.terminal_receipt().is_none()).map(|_| rt.environment.clone())
             };
-            if let Some(stamp) = stamp { return stamp.changed(); }
+            if let Some(stamp) = stamp { return stamp.status(); }
         }
-        Ok(false)
+        Ok(Default::default())
     }
 
     pub fn terminals(&self) -> &Arc<pty::Terminals> {
@@ -2353,7 +2353,7 @@ impl SessionManager {
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let environment = crate::store::environment::launch(cwd)?;
+        let environment = crate::store::environment::launch(cwd);
         let mut env: Vec<_> = environment.values.into_iter().collect();
         env.extend([
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),

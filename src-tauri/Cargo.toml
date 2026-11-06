@@ -29,7 +29,8 @@ desktop = [
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-updater",
     "dep:cpal",
-    # macOS only: AppKit alerts, dictation and local transcription.
+    # macOS only: keychain, AppKit alerts, dictation and local transcription.
+    "dep:security-framework",
     "dep:objc2",
     "dep:objc2-app-kit",
     "dep:objc2-av-foundation",
@@ -124,8 +125,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 notify-rust = { version = "4", optional = true }
-# Local headless launches read the same Keychain environment store as the desktop.
-security-framework = { version = "3.7" }
+security-framework = { version = "3.7", optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor", "NSPasteboard"], optional = true }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"], optional = true }

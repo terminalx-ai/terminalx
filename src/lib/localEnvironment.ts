@@ -1,4 +1,5 @@
 import { invoke } from "./api";
+import reserved from "../../src-tauri/src/store/environment_reserved.json";
 
 export interface EnvironmentRow { name: string; scope: "user" | "repository"; overridden: boolean }
 export interface EnvironmentInput { name: string; value: string }
@@ -9,13 +10,13 @@ export const environment = {
   save: (projectPath: string | null, inputs: EnvironmentInput[], previous: string | null = null) => invoke<void>("environment_save", { projectPath, inputs, previous }),
   delete: (projectPath: string | null, name: string) => invoke<void>("environment_delete", { projectPath, name }),
   readFile: (projectPath: string, path: string) => invoke<string>("environment_read_file", { projectPath, path }),
-  changed: (id: string) => invoke<boolean>("environment_changed", { id }),
+  changed: (id: string) => invoke<{ changed: boolean; unavailable: boolean }>("environment_changed", { id }),
 };
 
-const RESERVED = new Set(["TERMINALX", "RACCOON", "TERM", "COLORTERM", "TERM_PROGRAM", "PATH", "CODEX_HOME", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID"]);
+const RESERVED = new Set(reserved.names);
 export function environmentNameError(name: string): string | null {
   if (name.length > 128 || !/^[A-Z_][A-Z0-9_]*$/.test(name)) return "Use a name matching [A-Z_][A-Z0-9_]* (at most 128 characters).";
-  if (RESERVED.has(name) || name.startsWith("TERMINALX_") || name.startsWith("RACCOON_")) return "This name is reserved by TerminalX.";
+  if (RESERVED.has(name) || reserved.prefixes.some((prefix) => name.startsWith(prefix))) return "This name is reserved by TerminalX.";
   return null;
 }
 

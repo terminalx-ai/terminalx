@@ -654,6 +654,8 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     if let Some(lifetime) = &lifetime {
         #[cfg(all(target_os = "macos", feature = "local-ui"))]
         crate::local_runtime::platform::install(&manager,lifetime,&(sink.clone() as Arc<dyn crate::sink::EventSink>));
+        #[cfg(unix)]
+        crate::store::environment::start(lifetime)?;
         lifetime.ready();
         if options.relay_link.is_none() && !options.self_test {
             crate::local_runtime::workspaces::start_retention(manager.clone(), lifetime.clone());

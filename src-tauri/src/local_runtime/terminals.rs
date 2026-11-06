@@ -50,7 +50,7 @@ impl Terminals {
         self.0.call("runtime.pty.kill", json!({"id":id}))
     }
 
-    pub fn environment_changed(&self, id: &str) -> Result<bool> {
+    pub fn environment_changed(&self, id: &str) -> Result<crate::store::environment::Status> {
         self.0.quick("runtime.pty.environmentChanged", json!({"id":id}))
     }
 

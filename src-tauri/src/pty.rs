@@ -606,9 +606,9 @@ impl Terminals {
         Self::default()
     }
 
-    pub fn environment_changed(&self, id: &str) -> Result<bool> {
+    pub fn environment_changed(&self, id: &str) -> Result<Option<crate::store::environment::Status>> {
         let stamp = self.panes.lock().unwrap().get(id).filter(|p| *p.alive.lock().unwrap()).map(|p| p.environment.clone());
-        stamp.map_or(Ok(false), |stamp| stamp.changed())
+        stamp.map(|stamp| stamp.status()).transpose()
     }
 
     /// `command`, when given, replaces the interactive shell: the login shell
@@ -657,7 +657,7 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        let environment = crate::store::environment::launch(cwd)?;
+        let environment = crate::store::environment::launch(cwd);
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();

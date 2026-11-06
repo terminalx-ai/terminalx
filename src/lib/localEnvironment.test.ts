@@ -22,7 +22,7 @@ describe("local environment paste", () => {
   });
   it("rejects unterminated quotes, NUL and reserved names", () => {
     expect(parseLocalEnv("A='oops\nB=bad\0value").errors).toHaveLength(2);
-    for (const name of ["PATH", "RACCOON", "RACCOON_HOOK_TOKEN", "CODEX_HOME", "TERM", "CLAUDECODE", "lower", "1BAD"]) expect(environmentNameError(name)).toBeTruthy();
+    for (const name of ["HOME", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "PATH", "RACCOON", "RACCOON_HOOK_TOKEN", "CODEX_HOME", "TERM", "CLAUDECODE", "lower", "1BAD"]) expect(environmentNameError(name)).toBeTruthy();
     for (const name of ["_KEY", "API_KEY", "PORT", "DATABASE_URL"]) expect(environmentNameError(name)).toBeNull();
   });
 });

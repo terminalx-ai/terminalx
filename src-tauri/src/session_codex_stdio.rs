@@ -296,7 +296,7 @@ impl SessionManager {
         let version = codex_version(&program).context("Could not verify experimental Codex stdio version. No prompt was sent.")?;
         anyhow::ensure!(codex::stdio::supported(&version), "Experimental stdio requires Codex {} or newer (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::MIN_VERSION, version.trim());
         current()?;
-        let environment = crate::store::environment::launch(cwd)?;
+        let environment = crate::store::environment::launch(cwd);
         let mut env: Vec<_> = environment.values.into_iter().collect();
         env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),

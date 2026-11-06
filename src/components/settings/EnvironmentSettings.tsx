@@ -34,7 +34,7 @@ export function EnvironmentSettings() {
         <dt className="font-mono">TERMINALX_NEXT_TOKEN, RACCOON_HOOK_TOKEN</dt><dd>Private control and hook credentials</dd>
         <dt className="font-mono">CODEX_HOME</dt><dd>Codex launch configuration directory</dd>
       </dl>
-      <p className="mt-3 text-muted-foreground">The workspace path is the process working directory. Local launches do not allocate an environment variable for workspace paths or ports. TERMINALX_* and RACCOON_* names are reserved.</p>
+      <p className="mt-3 text-muted-foreground">The workspace path is the process working directory. Local launches do not allocate an environment variable for workspace paths or ports. HOME, LD_PRELOAD, DYLD_*, TERMINALX_* and RACCOON_* names are reserved.</p>
     </details>
   </div>;
 }
@@ -91,7 +91,7 @@ function EnvironmentTable({ project }: { project: string | null }) {
       </form>
     </DialogContent></Dialog>}
     {paste !== null && parsed && <Dialog open onOpenChange={(open) => { if (!open && !busy) setPaste(null); }}><DialogContent>
-      <DialogHeader><DialogTitle>Import variables</DialogTitle><DialogDescription>Paste NAME=value lines. Quotes and export prefixes are accepted. Values are literal; nothing is expanded or executed.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Import variables</DialogTitle><DialogDescription>Paste NAME=value lines. Quotes and export prefixes are accepted. Values are literal, including backslash escapes; nothing is expanded or executed.</DialogDescription></DialogHeader>
       <label className="flex flex-col gap-2 text-sm">Variables<textarea autoFocus autoComplete="off" spellCheck={false} className={`${inputClass} h-48 font-mono`} value={paste} onChange={(e) => setPaste(e.target.value)} /></label>
       <p className="mt-2 text-sm">{parsed.inputs.length} valid variables</p>
       {parsed.errors.length > 0 && <ul role="alert" className="mt-2 max-h-32 overflow-y-auto text-sm text-destructive">{parsed.errors.map((e) => <li key={e}>{e}</li>)}</ul>}
