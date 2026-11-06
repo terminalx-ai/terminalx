@@ -1,3 +1,5 @@
+import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarOrderError } from "@/components/layout/SidebarSort";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, Search, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
@@ -343,6 +345,7 @@ function GeneralTab() {
 }
 
 function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
+  const order = useSidebarOrder();
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
   const light = hasLightMode(theme);
@@ -441,6 +444,12 @@ function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
           />
         }
       />
+      <SettingRow
+        label="Custom order"
+        description="Arrange sessions and projects with their drag handles. Press Space to pick up, arrows to move, Space to drop, or Escape to cancel. Off restores pin and recency order and keeps your arrangement."
+        control={<Switch aria-label="Custom order" checked={order.custom} disabled={!order.loaded || order.pending} onCheckedChange={(custom) => void saveSidebarOrder({ custom })} />}
+      />
+      <SidebarOrderError />
       <SettingRow
         label="Tab bar"
         description="A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only."

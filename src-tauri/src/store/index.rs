@@ -597,6 +597,8 @@ struct IndexFile {
     workspace_tabs: BTreeMap<String, TabLayout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closed_tabs: Vec<ClosedTab>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_order: Option<SidebarOrder>,
     #[serde(flatten, default)]
     unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -618,6 +620,9 @@ pub fn revision() -> u64 {
 }
 
 fn save_file(file: &mut IndexFile) -> Result<()> {
+    if let Some(order) = &mut file.sidebar_order {
+        reconcile_sidebar_sessions(&mut order.sessions, &file.sessions);
+    }
     // A closed tab goes with its session: there is nothing left to reopen it into.
     let IndexFile { sessions, closed_tabs, .. } = file;
     closed_tabs.retain(|closed| sessions.iter().any(|session| session.id == closed.session_id));
@@ -670,6 +675,70 @@ pub fn update<R>(f: impl FnOnce(&mut Vec<SessionEntry>) -> Result<R>) -> Result<
 pub fn tab_state() -> Result<TabState> {
     let file = load_file()?;
     Ok(TabState { workspaces: file.workspace_tabs, closed: file.closed_tabs })
+}
+
+/// Sidebar arrangement is independent of activity and of whether custom order
+/// is currently displayed. Revision guards windows against delayed replies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SidebarOrder {
+    pub custom: bool,
+    pub sessions: Vec<String>,
+    pub projects: Vec<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidebarOrderPatch {
+    pub custom: Option<bool>,
+    pub sessions: Option<Vec<String>>,
+    pub projects: Option<Vec<String>>,
+}
+
+/// Only the named rows move. Filtered, folded, archived and other groups' rows
+/// retain their slots; simultaneous edits to different groups cannot erase one another.
+fn merge_sidebar_order(saved: &mut Vec<String>, requested: Vec<String>) {
+    let mut unique = std::collections::HashSet::new();
+    saved.retain(|id| unique.insert(id.clone()));
+    let mut seen = std::collections::HashSet::new();
+    let requested: Vec<_> = requested.into_iter().filter(|id| seen.insert(id.clone())).collect();
+    let missing: Vec<_> = requested.iter().filter(|id| !saved.contains(id)).cloned().collect();
+    saved.extend(missing);
+    let mut next = requested.iter();
+    for id in saved.iter_mut() {
+        if seen.contains(id) {
+            *id = next.next().expect("one slot per requested row").clone();
+        }
+    }
+}
+
+fn reconcile_sidebar_sessions(saved: &mut Vec<String>, sessions: &[SessionEntry]) {
+    let mut seen = std::collections::HashSet::new();
+    let existing: std::collections::HashSet<_> = sessions.iter().map(|s| &s.id).collect();
+    saved.retain(|id| existing.contains(id) && seen.insert(id.clone()));
+    let mut new: Vec<_> = sessions.iter().filter(|s| !seen.contains(&s.id)).collect();
+    new.sort_by(|a, b| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));
+    saved.splice(0..0, new.into_iter().map(|s| s.id.clone()));
+}
+
+pub fn sidebar_order() -> Result<SidebarOrder> {
+    Ok(load_file()?.sidebar_order.unwrap_or_default())
+}
+
+pub fn set_sidebar_order(patch: SidebarOrderPatch) -> Result<SidebarOrder> {
+    update_file(|file| {
+        let order = file.sidebar_order.get_or_insert_with(SidebarOrder::default);
+        reconcile_sidebar_sessions(&mut order.sessions, &file.sessions);
+        if let Some(custom) = patch.custom { order.custom = custom; }
+        if let Some(mut sessions) = patch.sessions {
+            sessions.retain(|id| file.sessions.iter().any(|s| &s.id == id));
+            merge_sidebar_order(&mut order.sessions, sessions);
+        }
+        if let Some(projects) = patch.projects { merge_sidebar_order(&mut order.projects, projects); }
+        order.revision = order.revision.saturating_add(1);
+        Ok(order.clone())
+    })
 }
 
 /// Save how a workspace's tabs are arranged; an empty layout forgets it.
@@ -924,6 +993,47 @@ mod tests {
 
     fn tab_ids(session_id: &str) -> Vec<String> {
         get(session_id).unwrap().tabs.into_iter().map(|tab| tab.id).collect()
+    }
+
+    #[test]
+    fn sidebar_order_survives_updates_and_new_sessions_lead_even_while_off() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("b"), entry("c")];
+        for session in &mut sessions { session.created = "2026-01-01".into(); }
+        save(&sessions).unwrap();
+        assert_eq!(sidebar_order().unwrap(), SidebarOrder::default());
+        let saved = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["c".into(), "a".into(), "b".into(), "c".into(), "gone".into()]),
+            projects: Some(vec!["/b".into(), "/a".into()]),
+        }).unwrap();
+        assert_eq!(saved.sessions, ["c", "a", "b"]);
+        assert_eq!(sidebar_order().unwrap(), saved);
+        set_sidebar_order(SidebarOrderPatch { custom: Some(false), ..Default::default() }).unwrap();
+        update_session("b", |session| { session.modified = "later".into(); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, saved.sessions);
+        update(|sessions| { sessions.push(entry("new")); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "c", "a", "b"]);
+        // A filtered drop preserves the unseen rows and another group's order.
+        set_sidebar_order(SidebarOrderPatch { sessions: Some(vec!["b".into(), "c".into()]), ..Default::default() }).unwrap();
+        let restored = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(restored.sessions, ["new", "b", "a", "c"]);
+        assert_eq!(restored.projects, ["/b", "/a"]);
+        assert!(restored.revision > saved.revision);
+        assert_eq!(get("a").unwrap().modified, sessions[0].modified);
+        update(|sessions| { sessions.retain(|s| s.id != "a"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "c"]);
+    }
+
+    #[test]
+    fn sidebar_project_reorder_keeps_other_groups_and_index_fields() {
+        let _home = crate::store::temp_home();
+        save(&[entry("a")]).unwrap();
+        set_tab_layout("/a", layout(&["agent:tab"])).unwrap();
+        set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/a".into(), "/hidden".into(), "/b".into()]), ..Default::default() }).unwrap();
+        set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/b".into(), "/a".into(), "/a".into()]), ..Default::default() }).unwrap();
+        assert_eq!(sidebar_order().unwrap().projects, ["/b", "/hidden", "/a"]);
+        assert_eq!(tab_state().unwrap().workspaces["/a"].order, ["agent:tab"]);
+        assert_eq!(load().unwrap().len(), 1);
     }
 
     #[test]

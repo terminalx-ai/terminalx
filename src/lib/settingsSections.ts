@@ -5,7 +5,7 @@ export const SETTINGS_SECTIONS = [
   { id: "account", title: "Account", description: "Sign in, profile and account diagnostics", terms: ["login email subscription"] },
   { id: "devices", title: "Devices", description: "Pair a phone and manage connected devices", terms: ["mobile pairing remote revoke"] },
   { id: "general", title: "General", description: "Website links, sounds, chat and worktree defaults", terms: ["browser link actions command line cli pixel raccoon fold tool calls files changed prompt map autocorrect quick chat floating window cloud control"] },
-  { id: "appearance", title: "Appearance", description: "Themes, font size, transcript layout and status bar", terms: ["text size light dark mode tabs branches usage resources refresh percent"] },
+  { id: "appearance", title: "Appearance", description: "Themes, font size, transcript layout and status bar", terms: ["text size light dark mode tabs branches usage resources refresh percent custom order drag reorder sidebar sessions projects"] },
   { id: "organizations", title: "Organizations", description: "Members, cloud workspaces and organization settings", terms: ["team invite billing compute environment agent logins routes github setup"] },
   { id: "agents", title: "Agents", description: "Install and sign in to agents, permissions and skills", terms: ["claude codex gemini approval idle archive computer use browser runtime"] },
   { id: "transcription", title: "Transcription", description: "Dictation, microphone and speech models", terms: ["voice recording audio mute noise personalization language download"] },

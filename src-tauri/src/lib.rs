@@ -580,6 +580,8 @@ pub fn run() {
             commands::reopen_tab,
             commands::rename_tab,
             commands::tab_state,
+            commands::sidebar_order,
+            commands::set_sidebar_order,
             commands::set_tab_layout,
             commands::tab_resume_conversation,
             commands::pane_agents,

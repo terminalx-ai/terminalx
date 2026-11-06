@@ -32,6 +32,9 @@ import { CloudOrganizations } from "./CloudOrganizations";
 
 import { conversationTime } from "@/lib/messageActivity";
 
+import { useSidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarSortList, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
+
 const canon = (path: string) => path.replace(/\/+$/, "");
 
 /**
@@ -60,6 +63,7 @@ export function chatPreview(
  */
 export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
+  const order = useSidebarOrder();
   const [error, setError] = useState<string | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
   const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
@@ -68,11 +72,11 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   const showArchived = store.showArchived && !filter.active;
   // Unread or Needs you: only the conversations that pass, and the open one.
   const conversations = useMemo(
-    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived),
-    [filter, store.sessions, store.selectedSessionId, showArchived],
+    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived, order),
+    [filter, store.sessions, store.selectedSessionId, showArchived, order],
   );
   // Show archived (#718): the archived ones, under a fold of their own at the end.
-  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions) : []), [showArchived, store.sessions]);
+  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions, order) : []), [showArchived, store.sessions, order]);
   const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
   const showAgents = useMemo(() => mixesAgents(listed), [listed]);
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
@@ -110,6 +114,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
+      <SidebarOrderError />
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
         {conversations.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
@@ -125,19 +130,19 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           </button>
         ) : (
           <ul className="flex flex-col gap-px">
-            {live.map((session) => chatRow(session))}
+            <SidebarSortList items={live.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{live.map((session) => chatRow(session))}</SidebarSortList>
             {removed.length > 0 && (
               <RemovedWorkspaces
                 id="chats"
                 count={new Set(removed.map((session) => session.removedWorkspace?.path ?? session.id)).size}
                 opened={filter.active || removed.some((session) => session.id === store.selectedSessionId)}
               >
-                {removed.map((session) => chatRow(session))}
+                <SidebarSortList items={removed.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{removed.map((session) => chatRow(session))}</SidebarSortList>
               </RemovedWorkspaces>
             )}
             {archived.length > 0 && (
               <ArchivedSessions id="list" count={archived.length} opened={archived.some((session) => session.id === store.selectedSessionId)}>
-                {archived.map((session) => chatRow(session, true))}
+                <SidebarSortList items={archived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{archived.map((session) => chatRow(session, true))}</SidebarSortList>
               </ArchivedSessions>
             )}
           </ul>
@@ -181,6 +186,7 @@ function ChatRow({
   /** Drawn under the Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
+  const sort = useSidebarSortable(session.id);
   const title = conversationTitle(session);
   const ids = [session.id];
   const pickedNow = usePickedSessions();
@@ -197,7 +203,7 @@ function ChatRow({
   const said = (summary?.waitingOn ?? summary?.lastReply ?? summary?.lastPrompt)?.replace(/\s+/g, " ").trim();
   const agent = showAgent ? conversationAgent(session) : null;
   return (
-    <li>
+    <li ref={sort.ref} style={sort.style}>
       <DropdownMenu>
         <ContextMenu>
         <ContextMenuTrigger asChild>
@@ -206,6 +212,7 @@ function ChatRow({
           {...{ [ROW_ATTRIBUTE]: session.id }}
           title={[title, session.worktreeRemoved ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null, preview.text, said && said !== preview.text ? said : null].filter(Boolean).join("\n")}
         >
+          {sort.handle}
           <button
             type="button"
             onClick={(event) => {

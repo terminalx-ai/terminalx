@@ -1928,6 +1928,18 @@ pub fn tab_state() -> CmdResult<index::TabState> {
     index::tab_state().map_err(err)
 }
 
+#[tauri::command]
+pub fn sidebar_order() -> CmdResult<index::SidebarOrder> {
+    index::sidebar_order().map_err(err)
+}
+
+#[tauri::command]
+pub fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
+    let saved = index::set_sidebar_order(patch).map_err(err)?;
+    let _ = app.emit("sidebar_order_changed", &saved);
+    Ok(saved)
+}
+
 /// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
 #[tauri::command]
 pub fn set_tab_layout(app: AppHandle, workspace: String, layout: index::TabLayout) -> CmdResult<()> {
