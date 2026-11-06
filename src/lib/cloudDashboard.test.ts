@@ -30,6 +30,7 @@ function session(id: string, title: string, status: RuntimeSession["tabs"][numbe
     title,
     created: "2026-09-30T10:00:00.000Z",
     modified: "2026-09-30T11:00:00.000Z",
+    lastMessageAt: "2026-09-30T10:30:00.000Z",
     archived: false,
     pinned: false,
     tabs: [{ id: `${id}-tab`, harness: "claude", title: null, model: "opus", permissionMode: "bypassPermissions", status, created: "2026-09-30T10:00:00.000Z", modified: "2026-09-30T10:00:00.000Z" }],
@@ -110,6 +111,16 @@ const columnOf = (sessions: CloudDashboardSession[], key: string) => {
 };
 
 describe("cloud sessions in the dashboard's columns", () => {
+  it("keeps empty cloud chats in Not started and retains message evidence for read chats", () => {
+    const sessions = project({
+      workspaces: [item("ws-1")],
+      live: { "ws-1": [session("empty", "Empty", "idle", { lastMessageAt: null }), session("read", "Read", "idle")] },
+      connected: ["ws-1"],
+    });
+    expect(columnOf(sessions, `cloud:${ORG}:ws-1:empty`)).toBe("not-started");
+    expect(columnOf(sessions, `cloud:${ORG}:ws-1:read`)).toBe("done");
+  });
+
   it("uses the live tab state while connected: waiting is Needs you, in progress is Working", () => {
     const sessions = project({
       workspaces: [item("ws-1", { runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } })],

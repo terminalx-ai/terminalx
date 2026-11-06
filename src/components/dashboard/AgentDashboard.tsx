@@ -34,14 +34,14 @@ function openCard(session: CardSession) {
 }
 
 /**
- * Every session at once, in three columns: what needs the reader, what is
- * running, what is done. The sidebar answers "what is in this project"; this
+ * Every session at once: what needs the reader, what is running, what is done,
+ * and what has not started. The sidebar answers "what is in this project"; this
  * answers "where should I be looking", which is a different question once more
  * than a couple of agents are working.
  *
- * The columns scroll on their own so the header and the three counts stay put,
- * and the page never scrolls sideways: under 760px of room — narrower than
- * three readable cards — they stack and the whole area scrolls instead.
+ * The columns scroll on their own so the header and counts stay put,
+ * and the page never scrolls sideways: under 1000px of room — narrower than
+ * four readable cards — they stack and the whole area scrolls instead.
  */
 /** The dashboard filter that stands for every quick chat: no project path can be this. */
 const QUICK_CHATS_FILTER = "quick:";
@@ -84,9 +84,9 @@ export function AgentDashboard() {
     () => bucketSessions(sessions, { query, filters: pathFilters, projectName }),
     [sessions, query, pathFilters, projectName],
   );
-  // Only the done column is capped; the other two are meant to be read whole.
+  // Only the done column is capped; the others are meant to be read whole.
   const shown: Record<ColumnId, CardSession[]> = useMemo(
-    () => ({ needs: buckets.needs, working: buckets.working, done: buckets.done.slice(0, doneLimit) }),
+    () => ({ ...buckets, done: buckets.done.slice(0, doneLimit) }),
     [buckets, doneLimit],
   );
 
@@ -260,8 +260,8 @@ export function AgentDashboard() {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pb-4 @min-[760px]:overflow-hidden">
-        <div className="flex flex-col gap-4 @min-[760px]:h-full @min-[760px]:flex-row @min-[760px]:gap-3">
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pb-4 @min-[1000px]:overflow-hidden">
+        <div className="flex flex-col gap-4 @min-[1000px]:h-full @min-[1000px]:flex-row @min-[1000px]:gap-3">
           {COLUMNS.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
               {shown[c.id].map((s, row) =>
@@ -314,6 +314,7 @@ const EMPTY: Record<ColumnId, string> = {
   needs: "None",
   working: "Nothing running.",
   done: "Nothing finished yet.",
+  "not-started": "No chats waiting to start.",
 };
 
 function Column({
@@ -333,7 +334,7 @@ function Column({
   return (
     // Columns share the width evenly but never squeeze below a readable card;
     // below the breakpoint they stack and the whole area scrolls instead.
-    <section aria-label={label} className="flex min-w-0 flex-col @min-[760px]:min-h-0 @min-[760px]:min-w-[220px] @min-[760px]:flex-1">
+    <section aria-label={label} className="flex min-w-0 flex-col @min-[1000px]:min-h-0 @min-[1000px]:min-w-[220px] @min-[1000px]:flex-1">
       <header className="flex shrink-0 items-center gap-1.5 px-1 pb-1.5">
         <span
           aria-hidden
@@ -342,12 +343,13 @@ function Column({
             id === "needs" && "bg-warning",
             id === "working" && "bg-info",
             id === "done" && "bg-add",
+            id === "not-started" && "bg-faint",
           )}
         />
         <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
         <span className="rounded-full bg-veil-raised px-1.5 text-[10px] text-faint tabular-nums">{count}</span>
       </header>
-      <div className="flex flex-col gap-1.5 pr-0.5 @min-[760px]:min-h-0 @min-[760px]:flex-1 @min-[760px]:overflow-y-auto scrollbar-thin">
+      <div className="flex flex-col gap-1.5 pr-0.5 @min-[1000px]:min-h-0 @min-[1000px]:flex-1 @min-[1000px]:overflow-y-auto scrollbar-thin">
         {loading && count === 0 ? (
           <>
             <AgentCardSkeleton />
