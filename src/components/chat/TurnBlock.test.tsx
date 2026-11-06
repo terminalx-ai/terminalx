@@ -286,3 +286,54 @@ describe("a message stopped before it was typed (#722)", () => {
     expect(onSendAgain.mock.calls).toEqual([[1], [2]]);
   });
 });
+
+describe("a settled turn's header and footer", () => {
+  const worked = (status: "ok" | "aborted" | "failed", tools = true): Turn =>
+    ({
+      ...turn([]),
+      completed: { status, ts: "2026-10-03T00:01:00Z", durationMs: 14_000 },
+      toolCount: tools ? 2 : 0,
+      work: [
+        ...(tools ? [{ kind: "tool", key: "ca", call: { callId: "a", name: "Bash", toolType: "shell", input: { command: "make build" }, seq: 2, result: { text: "built", isError: false } } }] : []),
+        { kind: "text", key: "a6", seq: 6, text: "Built it.", messageTs: "2026-10-03T00:01:00Z" },
+      ],
+    }) as unknown as Turn;
+
+  it("says how the work went above the answer, and keeps the footer to the time and a copy", () => {
+    setPrefs({ foldToolCalls: true });
+    render(<TurnBlock turn={worked("ok")} sessionId="s" stream={[]} working={false} />);
+    const header = screen.getByRole("button", { name: /Worked for 14s/ });
+    expect(header.textContent).toBe("Worked for 14s · 2 tool calls");
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    const footer = screen.getByTestId("turn-footer");
+    expect(footer.textContent).not.toContain("Worked");
+    expect(footer.querySelector("time")?.dateTime).toBe("2026-10-03T00:01:00.000Z");
+    expect(screen.getByRole("button", { name: "Copy answer" })).toBeDefined();
+  });
+
+  it("says a stopped or failed turn plainly in the header", () => {
+    setPrefs({ foldToolCalls: true });
+    render(<TurnBlock turn={worked("aborted")} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { name: /Stopped after 14s/ })).toBeDefined();
+    cleanup();
+    render(<TurnBlock turn={worked("failed")} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByRole("button", { name: /Failed after 14s/ })).toBeDefined();
+  });
+
+  it("puts how long it took in the footer when there is no work to fold", () => {
+    setPrefs({ foldToolCalls: true });
+    render(<TurnBlock turn={worked("ok", false)} sessionId="s" stream={[]} working={false} />);
+    expect(screen.queryByRole("button", { name: /Worked/ })).toBeNull();
+    expect(screen.getByTestId("turn-footer").textContent).toContain("Worked");
+    expect(screen.getByTestId("turn-footer").textContent).toContain("for 14s");
+  });
+
+  it("keeps the reader's time out of the bubble, under it on hover", () => {
+    const value = turn([]);
+    value.prompt!.messageTs = "2026-10-03T00:00:00Z";
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    const bubble = screen.getByTestId("reader-message");
+    expect(bubble.firstElementChild?.querySelector("time")).toBeNull();
+    expect(bubble.querySelector(":scope > time")?.getAttribute("dateTime")).toBe("2026-10-03T00:00:00.000Z");
+  });
+});

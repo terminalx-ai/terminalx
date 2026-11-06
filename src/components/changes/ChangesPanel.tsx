@@ -10,21 +10,26 @@ import type { ChangedFile, UnfinishedMerge } from "@/types/session";
 import { DiffPane } from "./DiffPane";
 import { FileList, sumChanges } from "./FileList";
 import { MergeInProgress, mergeGroups, type MergeGroup } from "./MergeInProgress";
+import { RepoPanel } from "./RepoPanel";
 
-type Scope = "all" | "uncommitted" | "turn";
+/** Uncommitted and History are the repository's own views: commit, push and pull there, and open past commits. */
+type Scope = "all" | "uncommitted" | "turn" | "history";
 type Choice = { scope: Scope; target: string | null };
 const preferenceKey = (source: GitSource) => `changes-scope:${source.key}`;
 function readChoice(source: GitSource): Choice {
   try {
     const saved = JSON.parse(localStorage.getItem(preferenceKey(source)) ?? "null");
-    if (saved && ["all", "uncommitted", "turn"].includes(saved.scope)) {
+    if (saved && ["all", "uncommitted", "turn", "history"].includes(saved.scope)) {
       return { scope: saved.scope, target: typeof saved.target === "string" ? saved.target : null };
     }
   } catch { /* Storage may be unavailable. */ }
   return { scope: "all", target: null };
 }
 
-/** Review the accumulated workspace by default; turn snapshots are opt-in. */
+/**
+ * Review the accumulated workspace by default; turn snapshots are opt-in.
+ * Uncommitted is where a commit is made, and History opens past commits.
+ */
 export function ChangesPanel(props: {
   cwd?: string;
   source?: GitSource;
@@ -34,20 +39,18 @@ export function ChangesPanel(props: {
   active: boolean;
   live: boolean;
   workingTree?: boolean;
-  onViewUncommitted: () => void;
 }) {
   const source = useMemo(() => props.source ?? localGitSource(props.cwd ?? ""), [props.source, props.cwd]);
   return <ScopedChanges key={source.key} {...props} source={source} />;
 }
 
-function ScopedChanges({ source, events, version, active, live, workingTree, onViewUncommitted }: {
+function ScopedChanges({ source, events, version, active, live, workingTree }: {
   source: GitSource;
   events: AgentEvent[];
   version: number;
   active: boolean;
   live: boolean;
   workingTree?: boolean;
-  onViewUncommitted: () => void;
 }) {
   const targetId = useId();
   const [choice, setChoice] = useState(() => readChoice(source));
@@ -63,6 +66,11 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
   const [result, setResult] = useState<{ range: ChangeRange; target: string; files: ChangedFile[]; merge: UnfinishedMerge | null; mergeError: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // History is the repository's view, which reads for itself. Uncommitted is too, except while a
+  // merge is in progress (#736): then the merge's own view (what is the base's, what was changed
+  // here, what is conflicted) leads, so it is read here like the other scopes.
+  const reads = choice.scope !== "history";
+  const repo = choice.scope === "history" ? "history" : choice.scope === "uncommitted" && !result?.merge ? "uncommitted" : null;
   const choose = (next: Choice) => {
     setChoice(next);
     setTick((t) => t + 1);
@@ -72,14 +80,14 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
     try { localStorage.setItem(preferenceKey(source), JSON.stringify(next)); } catch { /* Optional persistence. */ }
   };
   useEffect(() => {
-    if (!active || loading) return;
+    if (!active || loading || !reads) return;
     const id = window.setInterval(() => setTick((t) => t + 1), 4000);
     const refresh = () => setTick((t) => t + 1);
     window.addEventListener("focus", refresh);
     return () => { window.clearInterval(id); window.removeEventListener("focus", refresh); };
-  }, [active, loading]);
+  }, [active, loading, reads]);
   useEffect(() => {
-    if (!active) return;
+    if (!active || !reads) return;
     let cancelled = false;
     setLoading(true);
     const read = async () => {
@@ -113,7 +121,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
       if (!cancelled) { setResult(null); setError(source.errorMessage(e)); }
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [source, choice.scope, choice.target, choice.scope === "turn" ? turnRange?.base : null, choice.scope === "turn" ? turnRange?.head : null, active, tick, workingTree, live]);
+  }, [source, choice.scope, choice.target, choice.scope === "turn" ? turnRange?.base : null, choice.scope === "turn" ? turnRange?.head : null, active, tick, workingTree, live, reads]);
   const label = choice.scope === "all" ? "All changes" : choice.scope === "uncommitted" ? "Uncommitted changes" : live ? "This turn" : "Last turn";
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -123,6 +131,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
             <option value="all">All changes</option>
             <option value="uncommitted">Uncommitted changes</option>
             <option value="turn">{live ? "This turn" : "Last turn"}</option>
+            <option value="history">History</option>
           </select>
         </label>
         {choice.scope === "all" && <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); choose({ ...choice, target: draft.trim() || null }); }}>
@@ -130,21 +139,18 @@ function ScopedChanges({ source, events, version, active, live, workingTree, onV
           <input id={targetId} aria-label="Comparison target" className="min-w-0 flex-1 rounded bg-well p-1 font-mono" value={draft} placeholder={result?.target ?? "Automatic base branch"} onChange={(e) => setDraft(e.target.value)} />
           <Button type="submit" variant="secondary" size="sm">Apply</Button>
         </form>}
-        <p className="break-words text-muted-foreground">{result
+        {!repo && <p className="break-words text-muted-foreground">{result
           ? choice.scope === "all" ? `Against ${result.target} · merge-base tree ${result.range.base.slice(0, 7)}`
             : choice.scope === "uncommitted" ? `Against HEAD · tree ${result.range.base.slice(0, 7)}` : result.target
-          : choice.scope === "all" ? `Target: ${choice.target ?? "automatic base branch"}` : choice.scope === "uncommitted" ? "Against HEAD" : "Turn snapshots"}</p>
+          : choice.scope === "all" ? `Target: ${choice.target ?? "automatic base branch"}` : choice.scope === "uncommitted" ? "Against HEAD" : "Turn snapshots"}</p>}
       </div>
       {result?.merge && <MergeInProgress source={source} merge={result.merge} allChanges={choice.scope === "all"} onChanged={() => setTick((t) => t + 1)} />}
       {result?.mergeError && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">Whether a merge is in progress could not be read: {result.mergeError}</div>}
       <div className="min-h-0 flex-1">
-        <ChangesBody key={`${choice.scope}:${choice.target}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
+        {repo ? <RepoPanel source={source} active={active} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} embedded /> : <ChangesBody key={`${choice.scope}:${choice.target}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
           groups={choice.scope === "uncommitted" && result?.merge ? mergeGroups(result.merge, result.files) : null}
           label={label} empty={loading ? "Loading changes…" : error ? "Changes unavailable." : "No changes in this scope."}
-          noRange={loading ? "Loading changes…" : "Changes unavailable."} />
-      </div>
-      <div className="shrink-0 border-t border-hairline px-3 py-2">
-        <Button variant="ghost" size="sm" onClick={onViewUncommitted}>Commit and history in Repo</Button>
+          noRange={loading ? "Loading changes…" : "Changes unavailable."} />}
       </div>
     </div>
   );

@@ -189,6 +189,8 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
         return null;
       }
       if (cmd in answers) return typeof answers[cmd] === "function" ? answers[cmd](args ?? {}) : answers[cmd];
+      // No update is ever found here: a made-up one would cover the page with its card.
+      if (cmd === "plugin:updater|check") return null;
       if (cmd.startsWith("plugin:")) return id++;
       return new Promise(() => undefined);
     },
