@@ -449,17 +449,23 @@ try {
       state: "Todo", stateType: "open", labels: [], updatedAt: new Date().toISOString(), body: `Batch description ${index + 1}`,
     }));
     window.__BATCH_PROMPTS__ = [];
+    window.__BATCH_CREATED__ = [];
     Object.assign(answers, {
       gh_available: true, github_repo: "demo/project", linear_status: { connected: true }, linear_teams: [],
       issues_list: issues, issue_details: ({ id }) => issues.find((issue) => issue.id === id),
       issue_comments: { comments: [], nextCursor: null }, load_tab_events: [],
       preview_workspace_name: "batch-workspace",
       work_status: { isRepo: true, dirty: false, branch: "main", defaultBranch: "main", head: "abc" },
-      create_session: ({ req }) => ({
-        ...req, id: req.issue.id, cwd: `/repos/p0/${req.worktreeName}`, branch: req.worktreeName,
-        worktreeRemoved: false, created: new Date().toISOString(), modified: new Date().toISOString(), archived: false, pinned: false,
-        tabs: [{ ...req.tab, id: `${req.issue.id}-tab`, status: "idle", created: "", modified: "" }],
-      }),
+      create_session: ({ req }) => {
+        const id = `${req.issue.id}-${window.__BATCH_CREATED__.length + 1}`;
+        const session = {
+          ...req, id, cwd: `/repos/p0/${id}`, branch: id,
+          worktreeRemoved: false, created: new Date().toISOString(), modified: new Date().toISOString(), archived: false, pinned: false,
+          tabs: [{ ...req.tab, id: `${id}-tab`, status: "idle", created: "", modified: "" }],
+        };
+        window.__BATCH_CREATED__.push(session);
+        return session;
+      },
       send_message: (args) => { window.__BATCH_PROMPTS__.push(args); return { events: [] }; },
     });
   };
@@ -468,6 +474,11 @@ try {
   await batch.getByRole("button", { name: /^Issues/ }).click();
   await batch.getByRole("textbox", { name: "Search issues", exact: true }).fill("batch");
   await batch.locator('[data-issue-row="linear:batch-28"]').waitFor();
+  const chooseWorkFilter = async (name) => {
+    await batch.getByRole("button", { name: /^Working: / }).click();
+    await batch.getByRole("menuitem", { name, exact: true }).click();
+  };
+  await chooseWorkFilter("Hide issues someone is working on");
   for (const number of [28, 29, 30]) {
     const row = batch.locator(`[data-issue-row="linear:batch-${number}"]`);
     await row.click();
@@ -491,7 +502,10 @@ try {
     await batch.getByRole("button", { name: "Open session", exact: true }).waitFor();
   }
   assert.equal((await batch.evaluate(() => window.__BATCH_PROMPTS__)).length, 3);
-  failed += report("Linear batch", { "three starts preserve the list, search, selection and scroll and send three prompts": true });
+  failed += report("Linear batch", { "three starts under Nobody working preserve the list, search, selection and scroll and send three prompts": true });
+  await batch.getByRole("button", { name: "Refresh", exact: true }).click();
+  for (const number of [28, 29, 30]) await batch.locator(`[data-issue-row="linear:batch-${number}"]`).waitFor({ state: "detached" });
+  failed += report("Linear batch", { "an explicit refresh releases the retained rows": true });
   for (const number of [28, 29, 30]) {
     const notice = batch.getByRole("status").filter({ hasText: `BATCH-${number} Batch issue ${number}` });
     await notice.click();
@@ -501,6 +515,25 @@ try {
     await batch.getByRole("button", { name: /^Issues/ }).click();
   }
   failed += report("Linear batch", { "each notice opens its own session and disappears": true });
+
+  // Starting again without a pipeline must replace the panel's older local target.
+  await batch.locator('[data-issue-row="linear:batch-30"]').click();
+  await batch.getByText("Batch description 30", { exact: true }).waitFor();
+  await batch.getByRole("button", { name: "Start session", exact: true }).click();
+  await batch.getByRole("button", { name: "Start anyway", exact: true }).click();
+  const latestNotice = batch.getByRole("status").filter({ hasText: "BATCH-30 Batch issue 30" });
+  await latestNotice.waitFor();
+  await latestNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await chooseWorkFilter("Hide issues someone is working on");
+  await batch.locator('[data-issue-row="linear:batch-30"]').waitFor({ state: "detached" });
+  await chooseWorkFilter("All issues");
+  await chooseWorkFilter("Hide issues someone is working on");
+  assert.equal(await batch.locator('[data-issue-row="linear:batch-30"]').count(), 0);
+  const latestCwd = await batch.evaluate(() => window.__BATCH_CREATED__.at(-1).cwd);
+  await batch.getByRole("button", { name: "Open session", exact: true }).click();
+  await batch.getByTestId("session-branch").waitFor();
+  assert.ok((await batch.getByTestId("session-branch").getAttribute("title")).includes(latestCwd));
+  failed += report("Linear batch", { "filter changes release retained rows and Open session targets Start anyway's newest local work after dismissing its notice": true });
   await batch.close();
 } finally {
   await browser.close();
