@@ -7,6 +7,7 @@ import {
   closeSessionShare,
   createShare,
   defaultShareSettings,
+  isWaitingGuest,
   openSessionShare,
   refreshShare,
   useLocalShare,
@@ -460,20 +461,32 @@ export function LocalShareButton({ sessionId }: { sessionId: string }) {
     void refreshShare(sessionId).catch(() => undefined);
   }, [sessionId]);
   const people = share.people.filter((person) => person.admitted);
+  // Each link approves people by default (PRO-162): whoever waits is shown here, not only inside Share.
+  const waiting = share.people.filter(isWaitingGuest);
+  const waitingNote = `${waiting.length} waiting`;
   const detail = [
     ...people.map((guest) => `${guest.person.displayName}${guest.typing ? " (typing)" : ""}`),
     ...share.leases.map((lease) => `${lease.holder.displayName} is driving`),
+    ...waiting.map((guest) => `${guest.person.displayName} is waiting to join`),
   ].join(" · ");
+  const waitingId = `share-waiting-${sessionId}`;
   return (
     <Button
       variant="ghost"
       size="sm"
       aria-label="Share session…"
+      aria-describedby={waiting.length ? waitingId : undefined}
       title={detail || "Share session"}
       onClick={() => openSessionShare(sessionId)}
     >
       <Share2 />
       <span>{share.active ? `${people.length} guests` : "Share"}</span>
+      {waiting.length > 0 && (
+        <span className="text-warning" data-testid="share-waiting">
+          <span aria-hidden className="text-faint">· </span>
+          <span id={waitingId}>{waitingNote}</span>
+        </span>
+      )}
     </Button>
   );
 }

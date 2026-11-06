@@ -22,6 +22,12 @@ const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// they make one (`FIRST_RUN_PERMISSION_MODE` in packages/portable).
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
+/// The mode a new chat starts in until the reader picks one (PRO-162): Ask
+/// every time. Offered as the starting choice wherever a person opens a new
+/// chat form this side cannot read the reader's last pick for (the phone).
+/// Mirrors `FIRST_RUN_PERMISSION_MODE` in packages/portable/src/agentSettings.ts.
+pub const FIRST_RUN_PERMISSION_MODE: &str = "manual";
+
 /// A requested mode, or the default when none was named. Blank is not a mode.
 pub fn permission_mode_or_default(mode: Option<&str>) -> String {
     match mode.map(str::trim) {
@@ -1190,6 +1196,15 @@ mod tests {
         assert_eq!(requested_mode(Some(" ".into())), None);
         assert_eq!(requested_mode(None), None);
         assert_eq!(requested_mode(Some("plan".into())), Some("plan".into()));
+    }
+
+    #[test]
+    fn the_first_run_mode_is_ask_every_time_on_both_sides() {
+        // The desktop's new chats and the phone's form must open in the same mode.
+        let portable = include_str!("../../../packages/portable/src/agentSettings.ts");
+        assert!(portable.contains(&format!("export const FIRST_RUN_PERMISSION_MODE = \"{FIRST_RUN_PERMISSION_MODE}\";")), "agentSettings.ts and index.rs disagree on the first-run mode");
+        assert_eq!(FIRST_RUN_PERMISSION_MODE, "manual");
+        assert_ne!(FIRST_RUN_PERMISSION_MODE, DEFAULT_PERMISSION_MODE);
     }
 
     #[test]
