@@ -26,6 +26,8 @@ const SCHEME = /^([A-Za-z][A-Za-z0-9+.-]*):/;
 const SYSTEM_SCHEMES = new Set(["mailto", "tel"]);
 const REJECTED_SCHEMES = new Set(["javascript", "data", "vbscript", "blob"]);
 const ROUTED_HREF_PREFIX = "streamdown:terminalx/";
+/** A routed link to a file the agent made, which is drawn as a file chip (#776). */
+const CITED_FILE_HREF_PREFIX = "streamdown:terminalx-file/";
 const EXTERNAL_DOCUMENT_EXTENSIONS = new Set([
   "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key",
   "odt", "ods", "odp", "rtf", "epub", "mobi",
@@ -37,11 +39,25 @@ export function routedChatHref(href: string): string {
   return `${ROUTED_HREF_PREFIX}${encodeURIComponent(href)}`;
 }
 
-export function originalChatHref(href: string): string {
-  return href.startsWith(ROUTED_HREF_PREFIX) ? decodeOnce(href.slice(ROUTED_HREF_PREFIX.length)) : href;
+/** Routed like any chat link, and drawn as the chip of a file the agent made. */
+export function citedFileHref(href: string): string {
+  return `${CITED_FILE_HREF_PREFIX}${encodeURIComponent(href)}`;
 }
 
-type MarkdownNode = { type?: string; url?: string; title?: string; identifier?: string; children?: MarkdownNode[]; [key: string]: unknown };
+export function isCitedFileHref(href: string | undefined): boolean {
+  return !!href?.startsWith(CITED_FILE_HREF_PREFIX);
+}
+
+export function originalChatHref(href: string): string {
+  if (href.startsWith(ROUTED_HREF_PREFIX)) return decodeOnce(href.slice(ROUTED_HREF_PREFIX.length));
+  if (href.startsWith(CITED_FILE_HREF_PREFIX)) return decodeOnce(href.slice(CITED_FILE_HREF_PREFIX.length));
+  return href;
+}
+
+/** Marks the link a Codex file citation made (`codexCitations.ts`), whose destination is routed already. */
+export const CITATION_DATA = "codexFileCitation";
+
+type MarkdownNode = { type?: string; url?: string; title?: string; identifier?: string; data?: Record<string, unknown>; children?: MarkdownNode[]; [key: string]: unknown };
 export function routeMarkdownLinks() {
   return (tree: MarkdownNode) => {
     const definitions = new Map<string, { url: string; title?: string }>();
@@ -55,7 +71,7 @@ export function routeMarkdownLinks() {
     collect(tree);
     const walk = (node: MarkdownNode) => {
       if (node.type === "link" && typeof node.url === "string") {
-        node.url = routedChatHref(node.url);
+        if (!node.data?.[CITATION_DATA]) node.url = routedChatHref(node.url);
       } else if (node.type === "linkReference" && node.identifier) {
         const definition = definitions.get(node.identifier.toUpperCase());
         if (definition) {
