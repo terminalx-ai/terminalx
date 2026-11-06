@@ -31,6 +31,9 @@ pub struct GithubIdentity {
     pub email: Option<String>,
     /// The origin remote as `owner/name`, when it is on GitHub.
     pub repo: Option<String>,
+    /// Where the origin remote is hosted: `github`, `gitlab` or `other`;
+    /// `None` for a project with no remote yet, which lives on this computer only.
+    pub remote_host: Option<String>,
 }
 
 /// How long an answer stands before GitHub is asked again.
@@ -60,6 +63,7 @@ fn look_up(cwd: &Path) -> GithubIdentity {
     let remote = crate::git::remote_url(cwd);
     let email = crate::git::run(cwd, &["config", "--get", "user.email"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let repo = remote.as_deref().and_then(crate::issues::github_repo_from_url);
+    let remote_host = remote.as_deref().map(|url| remote_host_kind(url).to_string());
     // Over SSH, the key the folder uses names the account. A remote on a host
     // alias is asked by that alias; anything else by github.com, where the
     // folder's own SSH configuration still applies, since it is asked from there.
@@ -67,11 +71,25 @@ fn look_up(cwd: &Path) -> GithubIdentity {
     let https = remote.as_deref().is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"));
     let greeted = if https { None } else { ssh_greeting(cwd, &host).as_deref().and_then(login_in_greeting) };
     match greeted {
-        Some(login) => GithubIdentity { login: Some(login), source: Some("ssh".into()), email, repo },
+        Some(login) => GithubIdentity { login: Some(login), source: Some("ssh".into()), email, repo, remote_host },
         None => {
             let login = gh_active_login();
-            GithubIdentity { source: login.as_ref().map(|_| "gh".into()), login, email, repo }
+            GithubIdentity { source: login.as_ref().map(|_| "gh".into()), login, email, repo, remote_host }
         }
+    }
+}
+
+/// Where a remote is hosted, by the name of its host: `github` (an SSH alias
+/// such as `github-work` included), `gitlab`, or `other`.
+pub fn remote_host_kind(url: &str) -> &'static str {
+    let url = url.trim();
+    let host = ssh_host(url).or_else(|| url.split_once("://").and_then(|(_, rest)| rest.split('/').next()).map(|authority| authority.rsplit('@').next().unwrap_or("").split(':').next().unwrap_or("").to_string())).unwrap_or_default().to_ascii_lowercase();
+    if host.contains("github") {
+        "github"
+    } else if host.contains("gitlab") {
+        "gitlab"
+    } else {
+        "other"
     }
 }
 
@@ -178,6 +196,18 @@ mod tests {
         assert_eq!(ssh_host("ssh://git@github.com:22/owner/name.git").as_deref(), Some("github.com"));
         assert_eq!(ssh_host("https://github.com/owner/name.git"), None);
         assert_eq!(ssh_host("/Users/me/bare.git"), None);
+    }
+
+    #[test]
+    fn a_remote_is_placed_on_github_gitlab_or_elsewhere_by_its_host() {
+        assert_eq!(remote_host_kind("git@github.com:owner/name.git"), "github");
+        assert_eq!(remote_host_kind("git@github-work:terminalx-ai/terminalx.git"), "github");
+        assert_eq!(remote_host_kind("https://github.com/owner/name"), "github");
+        assert_eq!(remote_host_kind("git@gitlab.com:group/sub/name.git"), "gitlab");
+        assert_eq!(remote_host_kind("https://gitlab.example.com/group/name.git"), "gitlab");
+        assert_eq!(remote_host_kind("ssh://git@gitlab.com:2222/group/name.git"), "gitlab");
+        assert_eq!(remote_host_kind("https://user@bitbucket.org/team/name.git"), "other");
+        assert_eq!(remote_host_kind("/Users/me/bare.git"), "other");
     }
 
     #[test]
