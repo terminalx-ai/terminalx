@@ -595,7 +595,8 @@ export function NewSessionView({
 
           {!cloud && harness && !available && (
             <p className="mt-2 px-1 text-xs text-muted-foreground">
-              Install it with <code className="font-mono">{harness.installHint}</code>
+              {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}
+              <code className="font-mono">{harness.installHint}</code>
             </p>
           )}
           {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}

@@ -308,6 +308,8 @@ export interface HarnessInfo {
   path?: string;
   installHint: string;
   installUrl: string;
+  /** The app installs this CLI and signs in to it by itself (PRO-152). */
+  installable?: boolean;
   caps: Capabilities;
 }
 

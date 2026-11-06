@@ -28,15 +28,38 @@ export async function checkAgentReadiness(harness: string): Promise<AgentReadine
 }
 
 export function readinessBlock(harness: string, value: AgentReadiness): string | null {
-  if (value.state === "missing") return `${harness} is not installed. Follow the setup steps, then check again. Your draft is kept.`;
-  if (value.state === "signed_out") return `Sign in to ${harness}, then check again. Your draft is kept and no session has been created.`;
+  if (value.state === "missing") return `${harness} is not installed. Install it above, then start again. Your draft is kept.`;
+  if (value.state === "signed_out") return `Sign in to ${harness} above, then start again. Your draft is kept and no session has been created.`;
   return null;
+}
+
+/** Everything showing an agent's readiness, told of a check made elsewhere. */
+const announced = new Set<(harness: string, value: AgentReadiness) => void>();
+
+/**
+ * A fresh answer for `harness`, from a check someone else made (the setup
+ * flow, after an install or a sign-in): every view of it takes it at once,
+ * and a check of its own still under way no longer replaces it.
+ */
+export function announceReadiness(harness: string, value: AgentReadiness) {
+  for (const take of [...announced]) take(harness, value);
 }
 
 export function useAgentReadiness(harness: string | null, poll = false) {
   const [answer, setAnswer] = useState<{ harness: string; value: AgentReadiness } | null>(null);
   const [checking, setChecking] = useState(false);
   const generation = useRef(0);
+  useEffect(() => {
+    if (!harness) return;
+    const take = (id: string, value: AgentReadiness) => {
+      if (id !== harness) return;
+      generation.current++;
+      setAnswer({ harness, value });
+      setChecking(false);
+    };
+    announced.add(take);
+    return () => { announced.delete(take); };
+  }, [harness]);
   const refresh = useCallback(async () => {
     const run = ++generation.current;
     if (!harness) { setChecking(false); return null; }

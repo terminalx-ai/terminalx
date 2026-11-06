@@ -47,6 +47,7 @@ beforeEach(() => {
   account.status = { state: "signed-out" };
   sessions.addProject.mockImplementation(async (path: string) => ({ path, name: path.split("/").pop() }) as Project);
   invoke.mockImplementation(async (command: string) => {
+    if (command === "check_agent_readiness") return { state: "missing", checkedAt: null, version: null };
     if (command === "github_repositories") return { status: "ready", repositories: [], truncated: false };
     if (command === "project_start_defaults") return { projectsDir: "/home/me/Projects", suggestedName: "my-project" };
     throw new Error(`unexpected command ${command}`);
@@ -180,15 +181,16 @@ describe("the start screen", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("That folder is a cloud mirror.");
   });
 
-  it("says so when no agent is installed, with the install action and a re-check", () => {
-    store.harnesses = [{ ...claude, available: false }, codex];
+  it("says so when no agent is installed, with each agent's install action and a re-check", async () => {
+    store.harnesses = [{ ...claude, available: false, installable: true }, { ...codex, installable: true }];
     const onOpenSettings = vi.fn();
     render(<StartScreen onOpenSettings={onOpenSettings} />);
 
     const notice = screen.getByTestId("start-no-agent");
     expect(notice.textContent).toContain("No agent is installed");
-    fireEvent.click(screen.getByRole("button", { name: /Set up Codex/ }));
-    expect(onOpenSettings).toHaveBeenCalledWith("agents");
+    // Installed from here, not by way of Settings or the provider's site.
+    expect(await screen.findByRole("button", { name: "Install Claude Code and sign in" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
     expect(openUrl).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /Check again/ }));
     expect(sessions.refreshHarnesses).toHaveBeenCalled();

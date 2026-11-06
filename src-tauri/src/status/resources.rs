@@ -291,6 +291,28 @@ fn bound_pane(pane: &PaneInfo, sessions: &[index::SessionEntry], project_names: 
         };
     }
 
+    // An agent's install or sign-in (PRO-152): no session's, and no orphan.
+    if let Some(harness) = crate::harness::setup::pane_harness(&pane.id) {
+        return ProcSample {
+            pane_id: pane.id.clone(),
+            tab_id: None,
+            tab_title: format!("{} setup", crate::harness::display_name(harness)),
+            session_id: None,
+            session_title: None,
+            project_path: None,
+            project_name: None,
+            cwd: pane.cwd.clone(),
+            kind: "shell".into(),
+            harness: Some(harness.to_string()),
+            orphaned: false,
+            pid: pane.pid,
+            cpu_percent: aggregate.map(|sample| sample.cpu_percent),
+            rss_bytes: aggregate.map(|sample| sample.rss_bytes),
+            child_count: aggregate.map(|sample| sample.child_count),
+            kill_rule: KillRule::Confirm,
+        };
+    }
+
     let session = sessions
         .iter()
         .find(|session| pane.id.starts_with(&format!("{}:", session.id)))

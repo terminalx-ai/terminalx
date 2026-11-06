@@ -2203,6 +2203,19 @@ export const floatingWindow = {
   openInMain: (sessionId: string, tabId?: string | null) => invoke<void>("floating_open_in_main", { sessionId, tabId: tabId ?? null }),
 };
 
+// ---- agent setup (PRO-152)
+export type AgentSetupStep = "install" | "login";
+export const agentSetup = {
+  /**
+   * Run an agent's official installer, or its own sign-in, in setup pane `id`
+   * (`setup:<harness>:<run>`, a pane of no session). A pane whose step has
+   * ended goes on with the next one, its output kept above. The pane's exit
+   * code says how the step ended (`agentSetupFlow.ts`).
+   */
+  start: (id: string, harness: string, step: AgentSetupStep, cols: number, rows: number) =>
+    invoke<void>("agent_setup_start", { id, harness, step, cols, rows }),
+};
+
 // ---- terminals
 export const pty = {
   /** `title` names a shell tab for every window that lists it. */

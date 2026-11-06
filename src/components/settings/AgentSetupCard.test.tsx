@@ -1,22 +1,36 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo } from "@/types/session";
 import type { AgentReadiness } from "@/lib/agentReadiness";
 
-const { invoke, refreshHarnesses } = vi.hoisted(() => ({ invoke: vi.fn(), refreshHarnesses: vi.fn(async () => {}) }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+const { invoke, listen, refreshHarnesses } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), refreshHarnesses: vi.fn(async () => {}) }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke, Channel: class {} }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@/lib/sessions", () => ({ refreshHarnesses }));
+vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="terminal-view" data-pane={id} /> }));
 import { AgentSetupCard } from "./AgentSetupCard";
+import { resetAgentSetupFlows } from "@/lib/agentSetupFlow";
 
 const harness: HarnessInfo = {
-  id: "codex", name: "Codex", binary: "codex", available: false,
-  installHint: "npm install -g @openai/codex && codex login", installUrl: "https://developers.openai.com/codex/cli",
+  id: "codex", name: "Codex", binary: "codex", available: false, installable: true,
+  installHint: "curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login", installUrl: "https://developers.openai.com/codex/cli",
   caps: { images: true, steer: false, permissionModes: true, effort: true, slashCommands: true, atMentions: true, fork: true, resume: true },
 };
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-11-05T16:00:00Z", version: state === "missing" ? null : "0.166.0" });
 
-beforeEach(() => vi.clearAllMocks());
+const handlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
+const emit = (event: string, payload: unknown) => handlers.get(event)?.forEach((handler) => handler({ payload }));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  resetAgentSetupFlows();
+  handlers.clear();
+  listen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
+    if (!handlers.has(event)) handlers.set(event, new Set());
+    handlers.get(event)!.add(handler);
+    return () => handlers.get(event)!.delete(handler);
+  });
+});
 afterEach(cleanup);
 
 describe("agent setup card (PRO-170)", () => {
@@ -24,14 +38,15 @@ describe("agent setup card (PRO-170)", () => {
     invoke.mockResolvedValue(answer("missing"));
     render(<ul><AgentSetupCard harness={harness} /></ul>);
     expect(await screen.findAllByText("Not installed")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "Get it" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
 
     invoke.mockResolvedValue(answer("signed_out"));
     act(() => window.dispatchEvent(new Event("focus")));
     expect(await screen.findByText("Sign in required")).toBeTruthy();
-    expect(within(screen.getByRole("region", { name: "Codex setup" })).getByRole("status").textContent).toBe("Installed · sign in required");
+    expect(within(screen.getByRole("region", { name: "Codex setup" })).getAllByRole("status")[0].textContent).toBe("Installed · sign in required");
     expect(screen.queryByText("Not installed")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Get it" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Install Codex and sign in" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
 
     invoke.mockResolvedValue(answer("ready"));
     act(() => window.dispatchEvent(new Event("focus")));
@@ -39,6 +54,7 @@ describe("agent setup card (PRO-170)", () => {
     expect(within(screen.getByRole("region", { name: "Codex setup" })).getByRole("status").textContent).toBe("Ready · local login found");
     expect(screen.queryByText("Sign in required")).toBeNull();
     expect(screen.queryByRole("button", { name: "Copy command" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sign in to Codex" })).toBeNull();
   });
 
   it("uses the readiness result when an installed CLI is removed, and retains manual checks", async () => {
@@ -62,5 +78,63 @@ describe("agent setup card (PRO-170)", () => {
     await act(async () => reject(new Error("private diagnostic")));
     expect(screen.getAllByText("Login not checked")).toHaveLength(2);
     expect(screen.queryByText("private diagnostic")).toBeNull();
+  });
+
+  it("offers only the commands to copy for an agent the app cannot install", async () => {
+    invoke.mockResolvedValue(answer("missing"));
+    render(<ul><AgentSetupCard harness={{ ...harness, installable: false }} /></ul>);
+    await screen.findAllByText("Not installed");
+    expect(screen.queryByRole("button", { name: "Install Codex and sign in" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy command" })).toBeTruthy();
+    expect(screen.getByText(harness.installHint)).toBeTruthy();
+  });
+});
+
+describe("installing from the card (PRO-152)", () => {
+  it("runs install then sign-in in its terminal and turns Ready without Check again", async () => {
+    let state: AgentReadiness["state"] = "missing";
+    invoke.mockImplementation(async (command: string) => (command === "check_agent_readiness" ? answer(state) : null));
+    render(<ul><AgentSetupCard harness={harness} /></ul>);
+    fireEvent.click(await screen.findByRole("button", { name: "Install Codex and sign in" }));
+
+    expect(await screen.findByText("Installing…")).toBeTruthy();
+    const pane = screen.getByTestId("terminal-view").getAttribute("data-pane")!;
+    expect(invoke).toHaveBeenCalledWith("agent_setup_start", expect.objectContaining({ id: pane, harness: "codex", step: "install" }));
+    expect(screen.getByRole("button", { name: "Check again" }).hasAttribute("disabled")).toBe(true);
+
+    state = "signed_out";
+    await act(async () => emit("pty_exit", { id: pane, code: 0 }));
+    expect(await screen.findByText("Signing in…")).toBeTruthy();
+    expect(screen.getByTestId("terminal-view").getAttribute("data-pane")).toBe(pane);
+    expect(screen.getByText(/Finish in your browser/)).toBeTruthy();
+
+    state = "ready";
+    await act(async () => emit("pty_exit", { id: pane, code: 0 }));
+    expect(await screen.findByText("Ready")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("terminal-view")).toBeNull());
+    expect(screen.getByRole("status").textContent).toBe("Ready · local login found");
+    expect(invoke.mock.calls.filter(([command]) => command === "agent_setup_start")).toHaveLength(2);
+  });
+
+  it("says what went wrong, keeps the output, and tries again", async () => {
+    invoke.mockImplementation(async (command: string) => (command === "check_agent_readiness" ? answer("missing") : null));
+    render(<ul><AgentSetupCard harness={harness} /></ul>);
+    fireEvent.click(await screen.findByRole("button", { name: "Install Codex and sign in" }));
+    const pane = (await screen.findByTestId("terminal-view")).getAttribute("data-pane")!;
+
+    for (const [code, text] of [[70, /not writable by you/], [71, /Could not reach the provider/], [72, /could not be downloaded/], [73, /installer stopped/]] as const) {
+      await act(async () => emit("pty_exit", { id: pane, code }));
+      expect((await screen.findByRole("alert")).textContent).toMatch(text);
+      expect(screen.getAllByText("Setup did not finish")).toHaveLength(2);
+      expect(screen.getByTestId("terminal-view")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      expect(await screen.findByText("Installing…")).toBeTruthy();
+    }
+    expect(invoke.mock.calls.filter(([command, args]) => command === "agent_setup_start" && args.id === pane)).toHaveLength(5);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel Codex setup" }));
+    expect(await screen.findAllByText("Not installed")).toHaveLength(2);
+    expect(screen.queryByTestId("terminal-view")).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("pty_kill", { id: pane });
   });
 });

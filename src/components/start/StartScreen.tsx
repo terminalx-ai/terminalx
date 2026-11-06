@@ -2,8 +2,13 @@ import { EmptyView } from "./EmptyView";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { CircleAlert, ExternalLink, FolderGit2, FolderOpen, Loader2, RefreshCw, Zap, type LucideIcon } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { AgentMark } from "@/components/AgentMark";
+import { AgentSetup } from "@/components/session/AgentSetup";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";
+import { announceReadiness, checkAgentReadiness, useAgentReadiness } from "@/lib/agentReadiness";
+import { useAgentSetupFlows } from "@/lib/agentSetupFlow";
+import type { HarnessInfo } from "@/types/session";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { registerFileDropTarget } from "@/lib/fileDrop";
@@ -74,6 +79,10 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
 
   // The probe answers a moment after launch: nothing is claimed before it has.
   const noAgent = store.harnesses.length > 0 && !store.harnesses.some((harness) => harness.available);
+  // Once an install starts here it stays in view through sign-in to Ready,
+  // although the agent counts as installed half way (PRO-152).
+  const flows = useAgentSetupFlows();
+  const settingUp = store.harnesses.some((harness) => flows[harness.id]);
   const signedOut = account.ready && account.status.state === "signed-out";
 
   return (
@@ -115,28 +124,26 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
           </div>
         )}
 
-        {noAgent && (
-          <div role="status" data-testid="start-no-agent" className="mt-5 rounded-lg bg-warning/10 px-3 py-2.5 text-xs">
-            <div className="flex items-center gap-1.5 font-medium text-warning">
+        {(noAgent || settingUp) && (
+          <section aria-label="Set up an agent" data-testid="start-no-agent" className={cn("mt-5 rounded-lg px-3 py-2.5 text-xs", noAgent ? "bg-warning/10" : "bg-composer glass hairline")}>
+            {noAgent ? <div className="flex items-center gap-1.5 font-medium text-warning">
               <CircleAlert className="size-3.5" /> No agent is installed
-            </div>
+            </div> : <div className="font-medium">Set up an agent</div>}
             <p className="mt-1 text-muted-foreground">
-              TerminalX runs the agent command-line tools installed on this computer, and found none. Install one to start a session.
+              TerminalX runs the agent's own command-line tool on this computer. Install one here: its sign-in opens next, and no Terminal is needed.
             </p>
+            <ul className="mt-2 flex flex-col gap-2">
+              {store.harnesses.map((harness) => <StartAgent key={harness.id} harness={harness} />)}
+            </ul>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              {store.harnesses.map((harness) => (
-                <Button key={harness.id} size="xs" variant="secondary" onClick={() => onOpenSettings("agents")}>
-                  Set up {harness.name}
-                </Button>
-              ))}
-              <Button size="xs" variant="ghost" onClick={() => void refreshHarnesses()}>
+              <Button size="xs" variant="ghost" onClick={() => void recheckAgents(store.harnesses)}>
                 <RefreshCw /> Check again
               </Button>
               <Button size="xs" variant="ghost" onClick={() => onOpenSettings("agents")}>
                 Agent settings
               </Button>
             </div>
-          </div>
+          </section>
         )}
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -158,6 +165,25 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
         Drop a folder to open it as a project
       </div>
     </div>
+  );
+}
+
+/** Look for the agents again, and check each one's login, for every view of them. */
+async function recheckAgents(harnesses: HarnessInfo[]) {
+  try { await refreshHarnesses(); } catch { /* the checks below still answer */ }
+  await Promise.all(harnesses.map(async (harness) => announceReadiness(harness.id, await checkAgentReadiness(harness.id))));
+}
+
+/** One agent on the welcome screen: its state, and installing it and signing in to it from here. */
+function StartAgent({ harness }: { harness: HarnessInfo }) {
+  const readiness = useAgentReadiness(harness.id);
+  return (
+    <li className="flex min-w-0 items-start gap-2.5" data-start-agent={harness.id}>
+      <AgentMark id={harness.id} className="mt-3.5 size-4 shrink-0" decorative />
+      <div className="min-w-0 flex-1">
+        <AgentSetup compact harness={harness} value={readiness.value} checking={readiness.checking} onRefresh={() => void readiness.refresh()} />
+      </div>
+    </li>
   );
 }
 

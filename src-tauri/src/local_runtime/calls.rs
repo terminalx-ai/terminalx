@@ -55,6 +55,21 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 if let Some(shell) = terminals.shell(id) { sink.emit("pty_opened", &shell); }
                 Ok(Value::Null)
             }
+            // An agent's install or sign-in (PRO-152), in a pane of no
+            // session. The step's command is the registry's, never the caller's.
+            "agentSetup" => {
+                manager.accepting_work()?;
+                let harness = string(&params, "harness")?;
+                if !crate::harness::setup::is_pane(harness, id) { bail!("invalid setup pane id"); }
+                let step = crate::harness::setup::Step::parse(string(&params, "step")?)?;
+                if terminals.is_running(id) { bail!("{} is already being set up.", crate::harness::display_name(harness)); }
+                let command = crate::harness::setup::command(harness, step)?;
+                let (cols, rows) = size()?;
+                let home = dirs::home_dir().context("no home directory")?;
+                // In the place of the step before, whose output stays above this one's.
+                terminals.respawn(sink.clone(), id, crate::pty::PaneSpec { cwd: &home.to_string_lossy(), cols, rows, command: Some(&command), env: &[] })?;
+                Ok(Value::Null)
+            }
             "write" => {
                 let data = string(&params, "data")?;
                 if data.len() > 1024 * 1024 { bail!("terminal input is too large"); }

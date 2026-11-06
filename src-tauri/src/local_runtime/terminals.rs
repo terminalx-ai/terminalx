@@ -24,6 +24,11 @@ impl Terminals {
         self.0.call("runtime.pty.spawn", json!({"id":id,"cwd":cwd,"cols":cols,"rows":rows,"command":command,"title":title}))
     }
 
+    /// Run an agent's install or sign-in step in setup pane `id` (PRO-152).
+    pub fn agent_setup(&self, id: &str, harness: &str, step: &str, cols: u16, rows: u16) -> Result<()> {
+        self.0.call("runtime.pty.agentSetup", json!({"id":id,"harness":harness,"step":step,"cols":cols,"rows":rows}))
+    }
+
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<()> {
         self.0.quick("runtime.pty.write", json!({"id":id,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))
     }
