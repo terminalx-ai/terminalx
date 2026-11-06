@@ -184,8 +184,10 @@ export function cloudTerminalFactory(workspace: string, terminal: CloudTerminal,
     coordinateTerminalResize(instance.term, ({ cols, rows }) => {
       const binding = bindings.get(terminal.id);
       const now = current();
+      // No process remains to complete a resize; fit its retained output locally.
+      if (now?.exited) return false;
       // Only the controller's size reaches the program.
-      if (!binding || now?.control !== "you" || now.gone || now.exited) return;
+      if (!binding || now?.control !== "you" || now.gone) return;
       return binding.client.resizePty(terminal.ptyId, cols, rows).then(() => acknowledgeTerminalResize(instance.term, { cols, rows }));
     });
     instance.term.onResize((size) => { if (!isOutputResize(instance.term)) requestTerminalResize(instance.term, size); });

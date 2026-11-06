@@ -1,9 +1,10 @@
 import type { Terminal } from "@xterm/xterm";
 
 export interface OutputSize { cols: number; rows: number }
+type ResizeSender = (size: OutputSize) => void | false | Promise<void>;
 interface Output {
   requested?: OutputSize;
-  send?: (size: OutputSize) => void | Promise<void>;
+  send?: ResizeSender;
   sized: boolean;
   sending: boolean;
   revision: number;
@@ -21,8 +22,8 @@ function state(term: Terminal): Output {
   return output;
 }
 
-/** Size requests go to the process; its output decides when the parser changes grid. */
-export function coordinateTerminalResize(term: Terminal, send: (size: OutputSize) => void | Promise<void>) {
+/** The sender returns false to fit locally; otherwise process output decides the grid. */
+export function coordinateTerminalResize(term: Terminal, send: ResizeSender) {
   state(term).send = send;
 }
 export function requestedTerminalSize(term: Terminal): OutputSize {
@@ -61,22 +62,32 @@ export function requestTerminalResize(term: Terminal, size: OutputSize, force = 
   if (!output.stopped && (force || output.failed || output.requested?.cols !== size.cols || output.requested?.rows !== size.rows)) {
     output.requested = size;
     output.revision++;
-    const send = () => {
-      if (output.stopped || !output.requested || !output.send) return;
+    const send = (): boolean => {
+      if (output.stopped || !output.requested || !output.send) return true;
       output.sending = true;
       output.failed = false;
       const revision = output.revision;
-      let sent: void | Promise<void>;
+      let sent: ReturnType<ResizeSender>;
       try { sent = output.send(output.requested); }
       catch (error) { sent = Promise.reject(error); }
+      if (sent === false) {
+        output.sending = false;
+        // Re-evaluate a future fit even if it requests the same dimensions.
+        output.requested = undefined;
+        return false;
+      }
       void Promise.resolve(sent).catch(() => {
         if (output.revision === revision) output.failed = true;
       }).finally(() => {
         output.sending = false;
-        if (output.revision !== revision) send();
+        if (output.revision !== revision) {
+          const size = output.requested;
+          if (!send() && size) applyOutputSize(term, size);
+        }
       });
+      return true;
     };
-    if (!output.sending) send();
+    if (!output.sending) return send();
   }
   return true;
 }
