@@ -1,3 +1,4 @@
+import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -85,6 +86,7 @@ export function isCloudRepositoryKey(value: string): boolean {
 
 /** Every Tauri call made here goes through this: local paths pass unchanged, cloud ones throw. */
 export function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  if (privacyBlocksCommand(command)) return Promise.reject(new Error(PRIVACY_MESSAGE));
   if (args && typeof args === "object" && !Array.isArray(args) && !(args instanceof ArrayBuffer) && !(args instanceof Uint8Array)) {
     const record = args as Record<string, unknown>;
     try {

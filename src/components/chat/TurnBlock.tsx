@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { memo, useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -429,7 +430,7 @@ function ReaderMessage({
             {message.images.map((im, i) =>
               // A cloud tab's image is a file on its workspace, not here: its name, not a broken thumbnail.
               cwd || isLoadableUrl(im.url) ? (
-                <img key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+                <PrivacyImage key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
               ) : (
                 <span key={i} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-veil-raised px-2 py-1 text-xs text-muted-foreground" data-testid="prompt-image-name">
                   <ImageIcon className="size-3.5 shrink-0" />

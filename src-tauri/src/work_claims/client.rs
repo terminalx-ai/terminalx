@@ -147,7 +147,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(base: Url, timeout: Duration) -> Self {
-        Self { base, agent: ureq::AgentBuilder::new().timeout(timeout).redirects(0).build() }
+        Self { base, agent: crate::data_privacy::http_agent().timeout(timeout).redirects(0).build() }
     }
 
     fn url(&self, segments: &[&str]) -> Result<Url, WorkClaimsError> {

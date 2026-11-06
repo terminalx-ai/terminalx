@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/api";
 import { listen } from "@tauri-apps/api/event";
 import { copyText } from "@/lib/clipboard";
 

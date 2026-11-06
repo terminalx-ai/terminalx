@@ -58,7 +58,7 @@ fn delete_url(base: &str, target: &str) -> Result<Url, DeleteError> {
 
 fn send(context: &AccountContext, target: &str, name: &str) -> Result<(), DeleteError> {
     let url = delete_url(&api_base_url(), target)?;
-    let response = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build()
+    let response = crate::data_privacy::http_agent().timeout(REQUEST_TIMEOUT).redirects(0).build()
         .post(url.as_str()).set("authorization", &format!("Bearer {}", context.access_token))
         .send_json(json!({ "confirmationName": name }));
     match response {

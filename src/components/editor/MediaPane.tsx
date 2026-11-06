@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useRef, useState } from "react";
 import { FolderOpen, RotateCcw, ZoomIn, ZoomOut } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -196,7 +197,7 @@ function ImageSurface({ src, name, onError }: { src: string; name: string; onErr
     </div>
     <div ref={host} className="min-h-0 flex-1 overflow-auto" style={{ backgroundColor: "#e5e5e5", backgroundImage: "conic-gradient(#c4c4c4 25%, transparent 0 50%, #c4c4c4 0 75%, transparent 0)", backgroundSize: "20px 20px" }}>
       <div className="flex min-h-full min-w-full w-max items-center justify-center" style={zoom === null ? { width: "100%", height: "100%" } : undefined}>
-        <img ref={image} src={src} alt={name} draggable={false} onError={onError}
+        <PrivacyImage ref={image} src={src} alt={name} draggable={false} onError={onError}
           onLoad={(e) => setSize({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
           style={zoom === null ? { maxWidth: "100%", maxHeight: "100%", objectFit: "contain" } : { width: size ? size.width * zoom : undefined, maxWidth: "none", flexShrink: 0 }} />
       </div>

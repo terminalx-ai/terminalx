@@ -1,3 +1,5 @@
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeftRight, ArrowUp, Check, ChevronDown, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -67,6 +69,7 @@ import { useFold } from "./useFold";
  * desktop's caches; nothing connects or wakes a workspace.
  */
 export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganizations?: () => void }) {
+  const privacy = useDataPrivacy();
   const cloud = useOrganizationVisibility();
   const catalog = useCloudCatalog();
   const [dialog, setDialog] = useState<LifecycleRequest | null>(null);
@@ -74,6 +77,7 @@ export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganization
   // Live session lists follow the connections other surfaces open; a local mirror (PRO-25) too. Neither opens one.
   useEffect(() => bootCloudSessions(), []);
   useEffect(() => bootCloudMirrors(), []);
+  if (privacy.enabled) return <PrivacyEmptyState />;
   if (!cloud.all.length) return null;
   const hiddenRunning = cloud.hidden.reduce((count, org) => count + organizationRunningCount(org.id, catalog), 0);
   return (

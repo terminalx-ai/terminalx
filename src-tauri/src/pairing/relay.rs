@@ -101,7 +101,7 @@ impl Liveness {
 }
 
 fn control_tcp(socket: &ControlSocket) -> &tokio::net::TcpStream {
-    socket.get_ref().get_ref()
+    socket.get_ref().get_ref().get_ref()
 }
 
 fn enable_keepalive(socket: &ControlSocket) {
@@ -654,7 +654,7 @@ async fn connect_once(
 }
 
 type ControlSocket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+    crate::data_privacy::Socket;
 
 async fn open_control(
     context: &AccountContext,
@@ -671,7 +671,7 @@ async fn open_control(
         );
         let (socket, _) = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async_with_config(
+            crate::data_privacy::connect(
                 request,
                 Some(pairing_websocket_config()),
                 false,
@@ -1084,7 +1084,7 @@ pub(super) async fn open_data_socket(
     let attach_timeout = Duration::from_millis(connection.attach_deadline_ms);
     let (mut socket, _) = tokio::time::timeout(
         attach_timeout,
-        tokio_tungstenite::connect_async_with_config(
+        crate::data_privacy::connect(
             request,
             Some(pairing_websocket_config()),
             false,

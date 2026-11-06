@@ -8,6 +8,7 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+pub mod data_privacy;
 mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
@@ -230,6 +231,7 @@ pub fn run() {
     let codex_models = Arc::new(harness::codex::models::Cache::default());
     let terminals = Arc::new(pty::Terminals::new());
     let status_state = Arc::new(status::StatusState::default());
+    data_privacy::initialize();
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
     pairing.attach_models(codex_models.clone());
@@ -408,6 +410,8 @@ pub fn run() {
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
+            data_privacy::data_privacy_status,
+            data_privacy::data_privacy_set,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,

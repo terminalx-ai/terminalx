@@ -1,3 +1,5 @@
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { PrivacyEmptyState } from "./DataPrivacySettings";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
@@ -11,6 +13,10 @@ import { OrganizationSettings } from "./OrganizationSettings";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
 
 export function OrganizationsTab() {
+  return useDataPrivacy().enabled ? <PrivacyEmptyState /> : <OrganizationsTabContent />;
+}
+
+function OrganizationsTabContent() {
   const prefs = usePrefs();
   const { status, busy } = useAccount();
   const { all, selectedOrganization, temporaryOrganization } = useOrganizationVisibility();

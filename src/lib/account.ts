@@ -1,3 +1,4 @@
+import { privacyEnabled, subscribeDataPrivacy } from "@/lib/dataPrivacy";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, closeWorkspaceConnectionsIn, errorMessage, type AccountStatus } from "@/lib/api";
@@ -247,7 +248,7 @@ function scheduleRefresh(status: AccountStatus) {
   if (typeof window === "undefined") return;
   if (refreshTimer != null) window.clearTimeout(refreshTimer);
   refreshTimer = null;
-  if (status.state !== "signed-in" || status.expiresAt == null) return;
+  if (privacyEnabled() || status.state !== "signed-in" || status.expiresAt == null) return;
 
   const untilRefresh = status.expiresAt - Date.now() - 60_000;
   // An offline expired session remains visible and retries gently rather than
@@ -282,6 +283,11 @@ export function bootAccount(): Promise<void> {
   return (booted ??= (async () => {
     try {
       await listen<AccountStatus>("account_status", (event) => applyStatus(event.payload));
+      subscribeDataPrivacy(() => {
+        set({ status: { ...state.status } });
+        scheduleRefresh(state.status);
+        if (!privacyEnabled()) { void refreshAccount(); void refreshAccountRoles(true); }
+      });
       applyStatus(await api.accountStatus());
       // The saved session's organizations and roles are as old as its last
       // token refresh (or the last launch): read them again, without holding up the first paint.
@@ -337,6 +343,7 @@ let rolesFlight: Promise<void> | null = null;
 let rolesFlightFresh = false;
 
 export function refreshAccountRoles(force = false): Promise<void> {
+  if (privacyEnabled()) return Promise.resolve();
   if (rolesFlight) {
     // A forced read that found a throttled one running asks again after it.
     const running = rolesFlight;

@@ -1,3 +1,4 @@
+import { bootDataPrivacy } from "./lib/dataPrivacy";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/app.css";
@@ -16,8 +17,8 @@ window.addEventListener("unhandledrejection", (e) => {
 keepShellUnscrolled();
 installAppContextMenu();
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+void bootDataPrivacy().then(() => ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>,
-);
+));

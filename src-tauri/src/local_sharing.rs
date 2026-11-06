@@ -506,6 +506,7 @@ impl Share {
     }
 
     pub fn permit_current(&self, permit: &WritePermit, tab: &str, now: i64) -> bool {
+        if crate::data_privacy::enabled() { return false; }
         if permit.share_generation != self.generation || self.owner.as_ref().is_some_and(|owner| !owner.attachment.valid()) { return false; }
         self.guests.get(&permit.connection_id).is_some_and(|g| {
             g.write_revision == permit.revision
@@ -522,6 +523,7 @@ impl Share {
         tab_id: &str,
         now: i64,
     ) -> Result<Person> {
+        crate::data_privacy::require_network()?;
         if permit.share_generation != self.generation {
             bail!("The sharing generation changed before prompt delivery.");
         }

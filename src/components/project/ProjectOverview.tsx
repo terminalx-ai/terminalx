@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useState } from "react";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest, Loader2, Plus, RefreshCw, SquarePen } from "@/icons";
@@ -237,7 +238,7 @@ function Empty({ loading, children }: { loading: boolean; children: React.ReactN
 function Avatar({ login, name }: { login: string | null; name: string }) {
   const [failed, setFailed] = useState(false);
   if (login && !failed) {
-    return <img src={githubAvatarUrl(login, 28)} alt="" onError={() => setFailed(true)} className="size-7 shrink-0 rounded-full bg-well ring-1 ring-hairline" />;
+    return <PrivacyImage src={githubAvatarUrl(login, 28)} alt="" onError={() => setFailed(true)} className="size-7 shrink-0 rounded-full bg-well ring-1 ring-hairline" />;
   }
   const initials = name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]!.toUpperCase()).join("") || "?";
   return <span aria-hidden className="flex size-7 shrink-0 items-center justify-center rounded-full bg-veil-strong text-[10.5px] font-medium text-muted-foreground">{initials}</span>;

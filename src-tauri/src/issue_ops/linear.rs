@@ -19,7 +19,7 @@ const LINEAR: Provider = Provider::Linear;
 /// One GraphQL request. A failure is classified from the status and the
 /// reply's errors, and the reply is dropped.
 pub(crate) fn request(key: &str, query: &str, variables: Value) -> OpResult<Value> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
+    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(20)).build();
     let resp = agent.post(LINEAR_API).set("Authorization", key).set("Content-Type", "application/json").send_json(json!({"query": query, "variables": variables}));
     let (status, body) = match resp {
         Ok(r) => (r.status(), r.into_json::<Value>().unwrap_or(Value::Null)),

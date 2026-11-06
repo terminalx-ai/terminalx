@@ -37,6 +37,7 @@ pub struct ReadGuard<'a> {
 
 impl Grant {
     pub fn enter(&self) -> Result<ReadGuard<'_>> {
+        crate::data_privacy::require_network()?;
         let attachment = self.attachment.enter()?;
         let active = self.active.lock().unwrap();
         if !*active { bail!("The paired-device grant was revoked."); }

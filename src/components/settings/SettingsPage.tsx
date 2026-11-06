@@ -1,3 +1,4 @@
+import { DataPrivacySettings } from "./DataPrivacySettings";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
@@ -177,6 +178,7 @@ function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
+      <DataPrivacySettings />
       <SettingRow label="Website links" description="Choose a browser for website links, or ask each time." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <SettingRow label="Link actions" description="Show both browser destinations in the link action menu." control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
       {/* PRO-40: unless the app ships the in-window confirmation alone. */}

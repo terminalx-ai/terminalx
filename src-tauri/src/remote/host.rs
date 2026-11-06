@@ -518,7 +518,7 @@ impl RelayHost {
         request.headers_mut().insert("authorization", HeaderValue::from_str(&format!("Bearer {relay_token}"))?);
         let (mut socket, _) = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async_with_config(request, Some(websocket_config()), false),
+            crate::data_privacy::connect(request, Some(websocket_config()), false),
         )
         .await
         .context("relay control connect timed out")??;
@@ -832,7 +832,7 @@ impl RelayHost {
         let deadline = Duration::from_millis(connection.attach_deadline_ms.clamp(1, 60_000));
         let (mut socket, _) = tokio::time::timeout(
             deadline,
-            tokio_tungstenite::connect_async_with_config(request, Some(websocket_config()), false),
+            crate::data_privacy::connect(request, Some(websocket_config()), false),
         )
         .await
         .context("relay data connect timed out")??;
@@ -899,6 +899,7 @@ impl RelayHost {
                         }
                     }
                     incoming = socket.next() => {
+                        crate::data_privacy::require_network()?;
                         let Some(incoming) = incoming else { return Ok(()) };
                         match incoming? {
                             Message::Text(text) => {
@@ -1073,14 +1074,14 @@ struct ConnectionOpen {
     attach_deadline_ms: u64,
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Socket = crate::data_privacy::Socket;
 
 async fn assign(director_url: &str, relay_token: &str, relay_host_id: &str) -> Result<(String, u64)> {
     let url = format!("{}/v1/assign", director_url.trim_end_matches('/'));
     let token = relay_token.to_string();
     let host = relay_host_id.to_string();
     let response: Value = tokio::task::spawn_blocking(move || -> Result<Value> {
-        let response = ureq::post(&url)
+        let response = crate::data_privacy::http_agent().build().post(&url)
             .timeout(CONNECT_TIMEOUT)
             .set("authorization", &format!("Bearer {token}"))
             .send_json(json!({ "v": 1, "relayHostId": host }))

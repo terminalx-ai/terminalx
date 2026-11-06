@@ -1,3 +1,4 @@
+import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
 import { Loader2, UserRound } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";
@@ -5,6 +6,7 @@ import { AccountAvatar } from "./AccountAvatar";
 import { RelayStatus } from "./RelayStatus";
 
 export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => void }) {
+  const privacy = useDataPrivacy();
   const account = useAccount();
   const identity = account.status.identity;
   if (account.status.state === "signed-in" && identity) {
@@ -22,7 +24,7 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
             <span aria-hidden className="mt-0.5 block h-[15px]" />
           </span>
         </Button>
-        <RelayStatus />
+        {privacy.enabled ? <span className="absolute right-2 bottom-1.5 left-10 truncate text-[10px] text-faint">{PRIVACY_MESSAGE}</span> : <RelayStatus />}
       </div>
     );
   }
@@ -32,9 +34,9 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
     <Button
       variant="ghost"
       className="w-full min-w-0 justify-start gap-2 overflow-hidden px-2"
-      disabled={!account.ready || account.busy}
+      disabled={privacy.enabled || !account.ready || account.busy}
       onClick={() => void signIn()}
-      title={account.status.lastError ?? undefined}
+      title={privacy.enabled ? PRIVACY_MESSAGE : account.status.lastError ?? undefined}
     >
       {signingIn || !account.ready ? <Loader2 className="animate-spin" /> : <UserRound />}
       {signingIn ? "Finish signing in" : "Sign in"}

@@ -535,7 +535,7 @@ fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
     let endpoint = test_endpoint.as_deref().unwrap_or(LINEAR_API);
     #[cfg(not(test))]
     let endpoint = LINEAR_API;
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
+    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(20)).build();
     let resp = agent
         .post(endpoint)
         .set("Authorization", key)

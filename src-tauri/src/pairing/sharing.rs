@@ -130,6 +130,7 @@ impl PairingManager {
         mut settings: LinkSettings,
         direct_only: bool,
     ) -> Result<Value> {
+        crate::data_privacy::require_network()?;
         settings.validate(now())?;
         shareable(&session_id)?;
         let context = self
@@ -616,6 +617,7 @@ impl PairingManager {
     }
 
     pub(crate) fn share_rpc(&self, session: &str, connection: &str, method: &str, params: Value) -> Result<Value> {
+        crate::data_privacy::require_network()?;
         if let Some(result) = self.runtime_sharing("guest", json!({"sessionId":session,"connectionId":connection,"method":method,"params":params})) { return result; }
         local_sharing::runtime::request(manager(self)?, None, session, connection, method, params)
     }

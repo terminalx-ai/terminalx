@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { cloneElement, isValidElement, memo, useMemo, type ReactElement, type ReactNode } from "react";
 import { defaultRemarkPlugins, Streamdown } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
@@ -25,7 +26,7 @@ const Block = memo(function Block({ text, streaming, mode, linkContext }: { text
     a: chatLinkComponent(linkContext),
     table: MarkdownTable,
     // A picture on this computer is drawn under the message (ChatMedia); the web view cannot load its path.
-    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? <img src={src} alt={alt ?? ""} className="max-h-96 max-w-full rounded-lg" /> : null,
+    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? <PrivacyImage src={src} alt={alt ?? ""} className="max-h-96 max-w-full rounded-lg" /> : null,
     inlineCode: ({ children }: { children?: ReactNode }) => <code className="rounded bg-well px-1 py-0.5 font-mono text-[0.9em]"><LinkedText text={String(children ?? "")} context={linkContext} /></code>,
     pre: ({ children }: { children?: ReactNode }) => {
       if (!isValidElement(children)) return children;

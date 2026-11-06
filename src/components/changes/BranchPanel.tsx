@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { GitBranch, Loader2, Sparkles } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -428,7 +429,7 @@ function Face({ name, label = name, email, github, size = 20 }: { name: string; 
         role="img"
         aria-label={label}
       >
-        {url ? <img src={url} alt="" className="size-full object-cover" onError={() => setFailed(true)} /> : initials}
+        {url ? <PrivacyImage src={url} alt="" className="size-full object-cover" onError={() => setFailed(true)} /> : initials}
       </span>
     </WithTooltip>
   );

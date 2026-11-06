@@ -195,7 +195,7 @@ pub struct HttpTokenApi {
 
 impl HttpTokenApi {
     pub fn new(origin: &str, state_dir: &Path) -> Self {
-        let agent = ureq::AgentBuilder::new()
+        let agent = crate::data_privacy::http_agent()
             .timeout(REQUEST_TIMEOUT)
             .redirects(0)
             .user_agent(&format!("terminalx-serve/{}", crate::cloud_bootstrap::VERSION))

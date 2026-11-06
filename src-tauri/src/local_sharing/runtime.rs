@@ -53,6 +53,7 @@ pub(crate) fn request(
     method: &str,
     params: Value,
 ) -> Result<Value> {
+    crate::data_privacy::require_network()?;
     validate_params(method, &params, session)?;
     if method == "session.status" {
         return guest_status(sessions, owner, session, connection);

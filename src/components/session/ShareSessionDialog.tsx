@@ -1,3 +1,6 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
+import { useDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
+import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useState } from "react";
 import { Copy, Plus, QrCode, Share2 } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -213,7 +216,7 @@ function SecretLink({ link, edit, revoke }: { link: ShareLink; edit: () => void;
               Revoke
             </Button>
           </div>
-          {qr && <img src={qr} alt="Secret share link QR code" width={240} height={240} />}
+          {qr && <PrivacyImage src={qr} alt="Secret share link QR code" width={240} height={240} />}
           {link.directOnly && (
             <p className="text-xs text-muted-foreground">Local network only: guests need this Wi-Fi or Tailscale.</p>
           )}
@@ -229,6 +232,8 @@ function SecretLink({ link, edit, revoke }: { link: ShareLink; edit: () => void;
 }
 export function ShareSessionDialogHost() {
   const session = useShareDialog();
+  const privacy = useDataPrivacy();
+  if (session && privacy.enabled) return <Dialog open onOpenChange={(open) => { if (!open) closeSessionShare(); }}><DialogContent><DialogTitle>Share session</DialogTitle><PrivacyEmptyState /></DialogContent></Dialog>;
   return session ? <ShareSessionDialog key={session} sessionId={session} /> : null;
 }
 function ShareSessionDialog({ sessionId }: { sessionId: string }) {
@@ -456,6 +461,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
   );
 }
 export function LocalShareButton({ sessionId }: { sessionId: string }) {
+  const privacy = useDataPrivacy();
   const share = useLocalShare(sessionId);
   useEffect(() => {
     void refreshShare(sessionId).catch(() => undefined);
@@ -476,7 +482,8 @@ export function LocalShareButton({ sessionId }: { sessionId: string }) {
       size="sm"
       aria-label="Share session…"
       aria-describedby={waiting.length ? waitingId : undefined}
-      title={detail || "Share session"}
+      disabled={privacy.enabled}
+      title={privacy.enabled ? PRIVACY_MESSAGE : detail || "Share session"}
       onClick={() => openSessionShare(sessionId)}
     >
       <Share2 />

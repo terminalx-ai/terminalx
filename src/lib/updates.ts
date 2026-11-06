@@ -1,3 +1,4 @@
+import { privacyEnabled } from "@/lib/dataPrivacy";
 import { useSyncExternalStore } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -66,6 +67,7 @@ export function getUpdateState(): UpdateState {
  * leaves what was known (the reader did not ask, so it is not theirs to read).
  */
 export async function checkForUpdate({ quiet = false }: { quiet?: boolean } = {}): Promise<UpdateState> {
+  if (privacyEnabled()) return state;
   if (state.kind === "installing" || state.kind === "checking" || state.kind === "choosing") return state;
   if (quiet && state.kind === "available") return state;
   const before = state;
