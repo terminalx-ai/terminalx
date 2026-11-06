@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
+import { isContextMenuKey, isContextMenuTextField } from "@/lib/contextMenu";
 
 /**
  * A menu that opens on a mouse click, an accessibility press and the keyboard.
@@ -32,6 +33,21 @@ export function useRowMenu({ onOpenChange }: { onOpenChange?: (open: boolean) =>
     open,
     setOpen,
     root: { open, onOpenChange: setOpen },
+    /** Spread on the row to open the same menu as its trailing button. */
+    surface: {
+      onContextMenu: (event: MouseEvent<HTMLElement>) => {
+        if (event.defaultPrevented || isContextMenuTextField(event.target)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(true);
+      },
+      onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
+        if (event.defaultPrevented || !isContextMenuKey(event) || isContextMenuTextField(event.target)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(true);
+      },
+    },
     trigger: {
       "data-state": open ? "open" : "closed",
       onPointerDown: (event: PointerEvent<HTMLElement>) => {
