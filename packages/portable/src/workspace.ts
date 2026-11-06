@@ -188,6 +188,7 @@ export type AgentTabStatus = "idle" | "in_progress" | "waiting" | "completed";
 export interface AgentTabInfo {
   sessionCreated?: string | null;
   sessionLastMessageAt?: string | null;
+  sessionHasMessages?: boolean;
   sessionId: string;
   tabId: string;
   title: string | null;
@@ -221,6 +222,7 @@ export interface AgentTabInfo {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
 }
 
 /** An agent tab as the runtime's session index stores it. */
@@ -236,6 +238,7 @@ export interface RuntimeSessionTab {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
 }
 
 /** `workspace.remove`: the sessions that went with the worktree, and what became of its branch. */
@@ -437,6 +440,7 @@ export interface RuntimeSession {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
   archived: boolean;
   pinned: boolean;
   tabs: RuntimeSessionTab[];

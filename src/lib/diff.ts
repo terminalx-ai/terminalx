@@ -5,6 +5,30 @@ export interface DiffLine {
   newNo?: number;
 }
 
+/** Remove unified-diff file metadata, retaining +/- content even when it resembles a header. */
+export function patchLines(unified: string): string[] {
+  const lines = unified.split("\n");
+  const body: string[] = [];
+  let inHunk = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("diff ")) {
+      inHunk = false;
+      continue;
+    }
+    if (line.startsWith("index ")) continue;
+    if (line.startsWith("@@")) inHunk = true;
+    // File headers are an adjacent old/new pair before the hunk. Codex also
+    // supplies headerless patches, so a leading '-' or '+' alone proves nothing.
+    if (!inHunk && /^---[ \t]/.test(line) && /^\+\+\+[ \t]/.test(lines[i + 1] ?? "")) {
+      i++;
+      continue;
+    }
+    body.push(line);
+  }
+  return body;
+}
+
 /**
  * Line diff by longest common subsequence, with a cap so a pathological pair
  * (two huge unrelated files) degrades to delete-all + add-all instead of an

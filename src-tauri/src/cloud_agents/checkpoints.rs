@@ -169,8 +169,10 @@ fn project(tab: &super::AgentTabInfo, session: Option<&super::SessionSummary>, e
         "updatedAt": now_ms(),
         "created": tab.created,
         "lastMessageAt": tab.last_message_at,
+        "hasMessages": tab.has_messages,
         "sessionCreated": tab.session_created,
         "sessionLastMessageAt": tab.session_last_message_at,
+        "sessionHasMessages": tab.session_has_messages,
     });
     if let Some(session) = session {
         projection["session"] = json!({ "title": session.title, "branch": session.branch });
