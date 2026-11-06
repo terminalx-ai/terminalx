@@ -282,9 +282,9 @@ describe("WorkspaceRemoveDialog", () => {
   });
 });
 
-it("holds removal after an archive timeout, opens its terminal and requires separate consent", async () => {
+it.each(["", "internal: "])("holds removal after an archive timeout (%s), opens its terminal and requires separate consent", async (prefix) => {
   mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
-  mocks.removeWorkspace.mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", code: 124, timedOut: true })}`);
+  mocks.removeWorkspace.mockRejectedValueOnce(`${prefix}ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", code: 124, timedOut: true })}`);
   render(<WorkspaceRemoveDialog />);
   openDelete();
   await screen.findByText("Clean and merged: safe to remove.");

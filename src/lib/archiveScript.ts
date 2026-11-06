@@ -3,9 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import type { ArchiveFailure } from "@terminalx/portable/workspace";
 
 export function archiveFailure(error: string): ArchiveFailure | null {
-  if (!error.startsWith("ARCHIVE_SCRIPT_FAILED:")) return null;
+  // The local runtime's Refused display includes the control error code.
+  const message = error.startsWith("internal: ") ? error.slice("internal: ".length) : error;
+  if (!message.startsWith("ARCHIVE_SCRIPT_FAILED:")) return null;
   try {
-    const value = JSON.parse(error.slice("ARCHIVE_SCRIPT_FAILED:".length));
+    const value = JSON.parse(message.slice("ARCHIVE_SCRIPT_FAILED:".length));
     return typeof value.token === "string" && typeof value.pane === "string" && (typeof value.code === "number" || value.code === null) && typeof value.timedOut === "boolean" ? value : null;
   } catch { return null; }
 }
