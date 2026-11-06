@@ -29,6 +29,13 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// `run` for a command whose exit code is an answer (`merge-tree`): the code
+/// and stdout, or `None` when git could not be started or was killed.
+pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
+    let out = git().current_dir(cwd).args(args).output().ok()?;
+    Some((out.status.code()?, String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
 /// Why `run_within` did not succeed.
 #[derive(Debug)]
 pub enum RunError {
