@@ -1,7 +1,7 @@
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
-import { api, errorMessage, gh, git, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
+import { api, errorMessage, gh, git, type GitHubConnectionStatus, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
 import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, with what is left in progress in it. */
@@ -47,6 +47,11 @@ export interface GitSource {
   commitMerge?(merge: UnfinishedMerge): Promise<void>;
   abortMerge?(merge: UnfinishedMerge): Promise<void>;
   ghAvailable(): Promise<boolean>;
+  /** Local connection setup; cloud credentials belong to the workspace. */
+  githubStatus?(): Promise<GitHubConnectionStatus>;
+  hasRemote?(): Promise<boolean>;
+  addRemote?(url: string): Promise<void>;
+  createRepository?(name: string, privateRepo: boolean): Promise<void>;
   prs(branch: string): Promise<PullRequest[]>;
   /** Durable transport locator, separate from the repository/PR URL identity. */
   prScope?: PrScope;
@@ -87,6 +92,10 @@ export function localGitSource(cwd: string): GitSource {
     commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
+    githubStatus: () => gh.connectionStatus(),
+    hasRemote: () => git.hasRemote(cwd),
+    addRemote: (url) => git.addRemote(cwd, url),
+    createRepository: (name, privateRepo) => gh.createRepository(cwd, name, privateRepo),
     prs: (branch) => gh.list(cwd, branch),
     prScope: { kind: "local", cwd },
     prAccess: (association) => {

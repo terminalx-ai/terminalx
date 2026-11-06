@@ -24,6 +24,11 @@ impl Terminals {
         self.0.call("runtime.pty.spawn", json!({"id":id,"cwd":cwd,"cols":cols,"rows":rows,"command":command,"title":title}))
     }
 
+    /// Settings can connect GitHub before there is any project or session.
+    pub fn github_login(&self, id: &str) -> Result<()> {
+        self.0.call("runtime.pty.githubLogin", json!({"id":id}))
+    }
+
     /// Run an agent's install or sign-in step in setup pane `id` (PRO-152).
     pub fn agent_setup(&self, id: &str, harness: &str, step: &str, cols: u16, rows: u16) -> Result<()> {
         self.0.call("runtime.pty.agentSetup", json!({"id":id,"harness":harness,"step":step,"cols":cols,"rows":rows}))

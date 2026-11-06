@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronRight, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, type PullRequest } from "@/lib/api";
+import { api, type GitHubConnectionStatus, type PullRequest } from "@/lib/api";
+import { AddRemote, CommandDetails, GitError, GitHubSetup } from "./GitRecovery";
 import { sessionPrs, type SessionPr } from "@/lib/sessionPrs";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
@@ -70,6 +71,8 @@ export function PrPanel({
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [connection, setConnection] = useState<GitHubConnectionStatus | null>(null);
+  const [hasRemote, setHasRemote] = useState<boolean | null>(null);
   const [rows, setRows] = useState<SessionPr[]>([]);
   const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}`;
   const selected = useRef({ key: selection, generation: 0 });
@@ -98,11 +101,25 @@ export function PrPanel({
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     setAvailable(null);
-    source.ghAvailable().then((value) => !cancelled && setAvailable(value)).catch(() => !cancelled && setAvailable(false));
+    setConnection(null);
+    setHasRemote(null);
+    if (source.githubStatus) {
+      Promise.all([source.githubStatus(), source.hasRemote?.() ?? Promise.resolve(true)]).then(([status, remote]) => {
+        if (cancelled) return;
+        setConnection(status);
+        setHasRemote(remote);
+        setAvailable(status.state === "connected" && remote);
+      }).catch((error: unknown) => {
+        if (!cancelled) setConnection({ state: "unavailable", details: source.errorMessage(error) });
+      });
+    } else {
+      source.ghAvailable().then((value) => !cancelled && setAvailable(value)).catch(() => !cancelled && setAvailable(false));
+    }
     return () => { cancelled = true; };
-  }, [source]);
+  }, [source, active, tick]);
 
   useEffect(() => {
     if (!active || !available) return;
@@ -210,11 +227,17 @@ export function PrPanel({
       if (done) void requestMergedSweep();
     });
 
+  if (connection && connection.state !== "connected") {
+    return <GitHubSetup status={connection} onRefresh={() => setTick((value) => value + 1)} />;
+  }
+  if (connection?.state === "connected" && hasRemote === false && source.addRemote) {
+    return <AddRemote key={source.key} source={source} onDone={() => setTick((value) => value + 1)} />;
+  }
   if (available === false) {
     if (inline) return held ? null : <div className="px-3"><NextLine tone="muted" text={<>Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span> to open a pull request</>} /></div>;
     return (
       <div className="px-3 py-4 text-xs text-muted-foreground">
-        Pull requests need the GitHub CLI. Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span>.
+        GitHub is unavailable. Check the workspace’s GitHub connection and refresh.
       </div>
     );
   }
@@ -246,7 +269,7 @@ export function PrPanel({
       {error && inline && errorFrom === "load" ? (
         // Not reaching GitHub is no fault of the reader's: said once, quietly, the detail on hover.
         <p className="px-4 text-[11px] text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
-      ) : error && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
@@ -268,7 +291,8 @@ export function PrPanel({
         const pr = row.pr;
         if (!pr) return <div key={row.identity} role="alert" className="border-b border-hairline px-3 py-3 text-xs">
           <button type="button" onClick={() => void openUrl(row.identity)} className="hover:underline">{row.identity}</button>
-          <div className="text-destructive">Could not refresh: {row.error}</div>
+          <div className="text-destructive">Could not refresh this pull request.</div>
+          <CommandDetails details={row.error} />
         </div>;
         const ready = mergeReadiness(pr);
         if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
@@ -436,7 +460,7 @@ export function PrPanel({
           </div>
         </form>
       )}
-      {!inline && !loading && prs.length === 0 && !canCreate && status && (
+      {!inline && !loading && !error && prs.length === 0 && !canCreate && status && (
         <div className="px-3 py-4 text-xs text-muted-foreground">
           {status.branch === status.defaultBranch ? "On the default branch; nothing to open a pull request from." : "Nothing here yet."}
         </div>

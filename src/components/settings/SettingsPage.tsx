@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
+import { LocalGitHubConnection } from "@/components/changes/GitRecovery";
 import { AgentSetupCard } from "./AgentSetupCard";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
@@ -14,7 +15,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { api, errorMessage, gh, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
+import { api, errorMessage, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import { forgetIssueViewers } from "@/lib/issueViewer";
 import { ComputerUseRows } from "./ComputerUseSettings";
 import changelog from "../../../CHANGELOG.md?raw";
@@ -596,10 +597,8 @@ function IntegrationsTab() {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [ghOk, setGhOk] = useState<boolean | null>(null);
   useEffect(() => {
     issues.linearStatus().then(setLinear).catch(() => setLinear({ connected: false }));
-    gh.available().then(setGhOk).catch(() => setGhOk(false));
   }, []);
   const save = async (value: string) => {
     setBusy(true);
@@ -620,19 +619,7 @@ function IntegrationsTab() {
       <div>
         <div className="text-sm font-medium">GitHub</div>
         <p className="mt-0.5 text-xs text-muted-foreground">Issues and pull requests go through the GitHub CLI, which holds its own login.</p>
-        <div className="mt-2 flex items-center gap-2 text-xs">
-          {ghOk == null ? (
-            <Loader2 className="size-3.5 animate-spin text-faint" />
-          ) : ghOk ? (
-            <span className="flex items-center gap-1 text-add">
-              <Check className="size-3.5" /> gh is installed and signed in
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-warning">
-              <CircleAlert className="size-3.5" /> Install gh and run <code className="font-mono">gh auth login</code>
-            </span>
-          )}
-        </div>
+        <LocalGitHubConnection />
       </div>
       <div>
         <div className="text-sm font-medium">Linear</div>

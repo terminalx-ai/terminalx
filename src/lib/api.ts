@@ -2107,6 +2107,8 @@ export interface PullRequest {
 }
 
 export const git = {
+  hasRemote: (cwd: string) => invoke<boolean>("git_has_remote", { cwd }),
+  addRemote: (cwd: string, url: string) => invoke<void>("git_add_remote", { cwd, url }),
   commit: (cwd: string, message: string, paths?: string[]) => invoke<string>("git_commit", { cwd, message, paths: paths ?? null }),
   push: (cwd: string) => invoke<string>("git_push", { cwd }),
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
@@ -2129,7 +2131,15 @@ export interface PrAssociation {
   scope: PrScope;
 }
 
+export interface GitHubConnectionStatus {
+  state: "missing" | "signed_out" | "connected" | "unavailable";
+  details: string | null;
+}
+
 export const gh = {
+  connectionStatus: () => invoke<GitHubConnectionStatus>("gh_connection_status"),
+  loginStart: (id: string) => invoke<void>("gh_login_start", { id }),
+  createRepository: (cwd: string, name: string, privateRepo: boolean) => invoke<void>("gh_create_repository", { cwd, name, private: privateRepo }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
