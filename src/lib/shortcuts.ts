@@ -80,8 +80,8 @@ const ACTIONS = [
   // No keys by default: it ends the agent's process, so it is never a key pressed out of habit.
   { id: "session.stop", label: "Stop the session (ends the agent's process)", group: "Session", keys: [] },
   { id: "panel.changes", label: "Changes", group: "Panel", keys: ["mod+alt+1"] },
-  { id: "panel.repository", label: "Repository", group: "Panel", keys: ["mod+alt+2"] },
-  { id: "panel.pullRequests", label: "Pull requests", group: "Panel", keys: ["mod+alt+3"] },
+  { id: "panel.repository", label: "Branch", group: "Panel", keys: ["mod+alt+2"] },
+  { id: "panel.pullRequests", label: "Pull request", group: "Panel", keys: ["mod+alt+3"] },
   { id: "panel.files", label: "Files", group: "Panel", keys: ["mod+alt+4"] },
   { id: "files.quickOpen", label: "Open file by name", group: "Files", keys: ["mod+p"] },
   { id: "files.search", label: "Search in project", group: "Files", keys: ["mod+shift+f"] },

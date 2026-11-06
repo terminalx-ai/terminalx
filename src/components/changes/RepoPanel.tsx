@@ -19,7 +19,7 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author }: {
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false }: {
   cwd?: string;
   source?: GitSource;
   active: boolean;
@@ -27,6 +27,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   onViewChange: (view: RepoView) => void;
   /** Shown above the commit box: whose identity a cloud commit carries. */
   author?: string | null;
+  /** Inside the Changes tab, whose scope picks the view: no switch of its own. */
+  embedded?: boolean;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [tick, setTick] = useState(0);
@@ -106,7 +108,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-2 px-3 py-2">
+      {!embedded && <div className="flex items-center gap-2 px-3 py-2">
         <Segmented<RepoView>
           aria-label="Repository view"
           value={sub}
@@ -121,7 +123,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           {status && status.ahead > 0 && <span className="text-faint">↑{status.ahead}</span>}
           {status && status.behind > 0 && <span className="text-faint">↓{status.behind}</span>}
         </div>
-      </div>
+      </div>}
       {error && <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       {!error && readError != null && (
         <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div>
@@ -143,8 +145,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 
       {sub === "uncommitted" && (
         <>
-          <p className="px-3 pb-2 text-xs text-muted-foreground">Commit uncommitted changes here. Changes reviews all workspace work against your target branch.</p>
-          {writable && <div className="px-3 pb-2">
+          {!embedded && <p className="px-3 pb-2 text-xs text-muted-foreground">Commit uncommitted changes here. Changes reviews all workspace work against your target branch.</p>}
+          {writable && <div className={cn("px-3 pb-2", embedded && "pt-2")}>
             {author !== undefined && (
               <div className="mb-1 truncate px-1 text-[11px] text-faint" data-testid="commit-author">
                 {author ? `Committing as ${author}` : "No Git identity on this computer: set user.name and user.email to commit."}

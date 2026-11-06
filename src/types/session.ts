@@ -116,7 +116,8 @@ export interface SessionEntry {
   worktreeName?: string | null;
   branch?: string | null;
   baseRef?: string | null;
-  worktreeBase?: { commit: string; fetched: boolean; warning: string | null } | null;
+  /** `from`: the ref the worktree was made from, which its branch is read against. */
+  worktreeBase?: { commit: string; fetched: boolean; warning: string | null; from?: string | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
   /** The issue the session works on: the one it was started from, or one linked later (`issueWork.link`). */
