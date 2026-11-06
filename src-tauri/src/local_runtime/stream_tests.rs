@@ -177,14 +177,26 @@ fn a_replay_is_one_frame_and_longer_output_is_split_to_fit() {
     let (output, mut rx) = Output::new();
     let view = ViewTap { output, budget: Arc::new(Semaphore::new(VIEW_QUEUED_BYTES)), id: "pane".into(), token: "t".into(),
         told: true, peer: Arc::from("test"), tally: Arc::default() };
-    assert!(view.send(&vec![b'r'; SCROLLBACK_BYTES]));
+    assert!(view.send(&vec![b'r'; SCROLLBACK_BYTES], None));
     let frame = rx.try_recv().unwrap();
     assert!(frame.bytes.len() < MAX_FRAME, "{}", size(frame.bytes.len()));
     assert!(rx.try_recv().is_err(), "a full replay is one frame");
     drop(frame);
-    assert!(view.send(&vec![b'r'; SCROLLBACK_BYTES + 1]));
+    assert!(view.send(&vec![b'r'; SCROLLBACK_BYTES + 1], None));
     assert!(rx.try_recv().unwrap().bytes.len() < MAX_FRAME);
     assert!(rx.try_recv().unwrap().bytes.len() < MAX_FRAME);
+}
+
+#[test]
+fn every_split_output_frame_keeps_its_original_size() {
+    let (output, mut rx) = Output::new();
+    let view = ViewTap { output, budget: Arc::new(Semaphore::new(VIEW_QUEUED_BYTES)), id: "pane".into(), token: "t".into(),
+        told: true, peer: Arc::from("test"), tally: Arc::default() };
+    assert!(view.send(&vec![b'x'; PTY_PIECE + 1], Some(crate::pty::OutputSize { cols: 30, rows: 12 })));
+    for _ in 0..2 {
+        let frame: Value = serde_json::from_slice(&rx.try_recv().unwrap().bytes).unwrap();
+        assert_eq!(frame["size"], json!({"cols":30,"rows":12}));
+    }
 }
 
 #[test]

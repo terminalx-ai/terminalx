@@ -2084,7 +2084,7 @@ impl WorkspaceRpc {
                 }
                 peer.notify_sized(
                     "pty.output",
-                    json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data }),
+                    json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data, "size": data.size }),
                     data.data.len(),
                 );
             }

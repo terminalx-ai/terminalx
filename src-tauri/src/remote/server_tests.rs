@@ -425,7 +425,7 @@ async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
 /// Terminal output the test makes itself, delivered exactly as a PTY
 /// read would be, so no shell's timing is involved.
 fn inject(f: &Fixture, pty_id: &str, bytes: &[u8]) {
-    f.rpc.on_pty_data(PtyData { id: pty_id.to_string(), data: STANDARD.encode(bytes) });
+    f.rpc.on_pty_data(PtyData { id: pty_id.to_string(), data: STANDARD.encode(bytes), size: None });
 }
 
 /// The next event, however long a loaded machine takes to produce it.

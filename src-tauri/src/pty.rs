@@ -183,6 +183,7 @@ struct Pane {
     /// in a shell tab too, when the reader starts it there by hand (#437),
     /// and the app types into it all the same.
     screen: Arc<Mutex<vt100::Parser>>,
+    output_size: Arc<Mutex<OutputSize>>,
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
@@ -264,12 +265,20 @@ fn group_alive(pid: u32) -> bool {
 /// desktop window attaches one per terminal it shows, so its bytes cross as
 /// bytes, to that terminal only. Returns `false` once nobody is receiving.
 pub type Tap = Box<dyn Fn(&[u8]) -> bool + Send>;
+pub type SizedTap = Box<dyn Fn(&[u8], Option<OutputSize>) -> bool + Send>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSize {
+    pub cols: u16,
+    pub rows: u16,
+}
 
 /// One window's view of a pane. A pane has at most one per window: the main
 /// window and the floating one can show the same terminal at once, and each
 /// is sent, counted and held back for on its own.
 struct Tapped {
-    tap: Tap,
+    tap: SizedTap,
     /// The window this view is in. A later view from the same window replaces it.
     window: String,
     /// Which attachment this is. A view names its own when it reports or
@@ -439,6 +448,8 @@ pub struct PtyData {
     pub id: String,
     /// base64 of the raw bytes; the terminal decodes them itself.
     pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<OutputSize>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -656,6 +667,8 @@ impl Terminals {
         let last_output = Arc::new(Mutex::new(last_output));
         let scrollback = Arc::new(Mutex::new(scrollback));
         let own = Arc::new(AtomicU64::new(printed));
+        let (rows, cols) = screen.screen().size();
+        let output_size = Arc::new(Mutex::new(OutputSize { cols: cols.get(), rows: rows.get() }));
         let screen = Arc::new(Mutex::new(screen));
         let hold = Arc::new(Hold::default());
         let tap = self.tap_slot(id);
@@ -676,11 +689,13 @@ impl Terminals {
             let exited = exited.clone();
             let reading = hold.clone();
             let drawing = hold.clone();
+            let sizes = output_size.clone();
+            let latest_size = output_size.clone();
             // Reading blocks until the program writes again, so it gets a
             // thread of its own: the emitter below must be able to send what
             // it gathered when the window closes even if the program has
             // gone quiet (a prompt waiting for input), not on its next write.
-            let (chunks, gathered) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+            let (chunks, gathered) = std::sync::mpsc::sync_channel::<(Vec<u8>, OutputSize)>(64);
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
                 loop {
@@ -690,18 +705,21 @@ impl Terminals {
                     // still in the terminal for the next owner (#765). The
                     // master is non-blocking, so this never waits in the read.
                     #[cfg(unix)]
-                    let read = {
+                    let (read, size) = {
                         let mut held = reading.thawed();
+                        // Snapshot the geometry under the same lock as ioctl:
+                        // queued reads retain their size through later resizes.
+                        let size = sizes.lock().unwrap();
                         let read = reader.read(&mut buf);
                         if matches!(read, Ok(n) if n > 0) { held.read += 1; }
-                        read
+                        (read, *size)
                     };
                     #[cfg(not(unix))]
-                    let read = reader.read(&mut buf);
+                    let (read, size) = (reader.read(&mut buf), *sizes.lock().unwrap());
                     match read {
                         Ok(0) => break,
                         Ok(n) => {
-                            if chunks.send(buf[..n].to_vec()).is_err() {
+                            if chunks.send((buf[..n].to_vec(), size)).is_err() {
                                 break;
                             }
                         }
@@ -718,16 +736,21 @@ impl Terminals {
                 }
             })?;
             std::thread::Builder::new().name(format!("pty-emit-{id}")).spawn(move || {
-                let flush = |acc: &mut Vec<u8>| {
+                let flush = |acc: &mut Vec<u8>, size: OutputSize| {
                     {
                         // Held across both, so a view attaching now gets these
                         // bytes exactly once: in the scrollback it is handed,
                         // or from its tap.
                         let mut views = tap.0.lock().unwrap();
                         append_own_output(&scrollback, &own, acc);
-                        screen.lock().unwrap_or_else(|e| e.into_inner()).process(acc);
+                        let latest = *latest_size.lock().unwrap();
+                        let mut screen = screen.lock().unwrap_or_else(|e| e.into_inner());
+                        screen.set_size(screen_size(size.rows), screen_size(size.cols));
+                        screen.process(acc);
+                        screen.set_size(screen_size(latest.rows), screen_size(latest.cols));
+                        drop(screen);
                         views.0.retain_mut(|view| {
-                            let received = (view.tap)(acc);
+                            let received = (view.tap)(acc, Some(size));
                             if received {
                                 view.sent += acc.len() as u64;
                             }
@@ -737,14 +760,15 @@ impl Terminals {
                     emitted.events.fetch_add(1, Ordering::Relaxed);
                     emitted.bytes.fetch_add(acc.len() as u64, Ordering::Relaxed);
                     *last_output.lock().unwrap() = Some(Instant::now());
-                    sink.emit_pty(&id, acc);
+                    sink.emit_pty_sized(&id, acc, Some(size));
                     acc.clear();
                 };
                 let mut acc: Vec<u8> = Vec::with_capacity(MAX_CHUNK);
                 let mut open = true;
                 let mut flushed: Option<Instant> = None;
+                let mut pending = None;
                 while open {
-                    let Ok(first) = gathered.recv() else { break };
+                    let Some((first, size)) = pending.take().or_else(|| gathered.recv().ok()) else { break };
                     acc.extend_from_slice(&first);
                     let mut got = 1;
                     // Gather a little more if it is arriving fast, so one emit
@@ -759,10 +783,11 @@ impl Terminals {
                             break;
                         }
                         match gathered.recv_timeout(left) {
-                            Ok(more) => {
+                            Ok((more, next_size)) if next_size == size => {
                                 acc.extend_from_slice(&more);
                                 got += 1;
                             }
+                            Ok(more) => { pending = Some(more); break; }
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                 open = false;
@@ -770,7 +795,7 @@ impl Terminals {
                             }
                         }
                     }
-                    flush(&mut acc);
+                    flush(&mut acc, size);
                     drawing.drew(got);
                     flushed = Some(Instant::now());
                     wait_for_view(&tap, &exited);
@@ -811,7 +836,7 @@ impl Terminals {
             room,
             stalled: false,
         }));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, cwd, created, hold });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, output_size, cwd, created, hold });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -856,6 +881,10 @@ impl Terminals {
     /// repeated in between. It replaces an earlier tap `window` had for the
     /// same pane; another window's view of it is left as it is.
     pub fn attach(&self, window: &str, id: &str, token: &str, tap: Tap) {
+        self.attach_sized(window, id, token, Box::new(move |bytes, _| tap(bytes)));
+    }
+
+    pub fn attach_sized(&self, window: &str, id: &str, token: &str, tap: SizedTap) {
         let slot = self.tap_slot(id);
         let mut views = slot.0.lock().unwrap();
         let mut sent = 0;
@@ -864,7 +893,7 @@ impl Terminals {
             // a character or an escape sequence: start at the next line.
             let cut = printed.len() >= SCROLLBACK_BYTES;
             let start = cut.then(|| printed.iter().take(4096).position(|byte| *byte == b'\n').map(|at| at + 1)).flatten().unwrap_or(0);
-            if !tap(&printed[start..]) {
+            if !tap(&printed[start..], None) {
                 return;
             }
             sent = printed.len() - start;
@@ -1021,7 +1050,9 @@ impl Terminals {
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
         let panes = self.panes.lock().unwrap();
         let pane = panes.get(id).context("no such terminal")?;
+        let mut size = pane.output_size.lock().unwrap();
         pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
+        *size = OutputSize { cols, rows };
         pane.screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(rows), screen_size(cols));
         Ok(())
     }
@@ -1474,6 +1505,36 @@ mod tests {
         assert_eq!(terminals.taps.lock().unwrap().len(), 1);
         terminals.kill_all();
         assert!(terminals.taps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn output_batches_keep_their_read_size_across_later_resizes() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let send = Mutex::new(send);
+        terminals.attach_sized("main", "sized", "view", Box::new(move |bytes, size| send.lock().unwrap().send((bytes.to_vec(), size)).is_ok()));
+        pane(&terminals, &sink, &dir, "sized", "sh -c 'stty -echo; printf READY; read one; printf OLD30; read two; printf NEW18; exec sleep 600'");
+        let until = |wanted: &str| {
+            let mut data = String::new();
+            let mut sizes = Vec::new();
+            while !data.contains(wanted) {
+                let (bytes, size) = receive.recv_timeout(Duration::from_secs(60)).unwrap();
+                data.push_str(&String::from_utf8_lossy(&bytes));
+                sizes.push(size.unwrap());
+            }
+            sizes
+        };
+        assert!(until("READY").iter().all(|size| size.cols == 80));
+        terminals.resize("sized", 30, 12).unwrap();
+        terminals.write("sized", b"one\n").unwrap();
+        let in_transit = until("OLD30");
+        terminals.resize("sized", 18, 8).unwrap();
+        terminals.write("sized", b"two\n").unwrap();
+        assert!(until("NEW18").iter().all(|size| *size == OutputSize { cols: 18, rows: 8 }));
+        assert!(in_transit.iter().all(|size| *size == OutputSize { cols: 30, rows: 12 }));
+        terminals.kill_all();
     }
 
     #[test]

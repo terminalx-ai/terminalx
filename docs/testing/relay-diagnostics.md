@@ -147,13 +147,30 @@ close whose sensitive reason never reaches diagnostics.
 
 The drawer redraw was reproduced using a clean macOS zsh 5.9 PTY with a long
 prompt and an unsubmitted command: changing xterm's grid before parsing the
-previous resize's queued redraw leaves a duplicate prompt. Resize observations
-now settle for 100 ms, then wait behind xterm's queued writes before changing
-the grid and notifying the PTY. This avoids a redraw per drag observation and
-keeps both sides on the same size. The real-parser regression uses captured zsh
-escape sequences, demonstrates the duplicate in the old sequence, and checks
-that the fix preserves the prompt and typed command. Pending fits are cancelled
-when the view unmounts and never resize an evicted or replaced terminal.
+previous resize's redraw leaves a duplicate prompt. Draining xterm alone only
+covers already delivered output; a redraw can still be in IPC or cloud transit.
+Resize observations settle for 100 ms and serialize requests to the PTY, keeping
+only the latest pending size. Live output batches carry their dimensions from
+the PTY reader, captured under the same lock as a resize. Batches at different
+sizes are never coalesced. Local view frames retain the metadata through splitting
+and carry a four-byte dimension header across Tauri; cloud `pty.output` carries
+an optional `size` object.
+
+The renderer queues a size barrier immediately before each batch in xterm's own
+write queue, so old output is parsed at its original width even after newer
+resize requests have completed. Output-driven changes never resize the PTY back.
+Standalone cloud size notifications cannot move the parser ahead of sized
+output. There is no separate unbounded output buffer, and byte acknowledgements
+exclude framing. Older runtimes without metadata retain acknowledged sizing;
+the ordering guarantee requires the updated runtime. Raw scrollback replay
+remains compatible and does not acquire invented historical dimensions.
+
+The real-parser regression uses captured zsh escape sequences, demonstrates the
+old duplicate, and checks delayed delivery beyond the timer, fragmented escape
+sequences, input preservation, serialized RPCs, disposal and legacy peers.
+Native tests verify read-time dimensions survive later resizes and frame
+splitting. Pending fits are cancelled when the view unmounts and never resize an
+evicted or replaced terminal.
 
 ```sh
 pnpm exec vitest run src/components/account/AccountSidebarEntry.test.tsx src/lib/terminalResize.real.test.ts

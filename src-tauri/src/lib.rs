@@ -672,6 +672,7 @@ pub fn run() {
             commands::pty_busy,
             commands::pty_write,
             commands::pty_attach,
+            commands::pty_attach_sized,
             commands::pty_detach,
             commands::pty_detach_all,
             commands::pty_ack,

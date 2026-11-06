@@ -539,7 +539,7 @@ export interface PtyHandlers {
    * or what was missed while away). A terminal emulator must not answer the
    * queries it finds in them: the program that asked is long past them.
    */
-  onData(bytes: Uint8Array, offset: number, replay: boolean): void;
+  onData(bytes: Uint8Array, offset: number, replay: boolean, size?: { cols: number; rows: number }): void;
   onExit?(code: number | null): void;
   onControl?(control: PtyControl, controllerId?: string | null): void;
   /** The controller resized the terminal; a viewer should match it. */
@@ -880,11 +880,15 @@ export class WorkspaceRpcClient {
       this.forgetPty(ptyId);
       handlers.onGone?.(reason);
     };
-    const emit = (dataB64: string, offset: number) => {
+    const emit = (dataB64: string, offset: number, size?: { cols: number; rows: number }) => {
       const bytes = decodeBase64(dataB64);
       // Replay and live output can overlap by a chunk around a reconnect.
       const skip = cursor === undefined ? 0 : Math.max(0, cursor.offset - offset);
-      if (skip < bytes.length) handlers.onData(bytes.subarray(skip), offset + skip, offset + skip < replayUntil);
+      if (skip < bytes.length) {
+        const args = [bytes.subarray(skip), offset + skip, offset + skip < replayUntil] as const;
+        if (size) handlers.onData(...args, size);
+        else handlers.onData(...args);
+      }
       cursor = { offset: Math.max(cursor?.offset ?? 0, offset + bytes.length), epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
     };
     const stop = await this.subscribe({
@@ -930,7 +934,7 @@ export class WorkspaceRpcClient {
         const params = notification.params;
         switch (notification.event) {
           case "pty.output":
-            emit(String(params.data), Number(params.offset));
+            emit(String(params.data), Number(params.offset), outputSize(params.size));
             break;
           case "pty.exit":
             handlers.onExit?.((params.code as number | null | undefined) ?? null);
@@ -1511,6 +1515,12 @@ function refusalError(method: string, refusal: RpcErrorData): WorkspaceRpcError 
 
 function randomRequestId(): string {
   return `req-${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+function outputSize(value: unknown): { cols: number; rows: number } | undefined {
+  if (!value || typeof value !== "object") return;
+  const { cols, rows } = value as { cols?: unknown; rows?: unknown };
+  if (typeof cols === "number" && typeof rows === "number" && Number.isInteger(cols) && Number.isInteger(rows) && cols > 0 && rows > 0 && cols <= 1_000 && rows <= 1_000) return { cols, rows };
 }
 
 function decodeBase64(value: string): Uint8Array {

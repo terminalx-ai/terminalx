@@ -37,7 +37,10 @@ pub trait EventSink: Send + Sync {
     /// Backend consumers of PTY output (mobile and remote clients). Desktop
     /// xterms already receive raw channels and must not receive this again.
     fn emit_pty(&self, id: &str, bytes: &[u8]) {
-        if let Some(raw) = pty_payload(id, bytes) {
+        self.emit_pty_sized(id, bytes, None);
+    }
+    fn emit_pty_sized(&self, id: &str, bytes: &[u8], size: Option<crate::pty::OutputSize>) {
+        if let Some(raw) = pty_payload(id, bytes, size) {
             self.emit_raw("pty_data", raw);
         }
     }
@@ -47,11 +50,12 @@ pub trait EventSink: Send + Sync {
 }
 
 /// A `pty_data` event's payload: the pane and its bytes as base64.
-fn pty_payload(id: &str, bytes: &[u8]) -> Option<Box<RawValue>> {
+fn pty_payload(id: &str, bytes: &[u8], size: Option<crate::pty::OutputSize>) -> Option<Box<RawValue>> {
     use base64::Engine as _;
     let payload = crate::pty::PtyData {
         id: id.to_string(),
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        size,
     };
     serde_json::value::to_raw_value(&payload).ok()
 }
@@ -113,6 +117,10 @@ mod desktop {
         }
 
         fn emit_pty(&self, id: &str, bytes: &[u8]) {
+            self.emit_pty_sized(id, bytes, None);
+        }
+
+        fn emit_pty_sized(&self, id: &str, bytes: &[u8], size: Option<crate::pty::OutputSize>) {
             if let Some(listeners) = self.try_state::<PtyListeners>() {
                 // No mobile subscriber: no base64 allocation or JSON serialization.
                 let subscribed = listeners
@@ -123,7 +131,7 @@ mod desktop {
                     .get("pty_data")
                     .is_some_and(|entries| !entries.is_empty());
                 if subscribed {
-                    listeners.sink.emit_pty(id, bytes);
+                    listeners.sink.emit_pty_sized(id, bytes, size);
                 }
             }
         }
@@ -243,9 +251,13 @@ impl EventSink for BroadcastSink {
     /// to every event. Otherwise every byte every pane prints was turned into
     /// base64 for nobody.
     fn emit_pty(&self, id: &str, bytes: &[u8]) {
+        self.emit_pty_sized(id, bytes, None);
+    }
+
+    fn emit_pty_sized(&self, id: &str, bytes: &[u8], size: Option<crate::pty::OutputSize>) {
         let heard = self.tx.receiver_count() > 0
             || self.listeners.lock().unwrap().get("pty_data").is_some_and(|registered| !registered.is_empty());
-        if let Some(raw) = pty_payload(id, bytes).filter(|_| heard) {
+        if let Some(raw) = pty_payload(id, bytes, size).filter(|_| heard) {
             self.emit_raw("pty_data", raw);
         }
     }

@@ -2,6 +2,7 @@ import { Terminal } from "@xterm/xterm";
 import { afterEach, expect, it, vi } from "vitest";
 import { deferredTerminalFit, fitTerminal } from "./terminalFit";
 import { TerminalBufferCleanup } from "./terminalBufferCleanup";
+import { acknowledgeTerminalResize, coordinateTerminalResize, followTerminalOutputSize, isOutputResize, reassertTerminalResize, requestTerminalResize, stopTerminalOutput, writeTerminalOutput } from "./terminalOutput";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -77,5 +78,89 @@ it("coalesces a drag into its final size and cancels work for an unmounted or re
   current = undefined;
   await vi.runAllTimersAsync();
   expect(resize).toHaveBeenCalledTimes(1);
+  term.dispose();
+});
+
+it.each([false, true])("keeps a redraw arriving after the next resize request on its original grid (fragmented: %s)", async (fragmented) => {
+  vi.useFakeTimers();
+  const { term, box } = fixture();
+  const send = vi.fn(async (_size: { cols: number; rows: number }) => {});
+  coordinateTerminalResize(term, send);
+  term.onResize((size) => { if (!isOutputResize(term)) requestTerminalResize(term, size); });
+  const write = (data: string, cols: number, rows: number) => writeTerminalOutput(term, new TextEncoder().encode(data), { cols, rows });
+  write(initial, 80, 12);
+  await vi.runAllTimersAsync();
+  requestTerminalResize(term, { cols: 30, rows: 12 });
+  await vi.runAllTimersAsync();
+  const fit = deferredTerminalFit(() => term, box);
+  fit.schedule();
+  await vi.advanceTimersByTimeAsync(500); // Beyond debounce and RPC completion; no redraw has arrived.
+  followTerminalOutputSize(term, { cols: 18, rows: 16 }); // A cloud size notification can also arrive ahead of output.
+  expect(send.mock.calls.map(([size]) => size)).toEqual([{ cols: 30, rows: 12 }, { cols: 18, rows: 16 }]);
+  expect(term.cols).toBe(80); // Requests cannot move the parser ahead of its stream.
+  if (fragmented) {
+    for (const char of redraw) { write(char, 30, 12); await vi.advanceTimersByTimeAsync(150); }
+  } else {
+    write(redraw, 30, 12);
+  }
+  write(finalRedraw, 18, 16); // Both batches may also be queued before either is parsed.
+  await vi.runAllTimersAsync();
+  expect(text(term).match(/PROMPTMARK/g)).toHaveLength(1);
+  expect(text(term)).toContain(command);
+  expect(term.cols).toBe(18);
+  expect(send).toHaveBeenCalledTimes(2); // Parsing old output never resizes the PTY backwards.
+  fit.cancel();
+  stopTerminalOutput(term);
+  term.dispose();
+});
+
+it("serializes resize RPCs, coalesces pending sizes, and drops pending work when disposed", async () => {
+  vi.useFakeTimers();
+  const { term } = fixture();
+  let finish!: () => void;
+  const send = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+  coordinateTerminalResize(term, send);
+  requestTerminalResize(term, { cols: 30, rows: 12 });
+  requestTerminalResize(term, { cols: 22, rows: 12 });
+  requestTerminalResize(term, { cols: 18, rows: 12 });
+  expect(send).toHaveBeenCalledTimes(1);
+  finish();
+  await vi.runAllTimersAsync();
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(send).toHaveBeenLastCalledWith({ cols: 18, rows: 12 });
+  requestTerminalResize(term, { cols: 40, rows: 12 });
+  stopTerminalOutput(term);
+  finish();
+  await vi.runAllTimersAsync();
+  expect(send).toHaveBeenCalledTimes(2);
+  term.dispose();
+});
+
+it("keeps acknowledged sizing for older peers without output metadata", async () => {
+  vi.useFakeTimers();
+  const { term } = fixture();
+  coordinateTerminalResize(term, async (size) => acknowledgeTerminalResize(term, size));
+  requestTerminalResize(term, { cols: 30, rows: 12 });
+  await vi.runAllTimersAsync();
+  expect(term.cols).toBe(30);
+  term.dispose();
+});
+
+it.each([false, true])("retries a failed size request and reasserts after reconnecting (synchronous failure: %s)", async (synchronous) => {
+  vi.useFakeTimers();
+  const { term } = fixture();
+  const send = vi.fn().mockResolvedValue(undefined);
+  if (synchronous) send.mockImplementationOnce(() => { throw new Error("not attached"); });
+  else send.mockRejectedValueOnce(new Error("disconnected"));
+  coordinateTerminalResize(term, send);
+  requestTerminalResize(term, { cols: 30, rows: 12 });
+  await vi.runAllTimersAsync();
+  requestTerminalResize(term, { cols: 30, rows: 12 });
+  await vi.runAllTimersAsync();
+  expect(send).toHaveBeenCalledTimes(2);
+  reassertTerminalResize(term);
+  await vi.runAllTimersAsync();
+  expect(send).toHaveBeenCalledTimes(3);
+  expect(send).toHaveBeenLastCalledWith({ cols: 30, rows: 12 });
   term.dispose();
 });

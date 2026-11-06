@@ -7,6 +7,7 @@ import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTermi
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { terminalInput } from "@/lib/terminalInput";
 import { deferredTerminalFit, fitTerminal } from "@/lib/terminalFit";
+import { acknowledgeTerminalResize, coordinateTerminalResize, isOutputResize, reassertTerminalResize, requestTerminalResize, requestedTerminalSize, stopTerminalOutput } from "@/lib/terminalOutput";
 import { TerminalBufferCleanup } from "@/lib/terminalBufferCleanup";
 import { terminalColorHex } from "@/lib/terminalColor";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
@@ -118,9 +119,12 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     const token = crypto.randomUUID();
     const view = { token, retired: false, feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
     void subscribeTerminals()
-      .then(() => (view.retired ? undefined : pty.attach(id, token, view.feed.data)))
+      .then(() => (view.retired ? undefined : pty.attachSized(id, token, view.feed.data)))
       // Retired while the attach was on its way: it must not be left attached to nothing.
-      .then(() => (view.retired ? pty.detach(id, token) : undefined))
+      .then(() => {
+        if (view.retired) return pty.detach(id, token);
+        reassertTerminalResize(term);
+      })
       .catch(() => {});
     return view;
   };
@@ -135,7 +139,8 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   const input = terminalInput(id);
   term.onData(input.write);
   term.onBinary(input.write);
-  term.onResize(({ cols, rows }) => void pty.resize(id, cols, rows).catch(() => {}));
+  coordinateTerminalResize(term, (size) => pty.resize(id, size.cols, size.rows).then(() => acknowledgeTerminalResize(term, size)));
+  term.onResize((size) => { if (!isOutputResize(term)) requestTerminalResize(term, size); });
   return {
     el,
     term,
@@ -156,6 +161,7 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     },
     release: () => {
       released = true;
+      stopTerminalOutput(term);
       input.stop();
       retire(view);
     },
@@ -236,7 +242,7 @@ export function TerminalView({
     if (!shown || create) return;
     const assert = () => {
       const inst = peekInstance(id);
-      if (inst && inst.el.isConnected) void pty.resize(id, inst.term.cols, inst.term.rows).catch(() => {});
+      if (inst && inst.el.isConnected) requestTerminalResize(inst.term, requestedTerminalSize(inst.term), true);
     };
     assert();
     window.addEventListener("focus", assert);

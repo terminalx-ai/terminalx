@@ -3006,6 +3006,22 @@ pub async fn pty_attach(window: tauri::WebviewWindow, state: State<'_, AppState>
         .await.map_err(err)?.map_err(err)
 }
 
+/// Sized output: two little-endian u16 dimensions followed by raw PTY bytes.
+/// Zero dimensions mean replay, or an owner predating output size metadata.
+#[tauri::command]
+pub async fn pty_attach_sized(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    let label = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || runtime.attach_sized(&label, &id, &token, Box::new(move |bytes, size| {
+        let size = size.unwrap_or(crate::pty::OutputSize { cols: 0, rows: 0 });
+        let mut frame = Vec::with_capacity(bytes.len() + 4);
+        frame.extend_from_slice(&size.cols.to_le_bytes());
+        frame.extend_from_slice(&size.rows.to_le_bytes());
+        frame.extend_from_slice(bytes);
+        channel.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_ok()
+    }))).await.map_err(err)?.map_err(err)
+}
+
 /// The window has drawn `drawn` bytes of the pane's output since it attached (flow control).
 /// Acknowledgements and detaches are written to the window's runtime
 /// connection, which waits when the runtime stops reading it.
