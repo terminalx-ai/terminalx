@@ -44,6 +44,12 @@ impl Hold {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    #[cfg(unix)]
+    pub(super) fn try_running(&self) -> Option<MutexGuard<'_, Held>> {
+        let held = self.lock();
+        if held.frozen { None } else { Some(held) }
+    }
+
     /// The pane's state, once it is not being handed over: what the reader
     /// reads under, and what an exited program's waiter waits for.
     #[cfg(unix)]

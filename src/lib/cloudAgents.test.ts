@@ -37,8 +37,29 @@ import {
 import { getTabLog } from "./agentEvents";
 import { getDraft, setDraft } from "./drafts";
 import { buildTranscript } from "./transcript";
+import { projectCloudSessions } from "./cloudDashboard";
+import { bucketSessions } from "./dashboard";
+import type { CloudWorkspaceListItem } from "./api";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
+
+/** The real dashboard projection, with only the desktop cache available. */
+function stoppedDashboard() {
+  const item = {
+    workspace: { id: scope.workspaceId, orgId: scope.organizationId, name: "Stopped workspace", provider: "box", state: "suspended", accessMode: "organization", createdAt: 1, updatedAt: 10, releaseDisposition: null },
+    latestOperation: null,
+  } as CloudWorkspaceListItem;
+  return bucketSessions(projectCloudSessions({
+    orgs: [{ id: scope.organizationId, name: "Acme" }],
+    catalog: { createMemory: {}, orgs: { [scope.organizationId]: {
+      orgId: scope.organizationId, workspaces: [item], repositories: null, repositoriesAt: null,
+      quota: null, fetchedAt: 1, source: "cache", error: null, sessions: {},
+    } } },
+    liveSessions: () => null,
+    agentTabs: () => getCloudAgents(scope).tabs,
+    connected: () => false,
+  }));
+}
 
 const tabInfo = (fields: Partial<AgentTabInfo> = {}): AgentTabInfo => ({
   sessionId: "s-1",
@@ -169,6 +190,84 @@ afterEach(() => {
 });
 
 describe("cloud agent tabs store", () => {
+  it("migrates a read legacy cache in a stopped workspace to Done without waking it", async () => {
+    backend.cache["t-1"] = {
+      tab: tabInfo({ lastSeq: 3 }),
+      events: [
+        ev(1, { type: "user_message", text: "hi", queued: false }),
+        ev(2, { type: "assistant_text", text: "hello" }),
+        ev(3, { type: "turn_completed", status: "ok", authFailed: false }),
+      ],
+      cursor: null, checkpoint: null, unread: false, completed: true, updatedAt: 1,
+    };
+    await loadCloudAgents(scope);
+    expect(stoppedDashboard().done.map((session) => session.sessionId)).toEqual(["s-1"]);
+    expect(stoppedDashboard()["not-started"]).toEqual([]);
+    expect(getCloudAgents(scope).tabs[0].info.lastMessageAt).toBeUndefined();
+    await flushCloudAgentCache(scope);
+    expect(backend.cache["t-1"].tab.hasMessages).toBe(true);
+    expect(backend.calls.every(({ cmd }) => ["cloud_agent_cache_load", "cloud_agent_outbox", "cloud_agent_checkpoints", "cloud_agent_cache_save"].includes(cmd))).toBe(true);
+    resetCloudAgents();
+    await loadCloudAgents(scope);
+    expect(stoppedDashboard().done).toHaveLength(1);
+  });
+
+  it.each<Payload>([
+    { type: "user_message", text: "", images: [{ url: "/image.png" }], queued: false },
+    { type: "assistant_text", text: "Legacy reply" },
+    { type: "turn_completed", status: "ok", authFailed: false, finalText: "Legacy final reply" },
+    { type: "delta", delta: "text_delta", block: { messageId: "reply", index: 0 }, text: "Legacy stream" },
+  ])("derives presence from an old checkpoint's $type message and retains it after trimming", async (payload) => {
+    backend.metas = [{ tabId: "t-1", epoch: 1, version: 1 }];
+    backend.checkpoints["t-1"] = { epoch: 1, version: 1, projection: {
+      ...tabInfo(), v: 1, events: [ev(1, payload), ...Array.from({ length: 2000 }, (_, i) => ev(i + 2, { type: "settings_changed", model: "legacy-model" }))],
+      truncated: true, followUps: [], updatedAt: 10,
+    } };
+    await loadCloudAgents(scope);
+    expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+    expect(stoppedDashboard().done).toHaveLength(1);
+    await flushCloudAgentCache(scope);
+    expect(backend.cache["t-1"].events).toHaveLength(2000);
+    expect(backend.cache["t-1"].events.every((event) => event.payload.type === "settings_changed")).toBe(true);
+    expect(backend.cache["t-1"].tab.hasMessages).toBe(true);
+    expect(backend.cache["t-1"].tab.lastMessageAt).toBeUndefined();
+    resetCloudAgents();
+    await loadCloudAgents(scope);
+    expect(stoppedDashboard().done).toHaveLength(1);
+  });
+
+  it("does not mistake metadata, subagent messages, or another conversation for a started chat", async () => {
+    backend.cache["t-1"] = {
+      tab: tabInfo(),
+      events: [
+        ev(1, { type: "settings_changed", model: "configured" }),
+        ev(2, { type: "assistant_text", text: "" }),
+        ev(3, { type: "turn_completed", status: "ok", authFailed: false }),
+        { ...ev(4, { type: "assistant_text", text: "Child reply" }), subagent: { id: "child" } },
+        ev(5, { type: "user_message", text: "Elsewhere", queued: false }, "other-session"),
+        ev(6, { type: "user_message", text: "Another tab", queued: false }, "s-1", "other-tab"),
+      ],
+      cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1,
+    };
+    await loadCloudAgents(scope);
+    expect(stoppedDashboard().done).toEqual([]);
+    expect(stoppedDashboard()["not-started"]).toHaveLength(1);
+    expect(getCloudAgents(scope).tabs[0].info.hasMessages).toBeUndefined();
+  });
+
+  it("retains cached presence and messages when an older runtime lists the tab before replaying it", async () => {
+    const events = [ev(1, { type: "user_message", text: "Legacy prompt", queued: false })];
+    backend.cache["t-1"] = { tab: tabInfo(), events, cursor: null, checkpoint: null, unread: false, completed: true, updatedAt: 1 };
+    const loading = loadCloudAgents(scope);
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 1 })]);
+    await loading;
+    expect(getCloudAgents(scope).tabs[0].info.hasMessages).toBe(true);
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 1 })]);
+    await flushCloudAgentCache(scope);
+    expect(backend.cache["t-1"].tab.hasMessages).toBe(true);
+    expect(backend.cache["t-1"].events).toEqual(events);
+  });
+
   it("opens a tab from the cache, then a newer checkpoint, and never reads a checkpoint once it streams live", async () => {
     backend.cache["t-1"] = {
       tab: tabInfo(),
@@ -855,4 +954,26 @@ it("uses verified checkpoint chronology even when its retained event tail is emp
   });
   await flushCloudAgentCache(scope);
   expect(backend.cache["t-1"].tab.lastMessageAt).toBe("2026-10-04T00:00:00Z");
+});
+
+it("retains message presence from a legacy checkpoint with no verified time or retained events", async () => {
+  backend.cache["t-1"] = {
+    tab: tabInfo(), events: [], cursor: null, checkpoint: { epoch: 7, version: 1 },
+    unread: false, completed: false, updatedAt: 1,
+  };
+  backend.checkpoints["t-1"] = {
+    epoch: 7, version: 2,
+    projection: { ...tabInfo(), v: 1, events: [], truncated: true, updatedAt: 999,
+      hasMessages: true, sessionHasMessages: true,
+    },
+  };
+  await loadCloudAgents(scope);
+  expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+  const client = fakeClient();
+  client.listAgentTabs.mockResolvedValue([tabInfo({ status: "idle", hasMessages: false, sessionHasMessages: false })]);
+  await reconcileCloudAgents(scope, client);
+  expect(getCloudAgents(scope).tabs[0].info).toMatchObject({ hasMessages: true, sessionHasMessages: true });
+  expect(getCloudAgents(scope).tabs[0].info.lastMessageAt).toBeUndefined();
+  await flushCloudAgentCache(scope);
+  expect(backend.cache["t-1"].tab).toMatchObject({ hasMessages: true, sessionHasMessages: true });
 });

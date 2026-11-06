@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture-session",
+  "turn_id": "fixture-turn",
+  "transcript_path": "/fixture/codex/sessions/rollout.jsonl",
+  "cwd": "/fixture/session-a",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.4",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": { "command": "pwd" },
+  "tool_use_id": "call_probe"
+}

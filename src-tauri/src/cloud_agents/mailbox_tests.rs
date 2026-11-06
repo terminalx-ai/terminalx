@@ -49,8 +49,10 @@ impl AgentOps for FakeOps {
             created: String::new(),
             modified: String::new(),
             last_message_at: None,
+            has_messages: true,
             session_created: None,
             session_last_message_at: None,
+            session_has_messages: true,
         }]
     }
     fn busy(&self, _: &str, _: &str) -> bool {
@@ -422,6 +424,11 @@ fn a_projection_keeps_the_newest_whole_events_within_its_budget() {
     let cut = checkpoints::projection(&h.agents, "tab-1", one * 2).unwrap();
     assert_eq!(cut["truncated"], true);
     assert_eq!(cut["events"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()).collect::<Vec<_>>(), vec![2, 3]);
+    let empty = checkpoints::projection(&h.agents, "tab-1", 0).unwrap();
+    assert!(empty["events"].as_array().unwrap().is_empty());
+    assert_eq!(empty["hasMessages"], true);
+    assert_eq!(empty["sessionHasMessages"], true);
+    assert!(empty["lastMessageAt"].is_null());
 }
 
 #[test]

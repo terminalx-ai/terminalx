@@ -7,18 +7,19 @@ import { readFile } from "node:fs/promises";
 import { launch, serve } from "./harness.mjs";
 
 const stub = `${await readFile(new URL("./tauri-stub.js", import.meta.url), "utf8")}\n${await readFile(new URL("./dashboard-stub.js", import.meta.url), "utf8")}`;
-const labels = ["Needs you", "Working", "Done"];
+const labels = ["Needs you", "Working", "Done", "Not started"];
 const cards = (column) => column.locator('[role="button"]');
 const layouts = [
   { name: "wide", width: 1360, height: 760, stacked: false },
-  { name: "wide, short", width: 1100, height: 420, stacked: false },
+  { name: "wide, short", width: 1360, height: 420, stacked: false },
+  { name: "stacked at four columns", width: 1100, height: 420, stacked: true },
   { name: "stacked, short", width: 960, height: 420, stacked: true },
   // Emulate page zoom with a smaller CSS viewport and a matching pixel scale.
   // Pixel density alone would not exercise reflow; CSS zoom on the document
   // would also scale fixed-position portals a second time in WebKit.
-  { name: "150% zoom, wide", width: 1700, height: 800, zoom: 1.5, stacked: false },
+  { name: "150% zoom, wide", width: 2100, height: 800, zoom: 1.5, stacked: false },
   { name: "200% zoom, stacked", width: 1600, height: 900, zoom: 2, stacked: true },
-  { name: "150% text, short", width: 1280, height: 480, textScale: 1.5, stacked: false },
+  { name: "150% text, short", width: 1360, height: 480, textScale: 1.5, stacked: false },
 ];
 
 /** Include clipping by every scroll container, not just the viewport. */
@@ -128,7 +129,7 @@ try {
       // The sidebar's destination is "Dashboard, <counts>" since the chat-first sidebar (#484); it was "Agent Dashboard".
       await page.getByRole("button", { name: /^Dashboard/ }).click();
       await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
-      await page.getByText(`${count * 6} total`, { exact: true }).waitFor();
+      await page.getByText(`${count * 8} total`, { exact: true }).waitFor();
       if (count) await page.getByText("Check the synthetic layout", { exact: true }).first().waitFor();
       assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, "layout fixture reports no available update");
       await page.evaluate(async ({ textScale }) => {
@@ -147,7 +148,7 @@ try {
         const layout = await checkColumn(column, expectedCount, `${context}, ${labels[index]}`);
         assert.equal(layout.heading, `${labels[index]}${count * 2}`, `${context}: heading/count`);
         if (!count) {
-          await column.getByText(["None", "Nothing running.", "Nothing finished yet."][index], { exact: true }).waitFor();
+          await column.getByText(["None", "Nothing running.", "Nothing finished yet.", "No chats waiting to start."][index], { exact: true }).waitFor();
           continue;
         }
         // Wheel events exercise the actual scroll owner: the column in wide
@@ -193,6 +194,7 @@ try {
       await checkColumn(columns[2], count ? 1 : 0, `${context}, search`);
       assert.equal(await cards(columns[0]).count(), 0);
       assert.equal(await cards(columns[1]).count(), 0);
+      assert.equal(await cards(columns[3]).count(), 0);
       assert.ok(await visible(search), `${context}: search stays visible`);
       await page.getByRole("button", { name: "Clear search", exact: true }).click();
       await page.getByRole("button", { name: "Filter", exact: true }).click();
@@ -203,6 +205,7 @@ try {
       assert.equal(await cards(columns[0]).count(), 0);
       assert.equal(await cards(columns[1]).count(), count * 2);
       assert.equal(await cards(columns[2]).count(), 0);
+      assert.equal(await cards(columns[3]).count(), 0);
       if (count) {
         const local = columns[1].getByRole("button", { name: "Local working session 01, Claude, Codex", exact: true });
         await local.scrollIntoViewIfNeeded();

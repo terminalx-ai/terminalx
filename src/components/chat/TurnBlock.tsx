@@ -17,6 +17,8 @@ import { usePrefs } from "@/lib/prefs";
 import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
 import { DisclosureScope, useDisclosure } from "./disclosures";
+import { ChatMedia } from "./ChatMedia";
+import { mediaMentions } from "@/lib/chatMedia";
 
 /**
  * One exchange: the prompt, the work under it, the answer, and a footer.
@@ -170,7 +172,7 @@ function AgentSaid({ text }: { text: string }) {
 
 /** What a folded turn still shows: the answer, and the reader's own words (#551). */
 function outsideFold(item: WorkItem): boolean {
-  return item.kind === "text" || item.kind === "message" || item.kind === "queued";
+  return item.kind === "text" || item.kind === "message" || item.kind === "queued" || item.kind === "media";
 }
 
 type Outcome = { tone: "ok" | "stopped" | "failed"; word: string; label: string; duration: string | null };
@@ -265,7 +267,7 @@ export function previewFromPartialJson(partial: string): string {
 function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void }) {
   switch (item.kind) {
     case "text":
-      return <div className="mb-3"><Markdown text={item.text} linkContext={linkContext} /></div>;
+      return <div className="mb-3"><Markdown text={item.text} linkContext={linkContext} />{linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
     case "reasoning":
       return <ReasoningRow name={item.key} text={item.text} linkContext={linkContext} />;
     case "tool":
@@ -327,6 +329,8 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
           {item.done && <Check className="size-3.5 text-faint" />}
         </div>
       );
+    case "media":
+      return linkContext ? <div className="mb-3"><ChatMedia paths={item.paths} context={linkContext} /></div> : null;
     case "decision":
       return (
         <div className={cn("-mx-1.5 px-1.5 py-0.5 text-xs", item.allowed ? "text-faint" : "text-destructive/80")}>
@@ -373,6 +377,11 @@ function WithdrawnNote({ seq, onSendAgain }: { seq?: number; onSendAgain?: (seq:
       )}
     </div>
   );
+}
+
+function MentionedMedia({ text, linkContext }: { text: string; linkContext: { sessionId: string; cwd: string } }) {
+  const paths = useMemo(() => mediaMentions(text), [text]);
+  return <ChatMedia paths={paths} context={linkContext} />;
 }
 
 /** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */

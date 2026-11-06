@@ -35,7 +35,7 @@ export function StarNagCard({ view, onAction, onDismiss }: {
       aria-labelledby="star-reminder-title"
       aria-describedby="star-reminder-description"
       aria-busy={view.busy}
-      className="pointer-events-auto min-h-0 overflow-y-auto rounded-xl bg-popover glass p-4 text-popover-foreground shadow-surface hairline animate-fade-in"
+      className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto border-r border-t border-hairline bg-popover p-4 text-popover-foreground animate-fade-in"
     >
       <div className="flex items-center gap-2">
         <Star aria-hidden className="size-4 shrink-0 text-warning" />
@@ -57,7 +57,7 @@ export function StarNagCard({ view, onAction, onDismiss }: {
   );
 }
 
-/** Mounted once by AppShell. The backend owns eligibility, persistence and actions. */
+/** Mounted with the sidebar. The backend owns eligibility, persistence and actions. */
 export function StarReminder() {
   const [preview] = useState(() => import.meta.env.DEV && new URLSearchParams(location.search).get("preview") === "star-reminder");
   const [view, setView] = useState<StarReminderView>(() => preview ? {

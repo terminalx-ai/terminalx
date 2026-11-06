@@ -106,6 +106,32 @@ export function forgetReadiness() {
   known.clear();
 }
 
+/** Keep every local setup surface current; only Settings requests periodic checks. */
+function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, poll = false) {
+  useEffect(() => {
+    if (!enabled) return;
+    const recheck = () => { void refresh(); };
+    const stopResume = onAppResume(recheck);
+    // An embedded login (for example the Codex sign-in shell) exits its PTY
+    // when finished. An exit is only a hint: always probe the actual login.
+    let disposed = false;
+    let stopExit: (() => void) | undefined;
+    void listen("pty_exit", () => { if (!disposed) recheck(); }).then((stop) => {
+      if (disposed) stop();
+      else stopExit = stop;
+    }).catch(() => { /* outside a webview */ });
+    const timer = poll ? setInterval(() => {
+      if (!document.hidden) recheck();
+    }, 2 * 60_000) : undefined;
+    return () => {
+      disposed = true;
+      stopResume();
+      stopExit?.();
+      clearInterval(timer);
+    };
+  }, [enabled, poll, refresh]);
+}
+
 export function useAgentReadiness(harness: string | null, poll = false) {
   const [answer, setAnswer] = useState<{ harness: string; value: AgentReadiness } | null>(null);
   const [checking, setChecking] = useState(false);
@@ -133,28 +159,7 @@ export function useAgentReadiness(harness: string | null, poll = false) {
     void refresh();
     return () => { generation.current++; };
   }, [refresh]);
-  useEffect(() => {
-    if (!harness) return;
-    const recheck = () => { void refresh(); };
-    const stopResume = onAppResume(recheck);
-    // An embedded login (for example the Codex sign-in shell) exits its PTY
-    // when finished. An exit is only a hint: always probe the actual login.
-    let disposed = false;
-    let stopExit: (() => void) | undefined;
-    void listen("pty_exit", () => { if (!disposed) recheck(); }).then((stop) => {
-      if (disposed) stop();
-      else stopExit = stop;
-    }).catch(() => { /* outside a webview */ });
-    const timer = poll ? setInterval(() => {
-      if (!document.hidden) recheck();
-    }, 2 * 60_000) : undefined;
-    return () => {
-      disposed = true;
-      stopResume();
-      stopExit?.();
-      clearInterval(timer);
-    };
-  }, [harness, poll, refresh]);
+  useReadinessRefresh(!!harness, refresh, poll);
   return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
 }
 
@@ -175,9 +180,8 @@ export function useAgentReadinessList(harnesses: readonly Pick<HarnessInfo, "id"
     heard.current = {};
     const candidates: [string, boolean, string | null][] = JSON.parse(key);
     setChecking(true);
-    const entries = await Promise.all(candidates.map(async ([id, installed]) => [id, installed
-      ? await checkAgentReadiness(id)
-      : { state: "missing", checkedAt: null, version: null } satisfies AgentReadiness] as const));
+    // Installation metadata may predate a CLI installed in another terminal.
+    const entries = await Promise.all(candidates.map(async ([id]) => [id, await checkAgentReadiness(id)] as const));
     const values: AgentReadinessMap = { ...Object.fromEntries(entries), ...heard.current };
     if (run === generation.current) {
       setAnswer({ key, values });
@@ -195,6 +199,7 @@ export function useAgentReadinessList(harnesses: readonly Pick<HarnessInfo, "id"
     heard.current = { ...heard.current, [id]: value };
     setAnswer((before) => before?.key === key ? { key, values: { ...before.values, [id]: value } } : before);
   }), [key]);
+  useReadinessRefresh(enabled && harnesses.length > 0, refresh);
   return {
     values: answer?.key === key ? answer.values : null,
     checking: checking || answer?.key !== key,

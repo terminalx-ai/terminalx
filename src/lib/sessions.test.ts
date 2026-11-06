@@ -356,14 +356,14 @@ it("retains newer message time when delayed metadata events and refreshes arrive
   expect(sessions.getSessionStore().sessions[0].lastMessageAt).toBe(latest);
 });
 
-it("subscribes before boot backfill and merges its newer time into a stale initial list", async () => {
+it.each([true, false])("retains boot backfill activity across a stale list (verified timestamps: %s)", async (verified) => {
   vi.resetModules();
   mocks.listeners.clear();
   sessions = await import("./sessions");
   let resolveList!: (entries: SessionEntry[]) => void;
   const pending = new Promise<SessionEntry[]>((resolve) => { resolveList = resolve; });
-  const initial = { ...attached, lastMessageAt: "2026-10-02T00:00:00Z" };
-  const newer = { ...attached, lastMessageAt: "2026-10-05T00:00:00Z" };
+  const initial = { ...attached, lastMessageAt: verified ? "2026-10-02T00:00:00Z" : undefined };
+  const newer = { ...attached, lastMessageAt: verified ? "2026-10-05T00:00:00Z" : undefined, hasMessages: true };
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "list_projects") return { projects: [{ path: projectPath, name: "Synthetic" }], lastSelected: projectPath };
     if (command === "list_sessions") {
@@ -386,7 +386,7 @@ it("subscribes before boot backfill and merges its newer time into a stale initi
   expect(sessions.getSessionStore().sessions[0]).toEqual(newer);
   // The same listener continues normal updates after initialization.
   mocks.listeners.get("session_updated")!({ payload: { ...initial, title: "Synthetic rename" } });
-  expect(sessions.getSessionStore().sessions[0]).toMatchObject({ title: "Synthetic rename", lastMessageAt: newer.lastMessageAt });
+  expect(sessions.getSessionStore().sessions[0]).toMatchObject({ title: "Synthetic rename", lastMessageAt: newer.lastMessageAt, hasMessages: true });
 });
 
 describe("a new live connection", () => {

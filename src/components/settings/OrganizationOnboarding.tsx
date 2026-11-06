@@ -14,6 +14,7 @@ export function OrganizationOnboarding({
   contextRevision,
   organizations,
   multiOrg = false,
+  startWithCreation = false,
 }: {
   organizationName: string | null;
   /** The selected organization's id. A setup record is matched by it, never by name. */
@@ -23,6 +24,8 @@ export function OrganizationOnboarding({
   organizations: OrganizationSummary[];
   /** Every organization is live in the sidebar (CS-18): the selection only picks the default for new cloud work. */
   multiOrg?: boolean;
+  /** Open the creation form directly, then continue setup after the new organization is selected. */
+  startWithCreation?: boolean;
 }) {
   // The selected organization, by id. A status that only names it is
   // trusted when exactly one organization has that name: a setup record is
@@ -44,7 +47,7 @@ export function OrganizationOnboarding({
   const setup = setupFor(records, activeId);
   const [name, setName] = useState(attempt?.name ?? "");
   const flight = useRef(false);
-  const [createOpen, setCreateOpen] = useState(Boolean(attempt));
+  const [createOpen, setCreateOpen] = useState(startWithCreation || Boolean(attempt));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A provider change made in the compute controls is read by the setup
@@ -94,6 +97,7 @@ export function OrganizationOnboarding({
       }
       localStorage.removeItem(draftStorageKey);
       if (!mounted.current || epoch !== identityEpoch.current) return;
+      if (!unselected) setCreateOpen(false);
       await refreshAccount();
       if (unselected && mounted.current && epoch === identityEpoch.current)
         setError("The organization was created, but could not be selected. Resume setup to select it; it will not be created again.");
@@ -106,13 +110,14 @@ export function OrganizationOnboarding({
     }
   };
 
-  if (!organizationName) {
+  if (!organizationName || (startWithCreation && createOpen)) {
     return (
       <div className="rounded-lg border border-hairline p-3">
         <div className="text-sm font-medium">Create an organization</div>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          Organization setup is incomplete. Create one to configure compute
-          access; no machine is created by this step.
+          {organizationName
+            ? "Create another organization and continue setup there. No machine is created by this step."
+            : "Organization setup is incomplete. Create one to configure compute access; no machine is created by this step."}
         </p>
         <div className="mt-3 flex gap-2">
           <input

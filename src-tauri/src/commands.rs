@@ -1613,6 +1613,12 @@ pub async fn pairing_status(state: tauri::State<'_, crate::AppState>) -> CmdResu
 }
 
 #[tauri::command]
+pub async fn pairing_retry_relay(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.retry_relay()).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
 pub async fn pairing_generate(
     connection_mode: Option<crate::pairing::PairingConnectionMode>,
     state: tauri::State<'_, crate::AppState>,
@@ -2220,8 +2226,20 @@ pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDet
 
 /// The branch against its base, for the side panel's Branch tab.
 #[tauri::command]
-pub async fn branch_overview(cwd: String) -> CmdResult<crate::branch_overview::BranchOverview> {
-    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd))).await.map_err(err)
+pub async fn branch_overview(cwd: String, base: Option<String>) -> CmdResult<crate::branch_overview::BranchOverview> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref())).await.map_err(err)
+}
+
+/// Merges the checked-out branch into a local branch, for a project with no remote.
+#[tauri::command]
+pub async fn branch_merge_into(cwd: String, into: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::merge_into(Path::new(&cwd), &into).map_err(err)).await.map_err(err)?
+}
+
+/// Brings the remote's branches up to date for the Branch tab; false when it could not.
+#[tauri::command]
+pub async fn branch_fetch(cwd: String) -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::fetch(Path::new(&cwd))).await.map_err(err)
 }
 
 #[tauri::command]
@@ -3022,6 +3040,22 @@ pub async fn pty_attach(window: tauri::WebviewWindow, state: State<'_, AppState>
     let label = window.label().to_owned();
     tauri::async_runtime::spawn_blocking(move || runtime.attach(&label, &id, &token, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok())))
         .await.map_err(err)?.map_err(err)
+}
+
+/// Sized output: two little-endian u16 dimensions followed by raw PTY bytes.
+/// Zero dimensions mean replay, or an owner predating output size metadata.
+#[tauri::command]
+pub async fn pty_attach_sized(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    let label = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || runtime.attach_sized(&label, &id, &token, Box::new(move |bytes, size| {
+        let size = size.unwrap_or(crate::pty::OutputSize { cols: 0, rows: 0 });
+        let mut frame = Vec::with_capacity(bytes.len() + 4);
+        frame.extend_from_slice(&size.cols.to_le_bytes());
+        frame.extend_from_slice(&size.rows.to_le_bytes());
+        frame.extend_from_slice(bytes);
+        channel.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_ok()
+    }))).await.map_err(err)?.map_err(err)
 }
 
 /// The window has drawn `drawn` bytes of the pane's output since it attached (flow control).
@@ -4438,6 +4472,15 @@ pub fn set_work_status_settings(share_with_team: bool, state: tauri::State<'_, c
 #[tauri::command]
 pub fn agent_settings() -> crate::store::settings::AgentSettings {
     store::settings::load().agents
+}
+
+/// Applied by the owner at the next permission hook, including running tabs.
+#[tauri::command]
+pub fn set_read_only_commands(enabled: bool) -> CmdResult<crate::store::settings::AgentSettings> {
+    let mut settings = store::settings::load();
+    settings.agents.read_only_commands = enabled;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.agents)
 }
 
 /// The runtime that owns the agents reads the limit again at its next look,

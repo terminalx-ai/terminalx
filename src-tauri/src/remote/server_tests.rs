@@ -390,6 +390,29 @@ async fn one_controller_owns_input_and_size_and_viewers_follow() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn silent_resizes_and_returning_viewers_receive_ordered_size_completions() {
+    let f = fixture();
+    listed(&f.rpc);
+    let (desk, mut events) = peer_for(&f.rpc, "device-desk", Authority::Manage).await;
+    let created = call(&f.rpc, &desk, "pty.create", json!({"cols":80,"rows":12,"clientRequestId":"silent-resize"})).await.unwrap();
+    let id = created["ptyId"].as_str().unwrap();
+    call(&f.rpc, &desk, "pty.attach", json!({"ptyId":id})).await.unwrap();
+    assert_eq!(next_event(&mut events, "pty.resize-complete").await["size"], json!({"cols":80,"rows":12}));
+    call(&f.rpc, &desk, "pty.write", json!({"ptyId":id,"data":"exec sleep 600\n","seq":1,"writerId":"silent-writer"})).await.unwrap();
+    output_until(&mut events, "exec sleep 600").await;
+    for (cols, rows) in [(30, 8), (18, 8)] {
+        call(&f.rpc, &desk, "pty.resize", json!({"ptyId":id,"cols":cols,"rows":rows})).await.unwrap();
+        let completion = next_event(&mut events, "pty.resize-complete").await;
+        assert_eq!(completion["data"], "");
+        assert_eq!(completion["size"], json!({"cols":cols,"rows":rows}));
+        assert!(completion["offset"].as_u64().is_some());
+    }
+    let (viewer, mut viewing) = peer_for(&f.rpc, "device-viewer", Authority::Manage).await;
+    call(&f.rpc, &viewer, "pty.attach", json!({"ptyId":id})).await.unwrap();
+    assert_eq!(next_event(&mut viewing, "pty.resize-complete").await["size"], json!({"cols":18,"rows":8}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
     let f = fixture();
     listed(&f.rpc);
@@ -425,7 +448,7 @@ async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
 /// Terminal output the test makes itself, delivered exactly as a PTY
 /// read would be, so no shell's timing is involved.
 fn inject(f: &Fixture, pty_id: &str, bytes: &[u8]) {
-    f.rpc.on_pty_data(PtyData { id: pty_id.to_string(), data: STANDARD.encode(bytes) });
+    f.rpc.on_pty_data(PtyData { id: pty_id.to_string(), data: STANDARD.encode(bytes), size: None });
 }
 
 /// The next event, however long a loaded machine takes to produce it.
@@ -680,8 +703,10 @@ impl crate::cloud_agents::AgentOps for OneTab {
             created: String::new(),
             modified: String::new(),
             last_message_at: None,
+            has_messages: false,
             session_created: None,
             session_last_message_at: None,
+            session_has_messages: false,
         }]
     }
     fn busy(&self, _: &str, _: &str) -> bool {
