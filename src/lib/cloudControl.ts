@@ -846,7 +846,11 @@ async function sessionsCreate(params: Params) {
     request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline, settings };
     // As the issue page starts one: the switches at the project's defaults for
     // an issue, said outright so an older runtime does not take its own (#700).
-    if (pipeline) request.pipeline = pipelineLaunchDefaults(settings, true);
+    if (pipeline) request.pipeline = {
+      ...pipelineLaunchDefaults(settings, true),
+      ...(typeof params.resolveConflicts === "boolean" ? { resolveConflicts: params.resolveConflicts } : {}),
+      autoMerge: false,
+    };
   }
   let outcome: CloudIssueOutcome | null = null;
   const plan = planCloudStart(project);

@@ -131,6 +131,14 @@ pub fn commit(working: &mut Pipeline) -> Result<bool> {
     working.auto_merge = stored.auto_merge;
     working.resolve_conflicts = stored.resolve_conflicts;
     working.stopped = stored.stopped;
+    // Switches and their attribution are written immediately, while a stage
+    // may still be working on an older copy. Keep that history too.
+    for event in stored.events.iter().filter(|event| event.actor.is_some()) {
+        if !working.events.contains(event) { working.events.push(event.clone()); }
+    }
+    working.events.sort_by(|a, b| a.at.cmp(&b.at));
+    let over = working.events.len().saturating_sub(super::EVENT_LIMIT);
+    working.events.drain(..over);
     working.modified = stored.modified.clone();
     if *stored == *working {
         return Ok(false);

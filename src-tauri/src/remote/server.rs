@@ -1044,7 +1044,7 @@ impl WorkspaceRpc {
             "pipeline.resolveConflicts" => {
                 let pipeline = self.own_pipeline(&params)?;
                 let value = params.get("value").and_then(Value::as_bool).ok_or_else(|| RpcError::invalid("value must be boolean"))?;
-                let pipeline = crate::issue_pipeline::engine::set_resolve_conflicts(&self.pipeline_host()?, &pipeline.id, value).map_err(RpcError::internal)?;
+                let pipeline = crate::issue_pipeline::engine::set_resolve_conflicts_by(&self.pipeline_host()?, &pipeline.id, value, crate::issue_pipeline::SwitchActor::Person).map_err(RpcError::internal)?;
                 Ok(json!({ "pipeline": pipeline_on_the_wire(json!(pipeline)) }))
             },
             "pipeline.noteMerge" => self.pipeline_note_merge(params),
