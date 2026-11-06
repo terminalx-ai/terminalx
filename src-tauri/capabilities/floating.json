@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "floating",
-  "description": "Capabilities for the floating chat window: what a session view needs, and no more. It cannot update or restart the app, and it sends no desktop notifications and keeps no dock badge: the main window does both.",
+  "description": "Capabilities for compact chat windows: what a session view needs, and no more. It cannot update or restart the app, and it sends no desktop notifications and keeps no dock badge: the main window does both.",
   "windows": [
-    "floating"
+    "floating",
+    "chat-*"
   ],
   "permissions": [
     "core:default",

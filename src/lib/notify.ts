@@ -20,9 +20,9 @@ import type { IssuePipeline } from "@/types/issuePipeline";
  * and only the tone when the session is already on screen. The dock badge
  * counts sessions that want the reader back.
  *
- * The app has two windows and one reader. Every window hears every status
+ * The app has several windows and one reader. Every window hears every status
  * change, so each decides for itself and they must not both speak: the window
- * that has the focus raises the tone and the notice; when neither has it, the
+ * that has the focus raises the tone and the notice; when none has it, the
  * main window alone sends the banner and keeps the dock badge. A banner about
  * the session the floating window shows brings that window back when the
  * reader returns to the app.
@@ -96,12 +96,12 @@ interface Presence {
   focused: boolean;
   sessionId: string | null;
 }
-const presenceKey = (win: AppWindow) => `raccoon.presence.${win}`;
-const otherWindow = (): AppWindow => (appWindow() === "main" ? "floating" : "main");
+const PRESENCE_PREFIX = "raccoon.presence.";
+const presenceKey = (win: AppWindow) => `${PRESENCE_PREFIX}${win}`;
 
 /** This window has the reader: the focus, and (for the floating one) it is on screen. A hidden floating window shows nothing to anyone, whatever its page thinks. */
 function looking(): boolean {
-  return focused && (appWindow() === "main" || getFloating().visible);
+  return focused && (appWindow() !== "floating" || getFloating().visible);
 }
 
 function publishPresence() {
@@ -113,14 +113,27 @@ function publishPresence() {
   }
 }
 
-function presenceElsewhere(): Presence | null {
+function readPresence(key: string): Presence | null {
   try {
-    const raw = localStorage.getItem(presenceKey(otherWindow()));
+    const raw = localStorage.getItem(key);
     const parsed = raw ? (JSON.parse(raw) as Partial<Presence>) : null;
     return parsed ? { focused: parsed.focused === true, sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null } : null;
   } catch {
     return null;
   }
+}
+
+function presenceElsewhere(): Presence | null {
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (!key.startsWith(PRESENCE_PREFIX) || key === presenceKey(appWindow())) continue;
+      const presence = readPresence(key);
+      if (presence?.focused) return presence;
+    }
+  } catch {
+    /* storage unavailable */
+  }
+  return null;
 }
 
 /**
@@ -144,10 +157,13 @@ function onReturn() {
   // says about itself now, not what it showed some other day. The main
   // window's own sessions are where the reader left them, and are not
   // navigated for them.
-  if (presenceElsewhere()?.sessionId === target.sessionId) void showFloatingWindow(target.sessionId, target.tabId).catch(() => {});
+  if (readPresence(presenceKey("floating"))?.sessionId === target.sessionId) void showFloatingWindow(target.sessionId, target.tabId).catch(() => {});
 }
 
 if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    try { localStorage.removeItem(presenceKey(appWindow())); } catch { /* storage unavailable */ }
+  });
   window.addEventListener("focus", onReturn);
   window.addEventListener("blur", () => {
     focused = false;
@@ -155,7 +171,7 @@ if (typeof window !== "undefined") {
   });
   // The reader came back through the other window: what was raised has been answered there.
   window.addEventListener("storage", (event) => {
-    if (event.key === presenceKey(otherWindow()) && event.storageArea === localStorage && presenceElsewhere()?.focused) raised = null;
+    if (event.key?.startsWith(PRESENCE_PREFIX) && event.key !== presenceKey(appWindow()) && event.storageArea === localStorage && presenceElsewhere()?.focused) raised = null;
   });
 }
 
@@ -362,10 +378,12 @@ export function startNotifications() {
   subscribeFloating(publishPresence);
   // Cloud sessions and the badge are the main window's: the floating window shows neither.
   if (appWindow() !== "main") return;
-  // The floating window is made by this run of the app. What an earlier run
-  // left written for it is not a window that has the reader now.
+  // Secondary windows are made by this run. Discard presence from a previous
+  // run before any can be created.
   try {
-    localStorage.removeItem(presenceKey("floating"));
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(PRESENCE_PREFIX) && key !== presenceKey("main")) localStorage.removeItem(key);
+    }
   } catch {
     /* storage unavailable */
   }
