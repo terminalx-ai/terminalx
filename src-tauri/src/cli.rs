@@ -53,7 +53,8 @@ Usage:
       [--title TEXT] [--name NAME] [--experimental-codex-stdio]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
-      [--provider github|linear] [--auto-merge|--no-auto-merge] [--no-pipeline]
+      [--provider github|linear] [--auto-merge|--no-auto-merge]
+      [--resolve-conflicts|--no-resolve-conflicts] [--no-pipeline]
       [--title TEXT] [--name NAME] [--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
       [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
@@ -81,6 +82,7 @@ Usage:
       [--wake] [--confirm-spend] [--idempotency-key KEY] [--json]
   terminalx sessions create --project CLOUD_PROJECT --issue ISSUE
       [--provider github|linear] [--prompt TEXT] [--no-pipeline] [--agent AGENT]
+      [--resolve-conflicts|--no-resolve-conflicts]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--wake] [--json]
   terminalx send CLOUD_SESSION TEXT [--tab TAB] [--idempotency-key KEY] [--json]
   terminalx read CLOUD_SESSION [--tab TAB] [--since SEQ] [--tail COUNT] [--json]
@@ -105,6 +107,7 @@ Usage:
   terminalx pipelines list [--project PROJECT] [--json]
   terminalx pipelines show PIPELINE [--project PROJECT] [--json]
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
+  terminalx pipelines resolve-conflicts PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines stop|resume|advance|review|merge|refresh PIPELINE [--project PROJECT] [--json]
   terminalx vm status|start|stop [--json]
   terminalx vm tools [TOOL] [--json]
@@ -637,6 +640,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 (false, true) => Some(false),
                 (false, false) => None,
             };
+            let resolve_conflicts = conflict_switch(tokens)?;
             let no_pipeline = tokens.flag("--no-pipeline")?;
             if issue.is_none() && provider.is_some() {
                 return Err(invalid("--provider applies to a session started with --issue."));
@@ -674,12 +678,14 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 params["issue"] = json!(issue);
                 params["provider"] = json!(provider);
                 params["autoMerge"] = json!(auto_merge);
+                if let Some(value) = resolve_conflicts { params["resolveConflicts"] = json!(value); }
                 params["noPipeline"] = json!(no_pipeline);
                 tokens.finish()?;
                 // Reading the tracker comes before the session exists.
                 return Ok(Action::Rpc { command: "sessions.create".into(), params, timeout: Duration::from_secs(60) });
             }
             if let Some(value) = auto_merge { params["autoMerge"] = json!(value); }
+            if let Some(value) = resolve_conflicts { params["resolveConflicts"] = json!(value); }
             if no_pipeline { params["noPipeline"] = json!(true); }
             rpc("sessions.create", params, tokens)
         }
@@ -705,6 +711,15 @@ fn local_only(option: &Option<String>, name: &str) -> Result<(), ControlError> {
 const CLOUD_TIMEOUT: Duration = Duration::from_secs(60);
 const CLOUD_CREATE_TIMEOUT: Duration = Duration::from_secs(340);
 
+fn conflict_switch(tokens: &mut Tokens) -> Result<Option<bool>, ControlError> {
+    match (tokens.flag("--resolve-conflicts")?, tokens.flag("--no-resolve-conflicts")?) {
+        (true, true) => Err(invalid("--resolve-conflicts and --no-resolve-conflicts are mutually exclusive.")),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
+}
+
 fn cloud_rpc(action: &str, params: Value, tokens: &mut Tokens) -> Result<Action, ControlError> {
     tokens.finish()?;
     Ok(Action::Rpc {
@@ -726,6 +741,10 @@ fn parse_cloud_session_create(tokens: &mut Tokens) -> Result<Action, ControlErro
     let prompt = if issue.is_some() { tokens.option("--prompt")?.unwrap_or_default() } else { tokens.required_option("--prompt")? };
     let provider = tokens.option("--provider")?;
     let no_pipeline = tokens.flag("--no-pipeline")?;
+    let resolve_conflicts = conflict_switch(tokens)?;
+    if resolve_conflicts.is_some() && (issue.is_none() || no_pipeline) {
+        return Err(invalid("Conflict resolution needs an issue pipeline."));
+    }
     if tokens.flag("--auto-merge")? || tokens.flag("--no-auto-merge")? {
         return Err(invalid("A cloud workspace never merges by itself: its pipeline stops at Ready to merge, and you merge from the issue page."));
     }
@@ -764,6 +783,7 @@ fn parse_cloud_session_create(tokens: &mut Tokens) -> Result<Action, ControlErro
         params["issue"] = json!(issue);
         params["provider"] = json!(provider);
         params["noPipeline"] = json!(no_pipeline);
+        if let Some(value) = resolve_conflicts { params["resolveConflicts"] = json!(value); }
     }
     cloud_rpc("sessions.create", params, tokens)
 }
@@ -999,17 +1019,18 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let pipeline = tokens.required_front("pipeline")?;
             rpc("pipelines.show", json!({"pipeline": pipeline, "project": project}), tokens)
         }
-        "auto-merge" => {
+        "auto-merge" | "resolve-conflicts" => {
             let project = tokens.option("--project")?;
             let pipeline = tokens.required_front("pipeline")?;
             let value = match tokens.required_front("on or off")?.as_str() {
                 "on" => true,
                 "off" => false,
-                other => return Err(invalid(format!("auto-merge takes on or off, not {other}."))),
+                other => return Err(invalid(format!("{command} takes on or off, not {other}."))),
             };
             // Turning it on may merge there and then.
             tokens.finish()?;
-            Ok(Action::Rpc { command: "pipelines.autoMerge".into(), params: json!({"pipeline": pipeline, "project": project, "value": value}), timeout: PIPELINE_TIMEOUT })
+            let method = if command == "auto-merge" { "pipelines.autoMerge" } else { "pipelines.resolveConflicts" };
+            Ok(Action::Rpc { command: method.into(), params: json!({"pipeline": pipeline, "project": project, "value": value, "caller": issue_caller()}), timeout: PIPELINE_TIMEOUT })
         }
         "stop" | "resume" | "advance" | "review" | "merge" | "refresh" => {
             let project = tokens.option("--project")?;
@@ -1373,13 +1394,16 @@ mod tests {
         // Without flags the request stays unchanged; automation flags also serve non-issue branches.
         let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go"]);
         assert!(params.get("issue").is_none() && params.get("autoMerge").is_none() && params.get("noPipeline").is_none());
-        for (flag, field, expected) in [("--auto-merge", "autoMerge", true), ("--no-auto-merge", "autoMerge", false), ("--no-pipeline", "noPipeline", true)] {
+        for (flag, field, expected) in [("--auto-merge", "autoMerge", true), ("--no-auto-merge", "autoMerge", false), ("--resolve-conflicts", "resolveConflicts", true), ("--no-resolve-conflicts", "resolveConflicts", false), ("--no-pipeline", "noPipeline", true)] {
             let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", flag]);
             assert_eq!(params[field], expected, "{flag}");
             assert!(params.get("issue").is_none());
         }
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", "--provider", "linear"])).is_err());
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--issue", "433", "--auto-merge", "--no-auto-merge"])).is_err());
+        assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--issue", "433", "--resolve-conflicts", "--no-resolve-conflicts"])).is_err());
+        let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--issue", "ENG-42", "--no-resolve-conflicts"]);
+        assert_eq!((params["resolveConflicts"].clone(), params["autoMerge"].clone()), (json!(false), Value::Null));
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex"])).is_err());
     }
 
@@ -1526,7 +1550,7 @@ mod tests {
         assert_eq!(rpc_of(&["pipelines", "list"]).0, "pipelines.list");
         assert_eq!(rpc_of(&["pipelines", "list", "--project", "raccoon"]).1, json!({"project": "raccoon"}));
         assert_eq!(rpc_of(&["pipelines", "show", "433"]), ("pipelines.show".to_string(), json!({"pipeline": "433", "project": null}), Duration::from_secs(30)));
-        let (command, params, timeout) = rpc_of(&["pipelines", "auto-merge", "ENG-42", "off"]);
+        let (command, params, timeout) = issue_rpc(&["pipelines", "auto-merge", "ENG-42", "off"]);
         assert_eq!((command.as_str(), params), ("pipelines.autoMerge", json!({"pipeline": "ENG-42", "project": null, "value": false})));
         assert_eq!(timeout, PIPELINE_TIMEOUT);
         assert_eq!(rpc_of(&["pipelines", "auto-merge", "ENG-42", "on"]).1["value"], json!(true));
@@ -1535,7 +1559,16 @@ mod tests {
             assert_eq!((command.as_str(), params), ("pipelines.act", json!({"pipeline": "433", "project": null, "action": action})));
         }
         // Two projects can each have a #12: the project says which is meant.
-        assert_eq!(rpc_of(&["pipelines", "auto-merge", "12", "on", "--project", "widgets"]).1, json!({"pipeline": "12", "project": "widgets", "value": true}));
+        assert_eq!(issue_rpc(&["pipelines", "auto-merge", "12", "on", "--project", "widgets"]).1, json!({"pipeline": "12", "project": "widgets", "value": true}));
+        for (value, expected) in [("on", true), ("off", false)] {
+            let (command, params, timeout) = rpc_of(&["pipelines", "resolve-conflicts", "ENG-42", value]);
+            assert_eq!(command, "pipelines.resolveConflicts");
+            assert_eq!(params["value"], expected);
+            assert!(params["caller"].get("session").is_some() && params["caller"].get("tab").is_some());
+            assert_eq!(timeout, PIPELINE_TIMEOUT);
+        }
+        assert!(parse(&args(&["pipelines", "resolve-conflicts", "433", "maybe"])).is_err());
+        assert!(parse(&args(&["pipelines", "resolve-conflicts", "433"])).is_err());
         assert_eq!(rpc_of(&["pipelines", "stop", "--project", "widgets", "12"]).1["project"], json!("widgets"));
         assert_eq!(rpc_of(&["pipelines", "show", "12", "--project", "widgets"]).1["project"], json!("widgets"));
         assert_eq!(rpc_of(&["pipelines", "merge", "433", "--project", "widgets"]).1["project"], json!("widgets"));
@@ -1576,6 +1609,11 @@ mod tests {
         for flag in ["--auto-merge", "--no-auto-merge"] {
             let refused = parse(&args(&["sessions", "create", "--project", project, "--issue", "#433", flag])).unwrap_err();
             assert!(refused.message.contains("never merges by itself"), "{flag}: {}", refused.message);
+        }
+        for (flag, expected) in [("--resolve-conflicts", true), ("--no-resolve-conflicts", false)] {
+            let (_, params, _) = rpc_of(&["sessions", "create", "--project", project, "--issue", "ENG-42", flag]);
+            assert_eq!(params["resolveConflicts"], expected);
+            assert!(params.get("autoMerge").is_none());
         }
         // The issue's own options need an issue; a plain session still needs its prompt.
         assert!(parse(&args(&["sessions", "create", "--project", project, "--prompt", "go", "--no-pipeline"])).is_err());

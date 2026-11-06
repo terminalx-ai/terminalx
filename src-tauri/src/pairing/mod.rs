@@ -82,6 +82,7 @@ pub struct PairingManager {
     epoch: AtomicU64,
     sharing_blocked_generation: AtomicU64,
     stopped: AtomicBool,
+    relay_retry: tokio::sync::Notify,
     suspended_account_token: Mutex<Option<String>>,
     connections: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<()>>>>,
     mobile: Arc<mobile::MobileRuntime>,
@@ -115,6 +116,7 @@ impl PairingManager {
             epoch: AtomicU64::new(0),
             sharing_blocked_generation: AtomicU64::new(u64::MAX),
             stopped: AtomicBool::new(false),
+            relay_retry: tokio::sync::Notify::new(),
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
             mobile: Arc::new(mobile::MobileRuntime::new()),
@@ -588,12 +590,39 @@ impl PairingManager {
     }
 
     pub(super) fn set_relay_connecting(&self, attempt: u32) {
-        self.inner.lock().unwrap().relay_status = RelayStatus {
+        let mut inner = self.inner.lock().unwrap();
+        // Keep the last failure visible while the next connection is attempted.
+        let message = match inner.relay_status.phase {
+            RelayPhase::Offline | RelayPhase::Connecting => inner.relay_status.message.clone(),
+            _ => None,
+        };
+        inner.relay_status = RelayStatus {
             phase: RelayPhase::Connecting,
-            message: Some("Connecting securely…".into()),
+            message: message.or_else(|| Some("Connecting securely…".into())),
             attempt,
         };
+        drop(inner);
         self.emit();
+    }
+
+    /// Wake the existing supervisor. Never start a second control connection
+    /// or tear down a connection that recovered just before the click arrived.
+    pub fn retry_relay(&self) -> Result<PairingStatus> {
+        let mut inner = self.inner.lock().unwrap();
+        if self.is_stopped() || inner.relay_status.phase == RelayPhase::Off {
+            bail!("Relay is not configured. Check Settings → Account.");
+        }
+        if inner.relay_status.phase == RelayPhase::Offline {
+            inner.relay_status.phase = RelayPhase::Connecting;
+            let attempt = inner.relay_status.attempt;
+            drop(inner);
+            self.record_relay_diagnostic(diagnostics::Event::RetryRequested, attempt, None);
+            self.relay_retry.notify_one();
+            self.emit();
+        } else {
+            drop(inner);
+        }
+        Ok(self.status())
     }
 
     pub(super) fn set_relay_unavailable(&self, message: &str, attempt: u32) {

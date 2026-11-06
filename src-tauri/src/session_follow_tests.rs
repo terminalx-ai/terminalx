@@ -279,7 +279,6 @@ impl Rig {
             turn_tail: Default::default(),
             transcript_turn: None,
             transcript_end_owed: false,
-            answered: HashMap::new(),
             command: "claude".into(),
             origin: Origin { token: crate::hooks::mint_token(), transcript_root: self.dir.path().to_path_buf(), conversation: None },
             by_hand: None,

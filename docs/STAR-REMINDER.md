@@ -5,6 +5,14 @@
 baseline, next threshold, cooldown deadline, app version, permanent completion
 flag and version that consumed the successful-work trigger. No telemetry is added.
 
+Both triggers require at least three full days since the reminder first observed
+the install and successful work in three distinct sessions. The first-observed
+timestamp and up to three session IDs are saved across restarts and updates.
+Existing installs without these fields start the same grace period; historical
+work-start totals cannot bypass it or stand in for successful sessions. Multiple
+turns or tabs in one session count only once. Queued prompts, subagent events,
+errors and interruptions do not add a finished session.
+
 SessionManager supplies the activity ledger's committed lifetime work-start
 count. A live transition into working counts, including another turn or resuming
 after waiting in the same tab. Blank tabs, optimistic submissions, same-state
@@ -22,7 +30,7 @@ ledger performs historical recovery; reminder eligibility never scans transcript
 Live nonempty user prompts followed by successful turn completion qualify for
 the separate once-per-version trigger. Queued prompts, subagent events, errors,
 interruptions and idle/resume boundaries do not qualify. Working and waiting
-agents block it. A one-shot debounce waits 1.2 seconds after completion/input;
+agents block both triggers. A one-shot debounce waits 1.2 seconds after completion/input;
 activity and typing are checked again after GitHub returns. A prepared result
 waits locally when activity resumes, without repeating the lookup.
 
@@ -52,11 +60,14 @@ for that run without overwriting the file or blocking app startup.
 Run `pnpm dev` and open
 `http://localhost:1420/?preview=star-reminder`. Add `&starMode=direct` to inspect
 the direct-star label. This development-only mode uses the real card in the
-AppShell notice stack. Its buttons hide the preview locally: they make no reminder
+sidebar footer. The reminder reserves space within the sidebar, so it never
+covers or reduces the height available for the composer or inline approval cards,
+including when the window is resized or zoomed. It stays out of the way when the
+sidebar is hidden. Its buttons hide the preview locally: they make no reminder
 commands, GitHub requests, browser navigation or preference writes. Reload to
 show it again. It is disabled in production builds.
 
-Inspect both theme modes, narrow windows, keyboard focus, notice stacking and
+Inspect both theme modes, narrow windows, keyboard focus, composer clearance and
 Escape. Dialogs hide the reminder while preserving agent notices. The reminder
 has no auto-dismiss timer and does not focus itself.
 
@@ -64,6 +75,7 @@ has no auto-dismiss timer and does not focus itself.
 
 - `pnpm vitest run src/components/ui/StarReminder.test.tsx`
 - `cd src-tauri && cargo test --lib star_`
+- `pnpm build && node scripts/webkit/star-reminder.mjs`
 
 Backend tests use explicit clock values and temporary persisted files. CLI boundary
 tests launch local test subprocesses and verify the exact host, repository and

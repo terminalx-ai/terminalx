@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Install Claude Code or Codex and sign in to it without opening Terminal.
+  **Install and sign in**, on the welcome screen, in Settings → Agents and in
+  the new-session view, runs the provider's official native installer in an
+  embedded terminal (fetched over HTTPS only; no Node or npm needed), then the
+  agent's own sign-in in the same terminal, which opens the browser. One setup
+  runs per agent at a time, and another window shows it. Installation and login are
+  checked again after each step, so every view turns Ready by itself. A folder
+  that is not writable, no connection to the provider, a failed download or a
+  failed installer each get their own explanation and **Try again**; Cancel
+  stops a step without leaving an error. The welcome screen also offers this
+  when every installed agent is signed out. The commands to run by hand are
+  still shown, now the native installers instead of `npm install`. (PRO-152)
 - New chat opens the same composer from the sidebar and project menus, and
   creates nothing until the first prompt is sent. Both use the same saved
   agent, model, effort and permission mode, preferring an agent with a local
@@ -16,11 +28,24 @@
   is confirmed, including answers from the terminal or another card. Late
   duplicate requests stay retired; clicking a stale card explains that the
   request was already answered without submitting another decision. (PRO-160)
+- Stop a Codex command from showing two identical approval cards when the
+  model runs it again while its first card is still waiting. Codex hands the
+  turn back to the model once a script has waited for its yield time (30
+  seconds by default). The repeat now files no card, whichever approval it
+  or the waiting command has reached and however the model words its reason.
+  Codex is told the command is already waiting, and the command runs once.
+  (PRO-160)
+- Ask separately before a Codex command leaves its sandbox. In Ask every
+  time, allowing a command no longer also allows Codex to run it outside the
+  sandbox. That request gets its own card, which says so and shows Codex's
+  reason. Each run of a command is asked about, instead of a repeat in the
+  same turn reusing the first answer. (PRO-160)
 - Keep local agent installation and login status current when returning to the
   app, after an embedded sign-in command exits, and every two minutes while
   Settings → Agents is open. Each card's badge and setup instructions now use
   the same readiness check, so they cannot disagree about installation or
-  login. (PRO-170)
+  login. The new-chat composer also picks up installation and login changes
+  on return, even when its cached agent list still says not installed. (PRO-170)
 - Return to the welcome screen with **Home** in either sidebar layout or ⌘K,
   even after opening projects or sessions. Open local project, Open GitHub
   project and Quick start remain available there. (PRO-183)

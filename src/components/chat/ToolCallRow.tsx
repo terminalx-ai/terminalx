@@ -6,6 +6,7 @@ import { DiffBlock, UnifiedBlock } from "./DiffBlock";
 import { LinkedText } from "./LinkedText";
 import type { ChatLinkContext } from "@/lib/chatLinks";
 import { useDisclosure } from "./disclosures";
+import { editLineCounts } from "@/lib/turnChanges";
 
 function iconFor(toolType: string) {
   switch (toolType) {
@@ -155,12 +156,13 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
   );
 }
 
-function EditCounts({ edits }: { edits: { oldText?: string; newText?: string }[] }) {
+function EditCounts({ edits }: { edits: NonNullable<ToolCall["edits"]> }) {
   let add = 0;
   let del = 0;
   for (const e of edits) {
-    add += e.newText ? e.newText.split("\n").length : 0;
-    del += e.oldText ? e.oldText.split("\n").length : 0;
+    const { added, removed } = editLineCounts(e);
+    add += added;
+    del += removed;
   }
   return (
     <span className="shrink-0 font-mono text-[11px] tabular-nums">

@@ -181,6 +181,8 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
       branch: row.branch ?? workspace.launch?.workBranch ?? null,
       title: row.title,
       modified: row.modified,
+      lastMessageAt: row.lastMessageAt,
+      hasMessages: row.hasMessages,
       archived: row.archived,
       connected,
       stopped,

@@ -683,6 +683,11 @@ pub struct WorktreeBase {
     pub commit: String,
     pub fetched: bool,
     pub warning: Option<String>,
+    /// The ref the worktree was made from (`origin/main`, `develop`): what its
+    /// branch is read against and merges into. Absent for one checked out from
+    /// an existing branch, and for sessions made before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 const WORKTREE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -755,9 +760,10 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+    let from = Some(base.clone()).filter(|b| b != "HEAD");
     Ok(CreatedWorktree {
         name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched, warning }),
+        worktree_base: Some(WorktreeBase { commit, fetched, warning, from }),
     })
 }
 
@@ -798,7 +804,7 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         branch: local,
         base: commit.clone(),
         base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None }),
+        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None, from: None }),
     })
 }
 

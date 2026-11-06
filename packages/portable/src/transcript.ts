@@ -51,7 +51,9 @@ export type WorkItem =
   | { kind: "compaction"; preTokens?: number; postTokens?: number; summary?: string; lifecycle?: CompactionOperation; uncertain?: boolean; key: string; seq: number }
   | { kind: "retry"; attempt: number; maxRetries: number; reason?: string; key: string; seq: number }
   | { kind: "subagent"; agentId: string; label?: string; done: boolean; key: string; seq: number }
-  | { kind: "decision"; label: string; allowed: boolean; automatic: boolean; key: string; seq: number };
+  | { kind: "decision"; label: string; allowed: boolean; automatic: boolean; key: string; seq: number }
+  /** Pictures a tool made (an image generator's output), shown even when the tool calls fold. */
+  | { kind: "media"; paths: string[]; key: string; seq: number };
 
 export interface Turn {
   key: string;
@@ -516,6 +518,8 @@ export class TranscriptReducer {
           if (call.result) this.unresolved.delete(call);
           else this.unresolved.add(call);
           this.touchCall(call);
+          const paths = payload.result.images?.map((image) => image.url).filter(Boolean) ?? [];
+          if (paths.length && !call.subagent) this.ensureTurn(event).work.push({ kind: "media", paths, key: `v${payload.callId}`, seq: event.seq });
         }
         break;
       }

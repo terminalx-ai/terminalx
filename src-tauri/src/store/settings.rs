@@ -63,6 +63,8 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentSettings {
+    /// Skip Ask mode's card for built-in read-only discovery commands.
+    pub read_only_commands: bool,
     /// Minutes an agent may sit idle before it is stopped; 0 never stops one
     /// for that alone.
     #[serde(deserialize_with = "idle_stop_minutes")]
@@ -84,7 +86,7 @@ fn idle_stop_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::
 
 impl Default for AgentSettings {
     fn default() -> Self {
-        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES }
+        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES, read_only_commands: true }
     }
 }
 
@@ -417,6 +419,14 @@ mod tests {
             let damaged: Settings = serde_json::from_str(&format!(r#"{{"mergedCleanup":{{"graceMinutes":{invalid}}}}}"#)).unwrap();
             assert_eq!(damaged.merged_cleanup.grace_minutes, 10, "{invalid}");
         }
+    }
+
+    #[test]
+    fn read_only_commands_default_on_and_an_explicit_opt_out_round_trips() {
+        assert!(serde_json::from_str::<Settings>(r#"{"agents":{"idleStopMinutes":30}}"#).unwrap().agents.read_only_commands);
+        let chosen: Settings = serde_json::from_str(r#"{"agents":{"readOnlyCommands":false}}"#).unwrap();
+        assert!(!chosen.agents.read_only_commands);
+        assert!(!serde_json::from_value::<Settings>(serde_json::to_value(chosen).unwrap()).unwrap().agents.read_only_commands);
     }
 
     #[test]

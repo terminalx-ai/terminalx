@@ -520,6 +520,7 @@ export const api = {
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
+  pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
   /** This Mac's name as the user's other devices show it (#686). */
@@ -656,7 +657,12 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
-  branchOverview: (cwd: string) => invoke<BranchOverview>("branch_overview", { cwd }),
+  /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
+  branchOverview: (cwd: string, base?: string | null) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null }),
+  /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
+  branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
+  /** Merges the checked-out branch into the local branch `into`; says what it did. */
+  branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
   // directory from the two ids and only reports it back (`root`).
@@ -2073,7 +2079,13 @@ export interface BranchOverview {
   upstream: string | null;
   unpushed: number;
   unpulled: number;
+  /** The upstream's commits not pulled yet, newest first. */
+  incoming: CommitInfo[];
   dirty: boolean;
+  /** Files changed and not committed. */
+  changed: number;
+  /** Has a remote at all: without one there is no push and no pull request. */
+  hasRemote: boolean;
   merge: { state: "clean" | "conflicts" | "merged" | "unknown"; conflicted: string[] };
 }
 
@@ -2233,6 +2245,24 @@ export const floatingWindow = {
   openInMain: (sessionId: string, tabId?: string | null) => invoke<void>("floating_open_in_main", { sessionId, tabId: tabId ?? null }),
 };
 
+// ---- agent setup (PRO-152)
+export type AgentSetupStep = "install" | "login";
+export const agentSetup = {
+  /**
+   * Run an agent's official installer, or its own sign-in, in setup pane `id`
+   * (`setup:<harness>:<run>`, a pane of no session). A pane whose step has
+   * ended goes on with the next one, its output kept above. The pane's exit
+   * code says how the step ended (`agentSetupFlow.ts`).
+   */
+  start: (id: string, harness: string, step: AgentSetupStep, cols: number, rows: number) =>
+    invoke<void>("agent_setup_start", { id, harness, step, cols, rows }),
+  /**
+   * The agent's step that runs now, wherever it was started (another window,
+   * or this one before a reload): the runtime runs one at a time per agent.
+   */
+  running: (harness: string) => invoke<{ pane: string; step: AgentSetupStep } | null>("agent_setup_running", { harness }),
+};
+
 // ---- terminals
 export const pty = {
   /** `title` names a shell tab for every window that lists it. */
@@ -2257,6 +2287,16 @@ export const pty = {
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (message) => onData(new Uint8Array(message));
     return invoke<void>("pty_attach", { id, token, channel });
+  },
+  attachSized: (id: string, token: string, onData: (bytes: Uint8Array, size?: { cols: number; rows: number }) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (message) => {
+      if (message.byteLength < 4) return;
+      const header = new DataView(message);
+      const cols = header.getUint16(0, true), rows = header.getUint16(2, true);
+      onData(new Uint8Array(message, 4), cols > 0 && rows > 0 ? { cols, rows } : undefined);
+    };
+    return invoke<void>("pty_attach_sized", { id, token, channel });
   },
   /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
   ack: (id: string, token: string, drawn: number) => invoke<void>("pty_ack", { id, token, drawn }),
@@ -2458,6 +2498,7 @@ export interface WorkCloudSession {
 
 /** When an agent nobody is using is stopped (#696). */
 export interface AgentSettings {
+  readOnlyCommands: boolean;
   /** Minutes an agent may sit idle before it is stopped; 0 is never. */
   idleStopMinutes: number;
 }
@@ -2467,6 +2508,7 @@ export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
 
 export const agentSettings = {
   get: () => invoke<AgentSettings>("agent_settings"),
+  setReadOnlyCommands: (enabled: boolean) => invoke<AgentSettings>("set_read_only_commands", { enabled }),
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
 };
 

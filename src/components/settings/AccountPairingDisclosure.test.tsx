@@ -70,11 +70,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("account binding disclosure", () => {
-  it("names every directory field, the machine name among them", async () => {
+  it("keeps every directory field in a collapsed Advanced disclosure", async () => {
     render(<AccountTab />);
 
+    const advanced = screen.getByText("Advanced");
+    const disclosure = advanced.closest("details")!;
+    expect(disclosure.open).toBe(false);
+    fireEvent.click(advanced);
+    expect(disclosure.open).toBe(true);
     for (const label of ["Host ID", "Public key", "Generation", "Display name", "Platform", "Environment", "Capability"]) {
-      expect(screen.getByText(label)).toBeTruthy();
+      expect(within(disclosure).getByText(label)).toBeTruthy();
     }
     expect(screen.getByText("Display name").nextElementSibling?.textContent).toBe("Studio Mac");
     await screen.findByTestId("machine-name");

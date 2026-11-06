@@ -125,6 +125,10 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      - name: Local issue starts without desktop features (#786)
+        working-directory: src-tauri
+        run: cargo test --no-default-features --features local-ui --lib control::issue_tests
+
       - name: Save the cargo cache
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -176,6 +180,9 @@ jobs:
       - name: Handing the runtime over without stopping what it runs (#765)
         working-directory: src-tauri/serve
         run: cargo test --locked --test local_handover
+      - name: CLI issue starts in the shipped runtime (#786)
+        working-directory: src-tauri/serve
+        run: cargo test --locked --features local-ui --test local_issue_start
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test

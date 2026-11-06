@@ -205,6 +205,16 @@ describe("a member's new session only uses a workspace they manage (PRO-73)", ()
 });
 
 describe("new session in a cloud project", () => {
+  it("sends the first prompt while preserving Issues when selection is disabled", async () => {
+    await place([item("issue-workspace", { repositories: [api] })]);
+    sessions.openIssues();
+    const key = await flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, request, { select: false });
+    expect(key).toBe(`cloud:${ORG}:issue-workspace:issue-workspace-s1`);
+    expect(sessions.getSessionStore().view).toBe("issues");
+    expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+    expect(runtimes.get("issue-workspace")!.created[0]).toMatchObject({ prompt: request.prompt, agent: request.agent });
+  });
+
   it.each(["/var/lib/terminalx/workspace/Acme/App", "/srv/terminalx/state/workspace/Acme/App"])("carries the selected absolute in-scope catalog checkout %s", async (targetDirectory) => {
     const repository = { identity: "github.com/acme/app", fullName: "Acme/App", cloneUrl: "https://github.com/Acme/App.git", ref: "main", targetDirectory, primary: true };
     await place([item("image-checkout", { repositories: [repository] })]);

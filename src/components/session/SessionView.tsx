@@ -102,6 +102,7 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       gitNote={isQuickChat(session) && !isGit ? NO_REPOSITORY : undefined}
       branch={session.branch ?? null}
       baseRef={session.baseRef}
+      from={session.worktreeBase?.from}
       events={log.events}
       version={log.version}
       live={live}
@@ -909,6 +910,7 @@ export function SessionView({
             isGit={isGit}
             gitNote={quick && !isGit ? NO_REPOSITORY : undefined}
             branch={session.branch ?? null}
+            from={session.worktreeBase?.from}
             workingTree
             sessionId={session.id}
             statusKey={statusKey}

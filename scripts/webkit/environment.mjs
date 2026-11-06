@@ -83,7 +83,8 @@ const browser = await launch();
 let failed = 0;
 try {
   for (const width of [960, 720]) {
-    const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height: 900 });
+    // The price assertion uses the US currency format, regardless of the VM's locale.
+    const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height: 900 }, { locale: "en-US" });
     await page.evaluate(
       ({ status, recipes }) => {
         window.__ENVIRONMENT_CALLS__ = [];

@@ -26,6 +26,71 @@ const C4: &str = "4444444444444444444444444444444444444444";
 /// The base commit a conflict resolver is pinned to.
 const BASE: &str = "5555555555555555555555555555555555555555";
 
+#[test]
+fn launch_switches_are_independent_and_issue_defaults_respect_project_choices() {
+    let _home = crate::store::temp_home();
+    for issue in [github_issue(), linear_issue()] {
+        for (merge, conflicts, expected) in [
+            (None, None, (true, true)),
+            (Some(false), None, (false, true)),
+            (None, Some(false), (true, false)),
+            (Some(true), Some(true), (true, true)),
+        ] {
+            let host = FakeHost::new(&issue);
+            let id = uuid::Uuid::new_v4().to_string();
+            host.world().sessions.insert(id.clone(), session(&id, Some(&issue)));
+            let p = engine::start_with_switches(&host, &id, "t1", merge, conflicts, None).unwrap();
+            assert_eq!((p.auto_merge, p.resolve_conflicts), expected);
+        }
+        for (merge, conflicts, person, expected) in [
+            (Some(false), None, false, (false, true)),
+            (None, Some(false), false, (true, false)),
+            (Some(false), Some(false), false, (false, false)),
+            (None, None, true, (false, true)),
+        ] {
+            let host = FakeHost::new(&issue);
+            host.world().settings.auto_merge = merge;
+            host.world().settings.resolve_conflicts = conflicts;
+            host.world().settings.require_person = person;
+            let id = uuid::Uuid::new_v4().to_string();
+            host.world().sessions.insert(id.clone(), session(&id, Some(&issue)));
+            let p = engine::start_with_switches(&host, &id, "t1", None, None, None).unwrap();
+            assert_eq!((p.auto_merge, p.resolve_conflicts), expected);
+        }
+    }
+    let host = cloud_host(&linear_issue());
+    let p = engine::start_with_switches(&host, "author", "t1", Some(true), Some(true), None).unwrap();
+    assert!(!p.auto_merge && p.resolve_conflicts);
+}
+
+#[test]
+fn switch_history_names_people_author_sessions_and_other_cli_sessions_and_survives_a_step() {
+    use super::SwitchActor;
+    let run = Run::start(&github_issue(), true);
+    let author = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t1".into()) };
+    let p = engine::set_auto_merge_by(&run.host, &run.id, false, author.clone()).unwrap();
+    let event = p.events.last().unwrap();
+    assert_eq!(event.actor.as_ref(), Some(&author));
+    assert_eq!(event.session_id.as_deref(), Some("author"));
+    assert!(event.message.contains("author session author through the CLI"));
+    let mut stale = p.clone();
+    let other = SwitchActor::Cli { session_id: Some("other".into()), tab_id: Some("t2".into()) };
+    engine::set_resolve_conflicts_by(&run.host, &run.id, false, other.clone()).unwrap();
+    engine::set_resolve_conflicts_by(&run.host, &run.id, true, SwitchActor::Person).unwrap();
+    stale.record("2026-10-12T10:00:01.000Z", "note", "The step finished.");
+    store::commit(&mut stale).unwrap();
+    let p = store::get(&run.id).unwrap();
+    assert!(!p.auto_merge && p.resolve_conflicts);
+    let events: Vec<_> = p.events.iter().filter(|event| event.kind == "resolveConflicts").collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].actor.as_ref(), Some(&other));
+    assert!(events[0].message.contains("session other through the CLI"));
+    assert_eq!(events[1].actor, Some(SwitchActor::Person));
+    assert!(events[1].message.contains("the person in the app"));
+    let count = p.events.len();
+    assert_eq!(engine::set_resolve_conflicts_by(&run.host, &run.id, true, SwitchActor::Person).unwrap().events.len(), count);
+}
+
 type Hook = Box<dyn FnOnce() + Send>;
 
 struct World {
