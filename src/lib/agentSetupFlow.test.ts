@@ -234,6 +234,23 @@ describe("the setup flow (PRO-152)", () => {
     expect(getAgentSetupFlow("claude")).toMatchObject({ phase: "failed", problem: "start", detail: "Claude Code is already being set up." });
   });
 
+  it("keeps its terminal when the run it follows is in the pane it was about to use", async () => {
+    // Two windows follow one install; when it ends, both start the sign-in in
+    // its pane, and the runtime lets one of them.
+    await act(() => startAgentSetup("claude", "install", { chain: true }));
+    const pane = (calls("agent_setup_start")[0] as { id: string }).id;
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "check_agent_readiness") return answer("signed_out");
+      if (command === "agent_setup_start") throw new Error("Claude Code is already being set up.");
+      if (command === "agent_setup_running") return { pane, step: "login" };
+      return null;
+    });
+    await act(async () => emit("pty_exit", { id: pane, code: 0 }));
+    await waitFor(() => expect(calls("agent_setup_running").length).toBeGreaterThanOrEqual(2));
+    expect(getAgentSetupFlow("claude")).toEqual({ phase: "running", step: "login", pane, chain: false });
+    expect(disposeInstance).not.toHaveBeenCalledWith(pane);
+  });
+
   it("puts a terminal in the view in front, and back in the one behind when it goes", () => {
     const behind = renderHook(() => useSetupTerminalHost("setup:claude:r1"));
     expect(behind.result.current).toBe(true);

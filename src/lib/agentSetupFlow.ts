@@ -162,7 +162,10 @@ async function run(harness: string, step: AgentSetupStep, pane: string, chain: b
 async function adopt(harness: string, instead: string): Promise<boolean> {
   const found = await agentSetup.running(harness).catch(() => null);
   if (!found || !runningIn(harness, instead)) return false;
-  disposeInstance(instead);
+  // The terminal made for a pane that never started; not the one it goes on
+  // showing, when the run is in that same pane (two windows both starting a
+  // sign-in after the install they follow).
+  if (found.pane !== instead) disposeInstance(instead);
   put(harness, { phase: "running", step: found.step, pane: found.pane, chain: found.step === "install" });
   // It may have ended before this window listened for its exit.
   const still = await agentSetup.running(harness).catch(() => null);
