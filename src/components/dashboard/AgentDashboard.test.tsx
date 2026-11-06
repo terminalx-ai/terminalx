@@ -22,7 +22,7 @@ it("renders empty chats under Not started and moves a chat after its first messa
     title: "Empty chat", created: at, modified: at, archived: false, pinned: false,
     tabs: [{ id: "tab", harness: "codex", model: "", permissionMode: "auto", status: "idle", created: at, modified: at }],
   };
-  const read = { ...empty, id: "read", title: "Read chat", lastMessageAt: at };
+  const read = { ...empty, id: "read", title: "Read chat", hasMessages: true };
   state.sessions = [empty, read];
   const view = render(<AgentDashboard />);
   const column = (name: string) => within(screen.getByRole("region", { name }));

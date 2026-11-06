@@ -44,3 +44,19 @@ it("counts only changed lines in old/new text edits, matching file chips", () =>
   const { container } = render(<ToolCallRow call={call} />);
   expect(container.textContent).toContain("+2 −1");
 });
+
+it("counts and displays increment/decrement statements and Markdown separators as patch content", () => {
+  const call: ToolCall = {
+    callId: "patch", name: "apply_patch", toolType: "file_edit", input: {}, seq: 2,
+    edits: [{ path: "/repo/app.ts", kind: "update", unified: "--- a/app.ts\n+++ b/app.ts\n@@ -1,2 +1 @@\n---counter;\n----\n+++counter;\n" }],
+    result: { text: "Success", isError: false },
+  };
+  const { container } = render(<ToolCallRow call={call} defaultOpen />);
+  expect(container.textContent).toContain("+1 −2");
+  expect(screen.getByText("--counter;")).toBeDefined();
+  expect(screen.getByText("++counter;")).toBeDefined();
+  expect(screen.getByText("---")).toBeDefined();
+  const turn: Turn = { key: "turn", seq: 1, ts: "2026-11-05T12:00:00Z", work: [{ kind: "tool", key: "patch", call }], live: false, toolCount: 1, editedFiles: 1 };
+  render(<TurnChanges changes={turnFileChanges(turn)} cwd="/repo" />);
+  expect(screen.getByTestId("turn-changes").textContent).toBe("app.ts+1 −2");
+});

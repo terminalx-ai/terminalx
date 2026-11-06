@@ -4,6 +4,7 @@ export interface DashboardTab {
   harness: string;
   status: DashboardTabStatus;
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
 }
 
 export interface DashboardSession {
@@ -18,6 +19,7 @@ export interface DashboardSession {
   title: string;
   modified: string;
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
   archived: boolean;
   tabs: DashboardTab[];
 }
@@ -53,7 +55,7 @@ export function sessionColumn(session: DashboardSession): ColumnId {
   if (session.tabs.some((tab) => tab.status === "waiting")) return "needs";
   if (session.tabs.some((tab) => tab.status === "in_progress")) return "working";
   // Opening, renaming or configuring a chat changes `modified`, but starts no turn.
-  if (session.lastMessageAt || session.tabs.some((tab) => tab.lastMessageAt || tab.status === "completed")) return "done";
+  if (session.hasMessages || session.lastMessageAt || session.tabs.some((tab) => tab.hasMessages || tab.lastMessageAt || tab.status === "completed")) return "done";
   return "not-started";
 }
 

@@ -541,8 +541,10 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
   current.info = { ...current.info,
     created: p.created || current.info.created,
     lastMessageAt: newestMessageTime(current.info.lastMessageAt, p.lastMessageAt),
+    hasMessages: current.info.hasMessages || p.hasMessages,
     sessionCreated: p.sessionCreated ?? current.info.sessionCreated,
     sessionLastMessageAt: newestMessageTime(current.info.sessionLastMessageAt, p.sessionLastMessageAt),
+    sessionHasMessages: current.info.sessionHasMessages || p.sessionHasMessages,
   };
   mergeTabEvents(p.sessionId, tabId, p.events);
   current.historyRead = true;
@@ -577,6 +579,7 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
       // Settings chosen here and not sent yet stay shown as chosen.
       existing.info = withPending({ ...keepMessageTime(info, existing.info),
         sessionLastMessageAt: newestMessageTime(info.sessionLastMessageAt, existing.info.sessionLastMessageAt),
+        sessionHasMessages: info.sessionHasMessages || existing.info.sessionHasMessages,
       }, existing.pendingConfig);
       existing.source = "live";
       existing.placeholder = false;

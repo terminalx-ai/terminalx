@@ -1,6 +1,6 @@
 import type { FileEdit } from "@terminalx/portable/events";
 import type { Turn } from "@/lib/transcript";
-import { diffLines } from "@/lib/diff";
+import { diffLines, patchLines } from "@/lib/diff";
 
 /** One file a turn changed, and by how many lines, over all of the turn's edits to it. */
 export interface TurnFileChange {
@@ -15,8 +15,7 @@ export function editLineCounts(edit: Pick<FileEdit, "oldText" | "newText" | "uni
   let added = 0;
   let removed = 0;
   if (edit.oldText == null && edit.newText == null && edit.unified) {
-    for (const line of edit.unified.split("\n")) {
-      if (line.startsWith("+++") || line.startsWith("---")) continue;
+    for (const line of patchLines(edit.unified)) {
       if (line.startsWith("+")) added++;
       else if (line.startsWith("-")) removed++;
     }

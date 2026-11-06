@@ -33,6 +33,15 @@ function session(id: string, statuses: TabStatus[], patch: Partial<SessionEntry>
 const opts = { query: "", filters: NO_FILTERS, projectName: () => "Raccoon" };
 
 describe("sessionColumn", () => {
+  it("keeps a legacy chat in Done after it is read without inventing a message timestamp", () => {
+    const legacy = { ...session("legacy", ["completed"], { lastMessageAt: null }), hasMessages: true };
+    expect(sessionColumn(legacy)).toBe("done");
+    legacy.tabs[0].status = "idle";
+    expect(sessionColumn(legacy)).toBe("done");
+    expect(bucketSessions([legacy]).done).toEqual([legacy]);
+    expect(legacy.lastMessageAt).toBeNull();
+  });
+
   it("keeps a chat with no prompt out of Done", () => {
     const empty = session("not-started", ["idle"], { lastMessageAt: null, modified: "2026-02-01T00:00:00.000Z" });
     expect(sessionColumn(empty)).toBe("not-started");

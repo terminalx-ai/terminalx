@@ -856,3 +856,25 @@ it("uses verified checkpoint chronology even when its retained event tail is emp
   await flushCloudAgentCache(scope);
   expect(backend.cache["t-1"].tab.lastMessageAt).toBe("2026-10-04T00:00:00Z");
 });
+
+it("retains message presence from a legacy checkpoint with no verified time or retained events", async () => {
+  backend.cache["t-1"] = {
+    tab: tabInfo(), events: [], cursor: null, checkpoint: { epoch: 7, version: 1 },
+    unread: false, completed: false, updatedAt: 1,
+  };
+  backend.checkpoints["t-1"] = {
+    epoch: 7, version: 2,
+    projection: { ...tabInfo(), v: 1, events: [], truncated: true, updatedAt: 999,
+      hasMessages: true, sessionHasMessages: true,
+    },
+  };
+  await loadCloudAgents(scope);
+  expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+  const client = fakeClient();
+  client.listAgentTabs.mockResolvedValue([tabInfo({ status: "idle", hasMessages: false, sessionHasMessages: false })]);
+  await reconcileCloudAgents(scope, client);
+  expect(getCloudAgents(scope).tabs[0].info).toMatchObject({ hasMessages: true, sessionHasMessages: true });
+  expect(getCloudAgents(scope).tabs[0].info.lastMessageAt).toBeUndefined();
+  await flushCloudAgentCache(scope);
+  expect(backend.cache["t-1"].tab).toMatchObject({ hasMessages: true, sessionHasMessages: true });
+});

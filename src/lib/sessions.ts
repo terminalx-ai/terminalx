@@ -167,8 +167,8 @@ export function subscribeSessionStore(listener: () => void): () => void {
 let booted = false;
 const workspaceRefreshVersions = new Map<string, number>();
 // Backfill can publish while the first list is being read. Subscribe first,
-// retaining only chronology until initialization supplies the session rows.
-const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
+// retaining message activity until initialization supplies the session rows.
+const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt" | "hasMessages">>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
@@ -176,7 +176,7 @@ export async function bootSessions() {
     await listen<SessionEntry>("session_updated", (e) => {
       if (state.loaded) upsertSession(e.payload);
       else initialMessageTimes.set(e.payload.id, keepMessageTime(
-        { lastMessageAt: e.payload.lastMessageAt }, initialMessageTimes.get(e.payload.id),
+        { lastMessageAt: e.payload.lastMessageAt, hasMessages: e.payload.hasMessages }, initialMessageTimes.get(e.payload.id),
       ));
     });
     // A new live connection (#643): what changed during the gap was never

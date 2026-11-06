@@ -111,6 +111,22 @@ const columnOf = (sessions: CloudDashboardSession[], key: string) => {
 };
 
 describe("cloud sessions in the dashboard's columns", () => {
+  it("keeps timestamp-free legacy conversations Done from lists, tab metadata and checkpoints", () => {
+    const legacy = session("legacy", "Legacy", "idle", { lastMessageAt: null, hasMessages: true });
+    const known = agentTab("legacy", "idle");
+    known.info.hasMessages = true;
+    for (const world of [
+      { live: { "ws-1": [legacy] }, connected: ["ws-1"] },
+      { cached: { "ws-1": [legacy] } },
+      { live: { "ws-1": [{ ...legacy, hasMessages: false, tabs: legacy.tabs.map((tab) => ({ ...tab, hasMessages: true })) }] } },
+      { tabs: { "ws-1": [known] } },
+    ]) {
+      const sessions = project({ workspaces: [item("ws-1")], ...world });
+      expect(columnOf(sessions, `cloud:${ORG}:ws-1:legacy`)).toBe("done");
+      expect(sessions[0].lastMessageAt).toBeUndefined();
+    }
+  });
+
   it("keeps empty cloud chats in Not started and retains message evidence for read chats", () => {
     const sessions = project({
       workspaces: [item("ws-1")],
