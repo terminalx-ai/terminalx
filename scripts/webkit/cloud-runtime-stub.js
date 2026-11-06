@@ -24,8 +24,10 @@
     workspace: { id: WS, orgId: ORG, name: "share-demo", provider: "local-docker", state: "ready", accessMode: "organization", createdAt: 1, updatedAt: now, releaseDisposition: null, repositories: [], authority, you: { role, canApprove: you.canApprove }, sharedWith: 1 },
     latestOperation: null,
   };
-  const tab = { id: TAB, harness: "claude", title: "Echo:hello from Alice", model: "", permissionMode: "default", status: "idle", created: at, modified: at };
-  const session = { id: SESSION, projectPath: "/w", cwd: "/w", title, branch: f.branch ?? null, created: at, modified: at, archived: false, pinned: !!f.pinned, tabs: [tab], activeTab: TAB };
+  // The transcript below always contains completed turns. Cached and live
+  // metadata must carry that evidence so the dashboard keeps this read chat in Done.
+  const tab = { id: TAB, harness: "claude", title: "Echo:hello from Alice", model: "", permissionMode: "default", status: "idle", created: at, modified: at, hasMessages: true };
+  const session = { id: SESSION, projectPath: "/w", cwd: "/w", title, branch: f.branch ?? null, created: at, modified: at, hasMessages: true, archived: false, pinned: !!f.pinned, tabs: [tab], activeTab: TAB };
   const capabilities = ["pty/1", ...(f.sessionTerminals === false ? [] : ["pty/2"]), "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", ...(f.agentTerminal ? ["agent-pty/1"] : [])];
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [workspace], repositories: [], quota: { used: 1, limit: 3 }, fetchedAt: now, sessions: { [WS]: { sessions: [session], capabilities, at: now } } } } };
   const org = { id: ORG, name: "Local E2E", role: role === "manager" ? "owner" : "member", isPersonal: false, cloud: { enabled: true, flags: {} } };
@@ -46,7 +48,7 @@
   let status = "idle";
   // `model` and `permissionMode`: what the composer's pickers read (their labels decide how wide its toolbar wants to be).
   // `signIn`: the tab's agent has no way to sign in (PRO-78), and the tab says so.
-  const tabInfo = () => ({ sessionId: SESSION, tabId: TAB, title: tab.title, harness: "claude", model: f.model ?? "", effort: null, permissionMode: f.permissionMode ?? "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: seq, created: at, modified: at, ...(f.signIn ? { signIn: f.signIn } : {}) });
+  const tabInfo = () => ({ sessionId: SESSION, tabId: TAB, title: tab.title, harness: "claude", model: f.model ?? "", effort: null, permissionMode: f.permissionMode ?? "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: seq, created: at, modified: at, hasMessages: tab.hasMessages, sessionHasMessages: session.hasMessages, ...(f.signIn ? { signIn: f.signIn } : {}) });
   const terminals = [];
   const terminal = (sessionId) => ({ ptyId: `p${terminals.length + 1}`, number: terminals.length + 1, epoch: "e1", pid: 100 + terminals.length, cwd: "/w", cols: 80, rows: 24, createdAt: now, offset: 0, exited: false, exitCode: null, control: "none", controllerId: null, ...(sessionId ? { sessionId } : {}) });
   const notes = [];
