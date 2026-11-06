@@ -215,6 +215,31 @@ describe("the tab strip", () => {
     expect(screen.getByRole("menuitem", { name: "Close other tabs…" })).toBeTruthy();
   });
 
+  it.each(["strip", "sidebar"])("opens the %s tab's menu with Shift+F10 and returns focus on Escape", async (surface) => {
+    render(<TabsHarness />);
+    const target = surface === "strip" ? tab("Review") : rows("a").find((row) => row.getAttribute("aria-label") === "Review")!;
+    act(() => target.focus());
+    fireEvent.keyDown(target, { key: "F10", shiftKey: true });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Rename…" })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    await waitFor(() => expect(document.activeElement?.getAttribute("role")).toBe("menuitem"));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(target));
+  });
+
+  it.each(["right-click", "Shift+F10"])("opens a session row's existing menu with %s", async (input) => {
+    render(<TabsHarness />);
+    const session = backend.sessions.find((entry) => entry.id === "a")!;
+    const title = screen.getByRole("button", { name: session.title });
+    if (input === "right-click") fireEvent.contextMenu(title);
+    else fireEvent.keyDown(title, { key: "F10", shiftKey: true });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Share session…" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "Fork session" })).toBeTruthy();
+  });
+
   it("draws nothing for a single tab where a strip would only repeat it", () => {
     selectSession("other");
     const { container } = render(<TabsHarness hideSingle />);
