@@ -34,6 +34,8 @@ pub enum Action {
     AcpPrompt(Box<acp::PromptWrite>),
     /// An opening/live user model request, correlated independently of value.
     AcpModelRefused { request_id: String, model: String, message: String },
+    /// Consume a deferred mode only at its physical write (or known no-op).
+    AcpMode { mode: String, line: Option<String> },
     Emit(Payload),
     /// The thread id the server minted; the manager records it as the
     /// tab's provider session id so resume works.

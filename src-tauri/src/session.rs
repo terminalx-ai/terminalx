@@ -40,6 +40,9 @@ use crate::store::index::{self, TabEntry, TabStatus};
 use crate::sink::{EventSink, SessionObserver};
 use crate::{git, pty, store};
 
+#[cfg(test)]
+static ACP_FULL_PIPE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
+
 #[path = "session_follow.rs"]
 pub mod follow;
 #[path = "session_unsent.rs"]
@@ -2869,7 +2872,7 @@ impl SessionManager {
         let tab = entry.tab(&rt.tab_id).context("tab not found")?;
         if let Engine::Acp(a) = &mut rt.engine {
             a.model = Some(tab.requested_model.as_ref().unwrap_or(&tab.model).clone()).filter(|m| !m.is_empty());
-            a.mode = tab.permission_mode.clone();
+            a.mode = tab.requested_permission_mode.as_ref().unwrap_or(&tab.permission_mode).clone();
             a.opening_model_request = Settings::of(tab).model_request_id().map(String::from);
         }
         Ok(privacy)
@@ -2920,47 +2923,83 @@ impl SessionManager {
     /// The exact child and adapter request must still own it after admission.
     fn write_acp_prompt(&self, runtime: std::sync::Weak<Mutex<TabRuntime>>, child: Option<Arc<crate::harness::host::LiveChild>>,
         session: String, tab: String, write: acp::PromptWrite) {
-        let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
         let mut started = Some(write.started);
         let Some(runtime) = runtime.upgrade() else { return };
         let current = |rt: &TabRuntime| !rt.stopping
             && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
             && matches!(&rt.engine, Engine::Acp(a) if a.delivery_current(write.id, write.delivery.seq));
         let mut attempted = false;
+        let privacy = write.delivery.privacy.as_ref()
+            .or_else(|| write.delivery.mobile.as_ref().map(|p| &p.grant.privacy))
+            .or_else(|| write.delivery.shared.as_ref().map(|p| &p.privacy));
+        let lease = privacy.map(|ticket| ticket.enter()).transpose();
+        // A complete frame has one writer. Waiting for that writer owns no
+        // session/admission/sender lock, so Stop and other tabs can progress.
+        let _frame = child.as_ref().map(|child| child.input_frame());
+        let mut bytes = write.line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        let mut offset = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
         let result = (|| -> Result<()> {
-            let privacy = write.delivery.privacy.as_ref()
-                .or_else(|| write.delivery.mobile.as_ref().map(|p| &p.grant.privacy))
-                .or_else(|| write.delivery.shared.as_ref().map(|p| &p.privacy));
-            let _privacy = privacy.map(|ticket| ticket.enter()).transpose()?;
-            let mut sharing = (write.delivery.mobile.is_some() || write.delivery.shared.is_some()).then(|| self.sharing.lock().unwrap());
-            let mut attachment = None;
-            if let Some(permit) = &write.delivery.shared {
-                let share = sharing.as_mut().and_then(|s| s.sessions.get_mut(&session)).context("Sharing ended before ACP delivery")?;
-                share.admit_at_writer(permit, &tab, chrono::Utc::now().timestamp_millis())?;
-                attachment = share.owner.as_ref().map(|owner| owner.attachment.clone());
-                let entry = index::get(&session)?;
-                anyhow::ensure!(entry.tab(&tab).is_some_and(|tab| settings::allowed_while_shared(&tab.permission_mode)), "Shared mode changed before ACP delivery");
+            lease.as_ref().map_err(|error| anyhow!("{error}"))?;
+            while offset < bytes.len() {
+                {
+                    let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
+                    anyhow::ensure!(privacy.is_none_or(|ticket| ticket.valid()), crate::data_privacy::MESSAGE);
+                    anyhow::ensure!(Instant::now() < deadline, "ACP input pipe timed out; input will not be replayed");
+                    let mut sharing = (write.delivery.mobile.is_some() || write.delivery.shared.is_some()).then(|| self.sharing.lock().unwrap());
+                    let mut attachment = None;
+                    if let Some(permit) = &write.delivery.shared {
+                        let share = sharing.as_mut().and_then(|s| s.sessions.get_mut(&session)).context("Sharing ended before ACP delivery")?;
+                        share.admit_at_writer(permit, &tab, chrono::Utc::now().timestamp_millis())?;
+                        attachment = share.owner.as_ref().map(|owner| owner.attachment.clone());
+                        let entry = index::get(&session)?;
+                        anyhow::ensure!(entry.tab(&tab).is_some_and(|tab| settings::allowed_while_shared(&tab.permission_mode)), "Shared mode changed before ACP delivery");
+                    }
+                    if let Some(permit) = &write.delivery.mobile { permit.check_mode(&session, &tab)?; }
+                    let _mobile = write.delivery.mobile.as_ref().map(|permit| permit.enter()).transpose()?;
+                    let _owner = attachment.as_ref().map(|attachment| attachment.enter()).transpose()?;
+                    let mut rt = runtime.lock().unwrap();
+                    if !current(&rt) { return Ok(()); }
+                    self.accepting_work()?;
+                    crate::issue_pipeline::admission::check(&session, &tab)?;
+                    match child.as_ref().context("ACP child is missing")?.try_write_stdin(&bytes[offset..]) {
+                        Ok(0) => bail!("ACP input pipe closed"),
+                        Ok(written) => { offset += written; attempted = true; }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            #[cfg(test)]
+                            if let Some(observed) = ACP_FULL_PIPE.lock().unwrap().take() { let _ = observed.send(()); }
+                        },
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+                        Err(error) => return Err(error).context("ACP input pipe failed"),
+                    }
+                    if offset == bytes.len() {
+                        if let Engine::Acp(a) = &mut rt.engine { a.delivered(write.id); }
+                        recovery::diagnose_send(&rt.diagnostics_path(), write.delivery.seq, "delivered", serde_json::json!({ "since_sent_ms": 0 }));
+                        self.apply(&mut rt, started.take().unwrap(), None);
+                        self.apply(&mut rt, Payload::ModelRequestStarted, None);
+                    }
+                }
+                if offset < bytes.len() { std::thread::sleep(Duration::from_millis(5)); }
             }
-            if let Some(permit) = &write.delivery.mobile { permit.check_mode(&session, &tab)?; }
-            let _mobile = write.delivery.mobile.as_ref().map(|permit| permit.enter()).transpose()?;
-            let _owner = attachment.as_ref().map(|attachment| attachment.enter()).transpose()?;
-            let mut rt = runtime.lock().unwrap();
-            if !current(&rt) { return Ok(()); }
-            self.accepting_work()?;
-            crate::issue_pipeline::admission::check(&session, &tab)?;
-            attempted = true;
-            self.write(&rt, &write.line)?;
-            if let Engine::Acp(a) = &mut rt.engine { a.delivered(write.id); }
-            recovery::diagnose_send(&rt.diagnostics_path(), write.delivery.seq, "delivered", serde_json::json!({ "since_sent_ms": 0 }));
-            self.apply(&mut rt, started.take().unwrap(), None);
-            self.apply(&mut rt, Payload::ModelRequestStarted, None);
             Ok(())
         })();
         let mut rt = runtime.lock().unwrap();
+        // Interrupt or Stop may have retired the request between chunks.
+        // Close that exact pipe even when a later request now owns the turn;
+        // no subsequent frame may complete the cancelled partial JSON line.
+        if attempted && offset < bytes.len() {
+            if let Some(child) = &child { child.close_stdin(); }
+            if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) {
+                rt.stopping = true;
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+            }
+        }
         // Success retired the queued write; failure may have raced Stop or
         // replacement. Never close a later turn or write into a new child.
         if let Err(error) = result {
-            if !current(&rt) { return; }
+            if !child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
+                || !matches!(&rt.engine, Engine::Acp(a) if a.delivery_current(write.id, write.delivery.seq)) { return; }
             if let Engine::Acp(a) = &mut rt.engine { a.withdraw_delivery(write.id); }
             log::warn!("ACP prompt delivery stopped: {error:#}");
             if attempted {
@@ -2972,11 +3011,23 @@ impl SessionManager {
             self.prompt_withdrawn(&mut rt, write.delivery.seq, None);
             self.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
         }
+        // The activation acknowledgement follows partial-frame cleanup.
+        drop(lease);
     }
 
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
         for a in actions {
             match a {
+                Action::AcpMode { mode, line } => {
+                    if rt.stopping { continue; }
+                    let result = line.as_deref().map(|line| self.write(rt, line)).unwrap_or(Ok(()))
+                        .and_then(|()| self.update_settings(rt, |s| s.reported_mode(&mode)).map(|_| ()));
+                    if let Err(error) = result {
+                        rt.stopping = true;
+                        self.needs_recovery(rt, RecoveryKind::Disconnected);
+                        self.publish(rt, Payload::Status { text: format!("Could not apply ACP permission mode: {error:#}. Stop the agent before retrying.") }, None);
+                    }
+                }
                 Action::AcpPrompt(write) => {
                     let manager = self.clone();
                     let runtime = rt.me.clone();
@@ -3012,6 +3063,11 @@ impl SessionManager {
                 }
                 Action::Write(line) => {
                     if let Err(e) = self.write(rt, &line) {
+                        if matches!(&rt.engine, Engine::Acp(_)) {
+                            if let Some(child) = &rt.child { child.close_stdin(); }
+                            rt.stopping = true;
+                            self.needs_recovery(rt, RecoveryKind::Disconnected);
+                        }
                         self.apply(rt, Payload::Error { message: format!("Connection write failed: {e:#}"), fatal: false, detail: None }, None);
                     }
                 }
@@ -3654,7 +3710,7 @@ impl SessionManager {
             (Engine::Cli(_), Apply::Live) => true,
             (Engine::Cli(_), Apply::Restart) => rt.turn_open,
             // The reply to `session/set_model` is its answer.
-            (Engine::Acp(a), Apply::Live) => a.session_id.is_some(),
+            (Engine::Acp(_), Apply::Live) => true,
             // OpenCode names the model on each prompt: nothing to wait for.
             _ => false,
         }
@@ -3889,7 +3945,7 @@ impl SessionManager {
         }
         let turn_open = rt.turn_open;
         let stdio = self.codex_stdio_mode_change(session_id, tab_id, mode, turn_open)?;
-        let waits = turn_open && matches!(rt.engine, Engine::Cli(_));
+        let waits = (turn_open && matches!(rt.engine, Engine::Cli(_))) || matches!(&rt.engine, Engine::Acp(a) if !a.ready);
         let (before, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
         let mut restart = false;
         match &mut rt.engine {

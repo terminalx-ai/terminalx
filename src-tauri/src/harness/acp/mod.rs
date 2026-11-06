@@ -236,9 +236,10 @@ impl Acp {
         self.mode = mode.into();
         let (Some(sid), Some(id)) = (self.session_id.clone(), self.mode_id_for(mode)) else { return Vec::new() };
         if self.current_mode.as_deref() == Some(&id) {
-            return Vec::new();
+            return vec![Action::AcpMode { mode: mode.into(), line: None }];
         }
-        vec![Action::Write(self.request("session/set_mode", json!({"sessionId": sid, "modeId": id}), Pending::SetMode))]
+        let line = self.request("session/set_mode", json!({"sessionId": sid, "modeId": id}), Pending::SetMode);
+        vec![Action::AcpMode { mode: mode.into(), line: Some(line) }]
     }
 
     /// Ask the agent for another model. Its reply is the answer the tab
@@ -615,7 +616,10 @@ mod tests {
     use super::*;
 
     fn writes(actions: &[Action]) -> Vec<Value> {
-        actions.iter().filter_map(|a| if let Action::Write(l) = a { serde_json::from_str(l).ok() } else { None }).collect()
+        actions.iter().filter_map(|a| match a {
+            Action::Write(line) | Action::AcpMode { line: Some(line), .. } => serde_json::from_str(line).ok(),
+            _ => None,
+        }).collect()
     }
     fn emits(actions: &[Action]) -> Vec<&Payload> {
         actions.iter().filter_map(|a| if let Action::Emit(p) = a { Some(p) } else { None }).collect()
