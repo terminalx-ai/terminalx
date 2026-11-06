@@ -1,11 +1,123 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DEFAULT_SETTINGS_TAB, SettingsPage } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { isMac } from "@/lib/hotkeys";
+
+const settingsFile = vi.hoisted(() => ({ error: null as string | null }));
+vi.mock("@/lib/settingsFile", () => ({
+  useSettingsFile: () => ({ error: settingsFile.error, file: null, revision: 0 }),
+  createSettingsFile: vi.fn(async () => {}),
+}));
+
+beforeEach(() => {
+  settingsFile.error = null;
+  Element.prototype.scrollIntoView = vi.fn();
+  Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
+});
 
 afterEach(cleanup);
+
+describe("Settings search", () => {
+  it("keeps one invalid-file diagnostic visible while searching sections", () => {
+    settingsFile.error = "preferences.sounds, line 3: expected true or false";
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search settings" }), { target: { value: "font" } });
+    expect(screen.getByRole("option", { name: /Appearance/ })).toBeTruthy();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
+  });
+
+  it("focuses with the find shortcut, highlights font matches, and opens the section with Enter", () => {
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search settings" });
+    fireEvent.keyDown(document.body, { key: "f", metaKey: isMac, ctrlKey: !isMac });
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: "font" } });
+    const result = screen.getByRole("option", { name: /Appearance/ });
+    expect(result.querySelector("mark")?.textContent).toBe("font");
+    expect(input.getAttribute("aria-activedescendant")).toBe(result.id);
+    result.closest("section")!.scrollTop = 400;
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+    expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2 }));
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.getByRole("heading", { level: 2 }).closest("section")!.scrollTop).toBe(0);
+  });
+
+  it("wraps arrow navigation, resets selection when edited, and opens a clicked result", () => {
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "a" } });
+    const results = screen.getAllByRole("option");
+    expect(results.length).toBeGreaterThan(2);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(results[1].id);
+    fireEvent.change(input, { target: { value: "hotkeys" } });
+    const result = screen.getByRole("option", { name: /Shortcuts/ });
+    expect(input.getAttribute("aria-activedescendant")).toBe(result.id);
+    fireEvent.click(result);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Shortcuts");
+  });
+
+  it("clears an empty-result search with Escape before closing Settings", () => {
+    const onBack = vi.fn();
+    render(<SettingsPage initialTab="appearance" onBack={onBack} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "zzzz-no-such-setting" } });
+    expect(screen.getByRole("status").textContent).toBe("No settings match zzzz-no-such-setting");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onBack).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(onBack).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets overlays keep Escape and find while search is active", () => {
+    const onBack = vi.fn();
+    render(<SettingsPage initialTab="appearance" onBack={onBack} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "font" } });
+    for (const role of ["dialog", "alertdialog", "menu", "listbox"]) {
+      const overlay = document.createElement("div");
+      overlay.setAttribute("role", role);
+      overlay.tabIndex = -1;
+      document.body.append(overlay);
+      overlay.focus();
+      fireEvent.keyDown(overlay, { key: "Escape" });
+      fireEvent.keyDown(overlay, { key: "f", metaKey: isMac, ctrlKey: !isMac });
+      expect((input as HTMLInputElement).value).toBe("font");
+      expect(document.activeElement).toBe(overlay);
+      expect(onBack).not.toHaveBeenCalled();
+      overlay.remove();
+    }
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(onBack).not.toHaveBeenCalled();
+  });
+
+  it("does not navigate on an IME's Enter and clears search for an external open request", () => {
+    const { rerender } = render(<SettingsPage initialTab="general" openRequest={1} onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "font" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(screen.getByRole("option", { name: /Appearance/ })).toBeTruthy();
+    rerender(<SettingsPage initialTab="general" openRequest={2} onBack={vi.fn()} />);
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+    expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2 }));
+  });
+});
 
 describe("Website links", () => {
   it("offers all three browser modes and can turn the chooser back on", () => {

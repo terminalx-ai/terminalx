@@ -96,7 +96,7 @@ describe("organization Settings", () => {
     expect(getPrefs().selectedOrganization).toBe("b");
     fireEvent.click(choices.getByRole("radio", { name: "All organizations" }));
     expect(getPrefs()).toMatchObject({ organizationDisplay: "all", hiddenOrganizations: ["a", "b"] });
-    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Organization in sidebar" })).toBeNull();
     expect(screen.getAllByRole("switch").every((toggle) => !toggle.hasAttribute("disabled"))).toBe(true);
   });
 
