@@ -6,6 +6,7 @@ import { getDraft, setDraft } from "@/lib/drafts";
 import { openFile, useEditors } from "@/lib/editors";
 import { fileErrorText, localFileSource, StaleRequestError, type FileSource, type SourceEntry } from "@/lib/workspaceFiles";
 import { cn } from "@/lib/cn";
+import { isContextMenuKey, openContextMenu } from "@/lib/contextMenu";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 import type { ChangeStatus } from "@/types/session";
 import { FileTypeIcon } from "./FileTypeIcon";
@@ -216,8 +217,18 @@ function RootedFileTreeView({
   );
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.defaultPrevented) return;
     const i = Math.max(0, rows.findIndex((r) => r.path === focus));
     const row = rows[i];
+    if (isContextMenuKey(e)) {
+      const target = container.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(row.path)}"]`);
+      if (target) {
+        e.preventDefault();
+        e.stopPropagation();
+        openContextMenu(target);
+      }
+      return;
+    }
     const go = (j: number) => {
       const target = rows[Math.max(0, Math.min(rows.length - 1, j))];
       if (target) setFocus(target.path);

@@ -2,9 +2,15 @@
 //! commands serialized per session, each bounded by a timeout, and a stuck
 //! daemon restarted after repeated timeouts.
 //!
-//! Every invocation re-asserts the launch options (`--profile`, `--headed`,
-//! `--download-path`): a daemon that idled out and was relaunched by the next
-//! command would otherwise open a headless, profile-less browser.
+//! Every invocation re-asserts the launch options (`--profile`,
+//! `--download-path`, and `--headed` when asked for): a daemon that idled out
+//! and was relaunched by the next command would otherwise open a profile-less
+//! browser.
+//!
+//! The browser runs headless: the page lives in the app, in its browser
+//! views, streamed and driven over DevTools, never in a window of its own.
+//! `TERMINALX_BROWSER_HEADED=1` brings the window back, for debugging the
+//! browser itself.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -179,7 +185,10 @@ impl Ctx<'_> {
         let mut argv: Vec<&str> = vec!["--session", &self.session.name];
         let profile_dir = self.session.profile_dir.to_string_lossy().into_owned();
         let download_dir = self.session.download_dir.to_string_lossy().into_owned();
-        argv.extend(["--profile", &profile_dir, "--headed", "--download-path", &download_dir]);
+        argv.extend(["--profile", &profile_dir, "--download-path", &download_dir]);
+        if headed() {
+            argv.push("--headed");
+        }
         argv.extend_from_slice(args);
         argv.push("--json");
         self.lane.last_command_at = Some(Instant::now());
@@ -367,6 +376,12 @@ pub fn check_text_argument(name: &str, value: &str) -> BrowserResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Whether to show the Chromium window (`TERMINALX_BROWSER_HEADED=1`); the
+/// app's own browser views are the page's place otherwise.
+pub fn headed() -> bool {
+    std::env::var("TERMINALX_BROWSER_HEADED").is_ok_and(|v| v == "1")
 }
 
 #[cfg(test)]

@@ -2200,6 +2200,24 @@ pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDet
 
 // ------------------------------------------------------------------ git
 
+/// The branch against its base, for the side panel's Branch tab.
+#[tauri::command]
+pub async fn branch_overview(cwd: String, base: Option<String>) -> CmdResult<crate::branch_overview::BranchOverview> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref())).await.map_err(err)
+}
+
+/// Merges the checked-out branch into a local branch, for a project with no remote.
+#[tauri::command]
+pub async fn branch_merge_into(cwd: String, into: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::merge_into(Path::new(&cwd), &into).map_err(err)).await.map_err(err)?
+}
+
+/// Brings the remote's branches up to date for the Branch tab; false when it could not.
+#[tauri::command]
+pub async fn branch_fetch(cwd: String) -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::fetch(Path::new(&cwd))).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn work_status(cwd: String) -> CmdResult<git::WorkStatus> {
     tauri::async_runtime::spawn_blocking(move || git::work_status(Path::new(&cwd))).await.map_err(err)

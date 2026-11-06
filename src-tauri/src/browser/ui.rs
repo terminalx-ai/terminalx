@@ -93,6 +93,20 @@ pub async fn browser_screencast(state: State<'_, crate::AppState>, page_id: Stri
     .map_err(err)?
 }
 
+/// The reader's input on a page's live preview: mouse, wheel, keys and
+/// pasted text, as DevTools `Input.*` commands sent in order.
+#[derive(serde::Deserialize)]
+pub struct PageInput {
+    method: String,
+    params: Value,
+}
+
+#[tauri::command]
+pub fn browser_input(state: State<'_, crate::AppState>, page_id: String, events: Vec<PageInput>) -> CmdResult<()> {
+    let events = events.into_iter().map(|e| (e.method, e.params)).collect();
+    runtime(&state).screencasts.input(&page_id, events).map_err(err)
+}
+
 #[tauri::command]
 pub async fn browser_runtime_status(state: State<'_, crate::AppState>) -> CmdResult<super::binary::RuntimeStatus> {
     let rt = runtime(&state);

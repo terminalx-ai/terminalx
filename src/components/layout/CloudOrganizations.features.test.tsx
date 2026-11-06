@@ -185,6 +185,21 @@ afterEach(async () => {
   await resetCloudDashboard();
 });
 
+describe("cloud context menus (PRO-187)", () => {
+  it.each(["project", "workspace", "session"])("opens a cloud %s menu with Shift+F10", async (surface) => {
+    await standard();
+    mount();
+    const target = surface === "project"
+      ? within(project("acme/api")).getByRole("button", { name: "Collapse acme/api" })
+      : surface === "workspace"
+        ? screen.getAllByTestId("cloud-workspace-group").find((row) => row.getAttribute("data-workspace") === "fix-login")!.querySelector("button")!
+        : sessionRow(`cloud:${ORG}:fix-login:s1`).querySelector("button")!;
+    fireEvent.keyDown(target, { key: "F10", shiftKey: true });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: surface === "project" ? "Pin project" : surface === "session" ? "Rename" : "Stop" })).toBeTruthy();
+  });
+});
+
 describe("personal named sections", () => {
   const mine = () => prefs.getPrefs().cloudSections[ME]?.[ORG] ?? [];
   const sectionNames = () => screen.queryAllByTestId("cloud-section-name").map((name) => name.textContent);

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { DEFAULT_PERMISSION_MODE, pickerMode, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -6,6 +6,7 @@ import { chooseMode } from "@/lib/dialogs";
 import { getPrefs, setPrefs, usePrefs, type Prefs } from "@/lib/prefs";
 import type { ModelInfo } from "@/lib/api";
 import type { HarnessInfo, TabEntry } from "@/types/session";
+import type { AgentReadinessMap } from "@/lib/agentReadiness";
 
 /** One launch: the agent, its model and effort, and the permission mode it starts in. */
 export interface LaunchSettings {
@@ -88,8 +89,9 @@ export function handoffStart(source: LaunchSettings, harnesses: HarnessInfo[], m
  * With `controlled`, the choices are the form's own and preferences are only
  * read, for the saved model and effort of an agent switched to.
  */
-export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClient?: WorkspaceRpcClient | null, controlled?: ControlledLaunch) {
+export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClient?: WorkspaceRpcClient | null, controlled?: ControlledLaunch, readiness?: AgentReadinessMap | null) {
   const prefs = usePrefs();
+  const [pickedAgent, setPickedAgent] = useState<string | null>(null);
   // The bypass confirmation answers later: it must change the value as it is then.
   const latest = useRef(controlled);
   latest.current = controlled;
@@ -98,7 +100,17 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   // A cloud or controlled form owns its choice. For a local start, a missing
   // default should not hide the agent that is already installed. Derive this
   // without replacing the saved provider/model preferences during discovery.
-  const harness = (!chosen && here && !preferred?.available ? harnesses.find((h) => h.available) : preferred) ?? preferred ?? harnesses[0] ?? null;
+  const localDefaults = !chosen && here && readiness !== undefined;
+  const eligible = (state: "ready" | "unknown") => harnesses.filter((h) => h.available && readiness?.[h.id]?.state === state);
+  // Known logins win over an unknown probe, including a saved unknown agent.
+  // Unknown can be a working custom route; a failed probe is not a signed-out login.
+  const ready = localDefaults ? eligible("ready") : [];
+  const unknown = localDefaults ? eligible("unknown") : [];
+  const candidates = ready.length ? ready : unknown;
+  const explicit = [...ready, ...unknown].find((h) => h.id === pickedAgent && h.id === prefs.lastAgent);
+  const harness = localDefaults
+    ? explicit ?? candidates.find((h) => h.id === prefs.lastAgent) ?? candidates[0] ?? null
+    : (!chosen && here && !preferred?.available ? harnesses.find((h) => h.available) : preferred) ?? preferred ?? harnesses[0] ?? null;
   const catalog = useModels(controlled?.preserveUnavailableModel ? undefined : harness?.id);
   const listed = controlled?.preserveUnavailableModel ? catalog.filter((m) => m.harness === harness?.id) : catalog;
   const picker = usePickerModels(listed, !here, modelClient, harness?.id);
@@ -125,6 +137,7 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   return {
     harnesses,
     harness,
+    readiness,
     here,
     models,
     refreshModels: picker.refresh,
@@ -136,7 +149,11 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     mode,
     // Like New Session, only explicit choices are persisted, per provider.
     selectHarness: (id: string) => {
-      if (!controlled) setPrefs({ lastAgent: id });
+      if (!controlled) {
+        if (localDefaults && ![...ready, ...unknown].some((h) => h.id === id)) return;
+        setPickedAgent(id);
+        setPrefs({ lastAgent: id });
+      }
       // Another agent starts on its own saved model and effort, as it would on New Session.
       else if (id !== harness?.id) {
         if (!controlled.preserveUnavailableModel) {
