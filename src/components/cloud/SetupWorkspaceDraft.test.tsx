@@ -10,7 +10,7 @@ import { SetupWorkspaceDraft } from "./SetupWorkspaceDraft";
 const account = vi.hoisted(() => ({ status: { state: "signed-in", context: { account: "account", revision: "1" }, identity: { email: "admin@example.com" }, organizations: [{ id: "org", role: "owner" }] }, listeners: new Set<() => void>() }));
 vi.mock("@/lib/account", () => ({ useAccount: () => account, getAccount: () => account, subscribeAccount: (listener: () => void) => { account.listeners.add(listener); return () => account.listeners.delete(listener); } }));
 vi.mock("@/lib/cloudAgents", () => ({ sendToCloudAgent: vi.fn() }));
-vi.mock("@/lib/sessions", () => ({ selectCloudSession: vi.fn() }));
+vi.mock("@/lib/sessions", () => ({ selectCloudSession: vi.fn(), getSessionStore: () => ({ navigationVersion: 1 }) }));
 const client = { createAgentTab: vi.fn() } as unknown as WorkspaceRpcClient;
 // This is the real launch response contract: runtime created a tab in the selected nested checkout.
 const launch = { tabId: "launch-tab", sessionId: "launch-session", hasPrompt: false } as CloudWorkspaceLaunch;
@@ -64,5 +64,23 @@ it.each(["signout", "account", "profile", "role"])("fences a late send after %s 
   await act(async () => held.resolve({ clientCommandId: "old-command" } as never));
   if (change === "signout") expect(loadSetups("admin@example.com")).toEqual([]);
   else expect(loadSetups("admin@example.com")[0].draft?.sent).toBeUndefined();
-  expect(selectCloudSession).toHaveBeenCalledTimes(1);
+  expect(selectCloudSession).not.toHaveBeenCalled();
+});
+
+it.each(["cloud_agent_key_missing", "cloud_agent_command_too_large"])("restores an editable draft and visible error after definite refusal %s and reopening", async (code) => {
+  vi.mocked(sendToCloudAgent).mockRejectedValueOnce(code);
+  const view = mount(); fireEvent.click(screen.getByText("Send")); await screen.findByRole("alert");
+  expect(selectCloudSession).not.toHaveBeenCalled(); view.unmount(); mount();
+  expect(screen.getByRole("alert")).toBeTruthy();
+  expect((screen.getByLabelText("Environment-check draft") as HTMLTextAreaElement).disabled).toBe(false);
+  fireEvent.change(screen.getByLabelText("Environment-check draft"), { target: { value: "Shorter draft" } });
+  fireEvent.click(screen.getByText("Send")); await waitFor(() => expect(sendToCloudAgent).toHaveBeenCalledTimes(2));
+});
+it("a context change before enqueue leaves the original draft recoverable without a sending marker", async () => {
+  const view = mount(); fireEvent.click(screen.getByText("Send"));
+  account.status.context.revision = "2"; for (const listener of account.listeners) listener();
+  await act(async () => {}); view.unmount(); mount();
+  expect(sendToCloudAgent).not.toHaveBeenCalled();
+  expect(loadSetups("admin@example.com")[0].draft?.sending).toBeUndefined();
+  expect((screen.getByLabelText("Environment-check draft") as HTMLTextAreaElement).disabled).toBe(false);
 });

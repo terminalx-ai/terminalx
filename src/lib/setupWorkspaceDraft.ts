@@ -3,7 +3,7 @@ import { getAccount, subscribeAccount } from "@/lib/account";
 import { errorMessage, type CloudWorkspaceLaunch } from "@/lib/api";
 import { sendToCloudAgent } from "@/lib/cloudAgents";
 import { loadSetups, saveSetup, type OrganizationSetupRecord } from "@/lib/organizationSetup";
-import { selectCloudSession } from "@/lib/sessions";
+import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey } from "@/types/target";
 
 const flights = new Map<string, Promise<void>>();
@@ -35,20 +35,32 @@ export function sendSetupDraft(record: OrganizationSetupRecord, launch: CloudWor
   const latest = current();
   if (!latest?.draft || latest.draft.sent || latest.draft.sending || !latest.draft.text.trim()) return Promise.resolve();
   const unsubscribe = subscribeAccount(() => { current(); });
-  const pending = { ...latest, draft: { ...latest.draft, sending: true, coachDismissed: true, tabId: launch.tabId } };
-  saveSetup(email, pending);
-  // Select only in response to the click, never after a late response has arrived.
-  selectCloudSession(cloudSessionKey(orgId, workspaceId, launch.sessionId));
+  const navigation = getSessionStore().navigationVersion;
   // Start in a microtask so the map owns even synchronously rejected operations.
   const operation = Promise.resolve().then(async () => {
     try {
-      if (!current()) return;
-      const receipt = await sendToCloudAgent({ organizationId: orgId, workspaceId }, launch.tabId!, pending.draft.text.trim(), client);
+      const active = current();
+      if (!active?.draft) return;
+      // Nothing is marked sending if a context change prevents enqueue altogether.
+      saveSetup(email, { ...active, draft: { ...active.draft, sending: true, error: undefined, coachDismissed: true, tabId: launch.tabId! } });
+      publishSetupDraft();
+      const receipt = await sendToCloudAgent({ organizationId: orgId, workspaceId }, launch.tabId!, active.draft.text.trim(), client);
       const kept = current();
-      if (kept?.draft) saveSetup(email, { ...kept, draft: { ...kept.draft, sent: true, sending: false, commandId: receipt.clientCommandId } });
+      if (kept?.draft) {
+        saveSetup(email, { ...kept, draft: { ...kept.draft, sent: true, sending: false, commandId: receipt.clientCommandId } });
+        // Stay on the editable draft for pre-enqueue errors. A late success must not
+        // move someone who navigated away while Send was pending.
+        if (getSessionStore().navigationVersion === navigation) selectCloudSession(cloudSessionKey(orgId, workspaceId, launch.sessionId!));
+      }
     } catch (error) {
-      // A lost reply may already have queued the message. Never offer another Send.
-      if (current()) throw new Error(`Could not confirm Send: ${errorMessage(error)}. Check the session's message queue before sending again.`);
+      const kept = current();
+      if (kept?.draft) {
+        const code = typeof error === "string" ? error : error instanceof Error ? error.message : error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        // Native enqueue rejects these before post_new creates any outbox entry.
+        const notQueued = new Set(["cloud_agent_key_missing", "cloud_agent_key_store_unavailable", "cloud_agent_command_too_large", "cloud_agent_request_invalid", "cloud_agent_encrypt_failed", "cloud_workspace_stopped"]).has(code);
+        const message = code === "cloud_agent_key_missing" ? "Reconnect the computer, then try Send again." : code === "cloud_agent_command_too_large" ? "The draft is too large. Shorten it, then try Send again." : notQueued ? `Nothing was sent: ${errorMessage(error)}` : `Could not confirm Send: ${errorMessage(error)}. Check the session's message queue before sending again.`;
+        saveSetup(email, { ...kept, draft: { ...kept.draft, sending: !notQueued, error: message } });
+      }
     } finally {
       unsubscribe(); flights.delete(key); publishSetupDraft();
     }

@@ -41,7 +41,7 @@ focused controls and Escape in WebKit against the normal built app and bridge
 fixture. The server route tests cover manager writes, member/nonmember refusal,
 invalid colors, and revoked authority at the write.
 
-The setup draft sends to the tab named by the workspace launch response, which already owns the selected repository checkout. It never creates another tab. A send remains owned by the account and setup record when the view closes. A changed account, profile or manager role fences late writes; an uncertain response retains the sending marker and directs the person to the normal session message queue instead of replaying the prompt.
+The setup draft sends to the tab named by the workspace launch response, which already owns the selected repository checkout. It never creates another tab. A send remains owned by the account and setup record when the view closes. A changed account, profile or manager role fences late writes; an uncertain response retains the sending marker and directs the person to the normal session message queue instead of replaying the prompt. A definite pre-queue refusal restores the editable draft and retains its error across reopening. The session is selected only after a receipt, if the person has not navigated elsewhere.
 
 Member callouts read `cloudComputerReady` from the organization roster. The server checks whether the organization has a ready or suspended, undeleted workspace, independently of the member's access to its contents. An older server without this field supplies no readiness assertion.
 
