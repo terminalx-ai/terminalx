@@ -1,4 +1,5 @@
 import { useSettingsFile } from "@/lib/settingsFile";
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { Loader2, Pencil } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -44,7 +45,7 @@ export function MachineNameSettings() {
   const typed = draft?.trim() ?? "";
   const computerName = machine?.computerName ?? null;
   return (
-    <div className="rounded-lg border border-hairline px-3 py-2" data-testid="machine-name-settings">
+    <RegisteredSetting setting="account.machineName"><div className="rounded-lg border border-hairline px-3 py-2" data-testid="machine-name-settings">
       <div className="flex flex-col gap-1.5 py-2">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
@@ -108,6 +109,6 @@ export function MachineNameSettings() {
         )}
       </div>
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
-    </div>
+    </div></RegisteredSetting>
   );
 }

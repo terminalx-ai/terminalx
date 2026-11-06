@@ -1,6 +1,7 @@
 import { useSettingsFile } from "@/lib/settingsFile";
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
-import { Segmented, SettingRow } from "@/components/ui/controls";
+import { Segmented } from "@/components/ui/controls";
 import { ARCHIVE_IDLE_DAYS, conversationSettings, errorMessage } from "@/lib/api";
 import { runIdleArchive } from "@/lib/sessions";
 
@@ -46,9 +47,7 @@ export function ArchiveIdleSettings() {
 
   return (
     <div className="mt-3 rounded-lg border border-hairline px-3 py-2" data-testid="archive-idle-settings">
-      <SettingRow
-        label="Archive conversations idle for"
-        description="A conversation nobody has written in for this long leaves the sidebar's list for its archive: View → Show archived lists it under its project, and the command palette still finds it. Nothing is deleted, and its next message brings it back. A conversation stays while it is pinned or open, while any of its tabs is working, waiting for you or holding a queued message, while its last reply is unread, while its worktree has uncommitted or unpushed work, and while its issue pipeline's pull request is open."
+      <RegisteredSetting setting="agents.archiveIdle"
         stacked
         control={
           <Segmented

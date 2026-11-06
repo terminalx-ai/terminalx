@@ -1,11 +1,11 @@
 import { useSettingsFile } from "@/lib/settingsFile";
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { SettingRow, Switch } from "@/components/ui/controls";
+import { Switch } from "@/components/ui/controls";
 import { errorMessage, experimental } from "@/lib/api";
 
-export const NATIVE_CODEX_DESCRIPTION =
-  "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
+export { NATIVE_CODEX_DESCRIPTION } from "./settingsRegistry";
 
 /** Features that are on only when the reader turns them on. */
 export function ExperimentalTab() {
@@ -55,9 +55,7 @@ export function ExperimentalTab() {
   return (
     <div className="flex flex-col" data-testid="experimental-settings">
       <p className="pb-3 text-[13px] text-muted-foreground">These features are still being tested. Turn one off at any time; sessions it already started keep working.</p>
-      <SettingRow
-        label="Native Codex"
-        description={NATIVE_CODEX_DESCRIPTION}
+      <RegisteredSetting setting="experimental.nativeCodex"
         control={<Switch aria-label="Native Codex" checked={nativeCodex ?? false} disabled={nativeCodex === null} onCheckedChange={(on) => void change(on)} />}
       />
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
