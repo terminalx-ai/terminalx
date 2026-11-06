@@ -6,7 +6,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { AgentSetup } from "@/components/session/AgentSetup";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";
-import { announceReadiness, checkAgentReadiness, useAgentReadiness } from "@/lib/agentReadiness";
+import { announceReadiness, checkAgentReadiness, useAgentReadiness, useAllSignedOut } from "@/lib/agentReadiness";
 import { useAgentSetupFlows } from "@/lib/agentSetupFlow";
 import type { HarnessInfo } from "@/types/session";
 import { errorMessage } from "@/lib/api";
@@ -83,7 +83,10 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
   // although the agent counts as installed half way (PRO-152).
   const flows = useAgentSetupFlows();
   const settingUp = store.harnesses.some((harness) => flows[harness.id]);
-  const signedOut = account.ready && account.status.state === "signed-out";
+  // Installed but never signed in (a sign-in left half way, the app quit
+  // during it): the way on is the same as from nothing.
+  const signedOut = useAllSignedOut(store.harnesses.filter((harness) => harness.available).map((harness) => harness.id));
+  const accountSignedOut = account.ready && account.status.state === "signed-out";
 
   return (
     <div ref={root} data-testid="start-screen" className="relative flex h-full min-h-0 flex-col">
@@ -124,13 +127,13 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
           </div>
         )}
 
-        {(noAgent || settingUp) && (
-          <section aria-label="Set up an agent" data-testid="start-no-agent" className={cn("mt-5 rounded-lg px-3 py-2.5 text-xs", noAgent ? "bg-warning/10" : "bg-composer glass hairline")}>
-            {noAgent ? <div className="flex items-center gap-1.5 font-medium text-warning">
-              <CircleAlert className="size-3.5" /> No agent is installed
+        {(noAgent || settingUp || signedOut) && (
+          <section aria-label="Set up an agent" data-testid="start-no-agent" className={cn("mt-5 rounded-lg px-3 py-2.5 text-xs", noAgent || signedOut ? "bg-warning/10" : "bg-composer glass hairline")}>
+            {noAgent || signedOut ? <div className="flex items-center gap-1.5 font-medium text-warning">
+              <CircleAlert className="size-3.5" /> {noAgent ? "No agent is installed" : "No agent is signed in"}
             </div> : <div className="font-medium">Set up an agent</div>}
             <p className="mt-1 text-muted-foreground">
-              TerminalX runs the agent's own command-line tool on this computer. Install one here: its sign-in opens next, and no Terminal is needed.
+              TerminalX runs each agent's own command-line tool on this computer. Install it and sign in to it here, with no Terminal needed.
             </p>
             <ul className="mt-2 flex flex-col gap-2">
               {store.harnesses.map((harness) => <StartAgent key={harness.id} harness={harness} />)}
@@ -147,7 +150,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
         )}
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          {signedOut && <SecondaryLink onClick={() => void signIn()}>Sign in</SecondaryLink>}
+          {accountSignedOut && <SecondaryLink onClick={() => void signIn()}>Sign in</SecondaryLink>}
           <SecondaryLink onClick={() => onOpenSettings()}>Settings</SecondaryLink>
           <SecondaryLink onClick={() => void openUrl(`${REPO_URL}#readme`)}>
             Read the docs <ExternalLink className="size-3" />

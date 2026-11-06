@@ -140,13 +140,34 @@ async function run(harness: string, step: AgentSetupStep, pane: string, chain: b
   }
 }
 
+/** How long to wait before asking again about a CLI that was just installed. */
+const RECHECK_AFTER_INSTALL_MS = 1500;
+
+/**
+ * Readiness after a step. A CLI's first run after its install can stumble
+ * (its new home still being set up by another of its processes): a login
+ * that cannot be read then is asked about again before the sign-in that
+ * should follow is given up on.
+ */
+async function readinessAfter(harness: string, step: AgentSetupStep): Promise<AgentReadiness> {
+  let value = await checkAgentReadiness(harness);
+  for (let tries = 0; step === "install" && value.state === "unknown" && tries < 2; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, RECHECK_AFTER_INSTALL_MS));
+    value = await checkAgentReadiness(harness);
+  }
+  return value;
+}
+
 async function check(harness: string) {
   // The welcome screen reads installation from the harness list.
   try { await refreshHarnesses(); } catch { /* readiness below still answers */ }
-  const value = await checkAgentReadiness(harness);
+  const checking = flows[harness];
+  if (checking?.phase !== "checking") return;
+  const value = await readinessAfter(harness, checking.step);
   announceReadiness(harness, value);
+  // Canceled, or begun again, while it was being checked.
   const flow = flows[harness];
-  if (flow?.phase !== "checking") return;
+  if (flow !== checking) return;
   const next = afterCheck(flow, value);
   if (next.phase === "running") {
     await run(harness, next.step, next.pane, next.chain);

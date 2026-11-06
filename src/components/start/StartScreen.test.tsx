@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, Project } from "@/types/session";
 
@@ -192,10 +192,36 @@ describe("the start screen", () => {
     expect(await screen.findByRole("button", { name: "Install Claude Code and sign in" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
     expect(openUrl).not.toHaveBeenCalled();
+    // The commands to run by hand are one press away, not in the way.
+    expect(screen.queryByText(codex.installHint)).toBeNull();
+    const codexRow = screen.getByRole("region", { name: "Codex setup" });
+    fireEvent.click(within(codexRow).getByRole("button", { name: "Run it yourself" }));
+    expect(within(codexRow).getByText(codex.installHint)).toBeTruthy();
+    expect(screen.queryByText(claude.installHint)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Check again/ }));
     expect(sessions.refreshHarnesses).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
     expect(onOpenSettings).toHaveBeenCalledWith("agents");
+  });
+
+  it("offers sign-in when every installed agent is signed out, and nothing once one is ready", async () => {
+    store.harnesses = [{ ...claude, installable: true }, { ...codex, installable: true }];
+    let claudeState = "signed_out";
+    invoke.mockImplementation(async (command: string, args: { harness: string }) => {
+      if (command === "check_agent_readiness") return { state: args.harness === "claude" ? claudeState : "missing", checkedAt: null, version: null };
+      throw new Error(`unexpected command ${command}`);
+    });
+    const { unmount } = render(<StartScreen onOpenSettings={vi.fn()} />);
+    expect((await screen.findByTestId("start-no-agent")).textContent).toContain("No agent is signed in");
+    expect(await screen.findByRole("button", { name: "Sign in to Claude Code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Codex and sign in" })).toBeTruthy();
+    unmount();
+
+    claudeState = "ready";
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("check_agent_readiness", { harness: "claude" }));
+    await act(async () => {});
+    expect(screen.queryByTestId("start-no-agent")).toBeNull();
   });
 
   it("claims nothing about agents before the probe has answered", () => {

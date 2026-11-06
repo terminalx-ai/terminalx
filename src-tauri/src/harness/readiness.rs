@@ -56,7 +56,17 @@ pub fn check(id: &str) -> Readiness {
 }
 
 /// The checks for agent `id` with its CLI at `path` (`None`: not installed).
+///
+/// One check at a time. Every view of an agent checks again when a terminal
+/// exits, so an install's exit starts several at once; and two Codex app
+/// servers starting together in a new `CODEX_HOME` (the first run after an
+/// install) race to create its state database, and the loser exits with
+/// "failed to initialize sqlite state runtime" (Codex 0.167.0, PRO-152): a
+/// fresh install would read as "login not checked" and its sign-in would
+/// not follow.
 pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None };
     if let Some(path) = path {
         let mut version = std::process::Command::new(&path);
@@ -101,6 +111,35 @@ mod tests {
         assert_eq!(choose(), managed.path());
         std::fs::write(user.path().join("auth.json"), "{}").unwrap();
         assert_eq!(choose(), user.path(), "the user's login takes precedence on the next launch");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checks_made_at_once_do_not_race_a_new_codex_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A stand-in that fails as Codex does when another app server is
+        // creating the same new home at that moment.
+        let fake = dir.path().join("codex");
+        std::fs::write(&fake, format!(r#"#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.167.0" ;;
+  app-server)
+    mkdir "{lock}" 2>/dev/null || {{ echo "failed to initialize sqlite state runtime" >&2; exit 1; }}
+    sleep 0.3
+    rmdir "{lock}"
+    echo '{{"id":2,"result":{{"account":null,"requiresOpenaiAuth":true}}}}'
+    cat >/dev/null ;;
+esac
+"#, lock = dir.path().join("creating").display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _codex = super::super::codex::pty::codex_program_for_tests(fake.clone());
+        let path = fake.to_string_lossy().into_owned();
+        let states: Vec<State> = std::thread::scope(|scope| {
+            let checks: Vec<_> = (0..3).map(|_| scope.spawn(|| check_binary("codex", Some(path.clone())).state)).collect();
+            checks.into_iter().map(|check| check.join().unwrap()).collect()
+        });
+        assert_eq!(states, [State::SignedOut; 3]);
     }
 
     #[test]

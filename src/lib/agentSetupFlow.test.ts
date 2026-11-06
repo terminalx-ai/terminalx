@@ -142,6 +142,21 @@ describe("the setup flow (PRO-152)", () => {
     expect(calls("agent_setup_start").map((args) => (args as { step: string }).step)).toEqual(["install", "login"]);
   });
 
+  it("asks again about a CLI whose first run after its install cannot tell its login", async () => {
+    await act(() => startAgentSetup("codex", "install", { chain: true }));
+    const pane = (calls("agent_setup_start")[0] as { id: string }).id;
+    probes = ["unknown", "unknown", "signed_out"];
+    await act(async () => emit("pty_exit", { id: pane, code: 0 }));
+    await waitFor(() => expect(getAgentSetupFlow("codex")).toMatchObject({ phase: "running", step: "login" }), { timeout: 5000 });
+    expect(calls("check_agent_readiness")).toHaveLength(3);
+
+    // After a sign-in, an unknown login is taken as it is.
+    probes = ["unknown"];
+    await act(async () => emit("pty_exit", { id: pane, code: 0 }));
+    await waitFor(() => expect(getAgentSetupFlow("codex")).toEqual({ phase: "idle" }));
+    expect(calls("check_agent_readiness")).toHaveLength(4);
+  });
+
   it("cancels without a failure, and a late exit of the canceled run changes nothing", async () => {
     await act(() => startAgentSetup("claude", "login"));
     const pane = (calls("agent_setup_start")[0] as { id: string }).id;

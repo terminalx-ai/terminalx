@@ -49,12 +49,14 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
   compact?: boolean;
 }) {
   const [copyStatus, setCopyStatus] = useState("");
+  const [manual, setManual] = useState(false);
   const flow = useAgentSetupFlow(harness.id);
   const active = setupActive(flow);
   const state = value?.state ?? "unknown";
   const command = state === "missing" ? harness.installHint : harness.id === "codex" ? "codex login" : "claude auth login";
   const status = active ? setupStatus(flow) : checking ? "Checking installation and login…" : READINESS_LABELS[state];
   const install = state === "missing";
+  const showCommand = !compact || manual || !harness.installable;
   return <section aria-label={`${harness.name} setup`} className="min-w-0 rounded-lg bg-well p-3 text-xs">
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       {compact && <span className="text-[13px] font-medium">{harness.name}</span>}
@@ -69,29 +71,31 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
       ? `${harness.name} is ready. Open a project above to start a session with it.`
       : "Local login found. Provider access and model availability are checked when you run a task."}</p> : <>
       {harness.installable ? <>
+        <p className="mt-1.5 text-muted-foreground">{install
+          ? `Runs ${harness.name}'s official installer here, then its sign-in. Node and npm are not needed.`
+          : state === "signed_out" ? `Runs ${harness.name}'s own sign-in here and opens your browser to finish.`
+          : "The login could not be verified. You can continue if your CLI already works, or sign in again."}</p>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Button type="button" size="xs" variant={state === "unknown" ? "secondary" : "default"} disabled={checking} aria-label={install ? `Install ${harness.name} and sign in` : `Sign in to ${harness.name}`}
             onClick={() => void startAgentSetup(harness.id, install ? "install" : "login", { chain: install })}>
             {install && <Download />} {install ? "Install and sign in" : "Sign in"}
           </Button>
-          <span className="min-w-0 text-muted-foreground">{install
-            ? `Runs ${harness.name}'s official installer here, then its sign-in. Node and npm are not needed.`
-            : state === "signed_out" ? `Runs ${harness.name}'s own sign-in here and opens your browser to finish.`
-            : "The login could not be verified. You can continue if your CLI already works, or sign in again."}</span>
+          {/* The welcome screen keeps each agent to a line or two: the commands are one press away. */}
+          {compact && <Button type="button" size="xs" variant="ghost" aria-expanded={manual} onClick={() => setManual(!manual)}>Run it yourself</Button>}
         </div>
-        <p className="mt-2 text-faint">Or run it in a terminal of your own:</p>
+        {showCommand && <p className="mt-2 text-faint">Or run it in a terminal of your own:</p>}
       </> : <p className="mt-2 text-muted-foreground">{install
         ? "Open a terminal and run this command to install the provider's CLI, then sign in."
         : state === "signed_out" ? `Open a terminal and run this command to sign in to ${harness.name}.`
         : "The login could not be verified. You can continue if your CLI already works, or sign in and check again."}</p>}
-      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+      {showCommand && <div className="mt-1.5 flex flex-wrap items-center gap-2">
         <code className="min-w-0 break-all rounded bg-background px-2 py-1">{command}</code>
         <Button type="button" size="xs" variant="outline" onClick={() => {
           void copyText(command).then(() => setCopyStatus("Copied"), () => setCopyStatus("Could not copy. Select the command to copy it."));
         }}>Copy command</Button>
         <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
         {copyStatus && <span role="status">{copyStatus}</span>}
-      </div>
+      </div>}
       {!compact && <p className="mt-2 text-faint">A TerminalX account is optional for local work. This signs in to the agent provider.</p>}
     </>}
   </section>;

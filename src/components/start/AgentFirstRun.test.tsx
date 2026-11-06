@@ -86,7 +86,7 @@ describe("first run with no agent installed (PRO-152)", () => {
     expect(setup.start.mock.calls[1].slice(0, 3)).toEqual([pane, "claude", "login"]);
     // The agent now counts as installed, and the setup stays in view for its sign-in.
     expect(store.harnesses[0].available).toBe(true);
-    expect(screen.getByTestId("start-no-agent").textContent).toContain("Set up an agent");
+    expect(screen.getByTestId("start-no-agent").textContent).toContain("No agent is signed in");
     expect(within(row("Claude Code")).getByRole("status").textContent).toBe("Signing in");
     expect(within(row("Claude Code")).getByTestId("terminal-view").getAttribute("data-pane")).toBe(pane);
 
@@ -95,6 +95,7 @@ describe("first run with no agent installed (PRO-152)", () => {
     await exit(pane, 0);
     await waitFor(() => expect(within(row("Claude Code")).getByRole("status").textContent).toBe("Ready · local login found"));
     expect(within(row("Claude Code")).getByText(/Claude Code is ready\. Open a project above/)).toBeTruthy();
+    expect(screen.getByTestId("start-no-agent").textContent).toContain("Set up an agent");
     expect(within(row("Claude Code")).queryByTestId("terminal-view")).toBeNull();
     expect(pty.kill).toHaveBeenCalledWith(pane);
     expect(within(row("Codex")).getByRole("status").textContent).toBe("Not installed");

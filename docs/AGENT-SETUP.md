@@ -48,6 +48,16 @@ same run that Settings shows.
   straight on to sign-in in the same terminal, with the installer's output
   kept above. Ready ends the run and closes its terminal. The exit code alone
   is never taken as success.
+- Readiness checks run one at a time (`readiness::check_binary`). An exit
+  makes every readiness view check again, and two Codex app servers starting
+  together in a new `CODEX_HOME` race to create its state database. The loser
+  exits with "failed to initialize sqlite state runtime", which reads as
+  **Login not checked** (seen with Codex 0.167.0 right after its install).
+  A check right after an install that still cannot tell the login is asked
+  again twice, 1.5 s apart, before the sign-in is given up on.
+- The welcome screen shows the setup when no agent is installed, when every
+  installed agent is signed out (a sign-in left half way), and for the rest of
+  the session once a run has started there.
 
 Each step runs in a pane of no session, `setup:<agent>:<run>`
 (`src-tauri/src/harness/setup.rs`). The webview names the agent and the step.

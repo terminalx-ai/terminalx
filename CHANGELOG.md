@@ -10,8 +10,9 @@
   checked again after each step, so every view turns Ready by itself. A folder
   that is not writable, no connection to the provider, a failed download or a
   failed installer each get their own explanation and **Try again**; Cancel
-  stops a step without leaving an error. The commands to run by hand are still
-  shown, now the native installers instead of `npm install`. (PRO-152)
+  stops a step without leaving an error. The welcome screen also offers this
+  when every installed agent is signed out. The commands to run by hand are
+  still shown, now the native installers instead of `npm install`. (PRO-152)
 - Show each permission request once, and retire it as soon as Allow or Deny
   is confirmed, including answers from the terminal or another card. Late
   duplicate requests stay retired; clicking a stale card explains that the

@@ -45,6 +45,37 @@ export function announceReadiness(harness: string, value: AgentReadiness) {
   for (const take of [...announced]) take(harness, value);
 }
 
+/** Hear every announced answer, for any agent, until the returned function is called. */
+export function onReadiness(listener: (harness: string, value: AgentReadiness) => void): () => void {
+  announced.add(listener);
+  return () => { announced.delete(listener); };
+}
+
+/**
+ * Whether every installed agent is signed out, by a check of each when the
+ * view mounts, when the app comes back, and on every announced answer. Not
+ * all in yet, or any answer but signed out (ready, or a login that cannot
+ * be told), is `false`.
+ */
+export function useAllSignedOut(harnesses: readonly string[]): boolean {
+  const key = harnesses.join(",");
+  const [states, setStates] = useState<Record<string, AgentReadiness["state"]>>({});
+  useEffect(() => {
+    if (!key) return;
+    const ids = key.split(",");
+    let live = true;
+    const take = (id: string, value: AgentReadiness) => {
+      if (live && ids.includes(id)) setStates((before) => ({ ...before, [id]: value.state }));
+    };
+    const check = () => { for (const id of ids) void checkAgentReadiness(id).then((value) => take(id, value)); };
+    check();
+    const stopResume = onAppResume(check);
+    const stopHearing = onReadiness(take);
+    return () => { live = false; stopResume(); stopHearing(); };
+  }, [key]);
+  return harnesses.length > 0 && harnesses.every((id) => states[id] === "signed_out");
+}
+
 export function useAgentReadiness(harness: string | null, poll = false) {
   const [answer, setAnswer] = useState<{ harness: string; value: AgentReadiness } | null>(null);
   const [checking, setChecking] = useState(false);
