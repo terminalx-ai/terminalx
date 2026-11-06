@@ -221,6 +221,8 @@ describe("the start screen", () => {
     unmount();
 
     claudeState = "ready";
+    // Wait for this mount's probe, not the matching call from the previous one.
+    invoke.mockClear();
     render(<StartScreen onOpenSettings={vi.fn()} />);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("check_agent_readiness", { harness: "claude" }));
     await waitFor(() => expect(screen.queryByTestId("start-no-agent")).toBeNull());
