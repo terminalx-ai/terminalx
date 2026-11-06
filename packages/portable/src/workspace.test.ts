@@ -419,6 +419,25 @@ describe("workspace RPC client", () => {
     client.close();
   });
 
+  it("delivers ordered size-only completions without advancing or rewinding the byte cursor", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const onData = vi.fn();
+    const attachment = await client.attachPty("p1", { onData });
+    runtime.typeOutput("kept");
+    const complete = (cols: number, rows: number, offset = 4) => runtime.deliver({ event: "pty.resize-complete", params: { subscriptionId: "sub-1", ptyId: "p1", offset, size: { cols, rows } } });
+    complete(30, 8);
+    complete(18, 8);
+    complete(80, 12, 0); // An old completion replayed behind the byte cursor is stale.
+    expect(onData).toHaveBeenCalledTimes(3);
+    expect(onData.mock.calls.slice(1).map(([bytes, ...rest]) => [bytes.length, ...rest])).toEqual([
+      [0, 4, false, { cols: 30, rows: 8 }], [0, 4, false, { cols: 18, rows: 8 }],
+    ]);
+    expect(attachment.cursor()?.offset).toBe(4);
+    client.close();
+  });
+
   it("resumes from a kept cursor, and again from the last byte when the runtime says the link lagged", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);

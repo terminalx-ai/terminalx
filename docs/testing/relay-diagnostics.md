@@ -150,11 +150,25 @@ prompt and an unsubmitted command: changing xterm's grid before parsing the
 previous resize's redraw leaves a duplicate prompt. Draining xterm alone only
 covers already delivered output; a redraw can still be in IPC or cloud transit.
 Resize observations settle for 100 ms and serialize requests to the PTY, keeping
-only the latest pending size. Live output batches carry their dimensions from
-the PTY reader, captured under the same lock as a resize. Batches at different
-sizes are never coalesced. Local view frames retain the metadata through splitting
+only the latest pending size. On macOS/Linux the reader and resize path share
+a read lock. Before `ioctl`, resize snapshots and drains the bytes already in
+the kernel at the old dimensions. Both paths enqueue under that lock, so a
+previous read cannot be published after the new size. The bounded output queue
+reserves space for this drain; resize never waits on an emitter which may need
+the caller's remote terminal lock. A full reserve refuses the resize before
+reading bytes or applying `ioctl`.
+Darwin queries the slave's output queue with `TIOCOUTQ`; `FIONREAD` on its
+master describes input to the slave and can report zero despite readable output.
+Linux uses `FIONREAD` for pending master reads.
+
+Each successful resize enqueues a zero-byte completion behind the old bytes,
+including for silent programs such as `sleep` or `tail -f`. Completions are never
+coalesced with program output. Local view frames retain metadata through splitting
 and carry a four-byte dimension header across Tauri; cloud `pty.output` carries
-an optional `size` object.
+an optional `size` object and `pty.resize-complete` carries ordered completions.
+Size-only completions consume no PTY byte offset but do consume transport budget.
+Attachments queue a size snapshot at the producer, after pending output/replay,
+so returning viewers also learn a silent pane's current dimensions.
 
 The renderer queues a size barrier immediately before each batch in xterm's own
 write queue, so old output is parsed at its original width even after newer
@@ -168,14 +182,20 @@ remains compatible and does not acquire invented historical dimensions.
 The real-parser regression uses captured zsh escape sequences, demonstrates the
 old duplicate, and checks delayed delivery beyond the timer, fragmented escape
 sequences, input preservation, serialized RPCs, disposal and legacy peers.
-Native tests verify read-time dimensions survive later resizes and frame
-splitting. Pending fits are cancelled when the view unmounts and never resize an
+Native tests hold the reader while a captured redraw is waiting in the kernel,
+verify its old dimensions and the following size-only completion, and resize
+with the emitter blocked and read queue full. Transport tests cover completion
+framing, cursor preservation, silent resizes and returning viewers.
+Pending fits are cancelled when the view unmounts and never resize an
 evicted or replaced terminal.
 
 ```sh
 pnpm exec vitest run src/components/account/AccountSidebarEntry.test.tsx src/lib/terminalResize.real.test.ts
 pnpm build && node scripts/webkit/account-row.mjs
 cargo test --manifest-path src-tauri/Cargo.toml --lib pairing::
+cargo test --manifest-path src-tauri/Cargo.toml --lib pty::
+cargo test --manifest-path src-tauri/Cargo.toml --lib remote::server::tests
+cargo test --manifest-path src-tauri/Cargo.toml --lib local_runtime::stream::tests
 ```
 
 ## Validation result

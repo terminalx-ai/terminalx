@@ -27,6 +27,9 @@ mod handover;
 #[cfg(unix)]
 pub(crate) use handover::{Frozen, FrozenPane};
 use handover::{Hold, Parts, Waiter};
+#[path = "pty_output.rs"]
+mod output;
+use output::{OutputQueue, READ_BYTES};
 const COALESCE: Duration = Duration::from_millis(8);
 pub(crate) const MAX_CHUNK: usize = 32 * 1024;
 /// Enough raw output to reconstruct a useful terminal tail on a newly attached
@@ -184,6 +187,9 @@ struct Pane {
     /// and the app types into it all the same.
     screen: Arc<Mutex<vt100::Parser>>,
     output_size: Arc<Mutex<OutputSize>>,
+    output: Arc<OutputQueue>,
+    #[cfg(unix)]
+    reader: Arc<Mutex<Box<dyn Read + Send>>>,
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
@@ -272,6 +278,64 @@ pub type SizedTap = Box<dyn Fn(&[u8], Option<OutputSize>) -> bool + Send>;
 pub struct OutputSize {
     pub cols: u16,
     pub rows: u16,
+}
+
+#[cfg(unix)]
+fn unread_output(fd: std::os::fd::RawFd) -> std::io::Result<usize> {
+    let mut count: libc::c_int = 0;
+    // Darwin's PTY master forwards tty queue queries to the slave: bytes
+    // waiting for the master reader are in its output queue. FIONREAD reports
+    // the slave's input queue instead, and can return zero for readable output.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let request = libc::TIOCOUTQ;
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let request = libc::FIONREAD;
+    // SAFETY: the caller holds the pane/read lock, keeping the master open;
+    // the queue query writes one c_int and does not consume output.
+    if unsafe { libc::ioctl(fd, request, &mut count) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(count.max(0) as usize)
+}
+
+/// The caller owns the read lock, so nobody can read bytes at the old size
+/// and enqueue them after the resize completion. Drain the kernel snapshot
+/// before ioctl; a continuous producer cannot keep a resize waiting forever.
+#[cfg(unix)]
+fn resize_with_reader(pane: &Pane, reader: &mut dyn Read, next: OutputSize) -> Result<()> {
+    let mut held = pane.hold.try_running().context("The terminal is being handed over. Retry resizing.")?;
+    let fd = pane.master.as_raw_fd().context("the PTY has no descriptor")?;
+    let remaining = unread_output(fd).context("inspect unread terminal output")?;
+    if !pane.output.can_resize(remaining) {
+        bail!("Terminal output is catching up. Retry resizing.");
+    }
+    let mut size = pane.output_size.lock().unwrap();
+    let mut buf = vec![0u8; remaining];
+    let mut read = 0;
+    let mut failure = None;
+    while read < remaining {
+        match reader.read(&mut buf[read..]) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => { failure = Some(error); break; }
+        }
+    }
+    // Short kernel reads must not use more batches than the capacity reserved
+    // above. Publish consumed bytes even if a later read failed.
+    for chunk in buf[..read].chunks(READ_BYTES) {
+        if !pane.output.send((chunk.to_vec(), *size)) { bail!("Terminal output closed."); }
+        held.read += 1;
+    }
+    if let Some(error) = failure { return Err(error).context("drain terminal output before resizing"); }
+    pane.master.resize(PtySize { rows: next.rows, cols: next.cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
+    *size = next;
+    pane.screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(next.rows), screen_size(next.cols));
+    // A zero-byte batch is an ordered completion, even for `sleep`/`tail -f`.
+    if !pane.output.send((Vec::new(), next)) { bail!("Terminal output closed."); }
+    held.read += 1;
+    Ok(())
 }
 
 /// One window's view of a pane. A pane has at most one per window: the main
@@ -650,7 +714,11 @@ impl Terminals {
     /// Run a pane's reader, emitter and waiter, and list it: one opened here
     /// or one handed over by the runtime this one replaced (#765).
     fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
-        let Parts { master, mut reader, writer, mut waiter, pid, group, explicit_command, cwd, created, scrollback, printed, screen, last_output } = parts;
+        let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, cwd, created, scrollback, printed, screen, last_output } = parts;
+        #[cfg(unix)]
+        let reader = Arc::new(Mutex::new(reader));
+        #[cfg(not(unix))]
+        let mut reader = reader;
         #[cfg(unix)]
         let (readable, room) = {
             let room = non_blocking(master.as_ref())?;
@@ -671,6 +739,7 @@ impl Terminals {
         let output_size = Arc::new(Mutex::new(OutputSize { cols: cols.get(), rows: rows.get() }));
         let screen = Arc::new(Mutex::new(screen));
         let hold = Arc::new(Hold::default());
+        let output = Arc::new(OutputQueue::default());
         let tap = self.tap_slot(id);
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
@@ -691,14 +760,20 @@ impl Terminals {
             let drawing = hold.clone();
             let sizes = output_size.clone();
             let latest_size = output_size.clone();
+            let chunks = output.clone();
+            let gathered = output.clone();
+            #[cfg(unix)]
+            let reader = reader.clone();
             // Reading blocks until the program writes again, so it gets a
             // thread of its own: the emitter below must be able to send what
             // it gathered when the window closes even if the program has
             // gone quiet (a prompt waiting for input), not on its next write.
-            let (chunks, gathered) = std::sync::mpsc::sync_channel::<(Vec<u8>, OutputSize)>(64);
+            let read_end = chunks.close_on_drop();
             std::thread::Builder::new().name(format!("pty-read-{id}")).spawn(move || {
-                let mut buf = vec![0u8; 16 * 1024];
+                let _read_end = read_end;
+                let mut buf = vec![0u8; READ_BYTES];
                 loop {
+                    if !chunks.wait_read_room() { break; }
                     // Read only while the pane is not being handed over, and
                     // count what is read under the same lock: a handover then
                     // finds every byte either on its way to the scrollback or
@@ -706,12 +781,21 @@ impl Terminals {
                     // master is non-blocking, so this never waits in the read.
                     #[cfg(unix)]
                     let (read, size) = {
-                        let mut held = reading.thawed();
-                        // Snapshot the geometry under the same lock as ioctl:
-                        // queued reads retain their size through later resizes.
+                        let mut reader = reader.lock().unwrap();
+                        let Some(mut held) = reading.try_running() else {
+                            drop(reader);
+                            drop(reading.thawed());
+                            continue;
+                        };
+                        if !chunks.has_read_room() { continue; }
                         let size = sizes.lock().unwrap();
                         let read = reader.read(&mut buf);
-                        if matches!(read, Ok(n) if n > 0) { held.read += 1; }
+                        if let Ok(n) = read {
+                            if n > 0 {
+                                if !chunks.send((buf[..n].to_vec(), *size)) { break; }
+                                held.read += 1;
+                            }
+                        }
                         (read, *size)
                     };
                     #[cfg(not(unix))]
@@ -719,9 +803,12 @@ impl Terminals {
                     match read {
                         Ok(0) => break,
                         Ok(n) => {
-                            if chunks.send((buf[..n].to_vec(), size)).is_err() {
+                            #[cfg(not(unix))]
+                            if !chunks.send((buf[..n].to_vec(), size)) {
                                 break;
                             }
+                            #[cfg(unix)]
+                            let _ = (n, size);
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         // The master is non-blocking for its writers' sake.
@@ -734,8 +821,11 @@ impl Terminals {
                         Err(_) => break,
                     }
                 }
+                chunks.close();
             })?;
+            let emit_end = gathered.close_on_drop();
             std::thread::Builder::new().name(format!("pty-emit-{id}")).spawn(move || {
+                let _emit_end = emit_end;
                 let flush = |acc: &mut Vec<u8>, size: OutputSize| {
                     {
                         // Held across both, so a view attaching now gets these
@@ -757,9 +847,11 @@ impl Terminals {
                             received
                         });
                     }
-                    emitted.events.fetch_add(1, Ordering::Relaxed);
-                    emitted.bytes.fetch_add(acc.len() as u64, Ordering::Relaxed);
-                    *last_output.lock().unwrap() = Some(Instant::now());
+                    if !acc.is_empty() {
+                        emitted.events.fetch_add(1, Ordering::Relaxed);
+                        emitted.bytes.fetch_add(acc.len() as u64, Ordering::Relaxed);
+                        *last_output.lock().unwrap() = Some(Instant::now());
+                    }
                     sink.emit_pty_sized(&id, acc, Some(size));
                     acc.clear();
                 };
@@ -776,14 +868,14 @@ impl Terminals {
                     // After a quiet spell there is no burst yet to gather: a
                     // key's echo is sent as it is, not 8ms later.
                     let start = Instant::now();
-                    let quiet = flushed.is_none_or(|at| at.elapsed() >= COALESCE);
+                    let quiet = acc.is_empty() || flushed.is_none_or(|at| at.elapsed() >= COALESCE);
                     while !quiet && acc.len() < MAX_CHUNK {
                         let left = COALESCE.saturating_sub(start.elapsed());
                         if left.is_zero() {
                             break;
                         }
                         match gathered.recv_timeout(left) {
-                            Ok((more, next_size)) if next_size == size => {
+                            Ok((more, next_size)) if next_size == size && !more.is_empty() => {
                                 acc.extend_from_slice(&more);
                                 got += 1;
                             }
@@ -836,7 +928,8 @@ impl Terminals {
             room,
             stalled: false,
         }));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, output_size, cwd, created, hold });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, output_size, output, cwd, created, hold,
+            #[cfg(unix)] reader });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -881,7 +974,7 @@ impl Terminals {
     /// repeated in between. It replaces an earlier tap `window` had for the
     /// same pane; another window's view of it is left as it is.
     pub fn attach(&self, window: &str, id: &str, token: &str, tap: Tap) {
-        self.attach_sized(window, id, token, Box::new(move |bytes, _| tap(bytes)));
+        self.attach_sized(window, id, token, Box::new(move |bytes, _| bytes.is_empty() || tap(bytes)));
     }
 
     pub fn attach_sized(&self, window: &str, id: &str, token: &str, tap: SizedTap) {
@@ -917,6 +1010,27 @@ impl Terminals {
                 taps.insert(id.to_string(), slot);
             }
         }
+        drop(taps);
+        // Queue the current size after pending output for a returning,
+        // possibly silent view. A direct snapshot could overtake those bytes.
+        let _ = self.publish_size(id);
+    }
+
+    /// Publish an ordered size snapshot for an attachment, behind any
+    /// buffered output. This also works when the program stays silent.
+    pub fn publish_size(&self, id: &str) -> Result<()> {
+        let panes = self.panes.lock().unwrap();
+        let pane = panes.get(id).context("no such terminal")?;
+        #[cfg(unix)]
+        let _reader = pane.reader.lock().unwrap();
+        #[cfg(unix)]
+        let mut held = pane.hold.try_running().context("the terminal is being handed over")?;
+        if !pane.output.can_resize(0) || !pane.output.send((Vec::new(), *pane.output_size.lock().unwrap())) {
+            bail!("Terminal output is catching up. Retry attaching.");
+        }
+        #[cfg(unix)]
+        { held.read += 1; }
+        Ok(())
     }
 
     /// The view attached as `token` has drawn `drawn` bytes of what its tap
@@ -1050,11 +1164,18 @@ impl Terminals {
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
         let panes = self.panes.lock().unwrap();
         let pane = panes.get(id).context("no such terminal")?;
+        #[cfg(unix)]
+        return resize_with_reader(pane, pane.reader.lock().unwrap().as_mut(), OutputSize { cols, rows });
+        #[cfg(not(unix))]
+        {
+        if !pane.output.can_resize(0) { bail!("Terminal output is catching up. Retry resizing."); }
         let mut size = pane.output_size.lock().unwrap();
         pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
         *size = OutputSize { cols, rows };
         pane.screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(rows), screen_size(cols));
+        pane.output.send((Vec::new(), *size));
         Ok(())
+        }
     }
 
     /// Read the screen pane `id`'s program has drawn, as it stands now.
@@ -1534,6 +1655,91 @@ mod tests {
         terminals.write("sized", b"two\n").unwrap();
         assert!(until("NEW18").iter().all(|size| *size == OutputSize { cols: 18, rows: 8 }));
         assert!(in_transit.iter().all(|size| *size == OutputSize { cols: 30, rows: 12 }));
+        terminals.kill_all();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resizing_drains_an_unread_redraw_then_completes_without_more_program_output() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let send = Mutex::new(send);
+        terminals.attach_sized("main", "unread", "view", Box::new(move |bytes, size| send.lock().unwrap().send((bytes.to_vec(), size.unwrap())).is_ok()));
+        pane(&terminals, &sink, &dir, "unread", r#"sh -c 'stty -echo; printf READY; read key; printf "\r\r\033[JPROMPTMARK@clean-macos-vm terminalx-project echo pending"; exec sleep 600'"#);
+        loop {
+            if receive.recv_timeout(Duration::from_secs(60)).unwrap().0.windows(5).any(|part| part == b"READY") { break; }
+        }
+        terminals.resize("unread", 30, 12).unwrap();
+        loop {
+            let (bytes, size) = receive.recv_timeout(Duration::from_secs(60)).unwrap();
+            if bytes.is_empty() && size == (OutputSize { cols: 30, rows: 12 }) { break; }
+        }
+        let reader = terminals.panes.lock().unwrap()["unread"].reader.clone();
+        let mut gate = reader.lock().unwrap();
+        terminals.write("unread", b"go\n").unwrap();
+        let old = b"\r\r\x1b[JPROMPTMARK@clean-macos-vm terminalx-project echo pending";
+        let fd = terminals.panes.lock().unwrap()["unread"].master.as_raw_fd().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while unread_output(fd).unwrap() < old.len() {
+            assert!(Instant::now() < deadline, "the previous redraw was not queued in the PTY");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        {
+            let panes = terminals.panes.lock().unwrap();
+            resize_with_reader(&panes["unread"], gate.as_mut(), OutputSize { cols: 18, rows: 8 }).unwrap();
+        }
+        drop(gate);
+        let mut drained = Vec::new();
+        loop {
+            let (bytes, size) = receive.recv_timeout(Duration::from_secs(60)).unwrap();
+            if size == (OutputSize { cols: 18, rows: 8 }) {
+                assert!(bytes.is_empty(), "the silent program should only receive a size completion");
+                break;
+            }
+            assert_eq!(size, OutputSize { cols: 30, rows: 12 });
+            drained.extend(bytes);
+        }
+        assert_eq!(drained, old);
+        assert!(receive.recv_timeout(Duration::from_millis(50)).is_err());
+        terminals.kill_all();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resizing_does_not_wait_for_a_blocked_emitter_or_a_full_read_queue() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Arc::new(Terminals::new());
+        let dir = tempfile::tempdir().unwrap();
+        let (started, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let released = Mutex::new(released);
+        let started = Mutex::new(Some(started));
+        terminals.attach_sized("main", "blocked", "view", Box::new(move |bytes, _| {
+            if bytes.windows(5).any(|part| part == b"READY") {
+                if let Some(started) = started.lock().unwrap().take() {
+                    started.send(()).unwrap();
+                    released.lock().unwrap().recv().unwrap();
+                }
+            }
+            true
+        }));
+        pane(&terminals, &sink, &dir, "blocked", "sh -c 'stty -echo; printf READY; read key; head -c 2097152 /dev/zero; exec sleep 600'");
+        entered.recv_timeout(Duration::from_secs(60)).unwrap();
+        terminals.write("blocked", b"go\n").unwrap();
+        let output = terminals.panes.lock().unwrap()["blocked"].output.clone();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while output.has_read_room() {
+            assert!(Instant::now() < deadline, "the read queue did not fill");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (done, result) = std::sync::mpsc::channel();
+        let resizing = terminals.clone();
+        std::thread::spawn(move || { done.send(resizing.resize("blocked", 30, 8)).unwrap(); });
+        let resized = result.recv_timeout(Duration::from_secs(5));
+        release.send(()).unwrap(); // Release even when the assertion fails.
+        assert!(resized.expect("resize waited on the blocked emitter").is_ok());
         terminals.kill_all();
     }
 

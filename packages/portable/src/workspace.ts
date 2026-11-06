@@ -884,12 +884,14 @@ export class WorkspaceRpcClient {
       const bytes = decodeBase64(dataB64);
       // Replay and live output can overlap by a chunk around a reconnect.
       const skip = cursor === undefined ? 0 : Math.max(0, cursor.offset - offset);
-      if (skip < bytes.length) {
+      // A zero-byte sized batch completes a resize at this stream position.
+      // It changes no byte cursor and must not be dropped as duplicate data.
+      if (skip < bytes.length || (size && bytes.length === 0 && offset >= (cursor?.offset ?? 0))) {
         const args = [bytes.subarray(skip), offset + skip, offset + skip < replayUntil] as const;
         if (size) handlers.onData(...args, size);
         else handlers.onData(...args);
       }
-      cursor = { offset: Math.max(cursor?.offset ?? 0, offset + bytes.length), epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
+      cursor = { offset: bytes.length ? Math.max(cursor?.offset ?? 0, offset + bytes.length) : cursor?.offset ?? 0, epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
     };
     const stop = await this.subscribe({
       method: "pty.attach",
@@ -935,6 +937,9 @@ export class WorkspaceRpcClient {
         switch (notification.event) {
           case "pty.output":
             emit(String(params.data), Number(params.offset), outputSize(params.size));
+            break;
+          case "pty.resize-complete":
+            emit("", Number(params.offset), outputSize(params.size));
             break;
           case "pty.exit":
             handlers.onExit?.((params.code as number | null | undefined) ?? null);

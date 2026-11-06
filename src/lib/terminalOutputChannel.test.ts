@@ -22,4 +22,9 @@ it("decodes local output dimensions without counting the header as PTY bytes", a
   expect(data).toHaveBeenLastCalledWith(new Uint8Array([65]), undefined);
   channel.onmessage(new ArrayBuffer(2));
   expect(data).toHaveBeenCalledTimes(2);
+  const completion = new ArrayBuffer(4);
+  new DataView(completion).setUint16(0, 30, true);
+  new DataView(completion).setUint16(2, 8, true);
+  channel.onmessage(completion);
+  expect(data).toHaveBeenLastCalledWith(new Uint8Array(), { cols: 30, rows: 8 });
 });

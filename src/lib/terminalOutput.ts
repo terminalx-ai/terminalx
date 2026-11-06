@@ -39,14 +39,18 @@ function applyOutputSize(term: Terminal, size: OutputSize) {
   try { term.resize(size.cols, size.rows); }
   finally { resizingOutput.delete(term); }
 }
-/** Older runtimes have no batch sizes. Preserve their previous acknowledged sizing. */
+/**
+ * RPC acknowledgements are on a different channel from output. Sized peers
+ * complete a resize with an ordered zero-byte batch, including silent programs.
+ * Older peers retain their previous acknowledged sizing.
+ */
 export function acknowledgeTerminalResize(term: Terminal, size: OutputSize) {
   const output = state(term);
   if (!output.sized && !output.stopped) term.write("", () => {
     if (!output.sized && !output.stopped && output.requested?.cols === size.cols && output.requested?.rows === size.rows) applyOutputSize(term, size);
   });
 }
-/** Standalone size notifications from older hosts; sized batches take precedence. */
+/** Standalone notifications can overtake output; sized peers use stream completions. */
 export function followTerminalOutputSize(term: Terminal, size: OutputSize) {
   const output = state(term);
   if (!output.sized && !output.stopped) applyOutputSize(term, size);

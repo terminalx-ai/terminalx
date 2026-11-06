@@ -98,11 +98,13 @@ it.each([false, true])("keeps a redraw arriving after the next resize request on
   followTerminalOutputSize(term, { cols: 18, rows: 16 }); // A cloud size notification can also arrive ahead of output.
   expect(send.mock.calls.map(([size]) => size)).toEqual([{ cols: 30, rows: 12 }, { cols: 18, rows: 16 }]);
   expect(term.cols).toBe(80); // Requests cannot move the parser ahead of its stream.
+  writeTerminalOutput(term, new Uint8Array(), { cols: 30, rows: 12 });
   if (fragmented) {
     for (const char of redraw) { write(char, 30, 12); await vi.advanceTimersByTimeAsync(150); }
   } else {
     write(redraw, 30, 12);
   }
+  writeTerminalOutput(term, new Uint8Array(), { cols: 18, rows: 16 });
   write(finalRedraw, 18, 16); // Both batches may also be queued before either is parsed.
   await vi.runAllTimersAsync();
   expect(text(term).match(/PROMPTMARK/g)).toHaveLength(1);
@@ -143,6 +145,26 @@ it("keeps acknowledged sizing for older peers without output metadata", async ()
   requestTerminalResize(term, { cols: 30, rows: 12 });
   await vi.runAllTimersAsync();
   expect(term.cols).toBe(30);
+  term.dispose();
+});
+
+it("adopts a silent terminal's ordered resize completion without any more program bytes", async () => {
+  vi.useFakeTimers();
+  const { term } = fixture();
+  const send = vi.fn(async (size: { cols: number; rows: number }) => acknowledgeTerminalResize(term, size));
+  coordinateTerminalResize(term, send);
+  term.onResize((size) => { if (!isOutputResize(term)) requestTerminalResize(term, size); });
+  writeTerminalOutput(term, new TextEncoder().encode("kept history\r\n"), { cols: 80, rows: 12 });
+  await vi.runAllTimersAsync();
+  requestTerminalResize(term, { cols: 30, rows: 8 });
+  await vi.runAllTimersAsync();
+  followTerminalOutputSize(term, { cols: 30, rows: 8 });
+  expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 80, rows: 12 }); // Neither RPC channel may overtake output.
+  writeTerminalOutput(term, new Uint8Array(), { cols: 30, rows: 8 });
+  await vi.runAllTimersAsync();
+  expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 30, rows: 8 });
+  expect(text(term)).toContain("kept history");
+  expect(send).toHaveBeenCalledTimes(1);
   term.dispose();
 });
 

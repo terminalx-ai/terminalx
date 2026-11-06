@@ -283,7 +283,8 @@ struct ViewTap {
 impl ViewTap {
     /// `false` once the view has fallen behind: the pane stops sending to it.
     fn send(&self, bytes: &[u8], size: Option<crate::pty::OutputSize>) -> bool {
-        for piece in bytes.chunks(PTY_PIECE) {
+        // Size-only completions must survive even when the program is silent.
+        for piece in bytes.chunks(PTY_PIECE).chain((bytes.is_empty() && size.is_some()).then_some(bytes)) {
             let frame = encode(&json!({"type":"pty", "id":self.id, "token":self.token,
                 "data":base64::engine::general_purpose::STANDARD.encode(piece), "size":size}));
             if !frame.is_some_and(|frame| self.output.frame(frame, Some(&self.budget))) {

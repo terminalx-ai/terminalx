@@ -200,6 +200,17 @@ fn every_split_output_frame_keeps_its_original_size() {
 }
 
 #[test]
+fn a_size_only_completion_is_not_lost_when_there_are_no_bytes_to_split() {
+    let (output, mut rx) = Output::new();
+    let view = ViewTap { output, budget: Arc::new(Semaphore::new(VIEW_QUEUED_BYTES)), id: "pane".into(), token: "t".into(),
+        told: true, peer: Arc::from("test"), tally: Arc::default() };
+    assert!(view.send(&[], Some(crate::pty::OutputSize { cols: 30, rows: 8 })));
+    let frame: Value = serde_json::from_slice(&rx.try_recv().unwrap().bytes).unwrap();
+    assert_eq!(frame["data"], "");
+    assert_eq!(frame["size"], json!({"cols":30,"rows":8}));
+}
+
+#[test]
 fn a_view_that_acknowledges_what_it_draws_never_reaches_its_budget() {
     // Its most outstanding output, the scrollback replay counted in: a pane
     // is held once it is `FLOW_HIGH` ahead, after one more flush of at most
