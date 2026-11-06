@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ChevronRight, X } from "@/icons";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, ChevronRight, Search, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
 import { resolveSetting, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
+import { HighlightedText } from "@/components/ui/HighlightedText";
+import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
+import { searchSettingsSections } from "@/lib/settingsSections";
 
 /** Legacy section names and stable row ids are both accepted by every existing entry point. */
 export type SettingsTab = SettingsSection | SettingId;
@@ -27,6 +30,18 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [target, setTarget] = useState<string | null>(() => initialTab === initial.id ? initial.id : null);
   const content = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const [selectionRequest, setSelectionRequest] = useState(0);
+  const results = useMemo(() => searchSettingsSections(query), [query]);
+  const searching = !!query.trim();
+  const changeQuery = (value: string) => {
+    setQuery(value);
+    setSelected(0);
+  };
   const { projects } = useSessionStore();
   const repositories = projects.filter((project) => !project.archived);
   const project = repositories.find((candidate) => candidate.path === projectPath);
@@ -36,6 +51,9 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     setProjectPath(initial.section === "repositories" ? initialProjectPath : undefined);
     if (initial.section === "repositories" && initialProjectPath) setExpanded((previous) => new Set([...previous, initialProjectPath]));
     setTarget(initialTab === initial.id ? initial.id : null);
+    setQuery("");
+    setSelected(0);
+    setSelectionRequest((request) => request + 1);
   }, [initial.id, initial.section, initialTab, initialProjectPath, openRequest]);
 
   // Rows can appear after account/native settings load. Resolve only inside this
@@ -44,8 +62,13 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     const root = content.current;
     if (!root) return;
     root.scrollTop = 0;
-    if (!target) return;
+    if (!target) {
+      if (!hasEscapeOverlay(resultsRef.current)) headingRef.current?.focus({ preventScroll: true });
+      return;
+    }
     const reveal = () => {
+      // Starting a search cancels any deferred row focus while its section loads.
+      if (resultsRef.current) return true;
       const row = [...root.querySelectorAll<HTMLElement>("[data-setting-id]")].find((element) => element.dataset.settingId === target);
       if (!row) return false;
       for (let parent: HTMLElement | null = row; parent && parent !== root; parent = parent.parentElement) {
@@ -63,16 +86,32 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
     observer.observe(root, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [section, projectPath, target, openRequest]);
+  }, [section, projectPath, target, openRequest, selectionRequest]);
+
+  useEffect(() => {
+    resultsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [selected, query]);
 
   useHotkey("escape", () => {
-    if (hasEscapeOverlay()) return false;
+    if (hasEscapeOverlay(resultsRef.current)) return false;
+    if (query) {
+      changeQuery("");
+      inputRef.current?.focus();
+      return;
+    }
     onBack();
   });
+  useHotkey("mod+f", () => {
+    if (hasEscapeOverlay(resultsRef.current)) return false;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, { global: true });
   const choose = (next: SettingsSection, path?: string) => {
     setSection(next);
     setProjectPath(path);
     setTarget(null);
+    changeQuery("");
+    setSelectionRequest((request) => request + 1);
   };
   const navClass = (selected: boolean) => cn(
     "w-full min-w-0 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
@@ -86,6 +125,37 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
         <h1 className="px-1 text-sm font-medium">Settings</h1>
         <Button variant="outline" size="icon-sm" aria-label="Close" onClick={onBack} className="ml-auto shrink-0 bg-raised hover:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_8%)] active:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_14%)]"><X /></Button>
       </header>
+      <div className="shrink-0 border-b border-hairline px-4 py-3">
+        <div className="mx-auto flex max-w-[48rem] items-center gap-2 rounded-md bg-well px-3 hairline focus-within:ring-1 focus-within:ring-ring/40">
+          <Search className="size-4 shrink-0 text-faint" />
+          <input
+            ref={inputRef}
+            role="combobox"
+            aria-label="Search settings"
+            aria-autocomplete="list"
+            aria-expanded={searching}
+            aria-controls={searching ? "settings-search-results" : undefined}
+            aria-activedescendant={searching ? results[selected]?.item.id : undefined}
+            placeholder="Search settings…"
+            autoComplete="off"
+            spellCheck={false}
+            value={query}
+            onChange={(event) => changeQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229 || !searching) return;
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelected((current) => movePaletteSelection(current, results.length, event.key as PaletteNavigationKey));
+              } else if (event.key === "Enter" && results[selected]) {
+                event.preventDefault();
+                choose(results[selected].item.tab);
+              }
+            }}
+            className="h-9 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
+          />
+          {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
+        </div>
+      </div>
       <div className="flex min-h-0 flex-1">
         <nav aria-label="Settings sections" className="flex w-52 shrink-0 flex-col gap-4 overflow-y-auto border-r border-hairline p-3 scrollbar-thin">
           {SETTINGS_GROUPS.map((group, index) => (
@@ -116,9 +186,30 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             </div>
           ))}
         </nav>
-        <section ref={content} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby="settings-section-title">
-          <div className="mx-auto w-full max-w-[48rem] p-6 pb-12" key={`${section}:${project?.path ?? ""}`}>
-            <h2 id="settings-section-title" className="mb-5 break-words text-xl font-semibold tracking-tight">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
+        <section ref={content} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby={searching ? "settings-results-title" : "settings-section-title"}>
+          {searching && <div className="mx-auto w-full max-w-[48rem] p-6">
+            <h2 id="settings-results-title" className="mb-3 text-sm font-medium">Settings sections</h2>
+            <div ref={resultsRef} id="settings-search-results" role="listbox" aria-label="Settings search results">
+              {results.map((match, index) => (
+                <button
+                  key={match.item.id}
+                  id={match.item.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selected === index}
+                  onMouseEnter={() => setSelected(index)}
+                  onClick={() => choose(match.item.tab)}
+                  className={cn("flex w-full flex-col gap-1 rounded-md px-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40", selected === index ? "bg-selected" : "hover:bg-veil-raised")}
+                >
+                  <span className="text-sm"><HighlightedText text={match.item.primary} ranges={match.primaryRanges} /></span>
+                  <span className="text-xs text-muted-foreground"><HighlightedText text={match.item.secondary} ranges={match.secondaryRanges} /></span>
+                </button>
+              ))}
+            </div>
+            {!results.length && <p role="status" className="py-6 text-sm text-muted-foreground">No settings match {query.trim()}</p>}
+          </div>}
+          <div hidden={searching} className="mx-auto w-full max-w-[48rem] p-6 pb-12" key={`${section}:${project?.path ?? ""}`}>
+            <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="mb-5 break-words text-xl font-semibold tracking-tight outline-none">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
             {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest })}
           </div>
         </section>
