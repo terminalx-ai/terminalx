@@ -90,6 +90,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
+            "environmentChanged" => Ok(json!(manager.environment_changed(id)?)),
             "busy" => Ok(json!(terminals.is_busy(id))),
             "output" => Ok(json!({"data":terminals.read_output(id).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
                 "running":terminals.is_running(id), "pid":terminals.pid(id)})),

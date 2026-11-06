@@ -704,7 +704,7 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
         let master = adopted.take(pane.fd)?;
         let id = pane.id.clone();
         let frozen = crate::pty::FrozenPane {
-            id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, cwd: pane.cwd, created: pane.created,
+            id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: pane.environment.unwrap_or_else(|| crate::store::environment::Stamp::unconfigured(&pane.cwd)), cwd: pane.cwd, created: pane.created,
             tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback, printed: pane.printed, screen: pane.screen,
             quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed,
         };

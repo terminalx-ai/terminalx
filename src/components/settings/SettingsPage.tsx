@@ -31,9 +31,10 @@ import { ShortcutsTab } from "./ShortcutsTab";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
+import { EnvironmentSettings } from "./EnvironmentSettings";
 import { ExperimentalTab } from "./ExperimentalSettings";
 
-const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "experimental", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "environment", "transcription", "integrations", "storage", "shortcuts", "experimental", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
@@ -45,6 +46,7 @@ const TAB_LABEL: Record<Tab, string> = {
   appearance: "Appearance",
   organizations: "Organizations",
   agents: "Agents",
+  environment: "Environment",
   transcription: "Transcription",
   integrations: "Integrations",
   storage: "Storage",
@@ -104,7 +106,7 @@ export function SettingsPage({
         </Button>
       </header>
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="Settings sections" className="flex w-48 shrink-0 flex-col gap-0.5 border-r border-hairline p-4">
+        <nav aria-label="Settings sections" className="flex w-48 shrink-0 flex-col gap-0.5 overflow-y-auto scrollbar-thin border-r border-hairline p-4">
           {TABS.map((t) => (
             <button
               key={t}
@@ -131,6 +133,7 @@ export function SettingsPage({
             {tab === "appearance" && <AppearanceTab onOpenUsage={onOpenUsage} />}
             {tab === "organizations" && <OrganizationsTab />}
             {tab === "agents" && <AgentsTab onOpenSkills={onOpenSkills} />}
+            {tab === "environment" && <EnvironmentSettings />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}
             {tab === "storage" && (

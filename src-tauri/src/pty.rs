@@ -169,6 +169,7 @@ struct Pane {
     /// A shell tab launched directly into a command has no interactive shell
     /// beneath it; its original foreground group is work too.
     explicit_command: bool,
+    environment: crate::store::environment::Stamp,
     alive: Arc<Mutex<bool>>,
     group: Arc<OwnedGroup>,
     /// When this pane last wrote something. A caller that has to type into a
@@ -605,6 +606,11 @@ impl Terminals {
         Self::default()
     }
 
+    pub fn environment_changed(&self, id: &str) -> Result<bool> {
+        let stamp = self.panes.lock().unwrap().get(id).filter(|p| *p.alive.lock().unwrap()).map(|p| p.environment.clone());
+        stamp.map_or(Ok(false), |stamp| stamp.changed())
+    }
+
     /// `command`, when given, replaces the interactive shell: the login shell
     /// execs it so PATH and rc files still apply, and the pane exits with it.
     /// That exit is the signal a terminal-view tab relies on, so there is no
@@ -651,6 +657,7 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
+        let environment = crate::store::environment::launch(cwd)?;
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
@@ -673,6 +680,7 @@ impl Terminals {
             None => {}
         }
         cmd.cwd(cwd);
+        environment.inject(&mut cmd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "Raccoon");
@@ -703,6 +711,7 @@ impl Terminals {
             pid,
             group: pid,
             explicit_command,
+            environment: environment.stamp,
             cwd: cwd.to_string(),
             created: crate::store::index::now(),
             scrollback,
@@ -715,7 +724,7 @@ impl Terminals {
     /// Run a pane's reader, emitter and waiter, and list it: one opened here
     /// or one handed over by the runtime this one replaced (#765).
     fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
-        let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, cwd, created, scrollback, printed, screen, last_output } = parts;
+        let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, environment, cwd, created, scrollback, printed, screen, last_output } = parts;
         #[cfg(unix)]
         let reader = Arc::new(Mutex::new(reader));
         #[cfg(not(unix))]
@@ -929,7 +938,7 @@ impl Terminals {
             room,
             stalled: false,
         }));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, output_size, output, cwd, created, hold,
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, environment, alive, group, last_output, scrollback, printed: own, screen, output_size, output, cwd, created, hold,
             #[cfg(unix)] reader });
         self.keep_slot(id, &tap);
         self.changed();

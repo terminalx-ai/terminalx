@@ -98,8 +98,9 @@ mod issue_ops;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
-#[cfg(feature = "desktop")]
 mod keychain;
+#[cfg(feature = "desktop")]
+mod environment_commands;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
@@ -399,6 +400,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            environment_commands::environment_list,
+            environment_commands::environment_reveal,
+            environment_commands::environment_save,
+            environment_commands::environment_delete,
+            environment_commands::environment_read_file,
+            environment_commands::environment_changed,
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
