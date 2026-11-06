@@ -234,6 +234,8 @@ const sameOverrides = (a: Map<CompactionRow, CompactionOperation> | undefined, b
 export class TranscriptReducer {
   private readonly turns: Turn[] = [];
   private readonly asks = new Map<string, PendingAsk>();
+  /** A replayed request cannot reopen an answer, even if it arrives after the decision. */
+  private readonly decidedAsks = new Set<string>();
   private readonly calls = new Map<string, ToolCall>();
   /** The calls in `calls` that have no result yet: what a new prompt or a turn's end abandons. */
   private readonly unresolved = new Set<ToolCall>();
@@ -550,6 +552,7 @@ export class TranscriptReducer {
         break;
       }
       case "permission_requested":
+        if (this.asks.has(payload.requestId) || this.decidedAsks.has(payload.requestId)) break;
         this.asks.set(payload.requestId, {
           requestId: payload.requestId,
           toolUseId: payload.toolUseId,
@@ -565,10 +568,13 @@ export class TranscriptReducer {
         this.asksVersion++;
         break;
       case "questions_asked":
+        if (this.asks.has(payload.requestId) || this.decidedAsks.has(payload.requestId)) break;
         this.asks.set(payload.requestId, { requestId: payload.requestId, toolUseId: payload.toolUseId, seq: event.seq, kind: "questions", questions: payload.questions });
         this.asksVersion++;
         break;
       case "permission_decided":
+        if (this.decidedAsks.has(payload.requestId)) break;
+        this.decidedAsks.add(payload.requestId);
         if (this.asks.delete(payload.requestId)) this.asksVersion++;
         if (this.current && !payload.automatic) {
           this.current.work.push({ kind: "decision", label: payload.label, allowed: payload.allowed, automatic: payload.automatic, key: `d${event.seq}`, seq: event.seq });

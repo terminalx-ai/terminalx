@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Show each permission request once, and retire it as soon as Allow or Deny
+  is confirmed, including answers from the terminal or another card. Late
+  duplicate requests stay retired; clicking a stale card explains that the
+  request was already answered without submitting another decision. (PRO-160)
 - Keep local agent installation and login status current when returning to the
   app, after an embedded sign-in command exits, and every two minutes while
   Settings → Agents is open. Each card's badge and setup instructions now use

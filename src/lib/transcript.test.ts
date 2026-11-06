@@ -26,6 +26,27 @@ function toolDone(callId: string): AgentEvent {
 }
 
 describe("buildTranscript", () => {
+  it.each([true, false])("does not reopen an answered Codex request when its duplicate arrives late, allowed=%s (PRO-160)", allowed => {
+    const prompt = ev({ type: "user_message", text: "Run pwd", queued: false }, { harness: "codex" });
+    const request = ev({ type: "permission_requested", requestId: "codex-request", toolUseId: "", toolName: "Bash", input: { command: "pwd" }, options: [
+      { id: "allow", label: "Allow", kind: "allow_once" }, { id: "deny", label: "Deny", kind: "deny" },
+    ] }, { harness: "codex" });
+    const events = [prompt, request, ev(request.payload, { harness: "codex" })];
+    expect(buildTranscript(events, true).pendingAsks).toHaveLength(1);
+    expect(buildTranscript(events, true).pendingAsks[0].seq).toBe(request.seq);
+    const decision = ev({ type: "permission_decided", requestId: "codex-request", allowed, label: allowed ? "Allowed" : "Denied", automatic: false }, { harness: "codex" });
+    events.push(decision);
+    expect(buildTranscript(events, true).pendingAsks).toHaveLength(0);
+    events.push(ev(request.payload, { harness: "codex" }));
+    expect(buildTranscript(events, true).pendingAsks).toHaveLength(0);
+    events.push(ev(decision.payload, { harness: "codex" }));
+    expect(buildTranscript(events, true).turns[0].work.filter(item => item.kind === "decision")).toHaveLength(1);
+    // Identical commands with distinct request ids are still independent approvals.
+    if (request.payload.type !== "permission_requested") throw new Error("expected a permission request");
+    events.push(ev({ ...request.payload, requestId: "another-request" }, { harness: "codex" }));
+    expect(buildTranscript(events, true).pendingAsks.map(ask => ask.requestId)).toEqual(["another-request"]);
+  });
+
   // #667: what the agent (or its launch) last said rides under the error, and only under a failure.
   it("keeps the agent's own last line under a failed turn and under a launch error", () => {
     const said = "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
