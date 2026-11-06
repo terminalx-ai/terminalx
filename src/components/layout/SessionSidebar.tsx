@@ -11,6 +11,9 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
   DropdownMenu,
   DropdownMenuContent,
@@ -52,7 +55,7 @@ import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizatio
 import { AgentMark } from "@/components/AgentMark";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
-import { IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
+import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
 import { compareMessageActivity, conversationTime } from "@/lib/messageActivity";
 
@@ -884,50 +887,116 @@ function NewSessionButton({ action }: { action: NewSessionAction }) {
   );
 }
 
-/**
- * A conversation row's right-click menu: what a developer reaches for on one, and nothing more. `ids`: the sessions
- * the row stands for, which Select picks for the bulk bar (#718).
- */
-export function RowContextMenu({ session, branch, rename, ids = [session.id] }: { session: SessionEntry; branch: string | null; rename: (() => void) | null; ids?: string[] }) {
+type ConversationLinkActions = { projects: Project[]; onMove: (project: Project, worktree: boolean) => void; onAddProject: (worktree: boolean) => void };
+
+type ConversationMenuProps = {
+  session: SessionEntry;
+  branch: string | null;
+  rename: (() => void) | null;
+  /** The sessions the row stands for, which Select picks for the bulk bar. */
+  ids?: string[];
+  linkTo?: ConversationLinkActions | null;
+};
+
+/** One action list for a conversation's ⋯, right-click and keyboard menus, in both sidebar layouts. */
+export function ConversationMenuItems({ session, branch, rename, ids = [session.id], linkTo, contextMenu = false }: ConversationMenuProps & { contextMenu?: boolean }) {
+  const Item = contextMenu ? ContextMenuItem : DropdownMenuItem;
+  const Separator = contextMenu ? ContextMenuSeparator : DropdownMenuSeparator;
+  const Sub = contextMenu ? ContextMenuSub : DropdownMenuSub;
+  const SubTrigger = contextMenu ? ContextMenuSubTrigger : DropdownMenuSubTrigger;
+  const SubContent = contextMenu ? ContextMenuSubContent : DropdownMenuSubContent;
+  const IssueItems = contextMenu ? IssueLinkContextItems : IssueLinkMenuItems;
   const copy = (text: string) => void copyText(text).catch(() => {});
   const picked = isPicked(ids, usePickedSessions());
   return (
-    <ContextMenuContent className="w-56">
+    <>
       {rename && (
-        <ContextMenuItem onSelect={rename}>
+        <Item onSelect={rename}>
           <Pencil /> Rename…
-        </ContextMenuItem>
+        </Item>
       )}
-      <ContextMenuItem onSelect={() => void pinSession(session.id, !session.pinned)}>
+      {linkTo && (
+        <>
+          <Sub>
+            <SubTrigger>
+              <FolderInput /> Link to a project
+            </SubTrigger>
+            <SubContent className="w-60">
+              {linkTo.projects.map((project) =>
+                project.kind === "folder" ? (
+                  <Item key={project.path} onSelect={() => linkTo.onMove(project, false)}>
+                    <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
+                  </Item>
+                ) : (
+                  <Sub key={project.path}>
+                    <SubTrigger>
+                      <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
+                    </SubTrigger>
+                    <SubContent>
+                      {/* A worktree first: the project's own checkout is shared with its other conversations. */}
+                      <Item onSelect={() => linkTo.onMove(project, true)}>
+                        <GitBranch /> On a new branch (worktree)
+                      </Item>
+                      <Item onSelect={() => linkTo.onMove(project, false)}>
+                        <FolderOpen /> In its main checkout
+                      </Item>
+                    </SubContent>
+                  </Sub>
+                ),
+              )}
+              {linkTo.projects.length > 0 && <Separator />}
+              <Item onSelect={() => linkTo.onAddProject(false)}>
+                <FolderPlus /> Choose a folder…
+              </Item>
+              <Item onSelect={() => linkTo.onAddProject(true)}>
+                <GitBranch /> Choose a repo, new branch…
+              </Item>
+            </SubContent>
+          </Sub>
+          <Separator />
+        </>
+      )}
+      <Item onSelect={() => void pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
-      </ContextMenuItem>
-      <ContextMenuSeparator />
-      <ContextMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
+      </Item>
+      <Separator />
+      <Item onSelect={() => void revealItemInDir(session.cwd)}>
         <FolderOpen /> Reveal in Finder
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={() => copy(session.cwd)}>
+      </Item>
+      <Item onSelect={() => copy(session.cwd)}>
         <Copy /> Copy path
-      </ContextMenuItem>
+      </Item>
       {branch && (
-        <ContextMenuItem onSelect={() => copy(branch)}>
+        <Item onSelect={() => copy(branch)}>
           <GitBranch /> Copy branch name
-        </ContextMenuItem>
+        </Item>
       )}
-      <ContextMenuItem onSelect={() => void copyShareLink(session.id).catch(() => {})}>
+      <Item onSelect={() => void copyShareLink(session.id).catch(() => {})}>
         <Link /> Copy link
-      </ContextMenuItem>
-      <ContextMenuSeparator />
-      <ContextMenuItem onSelect={() => togglePicked(ids)}>
+      </Item>
+      <Separator />
+      <Item onSelect={() => togglePicked(ids)}>
         <CheckSquare /> {picked ? "Deselect" : "Select"}
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
+      </Item>
+      <Item onSelect={() => void archiveSession(session.id, !session.archived)}>
         <Archive /> {session.archived ? "Unarchive" : "Archive"}
-      </ContextMenuItem>
-      <ContextMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
+      </Item>
+      <IssueItems session={session} />
+      <Separator />
+      {session.worktreeName && !session.worktreeRemoved && (
+        <Item onSelect={() => openSettle(session)}>
+          <Folder /> Remove workspace, keep conversations…
+        </Item>
+      )}
+      <Item destructive onSelect={() => void confirmDeleteSession(session)}>
         <Trash2 /> Delete…
-      </ContextMenuItem>
-    </ContextMenuContent>
+      </Item>
+    </>
   );
+}
+
+export function RowContextMenu(props: ConversationMenuProps) {
+  return <ContextMenuContent className="w-56"><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
 }
 
 /** The state that matters most among several: a question waiting, then work in progress, then work done. */
@@ -966,7 +1035,7 @@ function ConversationRow({
   /** The branch it works on, named at the row's end; without one the row shows when it was last active. */
   branch: string | null;
   /** For a chat linked to nothing: the projects it may be linked to. */
-  linkTo: { projects: Project[]; onMove: (project: Project, worktree: boolean) => void; onAddProject: (worktree: boolean) => void } | null;
+  linkTo: ConversationLinkActions | null;
   /** Drawn under an Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
@@ -1051,74 +1120,10 @@ function ConversationRow({
           </RowActions>
         </div>
         </ContextMenuTrigger>
-        <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} />
+        <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </ContextMenu>
         <DropdownMenuContent align="end" className="w-56">
-          {rename && (
-            <DropdownMenuItem onSelect={rename}>
-              <Pencil /> Rename…
-            </DropdownMenuItem>
-          )}
-          {linkTo && (
-            <>
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <FolderInput /> Link to a project
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent className="w-60">
-                  {linkTo.projects.map((project) =>
-                    project.kind === "folder" ? (
-                      <DropdownMenuItem key={project.path} onSelect={() => linkTo.onMove(project, false)}>
-                        <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
-                      </DropdownMenuItem>
-                    ) : (
-                      <DropdownMenuSub key={project.path}>
-                        <DropdownMenuSubTrigger>
-                          <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
-                        </DropdownMenuSubTrigger>
-                        <DropdownMenuSubContent>
-                          {/* A worktree first: the project's own checkout is shared with its other conversations. */}
-                          <DropdownMenuItem onSelect={() => linkTo.onMove(project, true)}>
-                            <GitBranch /> On a new branch (worktree)
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onSelect={() => linkTo.onMove(project, false)}>
-                            <FolderOpen /> In its main checkout
-                          </DropdownMenuItem>
-                        </DropdownMenuSubContent>
-                      </DropdownMenuSub>
-                    ),
-                  )}
-                  {linkTo.projects.length > 0 && <DropdownMenuSeparator />}
-                  <DropdownMenuItem onSelect={() => linkTo.onAddProject(false)}>
-                    <FolderPlus /> Choose a folder…
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => linkTo.onAddProject(true)}>
-                    <GitBranch /> Choose a repo, new branch…
-                  </DropdownMenuItem>
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-              <DropdownMenuSeparator />
-            </>
-          )}
-          <DropdownMenuItem onSelect={() => void pinSession(session.id, !session.pinned)}>
-            <Pin /> {session.pinned ? "Unpin" : "Pin"}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
-            <Archive /> {session.archived ? "Unarchive" : "Archive"}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => togglePicked(ids)}>
-            <CheckSquare /> {picked ? "Deselect" : "Select"}
-          </DropdownMenuItem>
-          <IssueLinkMenuItems session={session} />
-          <DropdownMenuSeparator />
-          {session.worktreeName && !session.worktreeRemoved && (
-            <DropdownMenuItem onSelect={() => openSettle(session)}>
-              <Folder /> Remove workspace, keep conversations…
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
-            <Trash2 /> Delete…
-          </DropdownMenuItem>
+          <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
       </DropdownMenu>
     </li>

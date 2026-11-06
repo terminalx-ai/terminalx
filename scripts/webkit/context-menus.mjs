@@ -31,14 +31,16 @@ try {
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "hidden" });
     };
-    const actions = async () => menu.getByRole("menuitem").allTextContents();
+    const actions = async () => menu.locator('[role^="menuitem"]').evaluateAll((items) => items.map((item) => ({
+      role: item.getAttribute("role"), label: item.textContent.trim(), checked: item.getAttribute("aria-checked"),
+    })));
 
     if (layout === "simple") {
       const title = page.getByRole("button", { name: "local-0 overview" });
       await title.click({ button: "right" });
       await menu.waitFor();
       const expected = await actions();
-      assert(expected.some((text) => text.includes("Issue pipeline…")));
+      assert(expected.some((item) => item.label.includes("Issue pipeline…")));
       await close();
       await title.focus();
       await page.keyboard.press("Shift+F10");
@@ -55,9 +57,16 @@ try {
     }
 
     const conversation = page.locator('[data-testid="conversation-list"]').getByRole("button", { name: layout === "simple" ? "main, First conversation" : "First conversation", exact: true });
-    await conversation.click({ button: "right" });
+    await conversation.hover();
+    await page.getByRole("button", { name: "Menu for First conversation", exact: true }).click();
     await menu.waitFor();
     const expected = await actions();
+    assert(expected.some((item) => item.label === "Link to issue…"));
+    assert(expected.some((item) => item.role === "menuitemcheckbox" && item.label === "Don’t share this session"));
+    await close();
+    await conversation.click({ button: "right" });
+    await menu.waitFor();
+    assert.deepEqual(await actions(), expected);
     await close();
     await conversation.focus();
     await page.keyboard.press("Shift+F10");
@@ -83,7 +92,7 @@ try {
     await file.click({ button: "right" });
     await menu.waitFor();
     const fileActions = await actions();
-    assert(fileActions.includes("Open"));
+    assert(fileActions.some((item) => item.label === "Open"));
     await close();
     const tree = page.getByRole("tree");
     await tree.focus();
