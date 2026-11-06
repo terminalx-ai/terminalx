@@ -15,11 +15,38 @@ export function modifiersOf(e: Modifiers): number {
   return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 }
 
-/** A point on the preview image in the page's own CSS pixels. */
-export function toPagePoint(clientX: number, clientY: number, rect: { left: number; top: number; width: number; height: number }, page: { width: number; height: number }) {
-  const x = ((clientX - rect.left) / Math.max(rect.width, 1)) * page.width;
-  const y = ((clientY - rect.top) / Math.max(rect.height, 1)) * page.height;
+/**
+ * Where a frame is drawn in an image box that fits it whole (`object-contain`,
+ * centred across, at the top): a frame of another shape than the box, as
+ * while a resize settles, leaves bands beside or under it.
+ */
+export function drawnArea(box: { left: number; top: number; width: number; height: number }, page: { width: number; height: number }) {
+  const scale = Math.min(box.width / Math.max(page.width, 1), box.height / Math.max(page.height, 1));
+  const width = page.width * scale;
+  const height = page.height * scale;
+  return { left: box.left + (box.width - width) / 2, top: box.top, width, height };
+}
+
+/** A point on the preview image in the page's own CSS pixels, through where the frame is drawn in it. */
+export function toPagePoint(clientX: number, clientY: number, box: { left: number; top: number; width: number; height: number }, page: { width: number; height: number }) {
+  const area = drawnArea(box, page);
+  const x = ((clientX - area.left) / Math.max(area.width, 1)) * page.width;
+  const y = ((clientY - area.top) / Math.max(area.height, 1)) * page.height;
   return { x: Math.max(0, Math.min(page.width, x)), y: Math.max(0, Math.min(page.height, y)) };
+}
+
+/** Presses this close in time and place are one double (or triple) click. */
+export const MULTI_CLICK_MS = 500;
+export const MULTI_CLICK_PX = 4;
+
+/**
+ * Counts a press into a run of clicks. Pointer events carry no click count
+ * (their \`detail\` is 0), so a double click is counted here from the last press.
+ */
+export function nextClickCount(last: { at: number; x: number; y: number; button: number; count: number } | null, press: { at: number; x: number; y: number; button: number }): number {
+  if (!last || last.button !== press.button || press.at - last.at > MULTI_CLICK_MS) return 1;
+  if (Math.abs(press.x - last.x) > MULTI_CLICK_PX || Math.abs(press.y - last.y) > MULTI_CLICK_PX) return 1;
+  return last.count + 1;
 }
 
 const BUTTONS = ["left", "middle", "right", "back", "forward"] as const;

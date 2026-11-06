@@ -4,7 +4,9 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { BrowserPage } from "@/lib/api";
 import { navigateBrowserPage, sendPageInput, setScreencast, subscribeFrames, useBrowser, watchScreencast } from "@/lib/browser";
-import { insertText, keyEvents, keyForPage, mouseEvent, toPagePoint, viewportEvent, wheelEvent, wheelPixels, modifiersOf, type PageInputEvent } from "@/lib/browserInput";
+import { insertText, keyEvents, keyForPage, mouseEvent, nextClickCount, toPagePoint, viewportEvent, wheelEvent, wheelPixels, modifiersOf, type PageInputEvent } from "@/lib/browserInput";
+
+const modifiersFrom = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => ({ altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isMac } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
@@ -130,19 +132,30 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
     };
   }, [streaming, page.id]);
 
+  /** The press the page holds (to release it however the gesture ends), and the last press, for counting clicks. */
+  const held = useRef<{ point: { x: number; y: number }; button: number; count: number } | null>(null);
+  const lastPress = useRef<{ at: number; x: number; y: number; button: number; count: number } | null>(null);
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     surfaceRef.current?.focus({ preventScroll: true });
     const point = pointAt(e.clientX, e.clientY);
     if (!interactive || !point) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    send(mouseEvent("mousePressed", point, e));
+    const press = { at: e.timeStamp, x: e.clientX, y: e.clientY, button: e.button };
+    const count = nextClickCount(lastPress.current, press);
+    lastPress.current = { ...press, count };
+    held.current = { point, button: e.button, count };
+    send(mouseEvent("mousePressed", point, { ...modifiersFrom(e), button: e.button, buttons: e.buttons, detail: count }));
   };
-  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
-    const point = pointAt(e.clientX, e.clientY);
-    if (!interactive || !point) return;
-    send(mouseEvent("mouseReleased", point, e));
+  const release = (e: PointerEvent<HTMLDivElement>, at?: { x: number; y: number } | null) => {
+    const press = held.current;
+    if (!press) return;
+    held.current = null;
+    send(mouseEvent("mouseReleased", at ?? press.point, { ...modifiersFrom(e), button: press.button, buttons: 0, detail: press.count }));
   };
+  // The page always hears the button go up, even when the gesture ends off the preview or is cancelled.
+  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => release(e, pointAt(e.clientX, e.clientY));
+  const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => release(e);
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     const point = pointAt(e.clientX, e.clientY);
     if (!interactive || !point) return;
@@ -264,6 +277,8 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
         aria-roledescription="browser page"
         onPointerDown={onPointerDown}
         onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onLostPointerCapture={onPointerCancel}
         onPointerMove={onPointerMove}
         onContextMenu={(e) => interactive && e.preventDefault()}
         onKeyDown={onKeyDown}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editingCommand, keyEvents, keyForPage, modifiersOf, mouseEvent, toPagePoint, viewportEvent, wheelPixels } from "./browserInput";
+import { editingCommand, keyEvents, keyForPage, modifiersOf, mouseEvent, nextClickCount, toPagePoint, viewportEvent, wheelPixels } from "./browserInput";
 
 const none = { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false };
 const key = (k: string, code: string, keyCode: number, mods: Partial<typeof none> = {}) => ({ ...none, ...mods, key: k, code, keyCode });
@@ -51,5 +51,24 @@ describe("the page's viewport", () => {
     expect(viewportEvent(520, 900, 2).params).toEqual({ width: 520, height: 900, deviceScaleFactor: 2, mobile: false });
     expect(viewportEvent(1400, 900, 2).params).toMatchObject({ width: 1400, deviceScaleFactor: 1.46 });
     expect(viewportEvent(50, 50, 1).params).toMatchObject({ width: 200, height: 200, deviceScaleFactor: 1 });
+  });
+});
+
+describe("where a click lands", () => {
+  it("goes through the frame as drawn, not the image box, when their shapes differ", () => {
+    // A 400×800 page drawn in a 1000×800 box: 400 wide, centred.
+    const box = { left: 0, top: 0, width: 1000, height: 800 };
+    expect(toPagePoint(300, 0, box, { width: 400, height: 800 })).toEqual({ x: 0, y: 0 });
+    expect(toPagePoint(500, 400, box, { width: 400, height: 800 })).toEqual({ x: 200, y: 400 });
+  });
+
+  it("counts presses close in time and place into a double and a triple click", () => {
+    const one = { at: 0, x: 10, y: 10, button: 0 };
+    expect(nextClickCount(null, one)).toBe(1);
+    expect(nextClickCount({ ...one, count: 1 }, { ...one, at: 200 })).toBe(2);
+    expect(nextClickCount({ ...one, count: 2 }, { ...one, at: 350 })).toBe(3);
+    expect(nextClickCount({ ...one, count: 1 }, { ...one, at: 900 })).toBe(1);
+    expect(nextClickCount({ ...one, count: 1 }, { ...one, at: 200, x: 30 })).toBe(1);
+    expect(nextClickCount({ ...one, count: 1 }, { ...one, at: 200, button: 2 })).toBe(1);
   });
 });
