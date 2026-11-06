@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep local agent installation and login status current when returning to the
+  app, after an embedded sign-in command exits, and every two minutes while
+  Settings → Agents is open. Each card's badge and setup instructions now use
+  the same readiness check, so they cannot disagree about installation or
+  login. (PRO-170)
 - Return to the welcome screen with **Home** in either sidebar layout or ⌘K,
   even after opening projects or sessions. Open local project, Open GitHub
   project and Quick start remain available there. (PRO-183)
