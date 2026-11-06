@@ -419,6 +419,33 @@ fn a_checked_repository_cannot_authorize_git_execution_in_another_workdir() {
 }
 
 #[test]
+fn session_rewrites_preserve_shell_syntax_and_reject_changed_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    // Arbitrary explicitly approved syntax must remain quoted inside eval,
+    // rather than being able to close or comment out the directory guard.
+    let input = serde_json::json!({"command":"cat > \"a'b\" <<'END'\nhello; 'quoted'\nEND\n# trailing comment", "timeout":1000});
+    let key = session_key("Bash", &input, dir.path().to_str()).unwrap();
+    let updated = session_input("Bash", &input, &key).unwrap();
+    let output = Command::new("/bin/sh")
+        .current_dir(dir.path())
+        .args(["-c", updated["command"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a'b")).unwrap(),
+        "hello; 'quoted'\n"
+    );
+    assert_eq!(updated["timeout"], 1000);
+    assert!(session_input("Bash", &serde_json::json!({"command":"rm file"}), &key).is_none());
+    assert!(session_input("Bash", &input, "legacy-key").is_none());
+}
+
+#[test]
 fn finder_launch_uses_trusted_developer_install_directories() {
     const CHILD: &str = "TERMINALX_READ_ONLY_FINDER_TEST";
     if let Some(home) = std::env::var_os(CHILD).map(PathBuf::from) {

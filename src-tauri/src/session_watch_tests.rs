@@ -448,16 +448,12 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
 }
 
 fn command_frame(rig: &Rig, gate: &str, command: &str, cwd: &str) -> HookFrame {
-    let mut input = json!({"command":command});
-    // Positive fixtures explicitly report the execution workdir. Codex
-    // 0.164's normalized command-only frames are tested separately below.
-    if matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.harness == CliKind::Codex) { input["workdir"] = json!(cwd); }
     HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
-        payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":input}) }
+        payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":{"command":command}}) }
 }
 
 /// Exercise the real response path, including validation of session options.
-fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: bool) {
+fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: bool) -> HookReply {
     let key = tool_key(frame.payload["tool_name"].as_str().unwrap(), &frame.payload["tool_input"]);
     let (unverified_codex, previous_answer) = {
         let rt = rig.rt.lock().unwrap();
@@ -495,18 +491,20 @@ fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: boo
         }
     }
     rig.manager.respond_permission(SESSION, TAB, &request, option).unwrap();
-    assert!(worker.join().unwrap().output.is_some());
+    let reply = worker.join().unwrap();
+    assert!(reply.output.is_some());
     if unverified_codex {
         let rt = rig.rt.lock().unwrap();
         let Engine::Cli(p) = &rt.engine else { unreachable!() };
         assert_eq!(p.answered.get(&key).copied(), previous_answer, "an unverified workdir must never populate the approval cache");
     }
     rig.manager.forget_tool_answers(&mut rig.rt.lock().unwrap());
+    reply
 }
 
 #[test]
 #[cfg(unix)]
-fn ask_mode_discovery_with_verified_directory_skips_cards_for_both_clis() {
+fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
@@ -527,31 +525,73 @@ fn ask_mode_discovery_with_verified_directory_skips_cards_for_both_clis() {
 }
 
 #[test]
-fn codex_normalized_input_cannot_reuse_session_or_turn_grants_for_an_unknown_workdir() {
+fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     // Codex 0.164 reports session A here even when exec_command runs in B.
     let input = json!({"command":"rm relative-file"});
-    rig.manager.session_commands.lock().unwrap().entry(key_of(SESSION, TAB)).or_default()
-        .insert(crate::harness::read_only::session_key("Bash", &input, Some("/workspace/a")).unwrap());
     {
         let mut rt = rig.rt.lock().unwrap();
         let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
         p.answered.insert(tool_key("Bash", &input), true);
     }
-    for (input, answer) in [
-        (input.clone(), "deny"),
-        (input, "allow"),
-        (json!({"command":"rm relative-file"}), "deny"),
-        (json!({"command":"git diff"}), "deny"),
-        (json!({"command":"pwd"}), "deny"),
-        (json!({"command":"pwd", "workdir":"../b"}), "deny"),
-        (json!({"command":"pwd", "workdir":"/workspace/a", "cwd":"/workspace/b"}), "deny"),
+    for answer in ["deny", "allow"] {
+        let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
+            payload: json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":input.clone()}) };
+        answer_command(&rig, frame, answer, true);
+    }
+    for input in [
+        json!({"command":"pwd", "workdir":"../b"}),
+        json!({"command":"pwd", "workdir":null}),
+        json!({"command":"pwd", "workdir":"/workspace/a", "cwd":"/workspace/b"}),
     ] {
         let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
             payload: json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":input}) };
-        answer_command(&rig, frame, answer, false);
+        answer_command(&rig, frame, "deny", false);
     }
     assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("verifiable execution directory"))));
+}
+
+/// Captured with Codex 0.164.0 and a loopback Responses provider requesting
+/// exec_command({cmd:"pwd", workdir:B}) from session A. Only paths and IDs
+/// are anonymized: the hook omits B, and calls the tool Bash.
+fn codex_0164_frame(rig: &Rig, cwd: &std::path::Path, command: &str) -> HookFrame {
+    let mut payload: Value = serde_json::from_str(include_str!("harness/codex/fixtures/pre_tool_use_0164.json")).unwrap();
+    assert_eq!(payload["tool_input"], json!({"command":"pwd"}));
+    payload["cwd"] = json!(cwd);
+    payload["tool_input"]["command"] = json!(command);
+    HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload }
+}
+
+#[test]
+#[cfg(unix)]
+fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let a = rig._dir.path().join("a");
+    let b = rig._dir.path().join("b");
+    for cwd in [&a, &b] {
+        std::fs::create_dir(cwd).unwrap();
+        std::fs::write(cwd.join("relative-file"), "hello\n").unwrap();
+    }
+    let execute = |reply: &HookReply, cwd: &std::path::Path| {
+        let command = reply.output.as_ref().unwrap()["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
+        std::process::Command::new("/bin/sh").current_dir(cwd).args(["-c", command]).output().unwrap()
+    };
+    let discovery = rig.manager.on_hook(codex_0164_frame(&rig, &a, "pwd; cat relative-file | grep hello"));
+    assert!(execute(&discovery, &a).status.success(), "normal Codex discovery must run without a card");
+    assert_eq!(execute(&discovery, &b).status.code(), Some(125), "a session directory must not stand in for another execution workdir");
+    assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionRequested { .. })));
+
+    let first = answer_command(&rig, codex_0164_frame(&rig, &a, "rm relative-file"), crate::harness::read_only::SESSION_OPTION, true);
+    assert_eq!(execute(&first, &b).status.code(), Some(125), "even the first session approval must be guarded");
+    assert!(execute(&first, &a).status.success());
+    std::fs::write(a.join("relative-file"), "again\n").unwrap();
+    let cards = rig.events().iter().filter(|e| matches!(e.payload, Payload::PermissionRequested { .. })).count();
+    let replay = rig.manager.on_hook(codex_0164_frame(&rig, &a, "rm relative-file"));
+    assert!(execute(&replay, &a).status.success(), "the same command reuses its grant without another card");
+    assert_eq!(execute(&replay, &b).status.code(), Some(125));
+    assert!(b.join("relative-file").exists(), "relative deletion grants cannot cross directories");
+    assert_eq!(rig.events().iter().filter(|e| matches!(e.payload, Payload::PermissionRequested { .. })).count(), cards);
+    assert!(rig.events().iter().any(|e| matches!(&e.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("Session allowances are limited to"))));
 }
 
 #[test]

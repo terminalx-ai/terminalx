@@ -51,7 +51,7 @@ pub fn session_key(tool: &str, input: &Value, cwd: Option<&str>) -> Option<Strin
     Some(serde_json::json!([tool, execution_input(input), cwd]).to_string())
 }
 
-/// Only an explicit absolute execution directory can authorize Codex input.
+/// Only an explicit absolute execution directory counts as verified context.
 /// Its normalized shell hooks (0.164) omit workdir, while payload.cwd names
 /// the session directory. Neither omission nor a relative path is proof.
 pub fn explicit_cwd(input: &Value) -> Option<&str> {
@@ -66,6 +66,37 @@ pub fn explicit_cwd(input: &Value) -> Option<&str> {
         .or_else(|| input.get("cwd"))?
         .as_str()?;
     Path::new(cwd).is_absolute().then_some(cwd)
+}
+
+/// A normalized Codex hook reports the session directory. It can propose
+/// an approval scope only when no execution-directory argument was supplied;
+/// the replacement command must enforce that scope before running anything.
+pub fn reported_scope<'a>(input: &Value, reported: Option<&'a str>) -> Option<&'a str> {
+    if input.get("workdir").is_some() || input.get("cwd").is_some() {
+        return None;
+    }
+    reported.filter(|cwd| Path::new(cwd).is_absolute())
+}
+
+/// Session grants authorize the exact command in one directory. Rewrites
+/// are essential: an unchanged allow would also run in an unreported workdir.
+pub fn session_input(tool: &str, input: &Value, key: &str) -> Option<Value> {
+    let scope: Value = serde_json::from_str(key).ok()?;
+    let cwd = scope.get(2)?.as_str()?;
+    if session_key(tool, input, Some(cwd))?.as_str() != key {
+        return None;
+    }
+    let original = command(tool, input)?;
+    let script = format!("if '/bin/test' '.' '-ef' {}; then eval {}; else printf '%s\\n' {} >&2; exit 125; fi",
+        quote(cwd), quote(original), quote("TerminalX blocked a session allowance outside its approved directory. Request a separate one-time approval for this workdir."));
+    let mut updated = input.clone();
+    let field = if input.get("command").is_some() {
+        "command"
+    } else {
+        "cmd"
+    };
+    updated[field] = Value::String(script);
+    Some(updated)
 }
 
 /// Retain every execution argument when comparing approvals. Only explanatory
@@ -956,6 +987,16 @@ mod tests {
             let input = serde_json::json!({"command":"pwd"});
             assert!(approved_input("Bash", &input, cwd).is_none());
             assert!(session_key("Bash", &input, cwd).is_none());
+            assert!(reported_scope(&input, cwd).is_none());
+        }
+        let input = serde_json::json!({"command":"pwd"});
+        assert_eq!(reported_scope(&input, Some("/session")), Some("/session"));
+        for input in [
+            serde_json::json!({"command":"pwd", "workdir":null}),
+            serde_json::json!({"command":"pwd", "cwd":"relative"}),
+            serde_json::json!({"command":"pwd", "workdir":"/a", "cwd":"/b"}),
+        ] {
+            assert!(reported_scope(&input, Some("/session")).is_none());
         }
     }
 }
