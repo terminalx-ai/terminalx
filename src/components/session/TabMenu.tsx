@@ -33,7 +33,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, MenuShortcut } from "@/components/ui/menu";
-import { isFloatingWindow } from "@/lib/appWindow";
+import { isCompactWindow } from "@/lib/appWindow";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { openCloseTabs, openRenameTab } from "@/lib/dialogs";
 import { showFloatingWindow } from "@/lib/floating";
@@ -91,7 +91,7 @@ export function TabMenuItems({
   const owner = tab.sessionId ? session : null;
   const shown = tab.kind === selected?.kind && tab.id === selected.id;
   const off = !!readOnlyReason;
-  const floating = isFloatingWindow();
+  const floating = isCompactWindow();
   const muted = row.layout.muted.includes(tab.key);
   const inTerminalView = tab.kind === "agent" && tabViewIn(tabViews.views, tab.tab) === "terminal";
   // What is in the tab now: an agent with a conversation, or a terminal.

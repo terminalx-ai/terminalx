@@ -215,6 +215,17 @@ the reader is in.
 of it is selected, chat versus terminal view for a tab, and unsent composer
 text.
 
+Independent chat windows created by File → New Window can open their view
+in the main window. A new-session form stays open with its initial prompt.
+A window with images queued, loading, or awaiting a send result also stays
+open: that composer state is not transferred, and its text stays with its
+images. This includes images in other mounted tabs. Once that state has
+been removed or sent, a text-only handoff copies every unsent tab's text to
+the main window and waits for acknowledgment before closing the source.
+Conflicts, failed transfers, or edits during transfer keep the source open
+and report why; images arriving during acknowledgment also keep it open.
+Quick Chat still hides on handoff and keeps its own drafts.
+
 **What there is one of**, owned by the main window: the dock badge, and
 desktop banners. Each window writes whether it has the focus and which
 session it shows; the rule is:

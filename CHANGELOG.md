@@ -56,6 +56,18 @@
 - Return to the welcome screen with **Home** in either sidebar layout or ⌘K,
   even after opening projects or sessions. Open local project, Open GitHub
   project and Quick start remain available there. (PRO-183)
+- Start new chats in **Ask every time** until you pick another permission
+  mode; after that, new chats start in the mode you last picked, as before. A
+  mode you already use, Bypass included, is kept. The phone's New Session also
+  opens in Ask every time. The New Session and issue start button now shows the
+  mode for every mode, not only Bypass. New share links, from Share or
+  `terminalx share create`, default to **Read only** with **Approve each
+  person** on, so a forwarded link neither drives the session nor joins without
+  you admitting them; `--can-drive` and `--no-approve` turn either back on for
+  a link. Someone waiting to be admitted shows on the session's Share button
+  and raises a notice that opens Share. Automations keep Bypass, as does
+  `terminalx sessions create` without `--mode` in a project on this Mac; in a
+  cloud project it takes your saved mode, as New Session does. (PRO-162)
 
 ## 0.2.24
 

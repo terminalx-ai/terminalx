@@ -92,7 +92,7 @@ beforeEach(() => {
   project.kind = "git";
   delete project.issuePipeline;
   vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "attachment-1") });
-  vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() });
+  vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() }));
 });
 
 afterEach(() => {
@@ -378,6 +378,17 @@ it("starts a branch with both switches off, and one started from an issue picked
   expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
 });
 
+it("opening the main window preserves an unsent initial prompt in the source view", async () => {
+  const view = render(<NewSessionView quick compact />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "An initial prompt I have not sent" } });
+  invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+    if (cmd === "chat_window_open_in_main" && args.closeSource !== false) view.unmount();
+  });
+  const { openChatWindowInMain } = await import("@/lib/chatWindowHandoff");
+  await act(async () => { await openChatWindowInMain("", null); });
+  expect(screen.getByRole("textbox")).toHaveProperty("value", "An initial prompt I have not sent");
+  expect(invoke).toHaveBeenCalledWith("chat_window_open_in_main", { sessionId: "", tabId: null, closeSource: false });
+});
 
 describe("one new-chat composer (PRO-173)", () => {
   it("updates setup and enables the installed agent after returning from Terminal without Check again (PRO-170)", async () => {
