@@ -147,6 +147,7 @@ const models = [
 
 function mockBackend() {
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    if (command === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
     if (command === "linear_status") return { connected: true };
     if (command === "linear_teams") return [];
     if (command === "gh_available") return true;
@@ -719,6 +720,7 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     setPrefs({ lastAgent: agent });
     const composer = render(<NewSessionView useWorktree={false} />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Synthetic task" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(upsertSession).toHaveBeenCalled());
     const tab = launchRequest().tab;
@@ -762,7 +764,7 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     view.unmount();
     render(<NewSessionView />);
     const agent = screen.getByTestId("agent-menu");
-    expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium");
+    await waitFor(() => expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium"));
     expect(agent.getAttribute("title")).toMatch(/^Codex · /);
   });
 

@@ -58,6 +58,21 @@ async function boot(list: SessionEntry[]) {
   });
 }
 
+describe("new-chat entry points", () => {
+  it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
+    await boot([session("here", "/repos/web", new Date().toISOString())]);
+    mount();
+    const titlebar = screen.getByTestId("sidebar-titlebar");
+    fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "New chat" }));
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: true, selectedSessionId: null });
+    fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
+    expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
+  });
+});
+
 describe("Home navigation (PRO-183)", () => {
   it.each(["simple", "list"] as const)("returns from a session in the %s sidebar", async (sidebarLayout) => {
     await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
@@ -199,7 +214,7 @@ describe("the conversation list", () => {
     expect(within(web).getAllByRole("button", { name: /, Talk/ }).map((row) => row.getAttribute("aria-label"))).toEqual(["release, Talk kept", "dev, Talk moved"]);
   });
 
-  it("starts another session on a branch from its row, in the folder where that branch is checked out", async () => {
+  it("opens the composer on a branch from its row without creating a session", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     await boot([
       session("here", "/repos/web", at(1)),
@@ -216,15 +231,15 @@ describe("the conversation list", () => {
     mount();
     const web = screen.getByRole("group", { name: "web" });
     await act(async () => { fireEvent.click(within(web).getByRole("button", { name: "New session on main" })); });
-    const created = mocks.invoke.mock.calls.find(([command]) => command === "create_session");
-    expect(created?.[1]).toMatchObject({ req: { projectPath: "/repos/web", cwd: "/repos/web", useWorktree: false } });
-    // A branch checked out nowhere gets a new workspace branched from it, named after it.
+    expect(store.getSessionStore().newSessionPreset).toEqual({ projectPath: "/repos/web", cwd: "/repos/web" });
+    // A branch checked out nowhere keeps its base branch until the first prompt.
     expect(within(web).queryByRole("button", { name: "New session on old" })).toBeNull();
     await act(async () => { fireEvent.click(within(web).getByRole("button", { name: "New workspace from old" })); });
-    expect(mocks.invoke.mock.calls.filter(([command]) => command === "create_session").at(-1)?.[1]).toMatchObject({ req: { projectPath: "/repos/web", cwd: null, useWorktree: true, baseRef: "old", worktreeName: "old" } });
+    expect(store.getSessionStore().newSessionPreset).toEqual({ projectPath: "/repos/web", cwd: null, fromBranch: "old" });
     // A worktree's branch has its folder, listed or not.
     await act(async () => { fireEvent.click(within(web).getByRole("button", { name: "New session on raccoon/fix-login" })); });
-    expect(mocks.invoke.mock.calls.filter(([command]) => command === "create_session").at(-1)?.[1]).toMatchObject({ req: { projectPath: "/repos/web", cwd: "/repos/web/.worktrees/fix-login", useWorktree: false } });
+    expect(store.getSessionStore().newSessionPreset).toEqual({ projectPath: "/repos/web", cwd: "/repos/web/.worktrees/fix-login" });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
   });
 
   it("ticks the branch icon of a branch whose commits are in the default branch", async () => {
