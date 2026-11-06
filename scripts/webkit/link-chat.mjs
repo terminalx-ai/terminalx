@@ -44,6 +44,13 @@ try {
   // The row's actions show on hover.
   await chats.getByRole("button", { name: /Plan the login page/ }).hover();
   await chats.getByRole("button", { name: "Menu for Plan the login page" }).click();
+  const menuActions = () => page.getByRole("menu").locator('[role^="menuitem"]').allTextContents();
+  const actions = await menuActions();
+  await page.keyboard.press("Escape");
+  await page.getByRole("menu").waitFor({ state: "hidden" });
+  await chats.getByRole("button", { name: /^Plan the login page/ }).click({ button: "right" });
+  await page.getByRole("menu").waitFor();
+  assert.deepEqual(await menuActions(), actions, "right-click shares the chat's ⋯ actions, including project linking");
   await page.getByRole("menuitem", { name: "Link to a project" }).click();
   await page.getByRole("menuitem", { name: "local-0" }).click();
   await page.getByRole("menuitem", { name: "On a new branch (worktree)" }).click();

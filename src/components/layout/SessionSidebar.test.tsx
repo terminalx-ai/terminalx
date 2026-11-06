@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Project, SessionEntry } from "@/types/session";
@@ -115,6 +115,53 @@ describe("a project's fold", () => {
     expect(prefs.getPrefs().sidebarSections["project:/repos/web"]).toBe("collapsed");
     await act(async () => { fireEvent.click(within(web).getByRole("button", { name: "Expand web" })); });
     expect(within(web).getByTestId("project-branches").getAttribute("class")).toContain("grid-rows-[1fr]");
+  });
+});
+
+describe("project context menus (PRO-187)", () => {
+  it.each(["right-click", "Shift+F10", "menu button"])("opens the project's actions with %s", async (input) => {
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    mount();
+    const title = screen.getByRole("button", { name: "web overview" });
+    if (input === "right-click") fireEvent.contextMenu(title);
+    else if (input === "Shift+F10") fireEvent.keyDown(title, { key: "F10", shiftKey: true });
+    else fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+      "New chat in web", "Reveal in Finder", "Pin project", "Name and appearance", "Issue pipeline…", "Remove from TerminalX…",
+    ]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Reveal in Finder" }));
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    expect(revealItemInDir).toHaveBeenCalledWith("/repos/web");
+  });
+
+  it.each(([
+    "simple", "list",
+  ] as const).flatMap((sidebarLayout) => [false, true].map((linked) => ({ sidebarLayout, linked }))))("shares the conversation's ⋯ actions with right-click and Shift+F10 in the $sidebarLayout sidebar (linked: $linked)", async ({ sidebarLayout, linked }) => {
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z", {
+      branch: "main", worktreeName: "feature",
+      ...(linked ? { issue: { provider: "github", id: "187", identifier: "#187", title: "Context menus", url: "https://github.com/acme/web/issues/187" }, issueWork: { private: true } } : {}),
+    })]);
+    prefs.setPrefs({ sidebarLayout });
+    mount();
+    const title = screen.getByRole("button", { name: sidebarLayout === "simple" ? "main, Talk here" : "Talk here" });
+    const items = (menu: HTMLElement) => [...menu.querySelectorAll('[role^="menuitem"]')].map((item) => ({
+      role: item.getAttribute("role"), label: item.textContent?.trim(), checked: item.getAttribute("aria-checked"),
+    }));
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk here" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+    let menu = await screen.findByRole("menu");
+    const expected = items(menu);
+    expect(within(menu).getByRole("menuitem", { name: linked ? "Unlink #187" : "Link to issue…" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitemcheckbox", { name: "Don’t share this session" }).getAttribute("aria-checked")).toBe(String(linked));
+    expect(within(menu).getByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
+    for (const input of ["right-click", "Shift+F10"]) {
+      fireEvent.keyDown(menu, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+      if (input === "right-click") fireEvent.contextMenu(title);
+      else fireEvent.keyDown(title, { key: "F10", shiftKey: true });
+      menu = await screen.findByRole("menu");
+      expect(items(menu), input).toEqual(expected);
+    }
   });
 });
 
@@ -289,7 +336,7 @@ describe("the conversation list", () => {
     const dialog = await import("@tauri-apps/plugin-dialog");
     vi.mocked(dialog.ask).mockResolvedValue(true);
     mount();
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Project menu for web" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
     await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: "Remove from TerminalX…" })); });
     expect(vi.mocked(dialog.ask).mock.calls[0][0]).toBe("Remove web from TerminalX? Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.");
     // Archived together, in one change, before the project goes.
@@ -414,7 +461,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {

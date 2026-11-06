@@ -13,6 +13,12 @@
   stops a step without leaving an error. The welcome screen also offers this
   when every installed agent is signed out. The commands to run by hand are
   still shown, now the native installers instead of `npm install`. (PRO-152)
+- Show the diff inside file-edit approvals. A Codex `apply_patch` request, and
+  Claude Code's Edit, MultiEdit and Write, now list each file with its lines
+  added and removed and the changed lines, marking new, deleted and renamed
+  files. Long files fold behind **Show all N lines**, and the diff scrolls on
+  its own so Allow and Deny stay in view. A patch that cannot be read exactly
+  is quoted whole instead of by its first line. (PRO-156)
 - Show each permission request once, and retire it as soon as Allow or Deny
   is confirmed, including answers from the terminal or another card. Late
   duplicate requests stay retired; clicking a stale card explains that the

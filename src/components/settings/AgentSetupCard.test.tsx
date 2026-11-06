@@ -20,6 +20,9 @@ const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, che
 
 const handlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
 const emit = (event: string, payload: unknown) => handlers.get(event)?.forEach((handler) => handler({ payload }));
+/** The embedded sign-in shell exits (PRO-170); and how many still listen for exits. */
+const exitLogin = (code: number) => emit("pty_exit", { id: "codex-login", code });
+const exits = { get size() { return handlers.get("pty_exit")?.size ?? 0; } };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -31,7 +34,7 @@ beforeEach(() => {
     return () => handlers.get(event)!.delete(handler);
   });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); invoke.mockReset(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("agent setup card (PRO-170)", () => {
   it("keeps badge and body together through missing → installed → ready despite a stale harness list", async () => {
@@ -66,6 +69,67 @@ describe("agent setup card (PRO-170)", () => {
     expect(await screen.findAllByText("Not installed")).toHaveLength(2);
     expect(refreshHarnesses).toHaveBeenCalledOnce();
     expect(screen.queryByText("Ready")).toBeNull();
+  });
+
+  it("keeps badge and body together while checking an embedded login, including a failed sign-in", async () => {
+    invoke.mockResolvedValue(answer("signed_out"));
+    render(<ul><AgentSetupCard harness={harness} /></ul>);
+    await screen.findByText("Sign in required");
+
+    for (const [code, state] of [[1, "signed_out"], [0, "ready"]] as const) {
+      let finish: (value: AgentReadiness) => void = () => {};
+      invoke.mockReturnValueOnce(new Promise<AgentReadiness>((resolve) => { finish = resolve; }));
+      act(() => exitLogin(code));
+      expect(screen.getByText("Checking…")).toBeTruthy();
+      expect(screen.getByRole("status").textContent).toBe("Checking installation and login…");
+      expect(screen.queryByText("Sign in required")).toBeNull();
+      expect(screen.queryByText("Ready")).toBeNull();
+      expect(screen.getByRole("button", { name: "Check again" }).hasAttribute("disabled")).toBe(true);
+
+      await act(async () => finish(answer(state)));
+      expect(screen.getByText(state === "ready" ? "Ready" : "Sign in required")).toBeTruthy();
+      expect(screen.getByRole("status").textContent).toBe(state === "ready" ? "Ready · local login found" : "Installed · sign in required");
+    }
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(refreshHarnesses).not.toHaveBeenCalled();
+  });
+
+  it("updates both labels on the two-minute timer and stops checking after leaving Agents", async () => {
+    vi.useFakeTimers();
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+    invoke.mockResolvedValue(answer("missing"));
+    const { unmount } = render(<ul><AgentSetupCard harness={harness} /></ul>);
+    await act(async () => {});
+    expect(screen.getAllByText("Not installed")).toHaveLength(2);
+
+    invoke.mockResolvedValue(answer("signed_out"));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(screen.getByText("Sign in required")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("Installed · sign in required");
+    expect(screen.queryByText("Not installed")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Get it" })).toBeNull();
+
+    hidden.mockReturnValue(true);
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Sign in required")).toBeTruthy();
+
+    hidden.mockReturnValue(false);
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(screen.getByText("Ready")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("Ready · local login found");
+    expect(screen.queryByText("Sign in required")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy command" })).toBeNull();
+    expect(invoke).toHaveBeenCalledTimes(3);
+
+    unmount();
+    exitLogin(0);
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(exits.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("shows checking and unknown consistently without falling back to cached installation status", async () => {
