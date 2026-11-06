@@ -3,6 +3,7 @@ import { Popover as PopoverPrimitive } from "radix-ui";
 import { Loader2, Server, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { suppressNativeContextMenu } from "@/lib/contextMenu";
 import { errorMessage, type LocalRuntimeOutdated } from "@/lib/api";
 import { bootLocalRuntime, replaceLocalRuntime, useRuntimeSwitch } from "@/lib/localRuntime";
 
@@ -57,7 +58,7 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
           align="end"
           sideOffset={5}
           data-status-context-exempt
-          onContextMenu={(event) => event.stopPropagation()}
+          onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
           className="z-(--z-menu) w-[24rem] max-w-[calc(100vw-2rem)] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
         >
           <RuntimeDetails epoch={runtime.epoch} outdated={outdated} />

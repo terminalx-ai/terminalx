@@ -4,6 +4,7 @@ import "./styles/app.css";
 import App from "./App";
 import { invoke } from "@tauri-apps/api/core";
 import { keepShellUnscrolled } from "./lib/shellScroll";
+import { installAppContextMenu } from "./lib/contextMenu";
 
 window.addEventListener("error", (e) => {
   void invoke("frontend_log", { level: "error", message: `${e.message} @ ${e.filename}:${e.lineno}` }).catch(() => {});
@@ -13,6 +14,7 @@ window.addEventListener("unhandledrejection", (e) => {
 });
 
 keepShellUnscrolled();
+installAppContextMenu();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
