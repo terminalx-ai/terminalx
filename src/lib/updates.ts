@@ -1,4 +1,4 @@
-import { privacyEnabled } from "@/lib/dataPrivacy";
+import { privacyEnabled, subscribeDataPrivacy } from "@/lib/dataPrivacy";
 import { useSyncExternalStore } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -39,6 +39,17 @@ const listeners = new Set<() => void>();
 /** What React reads: replaced on every change, the corner card's dismissal included. */
 let snapshot: { state: UpdateState; dismissed: string | null } = { state, dismissed };
 
+// Retire discovered updates and deferred choices on activation. An off/on
+// round trip cannot resume an earlier check or installation decision.
+let privacyGeneration = 0;
+subscribeDataPrivacy(() => {
+  if (privacyEnabled()) {
+    ++privacyGeneration;
+    emit({ kind: "idle" });
+  }
+});
+const admitted = (generation: number) => !privacyEnabled() && generation === privacyGeneration;
+
 function publish() {
   snapshot = { state, dismissed };
   for (const listener of listeners) listener();
@@ -71,11 +82,14 @@ export async function checkForUpdate({ quiet = false }: { quiet?: boolean } = {}
   if (state.kind === "installing" || state.kind === "checking" || state.kind === "choosing") return state;
   if (quiet && state.kind === "available") return state;
   const before = state;
+  const generation = privacyGeneration;
   if (!quiet) emit({ kind: "checking" });
   try {
     const update = await check({ headers: { "X-Raccoon-Channel": getPrefs().updateChannel } });
+    if (!admitted(generation)) return state;
     emit(update?.version ? { kind: "available", update } : { kind: "none" });
   } catch (error) {
+    if (!admitted(generation)) return state;
     emit(quiet ? before : { kind: "error", message: errorMessage(error) });
   }
   return state;
@@ -93,23 +107,25 @@ interface RuntimePlan { epoch: string; forced: boolean; quietSince: number | nul
  * would be cut short, and says so.
  */
 export async function installUpdate(): Promise<void> {
-  if (state.kind !== "available") return;
+  if (privacyEnabled() || state.kind !== "available") return;
+  const generation = privacyGeneration;
   const update = state.update;
   emit({ kind: "installing", version: update.version, pct: 0 });
   const reading = await localRuntime.work().catch((error: unknown) => {
     console.warn(`TerminalX update: ${errorMessage(error)}`);
     return null;
   });
+  if (!admitted(generation)) return;
   if (reading && reading.work.length > 0) {
     emit({ kind: "choosing", update, epoch: reading.epoch, work: reading.work, unkept: reading.unkept ?? [] });
     return;
   }
-  await install(update, reading && { epoch: reading.epoch, forced: false, quietSince: reading.readAt, stop: [] });
+  await install(update, reading && { epoch: reading.epoch, forced: false, quietSince: reading.readAt, stop: [] }, generation);
 }
 
 /** The answer to what installing would cut short, or `null` to not update now. */
 export async function chooseUpdate(choice: UpdateChoice | null): Promise<void> {
-  if (state.kind !== "choosing") return;
+  if (privacyEnabled() || state.kind !== "choosing") return;
   const { update, epoch, unkept } = state;
   if (!choice) {
     emit({ kind: "available", update });
@@ -117,27 +133,30 @@ export async function chooseUpdate(choice: UpdateChoice | null): Promise<void> {
   }
   emit({ kind: "installing", version: update.version, pct: 0 });
   // Update now stops what the card listed, and, handed over, nothing else.
-  await install(update, { epoch, forced: choice === "now", quietSince: null, stop: choice === "now" ? unkept : [] });
+  await install(update, { epoch, forced: choice === "now", quietSince: null, stop: choice === "now" ? unkept : [] }, privacyGeneration);
 }
 
-async function install(update: Update, plan: RuntimePlan | null): Promise<void> {
+async function install(update: Update, plan: RuntimePlan | null, generation: number): Promise<void> {
+  if (!admitted(generation)) return;
   try {
     let total = 0;
     let got = 0;
     await update.downloadAndInstall((event) => {
+      if (!admitted(generation)) return;
       if (event.event === "Started") total = event.data.contentLength ?? 0;
       else if (event.event === "Progress") {
         got += event.data.chunkLength;
         if (total) emit({ kind: "installing", version: update.version, pct: Math.round((got / total) * 100) });
       }
     });
+    if (!admitted(generation)) return;
     // Left for the relaunched app. Without it, that app waits by itself
     // until nothing would be cut short, and says so: the app is installed
     // either way, and is relaunched into.
     if (plan) await localRuntime.planUpdate(plan.epoch, plan.forced, plan.quietSince, plan.stop).catch((error: unknown) => console.warn(`TerminalX update: ${errorMessage(error)}`));
-    await relaunch();
+    if (admitted(generation)) await relaunch();
   } catch (error) {
-    emit({ kind: "error", message: errorMessage(error) });
+    if (admitted(generation)) emit({ kind: "error", message: errorMessage(error) });
   }
 }
 

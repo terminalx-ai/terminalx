@@ -34,19 +34,40 @@ fn read_all(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::J
 }
 
 /// `Command::output`, with a deadline after which the process is killed.
-fn output_within(mut command: Command, timeout: std::time::Duration) -> Result<std::process::Output> {
+fn output_within(command: Command, timeout: std::time::Duration) -> Result<std::process::Output> {
+    output_admitted(command, timeout, crate::data_privacy::Ticket::default())
+}
+
+fn output_admitted(mut command: Command, timeout: std::time::Duration, ticket: crate::data_privacy::Ticket) -> Result<std::process::Output> {
     use std::process::Stdio;
+    // These are the app's own requests, not an agent's subprocesses. Keep
+    // activation waiting until a revoked call and its descendants are gone.
+    let _privacy = ticket.enter()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     // Read as it comes, so a full pipe never blocks gh.
     let (stdout, stderr) = (read_all(child.stdout.take()), read_all(child.stderr.take()));
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
+        if !ticket.valid() || std::time::Instant::now() >= deadline {
+            #[cfg(unix)]
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout.join();
+            let _ = stderr.join();
+            anyhow::ensure!(ticket.valid(), crate::data_privacy::MESSAGE);
+            bail!("GitHub did not answer within {} seconds.", timeout.as_secs());
+        }
         match child.try_wait()? {
-            Some(status) => break status,
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("GitHub did not answer within {} seconds.", timeout.as_secs());
+            Some(status) => {
+                #[cfg(unix)]
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                break status;
             }
             None => std::thread::sleep(std::time::Duration::from_millis(25)),
         }
@@ -757,7 +778,9 @@ const BOUNDED: std::time::Duration = std::time::Duration::from_secs(30);
 fn run_bounded(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut command = gh()?;
     command.current_dir(cwd).args(args).env("GH_NO_UPDATE_NOTIFIER", "1");
-    crate::git::output_within(command, BOUNDED).map_err(|error| anyhow!("gh {}: {error}", args.first().copied().unwrap_or_default()))
+    let out = output_within(command, BOUNDED)?;
+    anyhow::ensure!(out.status.success(), "gh {}: {}", args.first().copied().unwrap_or_default(), String::from_utf8_lossy(&out.stderr).trim());
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The GitHub repository a checkout's pull requests are in, as `gh` resolves it.
@@ -1097,6 +1120,54 @@ mod tests {
         answers.args(["-c", "printf out; printf err >&2; exit 3"]);
         let out = output_within(answers, std::time::Duration::from_secs(5)).unwrap();
         assert_eq!((out.status.code(), out.stdout.as_slice(), out.stderr.as_slice()), (Some(3), b"out".as_slice(), b"err".as_slice()));
+    }
+
+    #[test]
+    fn privacy_blocks_and_drains_app_github_processes() {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "github::tests::privacy_process_child", "--nocapture"])
+            .env("TERMINALX_TEST_GITHUB_PRIVACY", "1").env("TERMINALX_HOME", root.path()).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn privacy_process_child() {
+        if std::env::var_os("TERMINALX_TEST_GITHUB_PRIVACY").is_none() { return; }
+        use std::time::{Duration, Instant};
+        let root = crate::store::root().unwrap();
+        let preference = root.join("data-privacy.json");
+        let marker = root.join("started");
+        let command = || {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "printf '%s' $$ > \"$1\"; exec sleep 30", "privacy"]).arg(&marker);
+            command
+        };
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":true})).unwrap();
+        crate::data_privacy::initialize();
+        assert!(output_within(command(), Duration::from_secs(5)).is_err());
+        assert!(!marker.exists(), "disabled GitHub requests never spawn");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(runtime.block_on(star_request(command(), &[])).is_none());
+        assert!(!marker.exists(), "star requests use the same admission");
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":false})).unwrap();
+        crate::data_privacy::refresh();
+        let pending = std::thread::spawn({ let command = command(); move || output_within(command, Duration::from_secs(30)) });
+        let until = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
+        let pid: i32 = std::fs::read_to_string(&marker).unwrap().parse().unwrap();
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":true})).unwrap();
+        let started = Instant::now();
+        assert!(crate::data_privacy::refresh().enabled);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(pending.join().unwrap().is_err());
+        #[cfg(unix)]
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "activation acknowledges after the exact process exits");
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":false})).unwrap();
+        crate::data_privacy::refresh();
+        let mut restored = Command::new("/bin/sh");
+        restored.args(["-c", "printf restored"]);
+        assert_eq!(output_within(restored, Duration::from_secs(5)).unwrap().stdout, b"restored");
     }
 
     #[test]
@@ -1506,10 +1577,10 @@ fn parse_star_status(success: bool, output: &[u8]) -> StarStatus {
     }
 }
 
-async fn star_request(command: Command, args: &[&str]) -> Option<std::process::Output> {
-    let mut command = tokio::process::Command::from(command);
-    command.args(args).kill_on_drop(true);
-    tokio::time::timeout(std::time::Duration::from_secs(15), command.output()).await.ok()?.ok()
+async fn star_request(mut command: Command, args: &[&str]) -> Option<std::process::Output> {
+    let ticket = crate::data_privacy::Ticket::default();
+    command.args(args);
+    tokio::task::spawn_blocking(move || output_admitted(command, std::time::Duration::from_secs(15), ticket)).await.ok()?.ok()
 }
 
 pub async fn star_status() -> StarStatus {
