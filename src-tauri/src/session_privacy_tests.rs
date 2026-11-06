@@ -615,7 +615,7 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
                 assert_eq!(after.requested_model, newer.requested_model, "a late refusal cannot remove the newer local edit");
                 assert_eq!(after.model_request_id(), newer.model_request_id());
                 wait_for("new local model reached stdio", || requests().iter().filter(|v| v["method"] == "session/set_model").count() == 2);
-                let fresh = requests().into_iter().filter(|v| v["method"] == "session/set_model").last().unwrap();
+                let fresh = requests().into_iter().rfind(|v| v["method"] == "session/set_model").unwrap();
                 rig.manager.on_line(&rig.rt, &json!({"jsonrpc":"2.0","id":fresh["id"],"error":{"code":-32602,"message":"New choice also refused"}}).to_string());
             }
             let rejected = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
