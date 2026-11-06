@@ -197,15 +197,18 @@ fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::V
 }
 
 /// Opening the terminal view hands the thread to Codex's own terminal: never
-/// mid-turn, only once the connection has exited, and for good.
+/// mid-turn: the request waits without fencing its writer. Once idle it moves
+/// only after the connection has exited, and for good.
 fn to_terminal_fixture(manager: &SessionManager) {
     let rt = manager.runtime("stdio-owner", "tab").unwrap();
     let chat = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
-        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. })).count();
+        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. } | Payload::Recovery { .. })).count();
     let before = chat();
     rt.lock().unwrap().turn_open = true;
-    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
-    assert!(refused.to_string().contains("finish this turn"), "{refused:#}");
+    crate::issue_pipeline::admission::observe_next_lock(Some(Box::new(|| {
+        assert!(!crate::issue_pipeline::admission::held("stdio-owner", "tab"), "checking an active turn must not fence its writer");
+    })), None);
+    assert!(!manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap(), "an active turn defers the switch without an error");
     assert!(matches!(rt.lock().unwrap().engine, Engine::CodexStdio(_)));
     rt.lock().unwrap().turn_open = false;
     // An exit Stop cannot confirm leaves the tab where it was, to retry.
@@ -213,6 +216,7 @@ fn to_terminal_fixture(manager: &SessionManager) {
     assert!(manager.codex_stdio_to_terminal("stdio-owner", "tab").is_err());
     assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().transport, AgentTransport::ExperimentalCodexStdio);
     rt.lock().unwrap().stop_in_flight = false;
+    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::Timeout);
     let child = rt.lock().unwrap().child.clone().expect("a running connection");
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
     assert!(child.terminal_receipt().is_some(), "the connection exits before the tab changes engine");
@@ -220,7 +224,15 @@ fn to_terminal_fixture(manager: &SessionManager) {
     let tab = index::get("stdio-owner").unwrap().tab("tab").unwrap().clone();
     assert_eq!((tab.transport, tab.provider_session_id.as_deref()), (AgentTransport::Pty, Some("thread-1")));
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
-    assert_eq!(chat(), before, "the move adds nothing to the chat");
+    assert_eq!(chat(), before, "the move adds no prompts, turns or errors to the chat");
+    assert_eq!(rt.lock().unwrap().recovery, None, "the successful handoff clears the previous connection's warning");
+    let path = rt.lock().unwrap().diagnostics_path();
+    let trace: Vec<serde_json::Value> = store::read_lines::<serde_json::Value>(&path).unwrap().into_iter()
+        .filter(|line| line["type"] == "terminal_view_transition").collect();
+    assert!(trace.iter().any(|line| line["report"]["stage"] == "waiting_for_turn" && line["turn_open"] == true && line["transport"] == "experimentalCodexStdio"));
+    assert!(trace.iter().any(|line| line["report"]["errorCategory"] == "owner_cleanup"));
+    assert!(trace.iter().any(|line| line["report"]["stage"] == "transport_changed" && line["transport"] == "pty"));
+    assert!(!serde_json::to_string(&trace).unwrap().contains("carry on"), "no conversation content in diagnostics");
 }
 
 /// Continue in New Session into an experimental tab: confirmed once Codex

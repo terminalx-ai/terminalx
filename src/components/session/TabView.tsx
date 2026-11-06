@@ -26,7 +26,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
-import { clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
+import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
 import { classifyRecovery, CONTINUE_PROMPT, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
@@ -42,9 +42,8 @@ import { interruptUnanswered } from "@/types/events";
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
- * Why a cloud tab's terminal view did not open (#644): the runtime's own
- * words for its refusal (mid-turn, someone else driving, no right to type),
- * never the recovery text a local tab's failure is mapped to.
+ * A view-change refusal describes that request, not an agent failure.
+ * Local PTY/native tabs and cloud tabs retain their usable chat (#644/#816).
  */
 export function terminalViewRefusal(message: string): string {
   const said = message.trim();
@@ -132,7 +131,7 @@ export function TabView({
   const terminalMode = tabViewIn(views.views, tab) === "terminal" && (local || !!remoteTerminal);
   const viewError = views.errors[tab.id] ?? null;
   // Over the tab, whatever the composer already says (a lease, view only): the switch is in the header.
-  const remoteViewRefusal = !local && viewError ? terminalViewRefusal(viewError) : null;
+  const viewRefusal = viewError && (!local || isPtyFirst(tab.harness)) ? terminalViewRefusal(viewError) : null;
   const terms = useTerminals();
   const ptyFirst = local && isPtyFirst(tab.harness);
   const paneId = tabPaneId(tab);
@@ -187,7 +186,7 @@ export function TabView({
   const [notesOpen, setNotesOpen] = useState(false);
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
-  const recovery = !backend.caps.recovery || readOnly ? null : eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
+  const recovery = !backend.caps.recovery || readOnly ? null : eventRecovery ?? (error || (viewError && !viewRefusal) ? classifyRecovery(error ?? viewError!) : null);
 
 
   const backendRef = useRef(backend);
@@ -630,7 +629,7 @@ export function TabView({
           settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : byHandNote}
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
-          disabledReason={gate?.blocked ?? error ?? (viewError && local ? safeError(viewError) : null) ?? backend.readOnlyReason}
+          disabledReason={gate?.blocked ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}
         />
         </>
@@ -730,9 +729,15 @@ export function TabView({
         unreadNotes={collab.unreadNotes[tab.id] ?? 0}
       />
     )}
-    {remoteViewRefusal && (
+    {views.waiting[tab.id] && (
+      <div role="status" className="flex shrink-0 items-center gap-2 bg-veil px-3 py-1.5 text-xs" data-testid="terminal-view-pending">
+        <span className="min-w-0 flex-1">Terminal view will open when Codex finishes this turn. You can interrupt the turn to open it sooner.</span>
+        <Button variant="ghost" size="xs" onClick={() => cancelTerminalView(tab.id)}>Stay in chat</Button>
+      </div>
+    )}
+    {viewRefusal && (
       <div role="alert" className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground" data-testid="terminal-view-refused">
-        <span className="min-w-0 flex-1">{remoteViewRefusal}</span>
+        <span className="min-w-0 flex-1">{viewRefusal}</span>
         <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => clearTabViewError(tab.id)}>
           <X />
         </Button>

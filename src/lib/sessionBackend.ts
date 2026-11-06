@@ -170,7 +170,7 @@ export interface SessionBackend {
    * same thread, for good, and start it, as opening its terminal view does on
    * a Mac. Refused mid-turn and to anyone who may not start its terminal.
    */
-  toTerminal?(tabId: string): Promise<void>;
+  toTerminal?(tabId: string, transitionId?: string): Promise<boolean | void>;
   /**
    * Cloud only (PRO-22): the slash commands the composer of `tab` offers,
    * from the runtime, which lists a plain driver only what it will accept
@@ -437,10 +437,10 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       guard();
       await stopCloudAgent(scope, tabId, client);
     },
-    toTerminal: async (tabId) => {
+    toTerminal: async (tabId, transitionId) => {
       guard();
       if (!client) throw new Error("A tab moves to its terminal once the workspace is connected.");
-      await client.moveAgentTabToTerminal(ctx.sessionId, tabId);
+      return !(await client.moveAgentTabToTerminal(ctx.sessionId, tabId, transitionId)).waitingForTurn;
     },
     respondPermission: (tabId, requestId, optionId) => {
       if (approveBlockedReason) return Promise.reject(new Error(approveBlockedReason));

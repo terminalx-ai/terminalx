@@ -415,7 +415,7 @@ describe("terminal view metadata lifetime", () => {
     bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "list_sessions" ? [] : backend(command, args));
     await window.sessions.refreshSessions();
     window.hook.rerender();
-    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {}, waiting: {} });
     window.hook.unmount();
   });
 
@@ -458,7 +458,7 @@ describe("terminal view metadata lifetime", () => {
     bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "remove_tab" ? null : backend(command, args));
     await window.sessions.removeTab(session.id, "first");
     window.hook.rerender();
-    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {}, waiting: {} });
     expect(window.sessions.getSessionStore().sessions[0].tabs).toEqual([]);
     let active = true;
     const adoption = window.terminal.adoptPane({ id: "late-pane", sessionId: session.id, title: "Agent", hidden: true, owned: true }, () => active);
@@ -514,6 +514,84 @@ describe("terminal view metadata lifetime", () => {
     window.hook.unmount();
   });
 
+  it("retains the chat when terminal startup fails and clears the refusal on a successful retry (#816)", async () => {
+    const window = await populated();
+    let fails = true;
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "ensure_tab_started") {
+        if (fails) throw new Error("Codex could not start its terminal");
+        return null;
+      }
+      if (command === "tab_pane") return window.info;
+      return backend(command, args);
+    });
+    await window.tabViews.enterTerminalView(session, session.tabs[0]);
+    window.hook.rerender();
+    expect(window.hook.result.current.views.first).toBeUndefined();
+    expect(window.hook.result.current.errors.first).toContain("could not start");
+    fails = false;
+    await window.tabViews.enterTerminalView(session, session.tabs[0]);
+    window.hook.rerender();
+    expect(window.hook.result.current.views.first).toBe("terminal");
+    expect(window.hook.result.current.errors.first).toBeNull();
+    await vi.waitFor(() => expect(bus.invoke.mock.calls.filter(([command]) => command === "report_terminal_view").at(-1)?.[1]?.report).toMatchObject({ stage: "opened" }));
+    const reports = bus.invoke.mock.calls.filter(([command]) => command === "report_terminal_view").map(([, args]) => args?.report);
+    expect(reports).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "failed", errorCategory: "start" }),
+      expect.objectContaining({ stage: "opened", errorCategory: null }),
+    ]));
+    expect(JSON.stringify(reports)).not.toContain("Codex could not start");
+    // The fake rejects diagnostic writes. Neither the refusal nor the retry
+    // depends on their success, and no raw error reaches the report.
+    window.hook.unmount();
+  });
+
+  it("waits for native Codex to finish, coalesces rapid switches, and opens once without sending input (#816)", async () => {
+    const window = await populated();
+    let ready = false;
+    const moves = vi.fn(async () => ready);
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "tab_to_terminal") return moves();
+      if (command === "ensure_tab_started") return null;
+      if (command === "tab_pane") return window.info;
+      return backend(command, args);
+    });
+    const native = { ...session.tabs[0], transport: "experimentalCodexStdio" as const };
+    const opening = window.tabViews.enterTerminalView(session, native);
+    await vi.waitFor(() => expect(moves).toHaveBeenCalledOnce());
+    await window.tabViews.enterTerminalView(session, native);
+    window.hook.rerender();
+    expect(window.hook.result.current.views.first).toBeUndefined();
+    expect(window.hook.result.current.switching.first).toBe(true);
+    await vi.waitFor(() => { window.hook.rerender(); expect(window.hook.result.current.waiting.first).toBe(true); });
+    expect(bus.invoke.mock.calls.some(([command]) => command === "ensure_tab_started")).toBe(false);
+    ready = true;
+    await opening;
+    window.hook.rerender();
+    expect(window.hook.result.current.views.first).toBe("terminal");
+    expect(window.hook.result.current.errors.first).toBeNull();
+    expect(bus.invoke.mock.calls.filter(([command]) => command === "ensure_tab_started")).toHaveLength(1);
+    expect(bus.invoke.mock.calls.some(([command]) => command === "send_prompt" || command === "interrupt_turn")).toBe(false);
+    window.hook.unmount();
+  });
+
+  it("cancels a pending native switch without stopping the turn or opening later (#816)", async () => {
+    const window = await populated();
+    const move = vi.fn(async () => false);
+    const native = { ...session.tabs[0], transport: "experimentalCodexStdio" as const };
+    const opening = window.tabViews.enterTerminalView(session, native, { remote: true, toTerminal: move });
+    await vi.waitFor(() => { window.hook.rerender(); expect(window.hook.result.current.waiting.first).toBe(true); });
+    window.tabViews.cancelTerminalView(native.id);
+    await opening;
+    window.hook.rerender();
+    expect(window.hook.result.current.views.first).toBeUndefined();
+    expect(window.hook.result.current.switching.first).toBe(false);
+    expect(window.hook.result.current.waiting.first).toBe(false);
+    expect(window.hook.result.current.errors.first).toBeNull();
+    expect(move).toHaveBeenCalledOnce();
+    window.hook.unmount();
+  });
+
   it("asks a cloud workspace to move only a native Codex tab when its terminal view is opened, and stays on the chat when refused", async () => {
     const window = await populated();
     const toTerminal = vi.fn(async (_tabId: string) => undefined);
@@ -522,7 +600,7 @@ describe("terminal view metadata lifetime", () => {
     await window.tabViews.enterTerminalView(session, plain, { remote: true, toTerminal });
     expect(toTerminal).not.toHaveBeenCalled();
     await window.tabViews.enterTerminalView(session, native, { remote: true, toTerminal });
-    expect(toTerminal).toHaveBeenCalledWith("cloud-native");
+    expect(toTerminal).toHaveBeenCalledWith("cloud-native", expect.any(String));
     window.hook.rerender();
     expect(window.hook.result.current.views).toMatchObject({ "cloud-plain": "terminal", "cloud-native": "terminal" });
 
@@ -548,7 +626,7 @@ describe("terminal view metadata lifetime", () => {
     reject(new Error("late failure"));
     await entering;
     window.hook.rerender();
-    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {}, waiting: {} });
     window.hook.unmount();
   });
 });

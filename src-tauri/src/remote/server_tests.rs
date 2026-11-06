@@ -2305,6 +2305,7 @@ case "$1" in
   *) exec sleep 10 ;;
 esac
 while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
@@ -2312,6 +2313,9 @@ while read -r line; do
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}' ;;
+    *'"method":"turn/interrupt"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}}' ;;
   esac
 done
 "#;
@@ -2384,12 +2388,27 @@ async fn native_terminal_child() {
     assert_eq!(code(move_as(erin).await), "forbidden");
     assert_eq!(transport(), Native);
 
-    // Never mid-turn.
+    // Active work defers the switch, without fencing protocol progress.
     let (alice, _alice_events) = agent_person(f.rpc.clone(), "d-alice", "alice").await;
     manager.send(&session, &tab, "hello".into(), Vec::new()).unwrap();
-    assert_eq!(code(move_as(alice.clone()).await), "conflict");
+    assert_eq!(move_as(alice.clone()).await.unwrap()["waitingForTurn"], true);
     assert_eq!(transport(), Native);
-    manager.stop(&session, &tab).unwrap();
+    let log = crate::store::log_path(&session, &tab).unwrap();
+    let events = || crate::store::read_lines::<crate::events::AgentEvent>(&log).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !events().iter().any(|event| matches!(event.payload, crate::events::Payload::TurnStarted { .. })) {
+        assert!(std::time::Instant::now() < until, "the deferred switch must allow the native prompt to start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(move_as(alice.clone()).await.unwrap()["waitingForTurn"], true);
+    assert!(manager.interrupt(&session, &tab).unwrap());
+    while !events().iter().any(|event| matches!(event.payload, crate::events::Payload::TurnCompleted { .. })) {
+        assert!(std::time::Instant::now() < until, "interrupt must remain writable while the switch waits");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!events().iter().any(|event| matches!(event.payload, crate::events::Payload::Error { .. })));
+    assert_eq!(events().iter().filter(|event| matches!(event.payload, crate::events::Payload::UserMessage { .. })).count(), 1);
+
 
     // A driver who may approve moves it, and its terminal starts.
     move_as(alice.clone()).await.unwrap();
@@ -2402,6 +2421,9 @@ async fn native_terminal_child() {
     // Asking again changes nothing and starts nothing more.
     move_as(alice).await.unwrap();
     assert_eq!((transport(), terminal_launches()), (Pty, 1));
+    assert!(launches().lines().any(|line| line.contains("resume thread-1")), "the terminal resumes the same conversation");
+    let frames = std::fs::read_to_string(bin.join("received")).unwrap();
+    assert_eq!(frames.lines().filter(|line| line.contains("\"method\":\"turn/start\"")).count(), 1, "the transition never replays the prompt");
     manager.stop(&session, &tab).unwrap();
 }
 

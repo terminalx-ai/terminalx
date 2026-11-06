@@ -1901,7 +1901,9 @@ impl WorkspaceRpc {
         let Some((session_id, tab_id)) = start else { return Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref())) };
         // Outside the lock: the CLI's first output is recorded under it.
         drop(ptys);
-        self.start_in_terminal(session_id, tab_id)?;
+        if !self.start_in_terminal(session_id, tab_id, None)? {
+            return Err(RpcError::new("conflict", "Wait for Codex to finish this turn, or interrupt it, before opening its terminal."));
+        }
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         // The CLI starts at its default size; the controller's applies from here.
@@ -1926,17 +1928,18 @@ impl WorkspaceRpc {
             Some(refusal) => return Err(refusal),
             None => {}
         }
-        self.start_in_terminal(&tab.session_id, &tab.tab_id)?;
-        Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id }))
+        let transition_id = serde_json::from_value(params["transitionId"].clone()).map_err(|_| RpcError::new("invalid_params", "transitionId must be a UUID"))?;
+        let ready = self.start_in_terminal(&tab.session_id, &tab.tab_id, transition_id)?;
+        Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id, "waitingForTurn": !ready }))
     }
 
     /// Start a tab's CLI in its terminal, moving native Codex there first.
-    fn start_in_terminal(&self, session_id: &str, tab_id: &str) -> Result<(), RpcError> {
+    fn start_in_terminal(&self, session_id: &str, tab_id: &str, transition_id: Option<uuid::Uuid>) -> Result<bool, RpcError> {
         let manager = self.manager()?;
-        manager.codex_stdio_to_terminal(session_id, tab_id).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
+        if !manager.codex_stdio_to_terminal_reported(session_id, tab_id, transition_id).map_err(|error| RpcError::new("conflict", format!("{error:#}")))? { return Ok(false); }
         manager.ensure_started(session_id, tab_id).map_err(|error| RpcError::new("unavailable", format!("the agent did not start: {error:#}")))?;
         self.tabs_changed.notify_one();
-        Ok(())
+        Ok(true)
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {

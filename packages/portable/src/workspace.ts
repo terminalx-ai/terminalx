@@ -1069,10 +1069,10 @@ export class WorkspaceRpcClient {
   /**
    * Native Codex's terminal view (#644): move the tab to Codex's own terminal
    * on the same thread, for good, and start it there. The runtime refuses it
-   * mid-turn and to anyone who may not start the agent's terminal.
+   * to anyone who may not start the agent's terminal. An active turn defers it.
    */
-  moveAgentTabToTerminal(sessionId: string, tabId: string): Promise<{ sessionId: string; tabId: string }> {
-    return this.mutate("session.toTerminal", { sessionId, tabId });
+  moveAgentTabToTerminal(sessionId: string, tabId: string, transitionId?: string): Promise<{ sessionId: string; tabId: string; waitingForTurn?: boolean }> {
+    return this.mutate("session.toTerminal", { sessionId, tabId, ...(transitionId ? { transitionId } : {}) });
   }
 
   /** The sessions this connection may see (`session.list`). */

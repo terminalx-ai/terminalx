@@ -160,6 +160,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64())?)?,
+        "terminalViewReport" => { manager.note_terminal_view(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }
         "interrupt" => json!(manager.interrupt(session, tab)?),
         "stop" => { manager.stop(session, tab)?; Value::Null }
@@ -173,7 +174,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
         "markRead" => { manager.mark_read(session, tab)?; Value::Null }
         "handoff" => serde_json::to_value(manager.handoff(session, tab)?)?,
-        "toTerminal" => { manager.codex_stdio_to_terminal(session, tab)?; Value::Null }
+        "toTerminal" => serde_json::to_value(manager.codex_stdio_to_terminal_reported(session, tab, serde_json::from_value(params["transitionId"].clone())?)?)?,
         _ => bail!("unsupported local session operation"),
     };
     Ok(value)

@@ -203,7 +203,30 @@ const showTerminal = () => fireEvent.click(screen.getByRole("button", { name: "S
 const settle = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
 
 describe("the chat / terminal switch on a local agent tab", () => {
-  it("is there as before, and shows the tab's own CLI on this computer", async () => {
+  it("keeps a refused native Codex switch in a usable chat without claiming the agent failed (#816)", async () => {
+    guard.strict = false;
+    guard.local = () => null;
+    guard.handlers.load_tab_events = () => [];
+    guard.handlers.tab_to_terminal = () => {
+      throw new Error("Codex is still starting. Try opening its terminal once the conversation is ready.");
+    };
+    const local: SessionEntry = {
+      id: "local-native", projectPath: "/Users/me/api", cwd: "/Users/me/api", title: "Native Codex", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
+      tabs: [{ id: "lt-native", harness: "codex", transport: "experimentalCodexStdio", model: "", permissionMode: "bypassPermissions", status: "in_progress", created: "", modified: "" }],
+    };
+    upsertSession(local);
+    selectSessionTab(local.id, { kind: "agent", id: "lt-native" });
+    render(wrap(<SessionView session={local} sidebarOpen onToggleSidebar={() => undefined} />));
+    fireEvent.click(await screen.findByRole("button", { name: "Show terminal view" }));
+    const refused = await screen.findByTestId("terminal-view-refused");
+    expect(refused.textContent).toContain("Codex is still starting");
+    expect(within(screen.getByTestId("composer")).queryByRole("note")).toBeNull();
+    expect(screen.queryByText(/encountered an error/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back to chat" })).toBeNull();
+    expect(guard.calls.some(({ command }) => command === "stop_tab" || command === "send_prompt")).toBe(false);
+  });
+
+  it.each([{ harness: "claude", status: "idle" }, { harness: "codex", status: "idle" }, { harness: "codex", status: "in_progress" }] as const)("shows an existing $harness CLI ($status) without a native handoff", async ({ harness, status }) => {
     guard.strict = false;
     guard.local = () => null;
     guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 });
@@ -218,7 +241,7 @@ describe("the chat / terminal switch on a local agent tab", () => {
       archived: false,
       pinned: false,
       worktreeRemoved: false,
-      tabs: [{ id: "lt-1", harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "" }],
+      tabs: [{ id: "lt-1", harness, model: "", permissionMode: "bypassPermissions", status, created: "", modified: "" }],
     };
     upsertSession(local);
     selectSessionTab("local-1", { kind: "agent", id: "lt-1" });
@@ -239,6 +262,10 @@ describe("the chat / terminal switch on a local agent tab", () => {
     expect(guard.calls.map((call) => call.command)).toContain("ensure_tab_started");
     expect(screen.queryByTestId("cloud-agent-terminal")).toBeNull();
     expect(runtime.sent).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+    showTerminal();
+    expect(await screen.findByRole("button", { name: "Back to chat" })).toBeTruthy();
+    expect(guard.calls.some(({ command }) => command === "tab_to_terminal" || command === "stop_tab" || command === "send_message")).toBe(false);
   });
 
   it("still shows a failed switch with the agent's recovery text, never a raw error and never as a cloud refusal (#644)", async () => {
@@ -1201,6 +1228,44 @@ describe("#644 on a cloud agent tab", () => {
     expect(await screen.findByText(/Context compacted/)).toBeTruthy();
     expect(screen.queryByText("Compacting context…")).toBeNull();
     expect(screen.queryByText(/Compaction status unknown/)).toBeNull();
+  });
+
+  it("opens a working native tab after its turn settles, retains its chat, and accepts a follow-up (#816)", async () => {
+    native({ status: "in_progress" });
+    runtime.toTerminalWaiting = true;
+    await open();
+    showTerminal();
+    expect(await screen.findByTestId("terminal-view-pending")).toBeTruthy();
+    expect(screen.queryByText(/encountered an error/)).toBeNull();
+    expect(screen.getByText("why does login loop?")).toBeTruthy();
+    expect(enqueued).toEqual([]);
+    expect(runtime.methods("session.interrupt")).toEqual([]);
+    runtime.toTerminalWaiting = false;
+    expect(await screen.findByRole("button", { name: "Back to chat" })).toBeTruthy();
+    expect(screen.queryByTestId("terminal-view-pending")).toBeNull();
+    expect(screen.queryByTestId("terminal-view-refused")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+    expect(await screen.findByText("why does login loop?")).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "continue after switch" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(enqueued).toEqual(["send"]));
+    expect(guard.calls.filter(({ command }) => command === "cloud_agent_enqueue").at(-1)?.args).toMatchObject({ text: "continue after switch" });
+  });
+
+  it("lets the reader keep chatting while a native switch waits (#816)", async () => {
+    native({ status: "in_progress" });
+    runtime.toTerminalWaiting = true;
+    await open();
+    showTerminal();
+    const pending = await screen.findByTestId("terminal-view-pending");
+    fireEvent.click(within(pending).getByRole("button", { name: "Stay in chat" }));
+    await waitFor(() => expect(screen.queryByTestId("terminal-view-pending")).toBeNull());
+    runtime.toTerminalWaiting = false;
+    await settle();
+    expect(screen.queryByRole("button", { name: "Back to chat" })).toBeNull();
+    expect(screen.queryByText(/encountered an error/)).toBeNull();
+    expect(enqueued).toEqual([]);
+    expect(runtime.methods("session.interrupt")).toEqual([]);
   });
 
   it("says why the runtime refused a native Codex tab's move to its terminal, in its own words", async () => {
