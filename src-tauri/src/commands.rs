@@ -1675,8 +1675,8 @@ pub fn list_projects() -> CmdResult<ProjectsResponse> {
 
 /// Preview effective copy patterns, including unsaved edits. No file contents leave Rust.
 #[tauri::command]
-pub async fn repository_files_preview(path: String, patterns: Option<Vec<String>>) -> CmdResult<crate::worktree_files::Preview> {
-    tauri::async_runtime::spawn_blocking(move || crate::worktree_files::preview(Path::new(&path), patterns.as_deref()).map_err(err))
+pub async fn repository_files_preview(path: String, patterns: Option<Vec<String>>, snapshot: Option<String>) -> CmdResult<crate::worktree_files::Preview> {
+    tauri::async_runtime::spawn_blocking(move || crate::worktree_files::preview(Path::new(&path), patterns.as_deref(), snapshot.as_deref()).map_err(err))
         .await.map_err(err)?
 }
 

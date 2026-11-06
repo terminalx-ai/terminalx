@@ -10,7 +10,8 @@ import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { activateLatestTerminal, closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import { bootTabLayouts } from "@/lib/tabLayouts";
-import { isFloatingWindow } from "@/lib/appWindow";
+import { isCompactWindow } from "@/lib/appWindow";
+import { listenForChatWindowDrafts } from "@/lib/chatWindowHandoff";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
 import type {
   ProjectPatch,
@@ -215,7 +216,10 @@ async function loadIndex() {
     // Another window added, removed or edited a project.
     await listen("projects_changed", () => void refreshProjects());
     // The floating window hands a session over ("Open in main window").
-    if (!isFloatingWindow()) await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
+    if (!isCompactWindow()) {
+      await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
+      await listenForChatWindowDrafts();
+    }
   } catch {
     /* outside a webview */
   }
@@ -668,7 +672,7 @@ export async function runIdleArchive(): Promise<string[]> {
 
 /** The main window runs the idle sweep, once soon after launch and then every half hour. */
 export function startIdleArchive() {
-  if (idleArchiveStarted || isFloatingWindow()) return;
+  if (idleArchiveStarted || isCompactWindow()) return;
   idleArchiveStarted = true;
   const next = (delay: number) => setTimeout(() => void runIdleArchive().finally(() => next(IDLE_ARCHIVE_EVERY)), delay);
   next(IDLE_ARCHIVE_FIRST);

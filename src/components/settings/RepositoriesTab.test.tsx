@@ -44,9 +44,11 @@ describe("Repository settings", () => {
     render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
     openFiles();
     await screen.findByText(".env.local");
+    const snapshot = mock.preview.mock.calls[0][2];
     fireEvent.change(screen.getByRole("textbox"), { target: { value: ".env*\nconfig/local/**\n" } });
     await screen.findByText("config/local/app.json");
-    expect(mock.preview).toHaveBeenLastCalledWith("/repo", [".env*", "config/local/**"]);
+    expect(mock.preview).toHaveBeenLastCalledWith("/repo", [".env*", "config/local/**"], expect.any(String));
+    expect(mock.preview.mock.calls.at(-1)?.[2]).toBe(snapshot);
     expect(mock.update).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }));
@@ -131,6 +133,16 @@ describe("Repository settings", () => {
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
     await screen.findByText(".env.local");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(mock.preview.mock.calls[0][2]).not.toBe(mock.preview.mock.calls[1][2]);
+  });
+
+  it("reports scan and preview limits without treating them as invalid patterns", async () => {
+    mock.preview.mockResolvedValue({ ...result(), warning: "Ignored-file scan limit reached", patterns: [{ pattern: ".env*", matches: [".env"], omitted: 105, error: null }] });
+    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
+    openFiles();
+    await screen.findByText("105 more matches omitted from preview.");
+    expect(screen.getByText("Ignored-file scan limit reached")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

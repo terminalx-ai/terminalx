@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { cn } from "@/lib/cn";
 import { messageTime, type Turn } from "@/lib/transcript";
 
@@ -47,6 +47,29 @@ export function PromptMap({
   const [fade, setFade] = useState({ top: false, bottom: false });
   const pointerOnRail = useRef(false);
   const followed = useRef(false);
+  // One stable set of handlers serves every mark, reading the latest hover and
+  // jump target through refs, so a mark redraws only when its own prompt,
+  // number or highlight changes. A send in a long session then draws its one
+  // new mark rather than every mark again (#727's send budget).
+  const hoveredRef = useRef(hovered);
+  hoveredRef.current = hovered;
+  const onJumpRef = useRef(onJump);
+  onJumpRef.current = onJump;
+  const actions = useMemo<MarkActions>(() => {
+    const show = (button: HTMLElement, key: string) => {
+      const box = nav.current?.getBoundingClientRect();
+      const mark = button.getBoundingClientRect();
+      setHovered({ key, top: mark.top + mark.height / 2 - (box?.top ?? 0) });
+    };
+    return {
+      jump: (key) => onJumpRef.current(key),
+      show,
+      move: (button, key) => {
+        if (hoveredRef.current?.key !== key) show(button, key);
+      },
+      hide: () => setHovered(null),
+    };
+  }, []);
 
   const measureFade = () => {
     const el = rail.current;
@@ -125,11 +148,6 @@ export function PromptMap({
   const hoveredPrompt = hovered && prompts.find((t) => t.key === hovered.key)?.prompt;
   const preview = hoveredPrompt?.text.trim();
   const sent = shortTime(hoveredPrompt?.messageTs);
-  const show = (button: HTMLElement, key: string) => {
-    const box = nav.current?.getBoundingClientRect();
-    const mark = button.getBoundingClientRect();
-    setHovered({ key, top: mark.top + mark.height / 2 - (box?.top ?? 0) });
-  };
   const mask =
     fade.top || fade.bottom
       ? `linear-gradient(to bottom, ${fade.top ? "transparent" : "black"}, black ${FADE_PX}px, black calc(100% - ${FADE_PX}px), ${fade.bottom ? "transparent" : "black"})`
@@ -158,36 +176,16 @@ export function PromptMap({
         onMouseEnter={() => (pointerOnRail.current = true)}
         onMouseLeave={() => (pointerOnRail.current = false)}
       >
-        {prompts.map((turn, index) => {
-          const text = turn.prompt!.text.trim();
-          const active = turn.key === current;
-          return (
-            <li key={turn.key} data-key={turn.key} className="flex h-[10px] shrink-0">
-              <button
-                type="button"
-                aria-label={`Prompt ${index + 1}: ${text.slice(0, 80)}`}
-                aria-current={active ? "true" : undefined}
-                onClick={() => onJump(turn.key)}
-                onMouseEnter={(e) => show(e.currentTarget, turn.key)}
-                onMouseMove={(e) => {
-                  if (hovered?.key !== turn.key) show(e.currentTarget, turn.key);
-                }}
-                onFocus={(e) => show(e.currentTarget, turn.key)}
-                onBlur={() => setHovered(null)}
-                className="group flex w-6 items-center justify-end outline-none"
-              >
-                <span
-                  className={cn(
-                    "h-[2px] rounded-full transition-[width,background-color] duration-100",
-                    active
-                      ? "w-4 bg-foreground/70"
-                      : "w-3 bg-faint/50 group-hover:w-4 group-hover:bg-foreground/60 group-focus-visible:bg-foreground/60",
-                  )}
-                />
-              </button>
-            </li>
-          );
-        })}
+        {prompts.map((turn, index) => (
+          <PromptMark
+            key={turn.key}
+            turnKey={turn.key}
+            index={index}
+            text={turn.prompt!.text.trim()}
+            active={turn.key === current}
+            actions={actions}
+          />
+        ))}
       </ol>
       {hovered && preview && (
         <div
@@ -208,6 +206,59 @@ export function PromptMap({
     </nav>
   );
 }
+
+/** What a mark does when it is used: the same for every mark of a map. */
+interface MarkActions {
+  jump: (key: string) => void;
+  show: (button: HTMLElement, key: string) => void;
+  /** A pointer moving over a mark shows its prompt, unless that prompt is already shown. */
+  move: (button: HTMLElement, key: string) => void;
+  hide: () => void;
+}
+
+/**
+ * One prompt's mark. It depends only on its own prompt, number and highlight
+ * and the map's stable actions, so it is drawn again only when one of those
+ * changes.
+ */
+const PromptMark = memo(function PromptMark({
+  turnKey,
+  index,
+  text,
+  active,
+  actions,
+}: {
+  turnKey: string;
+  index: number;
+  text: string;
+  active: boolean;
+  actions: MarkActions;
+}) {
+  return (
+    <li data-key={turnKey} className="flex h-[10px] shrink-0">
+      <button
+        type="button"
+        aria-label={`Prompt ${index + 1}: ${text.slice(0, 80)}`}
+        aria-current={active ? "true" : undefined}
+        onClick={() => actions.jump(turnKey)}
+        onMouseEnter={(e) => actions.show(e.currentTarget, turnKey)}
+        onMouseMove={(e) => actions.move(e.currentTarget, turnKey)}
+        onFocus={(e) => actions.show(e.currentTarget, turnKey)}
+        onBlur={actions.hide}
+        className="group flex w-6 items-center justify-end outline-none"
+      >
+        <span
+          className={cn(
+            "h-[2px] rounded-full transition-[width,background-color] duration-100",
+            active
+              ? "w-4 bg-foreground/70"
+              : "w-3 bg-faint/50 group-hover:w-4 group-hover:bg-foreground/60 group-focus-visible:bg-foreground/60",
+          )}
+        />
+      </button>
+    </li>
+  );
+});
 
 /**
  * When a prompt was sent, as short as it can be and still be plain: the

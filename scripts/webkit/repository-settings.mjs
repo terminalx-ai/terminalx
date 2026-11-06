@@ -30,7 +30,9 @@ try {
           })();`,
       });
       await page.getByRole("button", { name: "Settings", exact: true }).click();
-      await page.getByRole("button", { name: "Repositories", exact: true }).click();
+      await page.getByRole("button", { name: "Repositories", exact: true }).waitFor();
+      await page.getByRole("combobox", { name: "Search settings" }).fill("worktreeinclude");
+      await page.getByRole("option", { name: /Repositories/ }).click();
       await page.getByRole("button", { name: /local-0/ }).click();
       await page.getByText("/repos/p0/.raccoon/worktrees", { exact: true }).waitFor();
       if (shots && width === 1100) await page.getByRole("main", { name: "Settings", exact: true }).screenshot({ path: join(shots, `general-${mode}.png`) });

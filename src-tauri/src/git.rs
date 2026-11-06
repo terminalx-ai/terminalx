@@ -29,12 +29,47 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// NUL-separated file names must be decoded without lossy substitutions.
-pub(crate) fn file_names(cwd: &Path, args: &[&str]) -> Result<Vec<String>> {
-    let out = git().current_dir(cwd).args(args).output()?;
-    anyhow::ensure!(out.status.success(), "git file listing failed: {}", String::from_utf8_lossy(&out.stderr));
-    let names = String::from_utf8(out.stdout).context("A file name is not valid UTF-8")?;
-    Ok(names.split('\0').filter(|name| !name.is_empty()).map(String::from).collect())
+/// A bounded ignored-file scan. Stop Git when its output reaches the byte
+/// limit; never decode a partial NUL-delimited name at that boundary.
+pub(crate) fn file_names_bounded(cwd: &Path, args: &[&str], max_files: usize, max_bytes: usize) -> Result<(Vec<String>, bool)> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = git().current_dir(cwd).args(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut bytes = Vec::new();
+    let read = child.stdout.take().context("Missing Git output")?.take(max_bytes as u64 + 1).read_to_end(&mut bytes);
+    let byte_limit = bytes.len() > max_bytes;
+    if read.is_err() || byte_limit { let _ = child.kill(); }
+    let status = child.wait()?;
+    read?;
+    anyhow::ensure!(byte_limit || status.success(), "Git ignored-file listing failed");
+    if byte_limit {
+        bytes.truncate(max_bytes);
+        bytes.truncate(bytes.iter().rposition(|byte| *byte == 0).map_or(0, |index| index + 1));
+    }
+    let names = String::from_utf8(bytes).context("A file name is not valid UTF-8")?;
+    let mut all = names.split('\0').filter(|name| !name.is_empty());
+    let files = all.by_ref().take(max_files).map(String::from).collect();
+    Ok((files, byte_limit || all.next().is_some()))
+}
+
+/// Unlike --no-index, check-ignore's default also rejects tracked paths,
+/// including tracked files absent from disk. Both conditions must hold before
+/// copying secrets into a checkout whose ignore rules may differ from the source.
+pub(crate) fn ignored_untracked_paths(cwd: &Path, paths: &[String]) -> Result<std::collections::BTreeSet<String>> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = git().current_dir(cwd).args(["check-ignore", "-z", "--stdin"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut stdin = child.stdin.take().context("Missing Git input")?;
+    let input = paths.join("\0") + "\0";
+    // Feed stdin while wait_with_output drains stdout, avoiding pipe deadlocks.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output();
+    let written = writer.join().map_err(|_| anyhow!("Git input writer stopped"))?;
+    let output = output?;
+    anyhow::ensure!(matches!(output.status.code(), Some(0 | 1)), "Git ignore check failed: {}", String::from_utf8_lossy(&output.stderr));
+    written?;
+    Ok(String::from_utf8(output.stdout)?.split('\0').filter(|name| !name.is_empty()).map(String::from).collect())
 }
 
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code

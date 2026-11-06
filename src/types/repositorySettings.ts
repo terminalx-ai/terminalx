@@ -8,11 +8,15 @@ export interface RepositoryFilesPreview {
   workspacesPath: string;
   fromIncludeFile: boolean;
   error?: string | null;
-  patterns: { pattern: string; matches: string[]; error: string | null }[];
+  warning?: string | null;
+  patterns: { pattern: string; matches: string[]; omitted?: number; error: string | null }[];
 }
 
 export interface WorktreeCopyReport {
-  copied: string[];
+  copiedCount: number;
+  copiedBytes: number;
+  skippedCount: number;
+  warnings: { path: string; reason: string }[];
   skipped: { path: string; reason: string }[];
   error: string | null;
 }

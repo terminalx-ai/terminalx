@@ -34,7 +34,7 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refresh, setRefresh] = useState(0);
+  const [snapshot, setSnapshot] = useState(() => crypto.randomUUID());
   const stored = (project.repositorySettings?.filesToCopy ?? []).join("\n");
   const text = draft ?? stored;
 
@@ -43,14 +43,14 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
     setLoading(true);
     setError(null);
     const timer = window.setTimeout(() => {
-      api.repositoryFilesPreview(project.path, lines(text)).then((value) => {
+      api.repositoryFilesPreview(project.path, lines(text), snapshot).then((value) => {
         if (live) { setPreview(value); setError(value.error ?? null); }
       }).catch((error) => {
         if (live) { setPreview(null); setError(errorMessage(error)); }
       }).finally(() => { if (live) setLoading(false); });
     }, 200);
     return () => { live = false; window.clearTimeout(timer); };
-  }, [project.path, text, refresh]);
+  }, [project.path, text, snapshot]);
 
   const action = async (run: () => Promise<unknown>) => {
     try { await run(); } catch (error) { setError(errorMessage(error)); }
@@ -61,7 +61,7 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
     try {
       await updateProject(project.path, { repositorySettings: { filesToCopy: lines(text) } });
       setDraft(null);
-      setRefresh((value) => value + 1);
+      setSnapshot(crypto.randomUUID());
     } catch (error) {
       setError(errorMessage(error));
     } finally { setSaving(false); }
@@ -92,7 +92,8 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
         </>
       ) : (
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-muted-foreground">Copy matching ignored files into each new workspace. Paths are relative to the repository: * matches within a folder, ** matches across folders. Existing files and symbolic links are skipped.</p>
+          <p className="text-sm text-muted-foreground">Copy up to 1,000 matching files and 100 MiB into each new workspace. Files must be ignored and untracked in both checkouts. Existing files and symbolic links are skipped.</p>
+          <p className="text-xs text-muted-foreground">Both lists use positive globs from the repository root: .env matches only the root, **/.env matches any folder, and secrets/** includes a directory's contents. Leading / and ! exclusions are unsupported. In .worktreeinclude, blank lines and # comments are ignored.</p>
           {preview?.fromIncludeFile && <p role="status" className="text-sm">Patterns come from this repository's .worktreeinclude</p>}
           <label htmlFor="repository-copy-patterns" className="text-sm font-medium">Glob patterns (one per line)</label>
           <textarea
@@ -107,9 +108,11 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
           />
           <div className="flex gap-2">
             {!preview?.fromIncludeFile && <Button size="sm" disabled={saving || loading || !preview || !!preview.error || draft === null || text === stored || preview.patterns.some((item) => item.error)} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</Button>}
-            <Button size="sm" variant="outline" disabled={saving} onClick={() => setRefresh((value) => value + 1)}>Refresh preview</Button>
+            <Button size="sm" variant="outline" disabled={saving} onClick={() => setSnapshot(crypto.randomUUID())}>Refresh preview</Button>
           </div>
           <h4 className="text-sm font-medium">Ignored files matching each pattern</h4>
+          <p className="text-xs text-muted-foreground">Preview uses a snapshot of this repository's ignored files. Refresh after files or ignore rules change. Workspace creation checks the files and destination rules again.</p>
+          {preview?.warning && <p role="status" className="text-xs text-warning">{preview.warning}</p>}
           {loading ? <p role="status" className="text-xs text-muted-foreground">Updating preview…</p> : preview && (
             <div className="flex flex-col gap-3" aria-label="Ignored files preview">
               {!preview.patterns.length && !preview.error && <p className="text-xs text-muted-foreground">No patterns. No files will be copied.</p>}
@@ -121,6 +124,7 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
                       {item.matches.map((path) => <li key={path} className="break-all font-mono">{path}</li>)}
                     </ul>
                   ) : <p className="mt-2 text-xs text-muted-foreground">No ignored files match.</p>}
+                  {!!item.omitted && <p className="mt-2 text-xs text-muted-foreground">{item.omitted} more matches omitted from preview.</p>}
                 </div>
               ))}
             </div>

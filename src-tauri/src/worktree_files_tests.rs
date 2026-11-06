@@ -5,6 +5,11 @@ fn repo() -> tempfile::TempDir {
     git::run(dir.path(), &["init", "-q", "-b", "main"]).unwrap();
     git::run(dir.path(), &["config", "user.name", "Test"]).unwrap();
     git::run(dir.path(), &["config", "user.email", "test@example.com"]).unwrap();
+    // The different-base regression must depend only on this fixture's rules,
+    // even when the developer globally ignores .env files.
+    let excludes = dir.path().join(".git/test-global-ignore");
+    fs::write(&excludes, "").unwrap();
+    git::run(dir.path(), &["config", "core.excludesFile", excludes.to_str().unwrap()]).unwrap();
     write(dir.path(), ".gitignore", ".env*\nconfig/local/\ncache/\n");
     write(dir.path(), "tracked.txt", "tracked");
     git::run(dir.path(), &["add", "."]).unwrap();
@@ -30,7 +35,7 @@ fn globs_are_relative_and_distinguish_direct_and_recursive_matches() {
     assert!(glob.is_match("config/local/app.json"));
     assert!(glob.is_match("config/local/nested/app.json"));
     assert!(!glob.is_match("config/public/app.json"));
-    for invalid in ["/etc/*", "../secret", "config/../secret", ".git/**", "C:/secret", "config\\secret", "[", ""] {
+    for invalid in ["/etc/*", "../secret", "config/../secret", ".git/**", ".GIT/**", "!secret", "C:/secret", "config\\secret", "[", ""] {
         assert!(matcher(invalid).is_err(), "{invalid}");
     }
     assert!(validate_patterns(&vec![".env".into(); MAX_PATTERNS + 1]).is_err());
@@ -48,10 +53,10 @@ fn preview_only_lists_ignored_files_and_excludes_managed_workspaces() {
     write(repo.path(), "config/local/spaces and\nnewlines", "local");
     git::ensure_worktree_dir_ignored(repo.path());
     write(&git::worktree_root(repo.path()), "older/.env", "old");
-    let result = preview(repo.path(), Some(&patterns(&["**"]))).unwrap();
+    let result = preview(repo.path(), Some(&patterns(&["**"])), None).unwrap();
     assert_eq!(result.patterns[0].matches, patterns(&[".env", "config/local/nested/app.json", "config/local/spaces and\nnewlines"]));
     assert!(!result.from_include_file);
-    let result = preview(repo.path(), Some(&patterns(&["[", ".env*"]))).unwrap();
+    let result = preview(repo.path(), Some(&patterns(&["[", ".env*"])), None).unwrap();
     assert!(result.patterns[0].error.is_some());
     assert_eq!(result.patterns[1].matches, patterns(&[".env"]));
 }
@@ -65,7 +70,7 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
     write(repo.path(), ".env", "private");
     write(repo.path(), "config/local/app.json", "local");
     write(repo.path(), ".worktreeinclude", "# team choices\n\nconfig/local/**\r\n");
-    let result = preview(repo.path(), Some(&patterns(&[".env*"]))).unwrap();
+    let result = preview(repo.path(), Some(&patterns(&[".env*"])), None).unwrap();
     assert!(result.from_include_file);
     assert_eq!(result.patterns.len(), 1);
     assert_eq!(result.patterns[0].matches, patterns(&["config/local/app.json"]));
@@ -74,9 +79,9 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
     assert!(!Path::new(&created.path).join(".env").exists());
     assert!(projects::update(&project.path, projects::ProjectPatch { repository_settings: Some(Default::default()), ..Default::default() }).is_err());
     write(repo.path(), ".worktreeinclude", "# intentionally empty\n");
-    assert!(preview(repo.path(), None).unwrap().patterns.is_empty());
+    assert!(preview(repo.path(), None, None).unwrap().patterns.is_empty());
     fs::remove_file(repo.path().join(".worktreeinclude")).unwrap();
-    assert_eq!(preview(repo.path(), None).unwrap().patterns[0].matches, patterns(&[".env"]));
+    assert_eq!(preview(repo.path(), None, None).unwrap().patterns[0].matches, patterns(&[".env"]));
     assert_eq!(projects::list().unwrap().0[0].repository_settings.files_to_copy, patterns(&[".env*"]));
     // The same serialized Project is returned by `terminalx projects list`.
     assert_eq!(serde_json::to_value(&projects::list().unwrap().0[0]).unwrap()["repositorySettings"]["filesToCopy"], serde_json::json!([".env*"]));
@@ -94,7 +99,8 @@ fn create_and_checkout_copy_saved_patterns_before_returning() {
     assert_eq!(fs::read_to_string(Path::new(&worktree.path).join(".env")).unwrap(), "SECRET=value\n");
     assert_eq!(fs::read_to_string(Path::new(&worktree.path).join("config/local/app.json")).unwrap(), "local");
     let report = worktree.worktree_base.unwrap().file_copy.unwrap();
-    assert_eq!(report.copied, patterns(&[".env", "config/local/app.json"]));
+    assert_eq!(report.copied_count, 2);
+    assert_eq!(report.copied_bytes, 18);
     assert!(report.skipped.is_empty());
     git::run(repo.path(), &["branch", "existing"]).unwrap();
     let checkout = git::checkout_worktree(repo.path(), "existing-checkout", "existing").unwrap();
@@ -136,7 +142,7 @@ fn existing_files_are_kept_and_overlapping_patterns_copy_once() {
     write(repo.path(), ".env", "original");
     write(repo.path(), ".worktreeinclude", ".env*\n.env\n");
     let worktree = git::create_worktree(repo.path(), "overlap", Some("main")).unwrap();
-    assert_eq!(worktree.worktree_base.unwrap().file_copy.unwrap().copied, patterns(&[".env"]));
+    assert_eq!(worktree.worktree_base.unwrap().file_copy.unwrap().copied_count, 1);
     let dest = Path::new(&worktree.path);
     write(dest, ".env", "workspace value");
     assert_eq!(copy_files(repo.path(), dest).unwrap().skipped.len(), 1);
@@ -156,14 +162,14 @@ fn symbolic_links_and_special_files_cannot_escape_or_hang_copying() {
     write(repo.path(), ".worktreeinclude", ".env*\nconfig/local/**\n");
     let dest = tempfile::tempdir().unwrap();
     symlink(outside.path(), dest.path().join("config")).unwrap();
-    assert!(copy_one(repo.path(), dest.path(), Path::new(".env.link")).is_err());
-    assert!(copy_one(repo.path(), dest.path(), Path::new("config/local/app")).is_err());
+    assert!(copy_one(repo.path(), dest.path(), Path::new(".env.link"), MAX_COPY_BYTES).is_err());
+    assert!(copy_one(repo.path(), dest.path(), Path::new("config/local/app"), MAX_COPY_BYTES).is_err());
     assert!(!outside.path().join("local").exists());
     symlink(outside.path(), repo.path().join("cache")).unwrap();
-    assert!(copy_one(repo.path(), dest.path(), Path::new("cache/secret")).is_err());
+    assert!(copy_one(repo.path(), dest.path(), Path::new("cache/secret"), MAX_COPY_BYTES).is_err());
     fs::remove_file(repo.path().join(".worktreeinclude")).unwrap();
     symlink(outside.path().join("secret"), repo.path().join(".worktreeinclude")).unwrap();
-    let preview = preview(repo.path(), None).unwrap();
+    let preview = preview(repo.path(), None, None).unwrap();
     assert!(preview.from_include_file);
     assert!(preview.error.unwrap().contains(".worktreeinclude"));
     assert!(!preview.workspaces_path.is_empty());
@@ -173,13 +179,134 @@ fn symbolic_links_and_special_files_cannot_escape_or_hang_copying() {
     let fifo = std::ffi::CString::new(repo.path().join(".env.fifo").to_str().unwrap()).unwrap();
     // SAFETY: the path is a valid C string in this test's private temp directory.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    assert!(copy_one(repo.path(), dest.path(), Path::new(".env.fifo")).is_err());
+    assert!(copy_one(repo.path(), dest.path(), Path::new(".env.fifo"), MAX_COPY_BYTES).is_err());
 }
 
 #[test]
 fn old_project_records_default_to_no_copy_patterns() {
     let project: projects::Project = serde_json::from_value(serde_json::json!({"path":"/repo", "name":"repo"})).unwrap();
     assert_eq!(project.repository_settings, projects::RepositorySettings::default());
+    let legacy: CopyReport = serde_json::from_value(serde_json::json!({"copied":[".env"], "skipped":[], "error":null})).unwrap();
+    assert_eq!(legacy, CopyReport::default());
+}
+
+#[test]
+fn different_base_ignore_rules_cannot_expose_secrets_in_create_or_checkout() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    git::run(repo.path(), &["checkout", "-qb", "no-ignore"]).unwrap();
+    git::run(repo.path(), &["rm", ".gitignore"]).unwrap();
+    git::run(repo.path(), &["commit", "-qm", "remove ignores"]).unwrap();
+    git::run(repo.path(), &["checkout", "-q", "main"]).unwrap();
+    write(repo.path(), ".env", "secret");
+    write(repo.path(), ".worktreeinclude", ".env\n");
+    let created = git::create_worktree(repo.path(), "different-base", Some("no-ignore")).unwrap();
+    let checked_out = git::checkout_worktree(repo.path(), "different-checkout", "no-ignore").unwrap();
+    for worktree in [created, checked_out] {
+        let destination = Path::new(&worktree.path);
+        assert!(!destination.join(".env").exists());
+        let report = worktree.worktree_base.unwrap().file_copy.unwrap();
+        assert_eq!(report.copied_count, 0);
+        assert_eq!(report.skipped_count, 1);
+        assert!(report.skipped[0].reason.contains("not ignored"));
+        git::run(destination, &["add", "-A"]).unwrap();
+        assert!(git::run(destination, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn scan_limits_discard_partial_names_without_corrupting_utf8() {
+    let repo = repo();
+    write(repo.path(), ".env.a", "a");
+    write(repo.path(), ".env.é", "b");
+    let args = ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"];
+    let (names, limited) = git::file_names_bounded(repo.path(), &args, 1, 100).unwrap();
+    assert_eq!(names, patterns(&[".env.a"]));
+    assert!(limited);
+    // Seven bytes for the first name + NUL, then stop inside the second é.
+    let (names, limited) = git::file_names_bounded(repo.path(), &args, 10, 13).unwrap();
+    assert_eq!(names, patterns(&[".env.a"]));
+    assert!(limited);
+    let (names, limited) = git::file_names_bounded(repo.path(), &args, 10, 100).unwrap();
+    assert_eq!(names, patterns(&[".env.a", ".env.é"]));
+    assert!(!limited);
+}
+
+#[test]
+fn previews_and_copy_reports_are_bounded_and_copy_limits_preserve_checkout() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    for index in 0..205 { write(repo.path(), &format!(".env.{index:03}"), "secret"); }
+    let result = preview(repo.path(), Some(&patterns(&[".env*"])), None).unwrap();
+    assert_eq!(result.patterns[0].matches.len(), MAX_PREVIEW_MATCHES);
+    assert_eq!(result.patterns[0].omitted, 105);
+    // Create an empty checkout, then enable copying for bounded test runs.
+    let worktree = git::create_worktree(repo.path(), "limited", Some("main")).unwrap();
+    let dest = Path::new(&worktree.path);
+    write(repo.path(), ".worktreeinclude", ".env*\n");
+    let report = copy_files_with_limits(repo.path(), dest, 2, 6).unwrap();
+    assert_eq!(report.copied_count, 1);
+    assert_eq!(report.copied_bytes, 6);
+    assert_eq!(report.skipped_count, 204);
+    assert_eq!(report.skipped.len(), MAX_REPORT_DETAILS);
+    assert!(report.skipped[0].reason.contains("byte limit"));
+    assert!(report.skipped[1].reason.contains("matching files"));
+    assert!(dest.join(".env.000").is_file());
+    assert!(!dest.join(".env.001").exists());
+    assert!(!dest.join(".env.002").exists());
+    assert_eq!(fs::read_to_string(dest.join("tracked.txt")).unwrap(), "tracked");
+}
+
+#[test]
+fn preview_snapshots_reuse_scans_but_creation_always_rescans() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    write(repo.path(), ".env.first", "first");
+    let draft = patterns(&[".env*"]);
+    assert_eq!(preview(repo.path(), Some(&draft), Some("page")).unwrap().patterns[0].matches.len(), 1);
+    write(repo.path(), ".env.second", "second");
+    assert_eq!(preview(repo.path(), Some(&draft), Some("page")).unwrap().patterns[0].matches.len(), 1);
+    assert_eq!(preview(repo.path(), Some(&draft), Some("refreshed")).unwrap().patterns[0].matches.len(), 2);
+    write(repo.path(), ".worktreeinclude", ".env*\n");
+    write(repo.path(), ".env.third", "third");
+    let worktree = git::create_worktree(repo.path(), "fresh-scan", Some("main")).unwrap();
+    assert_eq!(worktree.worktree_base.unwrap().file_copy.unwrap().copied_count, 3);
+    assert!(Path::new(&worktree.path).join(".env.third").is_file());
+}
+
+#[test]
+fn snapshot_cache_is_bounded_and_separates_repositories() {
+    let mut cache = PreviewCache::default();
+    let empty = || Ok(IgnoredFiles { files: Vec::new(), limited: false });
+    cache.get(Path::new("a"), "token", empty).unwrap();
+    cache.get(Path::new("a"), "token", || panic!("must reuse scan")).unwrap();
+    cache.get(Path::new("b"), "token", empty).unwrap();
+    for token in ["two", "three", "four"] { cache.get(Path::new("a"), token, empty).unwrap(); }
+    assert_eq!(cache.entries.len(), 4);
+    assert!(!cache.entries.iter().any(|entry| entry.project == Path::new("a") && entry.token == "token"));
+}
+
+#[test]
+fn cleanup_failure_does_not_misreport_a_published_file_as_skipped() {
+    let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    assert!(finish_publication(Ok(()), Err(denied())).unwrap().unwrap().contains("Copied, but"));
+    let error = finish_publication(Err(anyhow::anyhow!("publication failed")), Err(denied())).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("publication failed"));
+    assert!(message.contains("temporary file"));
+}
+
+#[cfg(unix)]
+#[test]
+fn growing_source_cannot_publish_a_file_beyond_the_byte_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let mut source = std::io::Cursor::new(b"larger than the metadata indicated");
+    let error = safe_open::write_atomic(root.path(), Path::new(".env"), |target| {
+        copy_bounded(&mut source, target, 5).map(|_| ())
+    }).unwrap_err();
+    assert!(error.to_string().contains("byte limit"));
+    assert_eq!(source.position(), 6);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 #[cfg(unix)]
@@ -197,6 +324,6 @@ fn failed_writes_leave_no_partial_file_and_successful_copies_preserve_owner_exec
     let source = tempfile::tempdir().unwrap();
     write(source.path(), "setup", "#!/bin/sh\n");
     fs::set_permissions(source.path().join("setup"), fs::Permissions::from_mode(0o755)).unwrap();
-    copy_one(source.path(), root.path(), Path::new("setup")).unwrap();
+    copy_one(source.path(), root.path(), Path::new("setup"), MAX_COPY_BYTES).unwrap();
     assert_eq!(fs::metadata(root.path().join("setup")).unwrap().permissions().mode() & 0o777, 0o700);
 }

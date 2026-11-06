@@ -167,7 +167,8 @@ try {
       assert.equal(await page.getByTestId("issue-detail").getByText(/^Synthetic issue:/).isVisible(), true);
       await page.getByRole("button", { name: "Open session", exact: true }).waitFor();
       const req = await page.evaluate(() => window.__ISSUE_REQUEST__);
-      assert.deepEqual(req.tab, { harness: "codex", model: "gpt-6-astra", effort: "high", permissionMode: "bypassPermissions" });
+      // The saved preferences hold no mode: the session starts where a fresh profile does, Ask every time (PRO-162).
+      assert.deepEqual(req.tab, { harness: "codex", model: "gpt-6-astra", effort: "high", permissionMode: "manual" });
       assert.equal(req.issue.provider, provider);
       assert.equal(req.projectPath, "/repos/p0");
       assert.equal(req.useWorktree, true);
