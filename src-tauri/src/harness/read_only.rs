@@ -7,6 +7,10 @@ use std::path::Path;
 
 pub const SESSION_OPTION: &str = "terminalx:allow_session";
 
+#[cfg(all(test, unix))]
+#[path = "read_only_security_tests.rs"]
+mod security_tests;
+
 pub fn command<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
     if !matches!(
         tool,
@@ -65,7 +69,23 @@ pub fn execution_input(input: &Value) -> Value {
     Value::Object(execution)
 }
 
-pub fn allows(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
+/// An automatic approval is a replacement input, never permission to run
+/// the original command in an uninspected login-shell environment.
+pub fn approved_input(tool: &str, input: &Value, cwd: Option<&str>) -> Option<Value> {
+    approved_input_in(tool, input, cwd, &Execution::owner())
+}
+
+fn approved_input_in(
+    tool: &str,
+    input: &Value,
+    cwd: Option<&str>,
+    execution: &Execution,
+) -> Option<Value> {
+    // The replacement command uses the POSIX shell contract. Other platforms
+    // continue to ask until they have an equivalent controlled executor.
+    if !cfg!(unix) {
+        return None;
+    }
     if !input.as_object().is_some_and(|input| {
         input.keys().all(|key| {
             matches!(
@@ -85,26 +105,130 @@ pub fn allows(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
             )
         })
     }) {
-        return false;
+        return None;
     }
-    let Some(command) = command(tool, input) else {
-        return false;
+    let commands = parse(command(tool, input)?)?;
+    let mut script = String::new();
+    for command in commands {
+        if !safe_command(&command.words) {
+            return None;
+        }
+        let name = &command.words[0];
+        // Resolve using the owner's PATH, never the executing shell's PATH,
+        // aliases, functions, startup files or command substitutions.
+        let binary = which::which(name).ok()?;
+        if !binary.is_absolute() {
+            return None;
+        }
+        if name == "git" && !git_config_is_read_only(&binary, Path::new(cwd?), execution) {
+            return None;
+        }
+        if !script.is_empty() {
+            script.push(' ');
+        }
+        script.push_str(&quote(binary.to_str()?));
+        if name == "rg" {
+            script.push_str(" '--no-config'");
+        }
+        if name == "git" {
+            // Git propagates -c settings to its own subprocesses. In
+            // addition to rejecting current gitlinks below, suppress helpers
+            // and recursive submodule displays (including historical links).
+            script.push_str(" '--no-pager' '--no-optional-locks' '-c' 'core.fsmonitor=false' '-c' 'submodule.recurse=false' '-c' 'diff.submodule=short' '-c' 'status.submoduleSummary=false' '-c' 'log.showSignature=false'");
+        }
+        for word in &command.words[1..] {
+            script.push(' ');
+            script.push_str(&quote(word));
+        }
+        script.push(' ');
+        script.push_str(command.next);
+    }
+    // The provider's outer shell may have loaded .zshenv, .bashrc, etc.
+    // Clear what those files supplied before invoking our non-login shell.
+    // Quoted absolute paths also prevent aliases/functions replacing tools.
+    // env -i clears variables only after env itself has loaded. Mask loader
+    // controls with shell assignments first, so startup-file LD_* / DYLD_*
+    // values cannot inject libraries or create loader trace/profile files.
+    let mut wrapper = String::new();
+    for key in [
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "LD_DEBUG",
+        "LD_DEBUG_OUTPUT",
+        "LD_PROFILE",
+        "LD_PROFILE_OUTPUT",
+        "LD_TRACE_LOADED_OBJECTS",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "DYLD_ROOT_PATH",
+        "DYLD_IMAGE_SUFFIX",
+        "DYLD_PRINT_TO_FILE",
+    ] {
+        wrapper.push_str(key);
+        wrapper.push_str("='' ");
+    }
+    wrapper.push_str("LD_LIBRARY_PATH='/usr/lib:/lib' DYLD_LIBRARY_PATH='/usr/lib' GCONV_PATH='/usr/lib/gconv' LC_ALL='C' '/usr/bin/env' '-i'");
+    for (key, value) in &execution.env {
+        wrapper.push(' ');
+        wrapper.push_str(&quote(&format!("{key}={value}")));
+    }
+    wrapper.push_str(" '/bin/sh' '-c' ");
+    wrapper.push_str(&quote(&script));
+    let mut updated = input.clone();
+    let field = if input.get("command").is_some() {
+        "command"
+    } else {
+        "cmd"
     };
-    let Some(commands) = parse(command) else {
-        return false;
-    };
-    commands.iter().all(|words| safe_command(words))
-        && (!commands.iter().any(|words| words[0] == "rg")
-            || std::env::var_os("RIPGREP_CONFIG_PATH").is_none())
-        && (!commands.iter().any(|words| words[0] == "git")
-            || cwd.is_some_and(|cwd| git_config_is_read_only(Path::new(cwd))))
+    updated[field] = Value::String(wrapper);
+    Some(updated)
+}
+
+struct Execution {
+    env: Vec<(&'static str, String)>,
+}
+
+impl Execution {
+    fn owner() -> Self {
+        let mut env = vec![
+            ("PATH", "/usr/bin:/bin".into()),
+            ("LC_ALL", "C".into()),
+            ("GIT_OPTIONAL_LOCKS", "0".into()),
+        ];
+        for key in ["HOME", "XDG_CONFIG_HOME"] {
+            if let Ok(value) = std::env::var(key) {
+                env.push((key, value));
+            }
+        }
+        Self { env }
+    }
+
+    fn git(&self, binary: &Path) -> std::process::Command {
+        let mut command = std::process::Command::new(binary);
+        command
+            .env_clear()
+            .envs(self.env.iter().map(|(key, value)| (*key, value)));
+        command.args(["--no-pager", "--no-optional-locks"]);
+        command
+    }
+}
+
+fn quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+struct ShellCommand {
+    words: Vec<String>,
+    next: &'static str,
 }
 
 /// Recognise simple commands joined by ;, newline, &&, || or |. Reject all
 /// redirections (including input/process substitutions), background jobs,
 /// comments, variables, globs and shell control syntax. Quoted text stays a
 /// single literal argument; substitutions inside double quotes still ask.
-fn parse(source: &str) -> Option<Vec<Vec<String>>> {
+fn parse(source: &str) -> Option<Vec<ShellCommand>> {
     if source.len() > 64 * 1024 {
         return None;
     }
@@ -152,7 +276,16 @@ fn parse(source: &str) -> Option<Vec<Vec<String>>> {
                     }
                     return None;
                 }
-                commands.push(std::mem::take(&mut words));
+                let next = match c {
+                    ';' | '\n' => ";",
+                    '&' => "&&",
+                    '|' if doubled => "||",
+                    _ => "|",
+                };
+                commands.push(ShellCommand {
+                    words: std::mem::take(&mut words),
+                    next,
+                });
                 needs_command = matches!(c, '&' | '|');
             }
             c if c.is_ascii_whitespace() && c != '\r' => {
@@ -176,7 +309,7 @@ fn parse(source: &str) -> Option<Vec<Vec<String>>> {
         words.push(word);
     }
     if !words.is_empty() {
-        commands.push(words);
+        commands.push(ShellCommand { words, next: "" });
     } else if needs_command {
         return None;
     }
@@ -322,40 +455,94 @@ fn options(
     long_flags: &[&str],
     long_values: &[&str],
 ) -> bool {
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        if arg == "--" {
-            return true;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            continue;
-        }
-        if arg.starts_with("--") {
-            let (name, value) = arg
-                .split_once('=')
-                .map_or((arg.as_str(), None), |(n, v)| (n, Some(v)));
-            if long_flags.contains(&name) && value.is_none() {
+    OptionSpec {
+        flags,
+        values,
+        long_flags,
+        long_values,
+        ..Default::default()
+    }
+    .accepts(args)
+}
+
+#[derive(Default)]
+struct OptionSpec<'a> {
+    flags: &'a str,
+    values: &'a [&'a str],
+    numeric_values: &'a str,
+    optional_values: &'a str,
+    optional_numeric_values: &'a str,
+    long_flags: &'a [&'a str],
+    long_values: &'a [&'a str],
+    long_attached_values: &'a [&'a str],
+    long_optional_values: &'a [&'a str],
+}
+
+impl OptionSpec<'_> {
+    fn accepts(&self, args: &[String]) -> bool {
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            if arg == "--" {
+                return true;
+            }
+            if !arg.starts_with('-') || arg == "-" {
                 continue;
             }
-            if !long_values.contains(&name) || (value.is_none() && args.next().is_none()) {
-                return false;
-            }
-        } else {
-            let mut short = arg[1..].char_indices().peekable();
-            while let Some((_, c)) = short.next() {
-                if values.iter().any(|value| value.starts_with(c)) {
-                    if short.peek().is_none() && args.next().is_none() {
+            if arg.starts_with("--") {
+                let (name, value) = arg
+                    .split_once('=')
+                    .map_or((arg.as_str(), None), |(n, v)| (n, Some(v)));
+                if (self.long_flags.contains(&name) && value.is_none())
+                    || self.long_optional_values.contains(&name)
+                    || (self.long_attached_values.contains(&name) && value.is_some())
+                {
+                    continue;
+                }
+                if !self.long_values.contains(&name) || (value.is_none() && args.next().is_none()) {
+                    return false;
+                }
+            } else {
+                let mut short = arg[1..].char_indices().peekable();
+                while let Some((_, c)) = short.next() {
+                    // Optional short values must be attached. A bare -U or -u
+                    // leaves the following option for the next iteration.
+                    if self.optional_numeric_values.contains(c) {
+                        if short.any(|(_, digit)| !digit.is_ascii_digit()) {
+                            return false;
+                        }
+                        break;
+                    }
+                    if self.optional_values.contains(c) {
+                        break;
+                    }
+                    if self.numeric_values.contains(c) {
+                        let valid = if short.peek().is_some() {
+                            short.all(|(_, digit)| digit.is_ascii_digit())
+                        } else {
+                            args.next().is_some_and(|value| {
+                                !value.is_empty()
+                                    && value.bytes().all(|digit| digit.is_ascii_digit())
+                            })
+                        };
+                        if !valid {
+                            return false;
+                        }
+                        break;
+                    }
+                    if self.values.iter().any(|value| value.starts_with(c)) {
+                        if short.peek().is_none() && args.next().is_none() {
+                            return false;
+                        }
+                        break;
+                    }
+                    if !self.flags.contains(c) {
                         return false;
                     }
-                    break;
-                }
-                if !flags.contains(c) {
-                    return false;
                 }
             }
         }
+        true
     }
-    true
 }
 
 fn git_args(args: &[String]) -> bool {
@@ -366,11 +553,10 @@ fn git_args(args: &[String]) -> bool {
         return false;
     };
     match subcommand.as_str() {
-        "status" => options(
-            args,
-            "sbz",
-            &["u"],
-            &[
+        "status" => OptionSpec {
+            flags: "sbz",
+            optional_values: "u",
+            long_flags: &[
                 "--short",
                 "--branch",
                 "--porcelain",
@@ -378,13 +564,19 @@ fn git_args(args: &[String]) -> bool {
                 "--ignored",
                 "--no-renames",
             ],
-            &["--porcelain", "--untracked-files", "--ignore-submodules"],
-        ),
-        "diff" => options(
-            args,
-            "pUwbzR",
-            &["U"],
-            &[
+            long_optional_values: &[
+                "--porcelain",
+                "--ignored",
+                "--untracked-files",
+                "--ignore-submodules",
+            ],
+            ..Default::default()
+        }
+        .accepts(args),
+        "diff" => OptionSpec {
+            flags: "pwbzR",
+            optional_numeric_values: "U",
+            long_flags: &[
                 "--stat",
                 "--shortstat",
                 "--numstat",
@@ -402,8 +594,11 @@ fn git_args(args: &[String]) -> bool {
                 "--ignore-all-space",
                 "--ignore-space-change",
             ],
-            &["--unified", "--diff-filter", "--color"],
-        ),
+            long_optional_values: &["--unified", "--color"],
+            long_attached_values: &["--diff-filter"],
+            ..Default::default()
+        }
+        .accepts(args),
         "log" => {
             // Signature placeholders invoke gpg even without --show-signature.
             if args.iter().any(|arg| arg.contains("%G")) {
@@ -417,11 +612,10 @@ fn git_args(args: &[String]) -> bool {
                 })
                 .cloned()
                 .collect();
-            options(
-                &args,
-                "puz",
-                &["n"],
-                &[
+            OptionSpec {
+                flags: "puz",
+                numeric_values: "n",
+                long_flags: &[
                     "--oneline",
                     "--all",
                     "--graph",
@@ -439,40 +633,64 @@ fn git_args(args: &[String]) -> bool {
                     "--no-merges",
                     "--merges",
                 ],
-                &[
+                long_attached_values: &[
                     "--max-count",
                     "--format",
-                    "--pretty",
                     "--since",
                     "--until",
                     "--author",
                     "--grep",
-                    "--decorate",
                 ],
-            )
+                long_optional_values: &["--pretty", "--decorate"],
+                ..Default::default()
+            }
+            .accepts(&args)
         }
         _ => false,
     }
 }
 
-fn git_config_is_read_only(cwd: &Path) -> bool {
+fn git_config_is_read_only(binary: &Path, cwd: &Path, execution: &Execution) -> bool {
     // Listing config does not run fsmonitor, diff drivers, pagers or gpg.
     // If any are configured, leave the command to the approval card.
-    if std::env::vars_os().any(|(key, _)| {
-        let key = key.to_string_lossy();
-        key.starts_with("GIT_TRACE")
-            || matches!(key.as_ref(), "GIT_EXTERNAL_DIFF" | "GIT_PAGER" | "PAGER")
-    }) {
-        return false;
-    }
-    let Ok(output) = std::process::Command::new("git")
-        .args(["--no-pager", "config", "--null", "--list"])
+    // This is exactly the environment of the replacement command, including
+    // HOME and XDG_CONFIG_HOME. Shell startup cannot select another config.
+    let Ok(output) = execution
+        .git(binary)
+        .args(["config", "--null", "--list"])
         .current_dir(cwd)
         .output()
     else {
         return false;
     };
-    output.status.success() && git_config_entries_are_read_only(&output.stdout)
+    if !output.status.success() || !git_config_entries_are_read_only(&output.stdout) {
+        return false;
+    }
+    // A parent status/diff can enter a submodule with a separate config.
+    // Until each traversal can be inspected reliably, repos with gitlinks
+    // ask. Inspect the whole index even when the command starts in a subdir.
+    let Ok(index) = execution
+        .git(binary)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "ls-files",
+            "--stage",
+            "--full-name",
+            "-z",
+            "--",
+            ":(top)",
+        ])
+        .current_dir(cwd)
+        .output()
+    else {
+        return false;
+    };
+    index.status.success()
+        && !index
+            .stdout
+            .split(|b| *b == 0)
+            .any(|entry| entry.starts_with(b"160000 "))
 }
 
 fn git_config_entries_are_read_only(config: &[u8]) -> bool {
@@ -486,7 +704,12 @@ fn git_config_entries_are_read_only(config: &[u8]) -> bool {
                 | "diff.external"
                 | "log.showsignature"
                 | "extensions.partialclone"
+                | "format.pretty"
+                | "diff.submodule"
+                | "status.submodulesummary"
+                | "submodule.recurse"
         ) || key.starts_with("pager.")
+            || key.starts_with("pretty.")
             || (key.starts_with("remote.") && key.ends_with(".promisor"))
             || (key.starts_with("diff.")
                 && (key.ends_with(".command") || key.ends_with(".textconv"))))
@@ -498,7 +721,8 @@ mod tests {
     use super::*;
 
     fn syntax_allows(source: &str) -> bool {
-        parse(source).is_some_and(|commands| commands.iter().all(|words| safe_command(words)))
+        parse(source)
+            .is_some_and(|commands| commands.iter().all(|command| safe_command(&command.words)))
     }
 
     #[test]
@@ -579,11 +803,10 @@ mod tests {
 
     #[test]
     fn wrappers_and_escalated_or_custom_shell_inputs_ask() {
-        assert!(allows(
-            "Bash",
-            &serde_json::json!({"command":"pwd; rg --files"}),
-            None
-        ));
+        assert_eq!(
+            approved_input("Bash", &serde_json::json!({"command":"pwd; ls"}), None).is_some(),
+            cfg!(unix)
+        );
         for (tool, input) in [
             ("mcp__shell", serde_json::json!({"command":"pwd"})),
             (
@@ -596,7 +819,7 @@ mod tests {
             ),
             ("Bash", serde_json::json!({"command":"pwd", "env":{}})),
         ] {
-            assert!(!allows(tool, &input, None));
+            assert!(approved_input(tool, &input, None).is_none());
         }
     }
 
@@ -618,7 +841,11 @@ mod tests {
             "[log]\nshowSignature = true\n",
         ] {
             std::fs::write(&config, format!("{original}\n{entry}")).unwrap();
-            assert!(!git_config_is_read_only(dir.path()));
+            assert!(!git_config_is_read_only(
+                &which::which("git").unwrap(),
+                dir.path(),
+                &Execution::owner()
+            ));
             assert!(!dir.path().join("marker").exists());
         }
     }
@@ -636,6 +863,11 @@ mod tests {
             "log.showsignature",
             "extensions.partialclone",
             "remote.origin.promisor",
+            "format.pretty",
+            "pretty.checksig",
+            "diff.submodule",
+            "status.submodulesummary",
+            "submodule.recurse",
         ] {
             assert!(
                 !git_config_entries_are_read_only(format!("{key}\nvalue\0").as_bytes()),
@@ -646,7 +878,7 @@ mod tests {
             serde_json::json!({"command":"pwd", "cmd":"rm file"}),
             serde_json::json!({"command":"pwd", "dangerouslyDisableSandbox":true}),
         ] {
-            assert!(!allows("Bash", &input, None));
+            assert!(approved_input("Bash", &input, None).is_none());
         }
     }
 

@@ -102,6 +102,8 @@ fn a_retired_owner_socket_blocks_the_tool_without_claiming_a_human_refusal() {
 #[test]
 fn owner_permission_decisions_still_require_an_answer() {
     let (world, serve, launch) = start("manual");
+    // Exercise explicit decisions with the built-in discovery policy off.
+    std::fs::write(world.data.join("settings.json"), br#"{"agents":{"readOnlyCommands":false}}"#).unwrap();
     for (action, expected) in [("permissions.allow", "allow"), ("permissions.deny", "deny")] {
         let hook = Hook::start(&serve, &world, &launch, "PermissionRequest");
         let pending = wait_until("the permission card", || {
@@ -116,4 +118,19 @@ fn owner_permission_decisions_still_require_an_answer() {
         serve.control(action, json!({"request":pending["permissions"][0]["requestId"]}));
         assert_eq!(hook.reply()["hookSpecificOutput"]["decision"]["behavior"], expected);
     }
+}
+
+#[test]
+fn owner_read_only_approval_preserves_the_replacement_through_the_hook_process() {
+    let (world, serve, launch) = start("manual");
+    let reply = Hook::start(&serve, &world, &launch, "PermissionRequest").reply();
+    let decision = &reply["hookSpecificOutput"]["decision"];
+    assert_eq!(decision["behavior"], "allow");
+    let command = decision["updatedInput"]["command"].as_str().expect("approval must carry the sanitized command");
+    assert!(command.starts_with("LD_PRELOAD=''"));
+    assert!(command.contains("'/usr/bin/env' '-i'"));
+    assert_eq!(decision["updatedInput"]["description"], "Inspect the current directory");
+    assert_eq!(serve.control("permissions.list", json!({}))["permissions"], json!([]));
+    let output = Command::new("/bin/sh").current_dir(&world.project).args(["-c", command]).output().unwrap();
+    assert!(output.status.success());
 }

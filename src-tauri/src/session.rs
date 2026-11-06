@@ -6006,12 +6006,20 @@ impl SessionManager {
                 let key = crate::harness::read_only::session_key(&tool_name, &input, cwd);
                 let granted = key.as_ref().is_some_and(|key| self.session_commands.lock().unwrap()
                     .get(&rt.key()).is_some_and(|commands| commands.contains(key)));
-                let discovery = store::settings::load().agents.read_only_commands
-                    && crate::harness::read_only::allows(&tool_name, &input, cwd);
-                if granted || discovery {
+                if granted {
                     // Do not cache this in `answered`: a subsequent provider
                     // escalation still needs its own approval card.
                     return reply_for(kind, gate, Decision::Allow);
+                }
+                if let Some(updated) = store::settings::load().agents.read_only_commands
+                    .then(|| crate::harness::read_only::approved_input(&tool_name, &input, cwd)).flatten() {
+                    // Approve only the sanitized replacement. The unchanged
+                    // input may inherit executors/config from shell startup.
+                    let output = match kind {
+                        CliKind::Codex => codex::pty::pre_tool_rewrite(updated),
+                        CliKind::Claude => claude::pty::permission_decision(true, Some(updated), vec![]),
+                    };
+                    return HookReply { output: Some(output), refused: None };
                 }
                 key
             } else { None }

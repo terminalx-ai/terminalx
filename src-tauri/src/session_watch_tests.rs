@@ -478,13 +478,17 @@ fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: boo
 }
 
 #[test]
+#[cfg(unix)]
 fn ask_mode_discovery_skips_cards_for_both_clis_but_writes_and_network_ask() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        for command in ["pwd; rg --files", "ls; cat file", "cat file | grep -n hello"] {
+        let mut commands = vec!["pwd; ls", "ls; cat file", "cat file | grep -n hello"];
+        if which::which("rg").is_ok() { commands.push("pwd; rg --files"); }
+        for command in commands {
             let reply = rig.manager.on_hook(command_frame(&rig, gate, command, "/workspace/app"));
-            assert_eq!(reply.output, Some(if kind == CliKind::Codex { codex::pty::pre_tool_decision(true) } else { claude::pty::permission_decision(true, None, vec![]) }));
+            let updated = crate::harness::read_only::approved_input("Bash", &json!({"command":command}), Some("/workspace/app")).unwrap();
+            assert_eq!(reply.output, Some(if kind == CliKind::Codex { codex::pty::pre_tool_rewrite(updated) } else { claude::pty::permission_decision(true, Some(updated), vec![]) }));
             assert!(rig.manager.pending_permissions().is_empty());
             assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
         }
@@ -495,6 +499,7 @@ fn ask_mode_discovery_skips_cards_for_both_clis_but_writes_and_network_ask() {
 }
 
 #[test]
+#[cfg(unix)]
 fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
@@ -533,6 +538,7 @@ fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
 }
 
 #[test]
+#[cfg(unix)]
 fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", "/workspace/app")).output.is_some());
