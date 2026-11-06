@@ -607,6 +607,15 @@ export async function refreshCloudCatalog(orgId: string | null = defaultOrgId(ge
   await refreshCloudCatalogResult(orgId, now);
 }
 
+/** Activation must read markers even when a retained catalog cursor is unchanged. */
+export async function refreshCloudReadMarkers(): Promise<void> {
+  const owner = state.owner;
+  const feed = await api.cloudCatalogFeed(null);
+  if (state.owner !== owner) return;
+  if (!Array.isArray(feed.readMarkers)) throw new Error("cloud_read_markers_unavailable");
+  mergeReadMarkers(feed.readMarkers);
+}
+
 /** An inbox invalidation is durable until a list requested after it succeeds.
  * Read the affected organization directly even when the catalog feed is paused. */
 export async function invalidateCloudCatalog(orgId?: string): Promise<void> {

@@ -4,10 +4,10 @@ import type { AccountStatus } from "./api";
 const mocks = vi.hoisted(() => ({
   status: { state: "signed-out" } as AccountStatus,
   listeners: [] as (() => void)[],
-  subscribe: vi.fn(), stop: vi.fn(), markers: vi.fn(), refresh: vi.fn().mockResolvedValue(undefined),
+  subscribe: vi.fn(), stop: vi.fn(), markers: vi.fn(), hydrate: vi.fn().mockResolvedValue(undefined), refresh: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: mocks.status }), subscribeAccount: (fn: () => void) => mocks.listeners.push(fn) }));
-vi.mock("@/lib/cloudCatalog", () => ({ invalidateCloudCatalog: mocks.refresh }));
+vi.mock("@/lib/cloudCatalog", () => ({ invalidateCloudCatalog: mocks.refresh, refreshCloudReadMarkers: mocks.hydrate }));
 vi.mock("@/lib/desktopInbox", () => ({ subscribeInbox: mocks.subscribe }));
 vi.mock("@/lib/cloudReadMarkers", () => ({ setReadMarkerAccount: mocks.markers, mergeReadMarkers: vi.fn(), flushReadMarkers: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ noteOrganizationEvent: vi.fn() }));
@@ -65,4 +65,23 @@ it("pauses the account subscriber when all organization event flags turn off and
   mocks.status = { ...mocks.status, organizations: [{ id: "org", cloud: { enabled: true, flags: { "team.events.v1": true } } }] } as AccountStatus;
   mocks.listeners[0]();
   expect(mocks.subscribe).toHaveBeenCalledTimes(subscribeCount + 1);
+});
+
+it("rehydrates newly enabled organizations on the same subscriber, retrying failed activation reads", async () => {
+  vi.useFakeTimers();
+  try {
+    const org = (id: string, on: boolean) => ({ id, cloud: { enabled: true, flags: { "team.events.v1": on } } });
+    mocks.status = { ...mocks.status, organizations: [org("A", true), org("B", false)] } as AccountStatus;
+    mocks.listeners[0]();
+    const count = mocks.subscribe.mock.calls.length;
+    mocks.hydrate.mockClear();
+    mocks.hydrate.mockRejectedValueOnce(new Error("offline")).mockResolvedValue(undefined);
+    mocks.status = { ...mocks.status, organizations: [org("A", true), org("B", true)] } as AccountStatus;
+    mocks.listeners[0]();
+    expect(mocks.hydrate).toHaveBeenCalledOnce();
+    expect(mocks.subscribe).toHaveBeenCalledTimes(count);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mocks.hydrate).toHaveBeenCalledTimes(2);
+    mocks.status = { state: "signed-out" } as AccountStatus; mocks.listeners[0]();
+  } finally { vi.useRealTimers(); }
 });

@@ -63,6 +63,7 @@ import {
   REFRESH_ON_RETURN_FLOOR_MS,
   refreshCloudCatalog,
   refreshCloudFeed,
+  refreshCloudReadMarkers,
   refreshCloudWorkspaces,
   relistCloudCatalog,
   rememberCreatedWorkspace,
@@ -72,6 +73,7 @@ import {
   usesCatalogFeed,
   type OrgCatalog,
 } from "./cloudCatalog";
+import { isServerRead, setReadMarkerAccount } from "./cloudReadMarkers";
 import { cloudWorkspaceDeleted, noteCloudWorkspaceDeleted, resetPurged } from "./cloudLifecycle";
 import { registerAccountRoles } from "./accountRoles";
 import { notifyAccessChanged } from "./cloudCollab";
@@ -830,6 +832,23 @@ describe("the cross-organization catalog feed (PRO-74)", () => {
   const idsIn = (orgId: string) => getCloudCatalog().orgs[orgId]?.workspaces.map((w) => w.workspace.id);
   /** The server as it behaves: the whole catalog once, then 304 while the cursor is current. */
   const serve = (current: () => CloudCatalogFeed) => mocks.api.cloudCatalogFeed.mockImplementation(async (cursor: string | null) => (cursor === current().cursor ? unchanged(cursor!) : current()));
+
+  it.each(["mixed", "all-off"])("rehydrates markers after %s rollout activation despite an unchanged catalog cursor", async (mode) => {
+    let enabled = false;
+    const marker = { orgId: ORG_B, workspaceId: "read-ws", sessionId: "session", tabId: "tab", readSeq: 20 };
+    const feed = { ...whole("same-cursor"), readMarkers: [marker] };
+    serve(() => feed);
+    withFeed();
+    setReadMarkerAccount(mode === "mixed" ? "acct" : null, () => enabled);
+    await refreshCloudFeed();
+    expect(isServerRead(marker)).toBe(false);
+    enabled = true;
+    setReadMarkerAccount("acct", () => enabled);
+    await refreshCloudReadMarkers();
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenLastCalledWith(null);
+    expect(isServerRead(marker)).toBe(true);
+    setReadMarkerAccount(null);
+  });
 
   it.each(["paused", "refused"])("retries inbox invalidations while the advertised feed is %s", async (failure) => {
     withFeed();
