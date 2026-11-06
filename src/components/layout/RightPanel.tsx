@@ -206,8 +206,11 @@ export function RightPanel({
               type="button"
               onClick={() => setTab(t.id)}
               className={cn(
-                "rounded-md px-2 py-1 text-xs font-medium transition-colors",
-                tab === t.id ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:text-foreground",
+                // Tabs, like the chat's: the open one is underlined on the hairline below.
+                "relative flex h-full items-center px-2 text-xs font-medium transition-colors",
+                tab === t.id
+                  ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-t-full after:bg-foreground"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               {t.label}
