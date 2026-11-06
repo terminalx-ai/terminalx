@@ -43,6 +43,44 @@ selectors accept an attached project's exact path, exact name, or an unambiguous
 
 When automation passes ids between commands, copy the full ids from JSON output.
 
+## User settings
+
+The user file is `~/.raccoon/settings.json`, or `$TERMINALX_HOME/settings.json`
+when that home is set (`RACCOON_HOME` is the legacy fallback). Settings → General
+shows the actual location and offers **Create settings file** when it is absent.
+Keep the file private: it can contain a Linear API key. Do not print or copy the
+whole file into a conversation.
+
+The current precedence is user file → app defaults. A missing key inherits its
+default; removing a key resets it. Repository and organization layers are not
+available yet. Settings rows and the layered resolver will supply their schema
+and source badges once those features land.
+
+User-facing webview choices are under `preferences`, for example:
+
+```json
+{
+  "preferences": {
+    "sounds": false,
+    "fontScale": "lg",
+    "theme": "slate",
+    "mode": "system"
+  },
+  "agents": { "idleStopMinutes": 60 },
+  "experimental": { "nativeCodex": false }
+}
+```
+
+The first window migrates existing localStorage preferences once, without
+overwriting choices already in the file. Navigation state and pane sizes stay
+local to the webview. Leave `preferencesMigrated` alone.
+
+Edits reload automatically, including editor saves that replace the file.
+An invalid key, type or option produces one error with its key and line in
+Settings. The running processes retain their last valid settings until the file
+is fixed; Settings refuses to overwrite an invalid file. A new process with no
+valid file uses defaults. Keep JSON valid and use the options offered in Settings.
+
 ## Commands
 
 ### App and discovery

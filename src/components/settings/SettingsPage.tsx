@@ -32,6 +32,8 @@ import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
+import { SettingsFileError, SettingsFileRow } from "./SettingsFile";
+import { useSettingsFile } from "@/lib/settingsFile";
 
 const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "experimental", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
@@ -125,6 +127,7 @@ export function SettingsPage({
             <h2 id="settings-section-title" className="mb-5 text-xl font-semibold tracking-tight">
               {TAB_LABEL[tab]}
             </h2>
+            <SettingsFileError />
             {tab === "account" && <AccountTab />}
             {tab === "devices" && <DevicesTab />}
             {tab === "general" && <GeneralTab />}
@@ -177,6 +180,7 @@ function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
+      <SettingsFileRow />
       <SettingRow label="Website links" description="Choose a browser for website links, or ask each time." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <SettingRow label="Link actions" description="Show both browser destinations in the link action menu." control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
       {/* PRO-40: unless the app ships the in-window confirmation alone. */}
@@ -592,15 +596,18 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
 
 /** Trackers the issues view can read. Keys live in the app's own settings file. */
 function IntegrationsTab() {
+  const { revision } = useSettingsFile();
   const [linear, setLinear] = useState<LinearStatus | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   useEffect(() => {
-    issues.linearStatus().then(setLinear).catch(() => setLinear({ connected: false }));
-    gh.available().then(setGhOk).catch(() => setGhOk(false));
-  }, []);
+    let live = true;
+    issues.linearStatus().then((value) => live && setLinear(value)).catch(() => live && setLinear({ connected: false }));
+    gh.available().then((value) => live && setGhOk(value)).catch(() => live && setGhOk(false));
+    return () => { live = false; };
+  }, [revision]);
   const save = async (value: string) => {
     setBusy(true);
     setError(null);

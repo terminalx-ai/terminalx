@@ -1,3 +1,4 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { useEffect, useState } from "react";
 import { SettingRow, Switch } from "@/components/ui/controls";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,7 @@ import { errorMessage, workStatus, type OrganizationSummary, type OrganizationWo
  * (OrganizationWorkStatusSettings).
  */
 export function WorkStatusSettings() {
+  const { revision } = useSettingsFile();
   const [shareWithTeam, setShareWithTeam] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +24,7 @@ export function WorkStatusSettings() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [revision]);
 
   const changeShare = async (on: boolean) => {
     const before = shareWithTeam;

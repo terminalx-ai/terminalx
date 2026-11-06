@@ -1,3 +1,4 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { useEffect, useState } from "react";
 import { Segmented, SettingRow } from "@/components/ui/controls";
 import { ARCHIVE_IDLE_DAYS, conversationSettings, errorMessage } from "@/lib/api";
@@ -14,6 +15,7 @@ export function archiveLimitLabel(days: number): string {
  * session is doing reads the limit itself at its next sweep; a change runs one at once, so a shorter limit applies now.
  */
 export function ArchiveIdleSettings() {
+  const { revision } = useSettingsFile();
   const [days, setDays] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,7 +28,7 @@ export function ArchiveIdleSettings() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [revision]);
 
   const change = async (next: number) => {
     const before = days;

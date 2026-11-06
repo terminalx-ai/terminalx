@@ -2,11 +2,11 @@ import { useSyncExternalStore } from "react";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
 import type { IssueListFilter } from "@/lib/issueListFilter";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
+import userPreferenceDefaults from "./userPreferenceDefaults.json";
 
 /**
- * UI preferences that the frontend can read for itself live in localStorage.
- * Anything the Rust side needs before the webview exists belongs in
- * ~/.raccoon/settings.json instead (see store/settings.rs).
+ * User-facing preferences live in settings.json after the one-time migration.
+ * Transient navigation/layout state stays in localStorage.
  */
 export interface Prefs {
   linkBrowser: "terminalx" | "system" | "ask";
@@ -264,6 +264,34 @@ function load(): Prefs {
 
 let state: Prefs = load();
 const listeners = new Set<() => void>();
+type FileWriter = (patch: Record<string, unknown>) => void;
+let fileWriter: FileWriter | null = null;
+const fileKeys = Object.keys(userPreferenceDefaults).filter((key) => key !== "theme" && key !== "mode") as (keyof Prefs)[];
+
+/** Only choices actually kept by the old build, with its migrations applied. */
+export function legacyUserPreferences(): Record<string, unknown> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    return Object.fromEntries(fileKeys.filter((key) => key in saved || (key === "shortcutsVersion" && "shortcuts" in saved)).map((key) => [key, state[key]]));
+  } catch { return {}; }
+}
+
+export function connectPreferenceFile(writer: FileWriter) { fileWriter = writer; }
+
+/** Apply a complete file view: removing a key restores its default. */
+export function applyFilePreferences(values: Record<string, unknown>) {
+  const patch = Object.fromEntries(fileKeys.map((key) => [key, values[key] ?? DEFAULTS[key]]));
+  state = { ...state, ...patch };
+  persistLocal();
+  applyFontScale();
+  for (const listener of listeners) listener();
+}
+
+function persistLocal() {
+  const local: Record<string, unknown> = { ...state };
+  if (fileWriter) for (const key of fileKeys) delete local[key];
+  try { localStorage.setItem(KEY, JSON.stringify(local)); } catch { /* storage unavailable */ }
+}
 
 export function getPrefs(): Prefs {
   return state;
@@ -271,11 +299,9 @@ export function getPrefs(): Prefs {
 
 export function setPrefs(patch: Partial<Prefs>) {
   state = { ...state, ...patch };
-  try {
-    localStorage.setItem(KEY, JSON.stringify(state));
-  } catch {
-    /* ignore */
-  }
+  persistLocal();
+  const saved = Object.fromEntries(Object.entries(patch).filter(([key]) => fileKeys.includes(key as keyof Prefs)));
+  if (Object.keys(saved).length) fileWriter?.(saved);
   applyFontScale();
   for (const l of listeners) l();
 }
@@ -293,7 +319,8 @@ applyFontScale();
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key !== KEY || e.storageArea !== localStorage) return;
-    state = load();
+    const fileValues = fileWriter ? Object.fromEntries(fileKeys.map((key) => [key, state[key]])) : {};
+    state = { ...load(), ...fileValues };
     applyFontScale();
     for (const l of listeners) l();
   });

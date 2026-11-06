@@ -150,6 +150,10 @@ impl PairingManager {
             .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
         self.mobile.configure(sink.clone())?;
+        let settings = self.clone();
+        sink.listen("settings_file_changed", Box::new(move |_| {
+            settings.mobile.broadcast_settings_changed();
+        }));
         let events = self.clone();
         sink.listen(
             "agent_event",

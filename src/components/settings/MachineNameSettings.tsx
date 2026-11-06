@@ -1,3 +1,4 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { useEffect, useState } from "react";
 import { Loader2, Pencil } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,7 @@ import type { MachineName } from "@/types/pairing";
  * gets it too. Shown and changed here whether or not Relay is on.
  */
 export function MachineNameSettings() {
+  const { revision } = useSettingsFile();
   const [machine, setMachine] = useState<MachineName | null>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -24,7 +26,7 @@ export function MachineNameSettings() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [revision]);
 
   const save = async (name: string | null) => {
     setSaving(true);

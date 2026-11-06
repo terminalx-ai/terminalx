@@ -249,6 +249,15 @@ pub fn update(app: &AppHandle, patch: FloatingPatch) -> Result<FloatingStatus, S
     Ok(announce(app))
 }
 
+/// A file edit follows the same native shortcut/window path as Settings.
+pub fn reload_settings(app: &AppHandle) {
+    register_shortcut(app);
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.set_always_on_top(settings::load().floating.always_on_top);
+    }
+    announce(app);
+}
+
 fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let pinned = settings::load().floating.always_on_top;
     let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))

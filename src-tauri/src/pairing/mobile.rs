@@ -138,6 +138,10 @@ impl MobileRuntime {
         self.broadcast(json!({ "method": "sessions.changed" }));
     }
 
+    pub(super) fn broadcast_settings_changed(&self) {
+        self.broadcast(json!({ "method": "settings.changed" }));
+    }
+
     /// The desktop attached to a runtime: what each phone may be offered
     /// comes from it (#730). A connection admitted by the attachment it
     /// replaced checks that attachment before it sends this, finds it gone

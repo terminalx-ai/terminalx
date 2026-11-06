@@ -1,7 +1,9 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { useEffect, useState } from "react";
 import { errorMessage, localRuntime, type LocalRuntimeSettings as Settings, type QuitBehavior } from "@/lib/api";
 
 export function LocalRuntimeSettings() {
+  const { revision } = useSettingsFile();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [available, setAvailable] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -18,7 +20,7 @@ export function LocalRuntimeSettings() {
       if (!cancelled) { setAvailable(true); setError(errorMessage(reason)); }
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [revision]);
 
   async function save(quitBehavior: QuitBehavior) {
     setSaving(true);
