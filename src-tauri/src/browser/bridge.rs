@@ -378,6 +378,12 @@ pub fn check_text_argument(name: &str, value: &str) -> BrowserResult<()> {
     Ok(())
 }
 
+/// Whether to show the Chromium window (`TERMINALX_BROWSER_HEADED=1`); the
+/// app's own browser views are the page's place otherwise.
+pub fn headed() -> bool {
+    std::env::var("TERMINALX_BROWSER_HEADED").is_ok_and(|v| v == "1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,10 +475,4 @@ mod tests {
         });
         assert!(bridge.live_session_names().is_empty());
     }
-}
-
-/// Whether to show the Chromium window (`TERMINALX_BROWSER_HEADED=1`); the
-/// app's own browser views are the page's place otherwise.
-pub fn headed() -> bool {
-    std::env::var("TERMINALX_BROWSER_HEADED").is_ok_and(|v| v == "1")
 }
