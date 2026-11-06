@@ -33,7 +33,6 @@ import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
-import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
@@ -228,7 +227,6 @@ export function AppShell() {
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
-        <StarReminder />
         <MergedCleanupNotices />
         <CloseUndoNotices />
         <Toasts />
@@ -364,18 +362,18 @@ function UnselectedWorkspace({
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject ?? store.lastProject;
   const newProject = store.projects.find((project) => project.path === wanted) ?? store.projects[0] ?? null;
   const issueProject = store.projects.find((project) => project.path === issueProjectPath) ?? null;
-  const project = view === "new" ? newProject : view === "issues" ? issueProject : null;
+  const project = view === "new" ? (store.newSessionQuick ? null : newProject) : view === "issues" ? issueProject : null;
   const cwd = view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
-  // A cloud draft has no local checkout to show.
-  const panelAvailable = !!cwd && !!project && !(view === "new" && store.cloudSessionPreset);
+  // A cloud or project-less draft has no local checkout to show.
+  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.newSessionQuick));
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && view === "new" ? "branch" : useWorktree ? "base" : "branch";
   // Home always offers the welcome actions, including after a project has been added.
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
-  // Not before the projects are read, and not over a cloud draft, which needs no local project.
-  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset);
+  // Not before the projects are read, or over a cloud or project-less draft.
+  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionQuick));
 
   return (
     <>

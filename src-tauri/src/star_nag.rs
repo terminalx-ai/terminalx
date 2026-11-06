@@ -14,6 +14,8 @@ use crate::github::StarStatus;
 use crate::store::{self, index::TabStatus};
 
 const INITIAL_THRESHOLD: u64 = 35;
+const MIN_AGE_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+const MIN_FINISHED_SESSIONS: usize = 3;
 const COOLDOWN_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 const QUIET_MS: i64 = 1200;
 pub const EVENT: &str = "star_nag_changed";
@@ -21,6 +23,8 @@ pub const EVENT: &str = "star_nag_changed";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Saved {
+    first_seen_at: Option<i64>,
+    finished_sessions: Vec<String>,
     launches: u64,
     usage_schema: u32,
     baseline: u64,
@@ -33,7 +37,7 @@ struct Saved {
 
 impl Default for Saved {
     fn default() -> Self {
-        Self { launches: 0, usage_schema: 0, baseline: 0, next_threshold: INITIAL_THRESHOLD, cooldown_until: 0, app_version: String::new(), completed: false, completion_version: None }
+        Self { first_seen_at: None, finished_sessions: Vec::new(), launches: 0, usage_schema: 0, baseline: 0, next_threshold: INITIAL_THRESHOLD, cooldown_until: 0, app_version: String::new(), completed: false, completion_version: None }
     }
 }
 
@@ -74,6 +78,9 @@ struct Core {
 impl Core {
     fn load(path: PathBuf, version: &str, total_work_starts: u64, now: i64) -> Result<Self> {
         let mut saved: Saved = store::read_json(&path)?.unwrap_or_default();
+        // Start the grace period on first observation, including older installs:
+        // work-start totals cannot establish age or successful session history.
+        saved.first_seen_at.get_or_insert(now);
         // #111 changes usage from first process spawns to cumulative live work
         // starts. Rebase once without inventing equivalent historical usage;
         // retain cooldown, backoff, permanent completion and completion version.
@@ -157,6 +164,11 @@ impl Core {
             }
             Payload::TurnCompleted { status, .. } => {
                 let meaningful = self.meaningful.remove(&key);
+                if meaningful && *status == TurnStatus::Ok && self.saved.finished_sessions.len() < MIN_FINISHED_SESSIONS && !self.saved.finished_sessions.contains(&event.session_id) {
+                    let mut next = self.saved.clone();
+                    next.finished_sessions.push(event.session_id.clone());
+                    self.save(next)?;
+                }
                 if meaningful && *status == TurnStatus::Ok && self.saved.completion_version.as_deref() != Some(&self.saved.app_version) {
                     if self.suppressed(now) || self.view.visible {
                         self.consume_completion()?;
@@ -184,7 +196,11 @@ impl Core {
             && !self.view.visible
             && !self.action
             && !self.suppressed(now)
-            && (self.pending_usage || (self.pending_completion && self.active.is_empty() && now - self.quiet_since >= QUIET_MS))
+            && self.saved.first_seen_at.is_some_and(|first| now.saturating_sub(first) >= MIN_AGE_MS)
+            && self.saved.finished_sessions.len() >= MIN_FINISHED_SESSIONS
+            && self.active.is_empty()
+            && now.saturating_sub(self.quiet_since) >= QUIET_MS
+            && (self.pending_usage || self.pending_completion)
     }
 
     fn begin_check(&mut self, now: i64) -> Option<u64> {

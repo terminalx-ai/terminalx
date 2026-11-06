@@ -80,6 +80,7 @@ mod floating;
 #[cfg(feature = "desktop")]
 mod media;
 mod media_types;
+mod branch_overview;
 mod git;
 mod github;
 mod unfinished_merge;
@@ -528,6 +529,7 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,
             commands::session_share_change,
@@ -594,6 +596,9 @@ pub fn run() {
             commands::list_skills,
             commands::skill_detail,
             commands::work_status,
+            commands::branch_overview,
+            commands::branch_fetch,
+            commands::branch_merge_into,
             commands::list_branches,
             commands::worktree_disposition,
             commands::sessions_sharing_worktree,
@@ -675,6 +680,7 @@ pub fn run() {
             commands::pty_busy,
             commands::pty_write,
             commands::pty_attach,
+            commands::pty_attach_sized,
             commands::pty_detach,
             commands::pty_detach_all,
             commands::pty_ack,
@@ -734,6 +740,7 @@ pub fn run() {
             commands::set_work_status_settings,
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
+            commands::set_read_only_commands,
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,
@@ -814,6 +821,7 @@ pub fn run() {
             browser::ui::browser_activate_page,
             browser::ui::browser_navigate,
             browser::ui::browser_screencast,
+            browser::ui::browser_input,
             browser::ui::browser_runtime_status,
             browser::ui::browser_install_browser,
             browser::ui::browser_profiles,

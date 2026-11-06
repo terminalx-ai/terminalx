@@ -74,8 +74,10 @@ export interface CheckpointMeta {
 export interface Projection {
   sessionCreated?: string | null;
   sessionLastMessageAt?: string | null;
+  sessionHasMessages?: boolean;
   created?: string;
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
   v: 1;
   sessionId: string;
   tabId: string;

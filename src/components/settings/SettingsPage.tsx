@@ -24,6 +24,7 @@ import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { AgentIdleSettings } from "./AgentIdleSettings";
+import { CommandApprovalSettings } from "./CommandApprovalSettings";
 import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
@@ -237,6 +238,11 @@ function GeneralTab() {
         label="Show files changed"
         description="Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it."
         control={<Switch aria-label="Show files changed" checked={prefs.turnChanges} onCheckedChange={(v) => setPrefs({ turnChanges: v })} />}
+      />
+      <SettingRow
+        label="Prompt map"
+        description="A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it."
+        control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
       />
       <SettingRow
         label="Autocorrect"
@@ -578,6 +584,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul>
       <AgentIdleSettings />
+      <CommandApprovalSettings />
       <ArchiveIdleSettings />
     </div>
   );

@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { cn } from "@/lib/cn";
 import { LinkedText } from "./LinkedText";
 import { shortPath } from "@/lib/paths";
-import { diffLines, type DiffLine } from "@/lib/diff";
+import { diffLines, patchLines, type DiffLine } from "@/lib/diff";
 
 /**
  * A compact inline diff for one edit. Line-level LCS over the two fragments,
@@ -69,7 +69,7 @@ function DiffRow({ line }: { line: DiffLine }) {
 
 /** A diff the harness already produced in unified form. */
 export function UnifiedBlock({ path, unified, kind, cwd, maxLines = 60 }: { path: string; unified: string; kind?: string; cwd?: string; maxLines?: number }) {
-  const lines = unified.split("\n").filter((l) => !l.startsWith("---") && !l.startsWith("+++") && !l.startsWith("diff ") && !l.startsWith("index "));
+  const lines = patchLines(unified);
   const shown = lines.slice(0, maxLines);
   return (
     <div className="overflow-hidden rounded-md border border-hairline bg-well">

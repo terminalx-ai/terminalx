@@ -3,6 +3,8 @@ export type DashboardTabStatus = "idle" | "in_progress" | "completed" | "waiting
 export interface DashboardTab {
   harness: string;
   status: DashboardTabStatus;
+  lastMessageAt?: string | null;
+  hasMessages?: boolean;
 }
 
 export interface DashboardSession {
@@ -16,16 +18,19 @@ export interface DashboardSession {
   issue?: { identifier: string } | null;
   title: string;
   modified: string;
+  lastMessageAt?: string | null;
+  hasMessages?: boolean;
   archived: boolean;
   tabs: DashboardTab[];
 }
 
-export type ColumnId = "needs" | "working" | "done";
+export type ColumnId = "needs" | "working" | "done" | "not-started";
 
 export const COLUMNS: { id: ColumnId; label: string }[] = [
   { id: "needs", label: "Needs you" },
   { id: "working", label: "Working" },
   { id: "done", label: "Done" },
+  { id: "not-started", label: "Not started" },
 ];
 
 export const DONE_PAGE = 50;
@@ -49,7 +54,9 @@ export function toggleFilter<T extends string>(list: T[], value: T): T[] {
 export function sessionColumn(session: DashboardSession): ColumnId {
   if (session.tabs.some((tab) => tab.status === "waiting")) return "needs";
   if (session.tabs.some((tab) => tab.status === "in_progress")) return "working";
-  return "done";
+  // Opening, renaming or configuring a chat changes `modified`, but starts no turn.
+  if (session.hasMessages || session.lastMessageAt || session.tabs.some((tab) => tab.hasMessages || tab.lastMessageAt || tab.status === "completed")) return "done";
+  return "not-started";
 }
 
 export function isUnread(session: DashboardSession): boolean {
@@ -97,7 +104,7 @@ export type Buckets<T extends DashboardSession = DashboardSession> = Record<Colu
 
 /** Omit options for the global totals, independent of dashboard-local filters. */
 export function bucketSessions<T extends DashboardSession>(sessions: T[], options?: BucketOptions): Buckets<T> {
-  const buckets: Buckets<T> = { needs: [], working: [], done: [] };
+  const buckets: Buckets<T> = { needs: [], working: [], done: [], "not-started": [] };
   for (const session of sessions) {
     if (session.archived || !session.tabs.length) continue;
     if (options && !matchesFilters(session, options.filters)) continue;

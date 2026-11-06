@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ShieldAlert, MessageCircleQuestion } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
@@ -6,6 +6,8 @@ import { revealInOwnScroller } from "@/lib/shellScroll";
 import { cn } from "@/lib/cn";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { askAgentNote, type PendingAsk } from "@/lib/transcript";
+import { approvalFiles, rawPatch } from "@/lib/approvalDiff";
+import { ApprovalDiff, Counts } from "./ApprovalDiff";
 import { LinkedText } from "./LinkedText";
 
 /**
@@ -34,7 +36,10 @@ export function askDetail(ask: Pick<PendingAsk, "toolName" | "input" | "title">)
         ? field(ask.input, "url")
         : tool === "WebSearch"
           ? field(ask.input, "query")
-          : (field(ask.input, "file_path", "path", "notebook_path") ?? (tool.startsWith("mcp__") ? tool.replace(/^mcp__/, "").replace(/__/g, " · ") : null));
+          : tool === "apply_patch"
+            // The whole patch, when the card cannot show it as a diff: its first line says nothing.
+            ? rawPatch(ask.input)
+            : (field(ask.input, "file_path", "path", "notebook_path") ?? (tool.startsWith("mcp__") ? tool.replace(/^mcp__/, "").replace(/__/g, " · ") : null));
   const text = detail ?? ask.title?.trim() ?? (tool || null);
   if (!text) return null;
   return text;
@@ -52,7 +57,7 @@ const AskShell = forwardRef<HTMLDivElement, { icon: ReactNode; label: string; to
         <div className="px-4 pb-3.5 pt-1.5">{children}</div>
         <div className="flex flex-wrap items-center gap-1.5 border-t border-hairline bg-veil-card px-3 py-2">
           {aside && <div className="mr-auto flex items-center gap-1.5">{aside}</div>}
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">{actions}</div>
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5" data-ask-actions>{actions}</div>
         </div>
         {note && <p className="border-t border-hairline px-4 py-2 text-xs text-muted-foreground" data-testid="answer-blocked">{note}</p>}
       </div>
@@ -87,7 +92,9 @@ export function PermissionCard({
   /** At the start of the action bar, such as stopping the session. */
   aside?: ReactNode;
 }) {
-  const detail = showDetail ? askDetail(ask) : null;
+  // An edit is shown as what it changes; anything else, or an edit that cannot be read exactly, as asked.
+  const files = useMemo(() => (showDetail ? approvalFiles(ask.toolName, ask.input) : null), [showDetail, ask.toolName, ask.input]);
+  const detail = showDetail && !files ? askDetail(ask) : null;
   const workdir = showDetail ? field(ask.input, "workdir", "cwd") : null;
   const directory = showDetail ? workdir ?? ask.cwd : null;
   // Why the card is up, in the app's words: in bypass mode, Claude Code's own safety check (#775). Never the agent's.
@@ -99,7 +106,8 @@ export function PermissionCard({
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // The card is shown by its own scroller; focus alone would scroll every box above it too, the window included.
-    const first = ref.current?.querySelector<HTMLButtonElement>("button");
+    // The first answer, not a control in the diff above it: Return still answers.
+    const first = ref.current?.querySelector<HTMLButtonElement>("[data-ask-actions] button");
     first?.focus({ preventScroll: true });
     if (first) revealInOwnScroller(first);
   }, []);
@@ -122,16 +130,18 @@ export function PermissionCard({
           onClick={() => onAnswer(o.id)}
           className={cn((blocked || o.kind === "deny") && "text-muted-foreground")}
         >
-          {o.kind === "deny" ? "Deny" : o.kind === "allow_once" ? "Allow" : o.kind === "allow_always" ? "Always allow" : o.kind === "allow_session" ? "Allow for session" : "Change permission mode"}
+          {o.kind === "deny" ? "Deny" : o.kind === "allow_once" ? "Allow" : o.kind === "allow_always" ? "Always allow" : o.kind === "allow_session" ? o.label : "Change permission mode"}
           {/* Return answers nothing for someone who may not answer. */}
           {i === 0 && !blocked && <EnterKey />}
         </Button>
       ))}
     >
-      <div className="text-[14px] font-medium leading-snug text-foreground">
-        Waiting for permission to {verbFor(ask.toolName ?? "")}
+      <div className="flex flex-wrap items-baseline gap-x-2 text-[14px] font-medium leading-snug text-foreground">
+        <span>Waiting for permission to {verbFor(ask.toolName ?? "", files?.length)}</span>
+        {files && files.length > 1 && <Counts added={files.reduce((n, f) => n + f.added, 0)} removed={files.reduce((n, f) => n + f.removed, 0)} className="font-normal" />}
       </div>
       {why && <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/80" data-testid="permission-reason">{why}</p>}
+      {files && <ApprovalDiff files={files} cwd={directory ?? undefined} />}
       {detail && (
         <pre className="mt-2 max-h-60 max-w-full overflow-auto whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground [overflow-wrap:anywhere]" data-testid="permission-detail"><code>{detail}</code></pre>
       )}
@@ -146,7 +156,8 @@ export function PermissionCard({
   );
 }
 
-function verbFor(tool: string): string {
+/** `files`: how many files an edit the card shows as a diff touches. */
+function verbFor(tool: string, files?: number): string {
   switch (tool) {
     case "Bash":
     case "shell":
@@ -156,7 +167,7 @@ function verbFor(tool: string): string {
     case "functions.shell_command":
       return "run a command";
     case "apply_patch":
-      return "edit files";
+      return files === 1 ? "edit a file" : files ? `edit ${files} files` : "edit files";
     case "Edit":
     case "MultiEdit":
       return "edit a file";

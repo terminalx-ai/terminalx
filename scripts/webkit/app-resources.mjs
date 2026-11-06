@@ -41,6 +41,18 @@ function setup({ theme, mode }) {
     totalCpuPercent: 45.8, totalRssBytes: 864 * 1024 ** 2, sampledAt: Date.now(),
   };
   let channel;
+  let terminalSize = { cols: 80, rows: 24 };
+  const sendTerminal = (text = "") => {
+    if (!channel) return;
+    // pty_attach_sized frames begin with little-endian columns and rows.
+    const bytes = new TextEncoder().encode(text);
+    const frame = new Uint8Array(4 + bytes.length);
+    const header = new DataView(frame.buffer);
+    header.setUint16(0, terminalSize.cols, true);
+    header.setUint16(2, terminalSize.rows, true);
+    frame.set(bytes, 4);
+    channel.onmessage(frame.buffer);
+  };
   let sequence = 3;
   let output = 0;
   let refreshes = 0;
@@ -48,7 +60,7 @@ function setup({ theme, mode }) {
     output++;
     const color = output % 2 ? "97;45" : "30;103";
     const lines = Array.from({ length: 42 }, (_, i) => `\x1b[${color}m SYNTHETIC ${output} ${String(i).padStart(2, "0")}  ALPHA BRAVO CHARLIE DELTA ECHO FOXTROT GOLF HOTEL INDIA JULIET KILO LIMA MIKE NOVEMBER OSCAR PAPA QUEBEC \x1b[K\x1b[0m`);
-    channel?.onmessage(new TextEncoder().encode("\x1b[H" + lines.join("\r\n")).buffer);
+    sendTerminal("\x1b[H" + lines.join("\r\n"));
   };
   Object.assign(answers, {
     status_bar_settings: { visible: true, usage: false, resources: true, percent: "used", usageMode: "detailed", usageRefreshMinutes: 1 },
@@ -57,8 +69,9 @@ function setup({ theme, mode }) {
     status_resource_sample: () => { refreshes++; return sample; },
     ensure_tab_started: null,
     tab_pane: { sessionId: session.id, tabId, paneId, command: "synthetic-agent", harness: "claude" },
-    pty_detach_all: null, pty_detach: null, pty_ack: null, pty_resize: null,
-    pty_attach: (args) => { channel = args.channel; paintTerminal(); },
+    pty_detach_all: null, pty_detach: null, pty_ack: null,
+    pty_resize: ({ cols, rows }) => { terminalSize = { cols, rows }; sendTerminal(); },
+    pty_attach_sized: (args) => { channel = args.channel; paintTerminal(); },
     load_tab_events: () => events,
     "plugin:window|is_focused": true,
     "plugin:window|is_minimized": false,

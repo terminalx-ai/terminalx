@@ -185,6 +185,7 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
       created: row.created,
       lastMessageAt: row.lastMessageAt,
       pinned: row.pinned,
+      hasMessages: row.hasMessages,
       archived: row.archived,
       connected,
       stopped,

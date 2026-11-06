@@ -495,7 +495,7 @@ export function Composer({
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 pb-4 pt-2">
+    <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <DictationStatus dictation={dictation} />
       <div
@@ -570,9 +570,10 @@ export function Composer({
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
-                {/* An alias and the same version pinned read alike otherwise. */}
-                {model?.alias ? <span className="shrink-0 text-faint">latest</span> : null}
-                {effortName ? <span className="min-w-0 truncate text-faint">{effortName}</span> : null}
+                {/* An alias and the same version pinned read alike otherwise: a tag on the name, not a word after it. */}
+                {model?.alias ? <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[11px] leading-4 text-faint">latest</span> : null}
+                {/* The effort is a setting of its own: set apart from the model, a step brighter than the tag. */}
+                {effortName ? <><span aria-hidden className="h-3 w-px shrink-0 bg-hairline-strong" /><span className="min-w-0 truncate text-muted-foreground">{effortName}</span></> : null}
                 <ChevronDown className="size-3 text-faint" />
               </Button>
             </DropdownMenuTrigger>

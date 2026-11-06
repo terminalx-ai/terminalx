@@ -272,10 +272,30 @@ pub fn pre_tool_decision(allow: bool) -> Value {
     }})
 }
 
+/// Codex 0.164+ runs the replacement shell input from PreToolUse. Keep the
+/// provider's own sandbox/PermissionRequest boundary after this rewrite.
+pub fn pre_tool_rewrite(mut input: Value) -> Value {
+    // Codex normalizes shell hooks to `command`, including exec_command,
+    // whose underlying function argument is named `cmd`.
+    if let Some(object) = input.as_object_mut() {
+        if let Some(command) = object.remove("cmd") { object.insert("command".into(), command); }
+    }
+    json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": input,
+    }})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::harness::tui::Composer;
+
+    #[test]
+    fn rewritten_shell_input_uses_the_codex_hook_contract() {
+        let reply = pre_tool_rewrite(json!({"cmd":"sanitized command"}));
+        assert_eq!(reply["hookSpecificOutput"]["updatedInput"], json!({"command":"sanitized command"}));
+        assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
 
     fn drawn(output: &[u8]) -> vt100::Parser {
         let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(40).unwrap(), std::num::NonZeroU16::new(110).unwrap(), 0);

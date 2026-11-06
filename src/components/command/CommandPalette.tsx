@@ -443,7 +443,7 @@ export function CommandPalette({
         id: `command:shortcut:${shortcut.id}`,
         group: "commands" as const,
         primary: shortcut.label,
-        secondary: `${shortcut.group} shortcut`,
+        secondary: shortcut.id === "app.home" ? "Open the welcome screen" : `${shortcut.group} shortcut`,
         recentAt: SHORTCUT_ACTIONS.length - index,
         icon: shortcutIcon(shortcut),
         shortcut: true,

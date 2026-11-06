@@ -520,6 +520,7 @@ export const api = {
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
+  pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
   /** This Mac's name as the user's other devices show it (#686). */
@@ -656,6 +657,12 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
+  /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
+  branchOverview: (cwd: string, base?: string | null) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null }),
+  /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
+  branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
+  /** Merges the checked-out branch into the local branch `into`; says what it did. */
+  branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
   // directory from the two ids and only reports it back (`root`).
@@ -2047,6 +2054,41 @@ export interface PrCheck {
   url?: string | null;
 }
 
+export interface BranchContributor {
+  name: string;
+  email: string;
+  commits: number;
+  /** Their newest commit's author date. */
+  last: string;
+}
+
+/** A checkout's branch against the branch it merges into, read from refs already here. */
+export interface BranchOverview {
+  branch: string | null;
+  /** `origin/main`, else the local default branch; null outside a repository or without one. */
+  base: string | null;
+  onBase: boolean;
+  forkPoint: CommitInfo | null;
+  /** Commits only on the branch, and on the base since the fork. */
+  ahead: number;
+  behind: number;
+  commits: CommitInfo[];
+  baseCommits: CommitInfo[];
+  contributors: BranchContributor[];
+  baseContributors: BranchContributor[];
+  upstream: string | null;
+  unpushed: number;
+  unpulled: number;
+  /** The upstream's commits not pulled yet, newest first. */
+  incoming: CommitInfo[];
+  dirty: boolean;
+  /** Files changed and not committed. */
+  changed: number;
+  /** Has a remote at all: without one there is no push and no pull request. */
+  hasRemote: boolean;
+  merge: { state: "clean" | "conflicts" | "merged" | "unknown"; conflicted: string[] };
+}
+
 export interface PullRequest {
   number: number;
   title: string;
@@ -2227,6 +2269,16 @@ export const pty = {
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (message) => onData(new Uint8Array(message));
     return invoke<void>("pty_attach", { id, token, channel });
+  },
+  attachSized: (id: string, token: string, onData: (bytes: Uint8Array, size?: { cols: number; rows: number }) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (message) => {
+      if (message.byteLength < 4) return;
+      const header = new DataView(message);
+      const cols = header.getUint16(0, true), rows = header.getUint16(2, true);
+      onData(new Uint8Array(message, 4), cols > 0 && rows > 0 ? { cols, rows } : undefined);
+    };
+    return invoke<void>("pty_attach_sized", { id, token, channel });
   },
   /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
   ack: (id: string, token: string, drawn: number) => invoke<void>("pty_ack", { id, token, drawn }),
@@ -2428,6 +2480,7 @@ export interface WorkCloudSession {
 
 /** When an agent nobody is using is stopped (#696). */
 export interface AgentSettings {
+  readOnlyCommands: boolean;
   /** Minutes an agent may sit idle before it is stopped; 0 is never. */
   idleStopMinutes: number;
 }
@@ -2437,6 +2490,7 @@ export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
 
 export const agentSettings = {
   get: () => invoke<AgentSettings>("agent_settings"),
+  setReadOnlyCommands: (enabled: boolean) => invoke<AgentSettings>("set_read_only_commands", { enabled }),
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
 };
 
@@ -2525,6 +2579,8 @@ export interface GithubIdentity {
   source: "ssh" | "gh" | null;
   email: string | null;
   repo: string | null;
+  /** Where the origin remote is hosted; `null` for a project with no remote, on this computer only. */
+  remoteHost?: "github" | "gitlab" | "other" | null;
 }
 /** Sessions started from an issue, carried on to a pull request, a review and a merge. */
 export const issuePipelines = {

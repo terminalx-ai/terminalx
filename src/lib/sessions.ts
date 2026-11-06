@@ -60,7 +60,9 @@ interface State {
    */
   newSessionReturn: { sessionId: string | null; view: State["view"] } | null;
   /** A new-session form pre-filled from a workspace row. */
-  newSessionPreset: { projectPath: string; cwd: string | null } | null;
+  newSessionPreset: { projectPath: string; cwd: string | null; fromBranch?: string } | null;
+  /** The same composer, with no project or worktree. */
+  newSessionQuick: boolean;
   /**
    * A new-session form for a cloud project (`cloud:<orgId>:<identity>`),
    * from the project row's `+`. Cleared by the same navigation that clears
@@ -94,6 +96,7 @@ let state: State = {
   selectedCloudWorkspace: null,
   newSessionReturn: null,
   newSessionPreset: null,
+  newSessionQuick: false,
   cloudSessionPreset: null,
   selectedCloudProject: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
@@ -116,6 +119,7 @@ function set(patch: Partial<State>) {
   // Clear the draft destination when navigating away, not in React cleanup
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
+  if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionQuick = patch.newSessionQuick ?? false;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
   if (next.view !== "new" || next.selectedSessionId) next.newSessionReturn = null;
@@ -168,8 +172,8 @@ export function subscribeSessionStore(listener: () => void): () => void {
 let booted = false;
 const workspaceRefreshVersions = new Map<string, number>();
 // Backfill can publish while the first list is being read. Subscribe first,
-// retaining only chronology until initialization supplies the session rows.
-const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
+// retaining message activity until initialization supplies the session rows.
+const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt" | "hasMessages">>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
@@ -177,7 +181,7 @@ export async function bootSessions() {
     await listen<SessionEntry>("session_updated", (e) => {
       if (state.loaded) upsertSession(e.payload);
       else initialMessageTimes.set(e.payload.id, keepMessageTime(
-        { lastMessageAt: e.payload.lastMessageAt }, initialMessageTimes.get(e.payload.id),
+        { lastMessageAt: e.payload.lastMessageAt, hasMessages: e.payload.hasMessages }, initialMessageTimes.get(e.payload.id),
       ));
     });
     // A new live connection (#643): what changed during the gap was never
@@ -427,8 +431,8 @@ export function selectProjectInSidebar(path: string | null) {
 }
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
-export function startSessionIn(projectPath: string, cwd: string | null) {
-  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+export function startSessionIn(projectPath: string, cwd: string | null, fromBranch?: string) {
+  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -591,38 +595,15 @@ export async function addProject(path: string) {
   return p;
 }
 
-/**
- * The sidebar's New chat: an agent conversation in the store's Chats folder,
- * so talking to a model needs no project. The folder is a plain directory, so
- * the session runs in place with no worktree, and it is never added as a
- * project: the sidebar lists its sessions on their own.
- */
-export async function startChat(place?: { projectPath: string; cwd?: string; fromBranch?: string }): Promise<SessionEntry> {
-  const harness = state.harnesses.find((item) => item.id === "claude" && item.available) ?? state.harnesses.find((item) => item.available);
-  if (!harness) throw new Error("Install and sign in to an agent to start a chat.");
-  // Without a place, a chat of its own; with one, another session in that
-  // checkout, on its branch, or in a new workspace branched from `fromBranch`.
-  const chatsPath = place ? null : (state.chatsPath ?? (await api.chatsDir()));
-  if (chatsPath && chatsPath !== state.chatsPath) set({ chatsPath });
-  const prefs = getPrefs();
-  const session = await api.createSession({
-    projectPath: place?.projectPath ?? chatsPath!,
-    cwd: place?.fromBranch ? null : (place?.cwd ?? chatsPath!),
-    title: "Chat",
-    useWorktree: !!place?.fromBranch,
-    baseRef: place?.fromBranch ?? null,
-    // The workspace is named after the branch it comes from (made unique), not after the chat.
-    worktreeName: place?.fromBranch ? (place.fromBranch.split("/").pop() ?? null) : null,
-    tab: {
-      harness: harness.id,
-      model: prefs.lastModel[harness.id] ?? "",
-      effort: prefs.lastEffort[harness.id] ?? null,
-      permissionMode: prefs.lastMode,
-    },
-  });
-  upsertSession(session);
-  selectSession(session.id);
-  return session;
+/** Open New chat without creating a session, workspace, or running tab until the first send. */
+export async function startChat(place?: { projectPath: string; cwd?: string; fromBranch?: string }): Promise<void> {
+  if (place) {
+    startSessionIn(place.projectPath, place.cwd ?? null, place.fromBranch);
+    return;
+  }
+  const back = returnHere();
+  selectSession(null);
+  set({ newSessionReturn: back, newSessionQuick: true });
 }
 
 export async function removeProject(path: string) {

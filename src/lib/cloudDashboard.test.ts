@@ -31,6 +31,7 @@ function session(id: string, title: string, status: RuntimeSession["tabs"][numbe
     title,
     created: "2026-09-30T10:00:00.000Z",
     modified: "2026-09-30T11:00:00.000Z",
+    lastMessageAt: "2026-09-30T10:30:00.000Z",
     archived: false,
     pinned: false,
     tabs: [{ id: `${id}-tab`, harness: "claude", title: null, model: "opus", permissionMode: "bypassPermissions", status, created: "2026-09-30T10:00:00.000Z", modified: "2026-09-30T10:00:00.000Z" }],
@@ -125,6 +126,32 @@ describe("cloud sessions in the dashboard's columns", () => {
     expect(adjacentSession(sessions, key("A"), 1)).toBe(key("B"));
     expect(adjacentSession(sessions, key("B"), 1)).toBe(key("C"));
     expect(adjacentSession(sessions, key("A"), -1)).toBe(key("P"));
+  });
+
+  it("keeps timestamp-free legacy conversations Done from lists, tab metadata and checkpoints", () => {
+    const legacy = session("legacy", "Legacy", "idle", { lastMessageAt: null, hasMessages: true });
+    const known = agentTab("legacy", "idle");
+    known.info.hasMessages = true;
+    for (const world of [
+      { live: { "ws-1": [legacy] }, connected: ["ws-1"] },
+      { cached: { "ws-1": [legacy] } },
+      { live: { "ws-1": [{ ...legacy, hasMessages: false, tabs: legacy.tabs.map((tab) => ({ ...tab, hasMessages: true })) }] } },
+      { tabs: { "ws-1": [known] } },
+    ]) {
+      const sessions = project({ workspaces: [item("ws-1")], ...world });
+      expect(columnOf(sessions, `cloud:${ORG}:ws-1:legacy`)).toBe("done");
+      expect(sessions[0].lastMessageAt).toBeUndefined();
+    }
+  });
+
+  it("keeps empty cloud chats in Not started and retains message evidence for read chats", () => {
+    const sessions = project({
+      workspaces: [item("ws-1")],
+      live: { "ws-1": [session("empty", "Empty", "idle", { lastMessageAt: null }), session("read", "Read", "idle")] },
+      connected: ["ws-1"],
+    });
+    expect(columnOf(sessions, `cloud:${ORG}:ws-1:empty`)).toBe("not-started");
+    expect(columnOf(sessions, `cloud:${ORG}:ws-1:read`)).toBe("done");
   });
 
   it("uses the live tab state while connected: waiting is Needs you, in progress is Working", () => {

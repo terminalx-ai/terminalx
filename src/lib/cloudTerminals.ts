@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { agentPtyId, type PtyAttachment, type PtyControl, type PtyCursor, type PtyInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { disposeInstance, getInstance, peekInstance, type TerminalInstance } from "@/lib/terminal";
 import { countTerminalData } from "@/lib/terminalCounters";
+import { acknowledgeTerminalResize, coordinateTerminalResize, followTerminalOutputSize, isOutputResize, reassertTerminalResize, requestTerminalResize, stopTerminalOutput, writeTerminalOutput, type OutputSize } from "@/lib/terminalOutput";
 
 /**
  * Shell tabs of cloud workspaces (PRO-26). The shells run on the workspace
@@ -180,13 +181,18 @@ export function cloudTerminalFactory(workspace: string, terminal: CloudTerminal,
     instance.term.onData(send);
     // Binary events are legacy mouse reports only.
     instance.term.onBinary((data) => sendTerminalReport(workspace, terminal.id, data));
-    instance.term.onResize(({ cols, rows }) => {
+    coordinateTerminalResize(instance.term, ({ cols, rows }) => {
       const binding = bindings.get(terminal.id);
       const now = current();
+      // No process remains to complete a resize; fit its retained output locally.
+      if (now?.exited) return false;
       // Only the controller's size reaches the program.
-      if (!binding || now?.control !== "you" || now.gone || now.exited) return;
-      void binding.client.resizePty(terminal.ptyId, cols, rows).catch(() => undefined);
+      if (!binding || now?.control !== "you" || now.gone) return;
+      return binding.client.resizePty(terminal.ptyId, cols, rows).then(() => acknowledgeTerminalResize(instance.term, { cols, rows }));
     });
+    instance.term.onResize((size) => { if (!isOutputResize(instance.term)) requestTerminalResize(instance.term, size); });
+    const release = instance.release;
+    instance.release = () => { stopTerminalOutput(instance.term); release?.(); };
     return instance;
   };
 }
@@ -240,13 +246,13 @@ function sendTerminalReport(workspace: string, id: string, data: string) {
 }
 
 /** Write output to a terminal's xterm; while `replay` is being parsed its answers are not sent. */
-function show(id: string, instance: TerminalInstance, bytes: Uint8Array, replay: boolean) {
+function show(id: string, instance: TerminalInstance, bytes: Uint8Array, replay: boolean, size?: OutputSize) {
   if (!replay) {
-    instance.term.write(bytes);
+    writeTerminalOutput(instance.term, bytes, size);
     return;
   }
   replaying.set(id, (replaying.get(id) ?? 0) + 1);
-  instance.term.write(bytes, () => {
+  writeTerminalOutput(instance.term, bytes, size, () => {
     const left = (replaying.get(id) ?? 1) - 1;
     if (left > 0) replaying.set(id, left);
     else replaying.delete(id);
@@ -348,10 +354,10 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
   const attachment = await client
     .attachPty(terminal.ptyId, {
     since: cursors.get(terminal.id),
-    onData: (bytes, _offset, replay) => {
+    onData: (bytes, _offset, replay, size) => {
       if (!mine()) return;
       countTerminalData("cloud", bytes.length);
-      show(terminal.id, instance, bytes, replay);
+      show(terminal.id, instance, bytes, replay, size);
     },
     onTruncated: () => mine() && instance.term.write("\r\n\x1b[2m[earlier output was dropped while this view was away]\x1b[0m\r\n"),
     onExit: (code) => {
@@ -365,14 +371,14 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
       // A viewer shows the program at the controller's size.
       const current = terminalOf(workspace, terminal.id);
       if (control !== "you" && current && (instance.term.cols !== current.cols || instance.term.rows !== current.rows)) {
-        instance.term.resize(current.cols, current.rows);
+        followTerminalOutputSize(instance.term, { cols: current.cols, rows: current.rows });
       }
     },
     onResize: (cols, rows) => {
       if (!mine()) return;
       patch(workspace, terminal.id, { cols, rows });
       const current = terminalOf(workspace, terminal.id);
-      if (current?.control !== "you" && (instance.term.cols !== cols || instance.term.rows !== rows)) instance.term.resize(cols, rows);
+      if (current?.control !== "you") followTerminalOutputSize(instance.term, { cols, rows });
     },
     onGone: (gone) => {
       if (!mine()) return;
@@ -400,6 +406,7 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
     return;
   }
   binding.attachment = attachment;
+  reassertTerminalResize(instance.term);
   // Attached: who controls it and its size are now the runtime's word.
   if (terminal.tabId && !terminalOf(workspace, terminal.id)?.gone) patch(workspace, terminal.id, { live: true });
 }
