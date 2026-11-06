@@ -162,7 +162,7 @@ export function BranchPanel({
       type="button"
       onClick={() => run(what)}
       disabled={!!working}
-      className="flex shrink-0 items-center gap-1 rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/25 disabled:opacity-60"
+      className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-[11px] font-medium text-accent hover:bg-accent/25 disabled:opacity-60"
     >
       {working === what && <Loader2 className="size-3 animate-spin" aria-hidden />}
       {label}
@@ -179,7 +179,7 @@ export function BranchPanel({
       askButton("conflicts", `Merge the latest ${overview.base ?? baseName} into ${here}, and resolve the conflicts.`, "Resolve")
     ) : step?.kind === "commit" ? (
       <>
-        <button type="button" onClick={() => showPanelTab("changes")} className="flex shrink-0 items-center gap-1 rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/25">
+        <button type="button" onClick={() => showPanelTab("changes")} className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-[11px] font-medium text-accent hover:bg-accent/25">
           Review &amp; commit
         </button>
         {askButton("commit", "Commit the changes in this worktree with a clear message.")}
@@ -199,20 +199,20 @@ export function BranchPanel({
   return (
     <div className={inline ? undefined : "h-full overflow-y-auto scrollbar-thin"} data-testid="branch-panel">
       <div className="flex flex-col gap-3 p-3">
-        <header className="flex min-w-0 items-center gap-1.5 px-1">
+        <header className="flex min-h-6 min-w-0 items-center gap-2 px-3">
           <GitBranch className="size-4 shrink-0 text-accent" aria-hidden />
           <h3 className="truncate font-mono text-[13px] text-foreground" title={branch ?? "Detached HEAD"} data-testid="branch-name">
             {branch ?? "Detached HEAD"}
           </h3>
           {!overview.hasRemote && (
-            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2 py-0.5 text-[10.5px] text-muted-foreground" title="This repository has no remote: nothing is pushed or shared from it" data-testid="branch-local-only">
+            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2.5 py-0.5 text-[10.5px] text-muted-foreground" title="This repository has no remote: nothing is pushed or shared from it" data-testid="branch-local-only">
               This computer only
             </span>
           )}
         </header>
 
         {done && !step && (
-          <p role="status" className="px-1 text-xs text-success">
+          <p role="status" className="px-3 text-xs text-success">
             {done}
           </p>
         )}
@@ -243,7 +243,7 @@ export function BranchPanel({
 
         {/* The base moving on blocks nothing until it conflicts, which is the step above. */}
         {!overview.onBase && overview.behind > 0 && step?.kind !== "conflicts" && (
-          <div className="flex items-center gap-1.5 px-1" data-testid="branch-behind">
+          <div className="flex items-center gap-1.5 px-3" data-testid="branch-behind">
             <span className="min-w-0 flex-1 text-xs text-faint">
               {baseName} is {count(overview.behind)} ahead
             </span>
@@ -261,7 +261,7 @@ function since(iso: string): string {
   return r === "now" ? "just now" : /^\d/.test(r) ? `${r} ago` : `on ${r}`;
 }
 
-const AGENT_BUTTON = "flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-veil-raised hover:text-foreground";
+const AGENT_BUTTON = "flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] text-muted-foreground hover:bg-veil-raised hover:text-foreground";
 
 /** Commits of the base drawn on its line; older ones are counted above them. */
 const BASE_SHOWN = 12;
