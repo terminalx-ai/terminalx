@@ -1,3 +1,5 @@
+import { EnvironmentLeaveGuard } from "./EnvironmentLeaveGuard";
+import { navigateFromEnvironment } from "@/lib/environmentLeaveGuard";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -339,7 +341,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
   const providerPicker = providers && providers.length > 1 && (
     <label className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
       Provider
-      <select aria-label="Environment provider" className={inputClass} value={provider ?? ""} disabled={Boolean(busy)} onChange={(event) => setProvider(event.target.value)}>
+      <select aria-label="Environment provider" className={inputClass} value={provider ?? ""} disabled={Boolean(busy)} onChange={(event) => { const next = event.target.value; navigateFromEnvironment(() => setProvider(next)); }}>
         {providers.map((option) => (
           <option key={option.id} value={option.id}>
             {providerLabel(option.id)}
@@ -380,6 +382,12 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
   const template = status.template;
   const saved = template?.definition ?? emptyDefinition();
   const unchanged = sameDefinition(draft, saved);
+  const changed = [
+    ...(draft.installScript !== saved.installScript ? ["machine install script"] : []),
+    ...(JSON.stringify(draft.repositories) !== JSON.stringify(saved.repositories) ? ["repositories and setup steps"] : []),
+    ...status.pendingChanges.map(changeLabel),
+  ];
+  const unbuilt = status.canManage && status.supported && (!unchanged || (status.rebuildRequired && !status.versions.some((version) => isBuilding(version) && version.configurationRevision === template?.revision)));
   const problem = definitionProblem(draft);
   // Someone else saved a newer revision while this draft was being edited.
   const outdated = !unchanged && (template?.revision ?? 0) !== draftRevision;
@@ -397,6 +405,8 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
         </p>
       )}
 
+      <EnvironmentLeaveGuard unbuilt={unbuilt} unsaved={!unchanged} />
+      {unbuilt && <p role="status" className="mt-3 text-xs font-medium">Unbuilt changes · Changed: {[...new Set(changed)].join(", ") || "environment template"}</p>}
       {!status.supported ? (
         <p className="mt-2 text-[11px]" role="status">
           {name} cannot build environment images yet. Workspaces on {name} clone their repositories when they start, so there is nothing to configure here.
@@ -469,6 +479,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
                         setDraft(saved);
                         setDraftRevision(template?.revision ?? 0);
                         setDirty(false);
+                        dirtyRef.current = false;
                       }}
                     >
                       Discard changes
@@ -510,7 +521,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
                     <Button size="sm" variant="outline" className="h-7" disabled={disabled || !template || !unchanged || building} onClick={() => setConfirming("build")}>
                       Build version…
                     </Button>
-                    {template && !unchanged && <span className="text-[11px] text-muted-foreground">Save or discard your changes first.</span>}
+                    {template && !unchanged && <span className="text-[11px] text-muted-foreground">Save the template to build these changes, or discard your edits.</span>}
                     {building && <span className="text-[11px] text-muted-foreground">A build is in progress.</span>}
                   </div>
                 )}
@@ -584,9 +595,12 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
                               ) : log.entries === null ? (
                                 <p className="text-muted-foreground">Loading the log…</p>
                               ) : log.entries.length ? (
+                                <div>
+                                <Button size="xs" variant="outline" className="mb-1" onClick={() => void navigator.clipboard.writeText(log.entries!.map((entry) => `[${entry.phase}] ${entry.content}`).join("\n")).catch(() => setError("Could not copy logs. Select the log text and copy it."))}>Copy logs</Button>
                                 <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono">
                                   {log.entries.map((entry) => `[${entry.phase}] ${entry.content}`).join("\n")}
                                 </pre>
+                                </div>
                               ) : (
                                 <p className="text-muted-foreground">This version has no log.</p>
                               )}

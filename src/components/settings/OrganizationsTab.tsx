@@ -1,3 +1,4 @@
+import { openCloudSetup } from "@/lib/cloudSetupNavigation";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
@@ -50,6 +51,7 @@ export function OrganizationsTab() {
   );
   return (
     <div className="flex flex-col">
+      {status.state === "signed-in" && <Button className="mb-4 self-start" onClick={() => openCloudSetup()}>Set up cloud computer</Button>}
       <SettingRow
         label="Organizations in sidebar"
         description="Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace."

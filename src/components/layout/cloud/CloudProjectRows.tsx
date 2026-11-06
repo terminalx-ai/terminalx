@@ -1,3 +1,4 @@
+import { computerColor } from "@/lib/computerColor";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -191,7 +192,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
   const extra = only ? extraRepositories(only.item) : null;
 
   return (
-    <div role="group" aria-label={project.fullName} className="mb-1" data-testid="cloud-project-group" data-project={project.key}>
+    <div role="group" aria-label={project.fullName} className="mb-1 border-l-2 pl-1" style={{ borderLeftColor: computerColor(status.organizations?.find((org) => org.id === project.orgId)?.computerColor) }} data-testid="cloud-project-group" data-project={project.key}>
       <div
         className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-2 rounded-md px-2", drafting ? "bg-selected" : "hover:bg-selected/50")}
         title={[project.blank ? `${project.fullName} · no repository` : project.identity, extra?.card].filter(Boolean).join("\n")}

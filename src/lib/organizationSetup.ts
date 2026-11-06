@@ -42,6 +42,8 @@ export interface OrganizationSetupRecord {
    */
   workspace: { pending: PendingCreate | null; id: string | null } | null;
   completedAt: number | null;
+  /** An unsent setup check, kept with this account's setup workspace. */
+  draft?: { text: string; agent: string; tabId?: string; sent?: boolean; coachDismissed?: boolean };
 }
 
 const KEY = "terminalx.organization-setup.v2";

@@ -8,6 +8,7 @@ import { OrganizationSetupSteps } from "./OrganizationSetupSteps";
 import { ProviderControls } from "./ProviderControls";
 
 export function OrganizationOnboarding({
+  onCreated,
   organizationName,
   organizationId = null,
   accountEmail,
@@ -16,6 +17,7 @@ export function OrganizationOnboarding({
   multiOrg = false,
   startWithCreation = false,
 }: {
+  onCreated?: (organizationId: string) => void;
   organizationName: string | null;
   /** The selected organization's id. A setup record is matched by it, never by name. */
   organizationId?: string | null;
@@ -84,6 +86,7 @@ export function OrganizationOnboarding({
       const next = attempt ?? newSetup(name.trim(), crypto.randomUUID());
       persist(next);
       let unselected = false;
+      let createdId = next.organizationId;
       if (next.organizationId) {
         // Created earlier: only select it. Creation is never run again.
         await api.organizationSelect(next.organizationId, contextRevision);
@@ -91,6 +94,7 @@ export function OrganizationOnboarding({
         if (next.step === "select") persist({ ...next, step: "compute" });
       } else {
         const created = await api.organizationCreate(next.name, next.requestId);
+        createdId = created.id;
         const selected = created.selected !== false;
         persist({ ...next, organizationId: created.id, step: selected ? "compute" : "select" });
         unselected = !selected;
@@ -99,6 +103,7 @@ export function OrganizationOnboarding({
       if (!mounted.current || epoch !== identityEpoch.current) return;
       if (!unselected) setCreateOpen(false);
       await refreshAccount();
+      if (!unselected && createdId) onCreated?.(createdId);
       if (unselected && mounted.current && epoch === identityEpoch.current)
         setError("The organization was created, but could not be selected. Resume setup to select it; it will not be created again.");
     } catch (failure) {

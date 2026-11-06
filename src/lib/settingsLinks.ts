@@ -1,3 +1,4 @@
+import { navigateFromEnvironment } from "@/lib/environmentLeaveGuard";
 /**
  * The way from a message elsewhere in the app to an organization's page in
  * Settings → Organizations (PRO-107), and on it to its Agent logins. The
@@ -26,7 +27,7 @@ function request(organizationId: string | null, logins: boolean, signIn: AgentLo
 
 /** Open `organizationId`'s page in Settings (the active organization's when null). */
 export function openOrganizationSettings(organizationId: string | null): void {
-  request(organizationId, false);
+  navigateFromEnvironment(() => request(organizationId, false));
 }
 
 /**
@@ -34,7 +35,7 @@ export function openOrganizationSettings(organizationId: string | null): void {
  * that agent's sign-in is opened there too (#667), at the consent it always asks for first.
  */
 export function openAgentLogins(organizationId: string | null, signIn: AgentLoginProvider | null = null): void {
-  request(organizationId, true, signIn);
+  navigateFromEnvironment(() => request(organizationId, true, signIn));
 }
 
 export function onOpenOrganizationSettings(listener: () => void): () => void {

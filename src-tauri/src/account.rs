@@ -152,6 +152,8 @@ pub struct OrganizationSummary {
     /// The user's personal organization (PRO-69); absent from older servers.
     #[serde(default)]
     pub is_personal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_color: Option<String>,
     /// What the cloud offers in this organization (PRO-69); absent from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<OrganizationCloud>,
@@ -292,6 +294,8 @@ struct Organization {
     role: String,
     #[serde(default)]
     is_personal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    computer_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cloud: Option<OrganizationCloud>,
 }
@@ -464,7 +468,7 @@ impl AccountManager {
         let session = inner.session.as_mut().expect("signed in");
         session.organizations = organizations
             .iter()
-            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None })
+            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, computer_color: None, cloud: None })
             .collect();
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
     }
@@ -818,6 +822,33 @@ impl AccountManager {
             }
         };
         Ok(OrganizationCreated { organization, selected })
+    }
+
+    /// Persist a shared computer accent without changing the active organization.
+    pub(crate) fn set_computer_color(&self, organization_id: &str, revision: &str, color: &str) -> Result<()> {
+        if !["blue", "violet", "pink", "orange", "green", "teal"].contains(&color)
+            || organization_id.is_empty() || !organization_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err(anyhow!("invalid computer color or organization"));
+        }
+        let context = self.context().ok_or_else(|| anyhow!("account is signed out"))?;
+        if Self::context_revision(&context) != revision { return Err(anyhow!("account context changed")); }
+        let (target, access) = self.context_in(organization_id).map_err(|error| anyhow!(error))?;
+        if target.user_id != context.user_id || target.profile_id != context.profile_id { return Err(anyhow!("account context changed")); }
+        let _: serde_json::Value = post_authenticated(
+            &format!("{ORGANIZATIONS_PATH}/{organization_id}/computer-color"),
+            json!({ "computerColor": color }), Some(&target.access_token), None,
+        )?;
+        if !self.is_current_in(&target, access) { return Err(anyhow!("account context changed after saving color")); }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != target.generation || inner.session.as_ref().is_none_or(|session| session.cloud.user_id != target.user_id || session.cloud.cloud_profile_id != target.profile_id) {
+            return Err(anyhow!("account context changed after saving color"));
+        }
+        if let Some(session) = inner.session.as_mut() {
+            if let Some(org) = session.organizations.iter_mut().find(|org| org.org_id == organization_id) {
+                org.computer_color = Some(color.to_owned());
+            }
+        }
+        Ok(())
     }
 
     fn select_organization(&self, organization_id: &str, context: &AccountContext) -> Result<()> {
@@ -1377,7 +1408,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
             let account = account_key(&session.cloud.user_id, &session.cloud.cloud_profile_id);
             OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope, account }
         }),
-        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, computer_color: org.computer_color.clone(), cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
@@ -1664,8 +1695,20 @@ mod tests {
     }
 
     #[test]
+    fn organization_color_survives_the_server_roster_and_accepts_older_servers() {
+        let legacy = json!({ "orgId": "org", "name": "Team", "role": "member" });
+        let org: Organization = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(org.computer_color.is_none());
+        let mut colored = legacy;
+        colored["computerColor"] = json!("teal");
+        let org: Organization = serde_json::from_value(colored).unwrap();
+        assert_eq!(org.computer_color.as_deref(), Some("teal"));
+        assert_eq!(serde_json::to_value(org).unwrap()["computerColor"], "teal");
+    }
+
+    #[test]
     fn a_created_organization_says_whether_it_was_selected() {
-        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
+        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, computer_color: None, cloud: None };
         let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
         assert_eq!(
             serde_json::to_value(&unselected).unwrap(),
@@ -2254,7 +2297,7 @@ mod tests {
         let mut session = from.clone();
         session.access_token = "rotated-access".into();
         session.refresh_token = "rotated-refresh".into();
-        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None }];
+        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, computer_color: None, cloud: None }];
         session
     }
 

@@ -443,3 +443,23 @@ export async function signOut(): Promise<void> {
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
+
+/** Apply a color response only to the account and membership that requested it. */
+export async function setComputerColor(organizationId: string, color: string): Promise<void> {
+  const before = state.status;
+  const revision = before.context?.revision;
+  if (!revision) throw new Error("Sign in before changing the computer color.");
+  const previous = before.organizations?.find((org) => org.id === organizationId)?.computerColor;
+  applyStatus({ ...state.status, organizations: state.status.organizations?.map((org) => org.id === organizationId ? { ...org, computerColor: color } : org) });
+  let result: AccountStatus;
+  try { result = await api.organizationComputerColor(organizationId, revision, color); }
+  catch (failure) {
+    if (state.status.context?.account === before.context?.account && state.status.context?.revision === revision)
+      applyStatus({ ...state.status, organizations: state.status.organizations?.map((org) => org.id === organizationId && org.computerColor === color ? { ...org, computerColor: previous } : org) });
+    throw failure;
+  }
+  if (state.status.context?.account !== before.context?.account || state.status.context?.revision !== revision) return;
+  const saved = result.organizations?.find((org) => org.id === organizationId)?.computerColor;
+  if (!saved) throw new Error("The server did not confirm the computer color.");
+  applyStatus({ ...state.status, organizations: state.status.organizations?.map((org) => org.id === organizationId ? { ...org, computerColor: saved } : org) });
+}

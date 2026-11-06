@@ -1,3 +1,4 @@
+import { allowEnvironmentLeave } from "@/lib/environmentLeaveGuard";
 import { forgetClosedTabViews } from "@/lib/tabViews";
 import { keepMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
@@ -104,6 +105,7 @@ let state: State = {
 
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
+  if (patch.navigationVersion !== undefined && patch.navigationVersion !== state.navigationVersion && !allowEnvironmentLeave(() => set(patch))) return;
   const next = { ...state, ...patch };
   // Background deletion/archival must not replace another destination or an explicit draft.
   const previous = state.sessions.find((session) => session.id === state.selectedSessionId);

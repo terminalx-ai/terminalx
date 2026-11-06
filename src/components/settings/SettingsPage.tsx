@@ -1,3 +1,4 @@
+import { navigateFromEnvironment } from "@/lib/environmentLeaveGuard";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
@@ -82,13 +83,13 @@ export function SettingsPage({
 
   useHotkey("escape", () => {
     if (hasEscapeOverlay()) return false;
-    onBack();
+    navigateFromEnvironment(onBack);
   });
 
   return (
     <main className="flex h-full min-w-0 flex-1 flex-col bg-background" aria-label="Settings">
       <header data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-[78px] pr-3">
-        <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={onBack}>
+        <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={() => navigateFromEnvironment(onBack)}>
           <ArrowLeft />
         </Button>
         <h1 className="px-1 text-sm font-medium">Settings</h1>
@@ -97,7 +98,7 @@ export function SettingsPage({
           variant="outline"
           size="icon-sm"
           aria-label="Close"
-          onClick={onBack}
+          onClick={() => navigateFromEnvironment(onBack)}
           className="ml-auto shrink-0 bg-raised hover:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_8%)] active:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_14%)]"
         >
           <X />
@@ -110,7 +111,7 @@ export function SettingsPage({
               key={t}
               type="button"
               aria-current={tab === t ? "page" : undefined}
-              onClick={() => setTab(t)}
+              onClick={() => navigateFromEnvironment(() => setTab(t))}
               className={cn(
                 "rounded-md px-2.5 py-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                 tab === t ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",

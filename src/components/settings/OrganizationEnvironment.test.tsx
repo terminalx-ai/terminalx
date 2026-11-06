@@ -224,7 +224,7 @@ it("will not build a template with unsaved changes", async () => {
   fireEvent.change(within(form).getByLabelText("Machine install script"), { target: { value: "changed" } });
   const section = screen.getByLabelText("Build a version");
   expect((within(section).getByRole("button", { name: "Build version…" }) as HTMLButtonElement).disabled).toBe(true);
-  expect(section.textContent).toMatch(/Save or discard your changes first/);
+  expect(section.textContent).toMatch(/Save the template to build these changes/);
 });
 
 it("lists versions with their state and rolls back only after a confirmation", async () => {
@@ -427,4 +427,23 @@ it("offers a retry when the environment cannot be loaded", async () => {
   expect(await screen.findByText(/could not reach the account service/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await settled();
+});
+
+
+it("summarizes edits and restores the saved draft on Discard", async () => {
+  mount(); await settled();
+  fireEvent.change(screen.getByLabelText("Machine install script"), { target: { value: "apt-get install -y git" } });
+  expect(screen.getByText(/Unbuilt changes · Changed: machine install script/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+  expect((screen.getByLabelText("Machine install script") as HTMLTextAreaElement).value).toBe("apt-get install -y jq");
+  expect(screen.queryByText(/Unbuilt changes/)).toBeNull();
+});
+
+it("copies the complete displayed build log", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  environment.version.mockResolvedValue({ ...version(), logs: [{ phase: "install", content: "packages installed", occurredAt: 1 }] });
+  mount(); await settled(); fireEvent.click(screen.getAllByText("Show log")[0]);
+  fireEvent.click(await screen.findByText("Copy logs"));
+  expect(writeText).toHaveBeenCalledWith("[install] packages installed");
 });

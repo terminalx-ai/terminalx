@@ -1,3 +1,6 @@
+import { ComputerColorPicker } from "./ComputerColorPicker";
+import { CloudSetupNotice } from "@/components/cloud/CloudSetupNotice";
+import { navigateFromEnvironment } from "@/lib/environmentLeaveGuard";
 import { useState } from "react";
 import { ArrowLeft, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -69,7 +72,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
   return (
     <div className="flex flex-col gap-4" data-testid="organization-settings" data-organization={organization.id}>
       <div>
-        <Button variant="ghost" size="sm" className="-ml-2" onClick={onBack}>
+        <Button variant="ghost" size="sm" className="-ml-2" onClick={() => navigateFromEnvironment(onBack)}>
           <ArrowLeft /> All organizations
         </Button>
         <h3 className="mt-2 text-base font-semibold" data-testid="organization-settings-name">
@@ -82,6 +85,8 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
       </div>
       {active ? (
         <>
+          <CloudSetupNotice members organizationId={organization.id} />
+          {!member && <ComputerColorPicker organizationId={organization.id} name={name} />}
           <OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} />
           <OrganizationCompute contextRevision={contextRevision} />
           {logins}

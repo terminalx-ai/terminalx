@@ -1,3 +1,4 @@
+import { computerColor } from "@/lib/computerColor";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SessionPipelineControls } from "./SessionPipelineControls";
 import { LocalShareButton } from "./ShareSessionDialog";
@@ -298,7 +299,7 @@ function CloudLocation({
   const chipClass = cn("ml-1 flex max-w-[30%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", HEADER_CHIP_YIELDS, yields && HEADER_TIGHT);
   const chip = (
     <>
-      <Cloud className={HEADER_CHIP_ICON} />
+      <Cloud className={HEADER_CHIP_ICON} style={{ color: computerColor(status.organizations?.find((org) => org.id === cloud.orgId)?.computerColor) }} />
       <span className={cn("truncate", HEADER_CHIP_LABEL)}>Cloud · {location.provider} · {location.org}</span>
     </>
   );

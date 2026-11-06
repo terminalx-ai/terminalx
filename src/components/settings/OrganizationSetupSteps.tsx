@@ -28,6 +28,7 @@ const ORDER: readonly SetupStep[] = ["create", "select", "compute", "logins", "r
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
   { id: "codex", label: "Codex" },
+  { id: "cursor", label: "Cursor" },
 ];
 
 /** Every agent an organization keeps a login for (PRO-107), in the order its page lists them. */
@@ -74,6 +75,7 @@ const COMPUTE_PAUSED = "Compute provider connected, new machines paused";
  * (PRO-107), set here or later on its page.
  */
 export function OrganizationSetupSteps({
+  guided = false,
   record,
   organizationId,
   organizationName,
@@ -82,6 +84,7 @@ export function OrganizationSetupSteps({
   onProvidersChange,
   onRecord,
 }: {
+  guided?: boolean;
   record: OrganizationSetupRecord;
   organizationId: string;
   organizationName: string;
@@ -157,11 +160,12 @@ export function OrganizationSetupSteps({
       workspaces: list,
     };
     setFacts(next);
+    if (guided && logins?.length) setAgent((selected) => logins.includes(selected as AgentLoginProvider) ? selected : logins[0]);
     setChecking(false);
     const reconciled = reconcileSetup(current.current, next);
     if (reconciled !== current.current) store(reconciled);
-    return { providers, paused, github };
-  }, [organizationId, store]);
+    return { providers, paused, github, logins };
+  }, [organizationId, store, guided]);
 
   useEffect(() => {
     void check();
@@ -202,8 +206,8 @@ export function OrganizationSetupSteps({
         name: "Setup check",
         provider: provider.id,
         repositories: [{ cloneUrl: repository.cloneUrl, fullName: repository.fullName, ref: "" }],
-        prompt: terminalOnly ? "" : ENVIRONMENT_CHECK_PROMPT,
-        agent,
+        prompt: terminalOnly || guided ? "" : ENVIRONMENT_CHECK_PROMPT,
+        agent: guided ? (found?.logins?.find((login) => login === agent) ?? found?.logins?.[0] ?? agent) : agent,
         model: "",
         effort: "",
         mode: "",
@@ -241,7 +245,7 @@ export function OrganizationSetupSteps({
     setBusy(true);
     setError(null);
     const terminalOnly = !pending.request.launch?.prompt;
-    store({ ...current.current, agent: terminalOnly ? "terminal-only" : "required", workspace: { pending, id: null } });
+    store({ ...current.current, agent: terminalOnly ? "terminal-only" : "required", ...(guided ? { draft: current.current.draft ?? { text: ENVIRONMENT_CHECK_PROMPT, agent: form.agent } } : {}), workspace: { pending, id: null } });
     try {
       await createWorkspace(api, form, {
         pending,
@@ -266,6 +270,12 @@ export function OrganizationSetupSteps({
 
   /** The person goes on from the agent logins: with one connected, or to set them up later. */
   const passLogins = (logins: "connected" | "later") => store(reconcileSetup({ ...current.current, logins }, facts));
+
+  useEffect(() => {
+    if (!guided || !record.workspace?.id || record.step === "done") return;
+    const timer = setInterval(() => void check(), 3000);
+    return () => clearInterval(timer);
+  }, [guided, record.workspace?.id, record.step, check]);
 
   const step = record.step;
   const reached = (name: SetupStep) => ORDER.indexOf(step) > ORDER.indexOf(name);
@@ -294,7 +304,7 @@ export function OrganizationSetupSteps({
     return (
       <div className="mt-3">
         <p className="text-xs text-muted-foreground" data-testid="organization-setup-done">
-          Cloud setup is complete{record.agent === "terminal-only" ? " (terminal only, no agent)" : ""}.
+          Cloud setup is complete{!guided && record.agent === "terminal-only" ? " (terminal only, no agent)" : ""}.
         </p>
         {missingLogins}
       </div>
@@ -309,7 +319,7 @@ export function OrganizationSetupSteps({
           {checking ? <Loader2 className="animate-spin" /> : "Check again"}
         </Button>
       </div>
-      <ol className="mt-1 space-y-1 text-xs">
+      <ol hidden={guided} className="mt-1 space-y-1 text-xs">
         {SHOWN.filter((name) => name !== "agent" || record.agent === "required").map((name) => (
           <li key={name} className={reached(name) ? "text-muted-foreground" : name === step ? "text-foreground" : "text-faint"} aria-current={name === step ? "step" : undefined}>
             <span className="inline-flex w-4 justify-center">{reached(name) ? <Check className="size-3" aria-label="done" /> : name === step ? "→" : "·"}</span>{" "}
@@ -407,10 +417,10 @@ export function OrganizationSetupSteps({
                 ))}
               </select>
             </label>
-            <Button size="sm" disabled={busy} onClick={() => void prepare(false)}>
+            <Button size="sm" disabled={busy || checking} onClick={() => void prepare(false)}>
               {busy ? <Loader2 className="animate-spin" /> : "Prepare setup workspace"}
             </Button>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void prepare(true)}>
+            <Button hidden={guided} variant="ghost" size="sm" disabled={busy} onClick={() => void prepare(true)}>
               Terminal only, no agent
             </Button>
           </div>
@@ -420,7 +430,7 @@ export function OrganizationSetupSteps({
         <div className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-confirm">
           <p>
             Create “{prepared.form.name}” from {prepared.form.repositories[0]?.fullName}: {formatMicros(prepared.quote.activeHourlyMicros, prepared.quote.currency)} per hour while it runs.
-            {prepared.form.prompt ? ` ${AGENTS.find((option) => option.id === prepared.form.agent)?.label ?? prepared.form.agent} starts with this prompt:` : " No agent is started: you get a terminal."}
+            {prepared.form.prompt ? ` ${AGENTS.find((option) => option.id === prepared.form.agent)?.label ?? prepared.form.agent} starts with this prompt:` : guided ? " Your environment-check message will be ready to edit in the workspace." : " No agent is started: you get a terminal."}
           </p>
           {prepared.form.prompt && <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-hairline p-2 text-[11px]">{prepared.form.prompt}</pre>}
           <div className="mt-2 flex gap-2">

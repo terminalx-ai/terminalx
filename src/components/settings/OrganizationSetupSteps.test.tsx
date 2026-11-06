@@ -407,3 +407,18 @@ describe("a connected provider with new machines paused", () => {
     expect(api.cloudProviders).toHaveBeenCalledTimes(2);
   });
 });
+
+it("creates a guided setup with an unsent editable draft and completes when its runtime is ready", async () => {
+  vi.mocked(api.cloudWorkspaceCreate).mockImplementation(async () => creates());
+  const shown = render(<OrganizationSetupSteps record={record} organizationId="org-1" organizationName="Team" contextRevision="rev-1" onRecord={(next) => { record = next; }} guided />);
+  await waitFor(() => expect(record.step).toBe("workspace"));
+  const again = () => shown.rerender(<OrganizationSetupSteps record={record} organizationId="org-1" organizationName="Team" contextRevision="rev-1" onRecord={(next) => { record = next; }} guided />);
+  again(); fireEvent.click(screen.getByText("Prepare setup workspace"));
+  fireEvent.click(await screen.findByText("Create setup workspace"));
+  await waitFor(() => expect(record.workspace?.id).toBe("ws-1"));
+  const args = vi.mocked(api.cloudWorkspaceCreate).mock.calls[0][0];
+  expect(args.launch).toBeUndefined(); expect(record.draft?.text).toBe(ENVIRONMENT_CHECK_PROMPT);
+  vi.mocked(api.cloudWorkspaces).mockResolvedValue({ workspaces: [{ workspace: { ...snapshot.workspace, state: "ready", runtimeActivity: { online: true } }, latestOperation: null }] } as never);
+  again(); fireEvent.click(screen.getByText("Check again"));
+  await waitFor(() => expect(record.step).toBe("done"));
+});

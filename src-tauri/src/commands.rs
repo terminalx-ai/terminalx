@@ -88,6 +88,21 @@ pub async fn organization_create(
 }
 
 #[tauri::command]
+pub async fn organization_computer_color(
+    app: AppHandle,
+    organization_id: String,
+    context_revision: String,
+    color: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<crate::account::AccountStatus> {
+        account.set_computer_color(&organization_id, &context_revision, &color)?;
+        Ok(account.status(&app))
+    }).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
 pub async fn organization_select(
     app: AppHandle,
     organization_id: String,

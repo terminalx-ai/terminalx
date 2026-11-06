@@ -1,3 +1,4 @@
+import { openCloudSetup } from "@/lib/cloudSetupNavigation";
 import { EmptyView } from "./EmptyView";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { CircleAlert, ExternalLink, FolderGit2, FolderOpen, Loader2, RefreshCw, Zap, type LucideIcon } from "@/icons";
@@ -150,6 +151,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
         )}
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          {account.status.state === "signed-in" && <SecondaryLink onClick={() => openCloudSetup()}>Set up cloud computer</SecondaryLink>}
           {accountSignedOut && <SecondaryLink onClick={() => void signIn()}>Sign in</SecondaryLink>}
           <SecondaryLink onClick={() => onOpenSettings()}>Settings</SecondaryLink>
           <SecondaryLink onClick={() => void openUrl(`${REPO_URL}#readme`)}>

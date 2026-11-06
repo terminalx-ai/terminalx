@@ -1,3 +1,6 @@
+import { CloudSetupFlow } from "@/components/settings/CloudSetupFlow";
+import { onOpenCloudSetup } from "@/lib/cloudSetupNavigation";
+import { allowEnvironmentLeave, navigateFromEnvironment } from "@/lib/environmentLeaveGuard";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
 import { PanelLeft, PanelRight } from "@/icons";
@@ -101,6 +104,8 @@ export function AppShell() {
   const runtimeSwitch = useRuntimeSwitch();
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [cloudSetup, setCloudSetup] = useState<{ organizationId: string | null } | null>(null);
+  useEffect(() => onOpenCloudSetup((organizationId) => { setCloudSetup({ organizationId }); setSettingsOpen(false); }), []);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
   // Every request for Settings, so asking again with it open still lands on the section asked for.
   const [settingsRequest, setSettingsRequest] = useState(0);
@@ -153,6 +158,7 @@ export function AppShell() {
   // Also a click handler, which is handed the click's event: anything that is not a section's
   // name opens Account too, never a blank page.
   const openSettings = useCallback((tab?: unknown) => {
+    if (!allowEnvironmentLeave(() => openSettings(tab))) return;
     setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
@@ -181,24 +187,24 @@ export function AppShell() {
     setSettingsRequest((count) => count + 1);
   }, []);
   const newSession = useCallback(() => openNewSession(), []);
-  const showHome = useCallback(() => {
+  const showHome = useCallback(() => navigateFromEnvironment(() => {
     setSettingsOpen(false);
     openHome();
-  }, []);
-  const showIssues = useCallback(() => { setSettingsOpen(false); openIssues(); }, []);
-  const showAgents = useCallback(() => { setSettingsOpen(false); openAgents(); }, []);
+  }), []);
+  const showIssues = useCallback(() => navigateFromEnvironment(() => { setSettingsOpen(false); openIssues(); }), []);
+  const showAgents = useCallback(() => navigateFromEnvironment(() => { setSettingsOpen(false); openAgents(); }), []);
   const showStats = useCallback(() => openStats(), []);
   const showSkills = useCallback(() => openSkills(), []);
-  const showAutomations = useCallback(() => { setSettingsOpen(false); openAutomations(); }, []);
+  const showAutomations = useCallback(() => navigateFromEnvironment(() => { setSettingsOpen(false); openAutomations(); }), []);
   const showQuickChat = useCallback(() => void showFloatingWindow().catch((e) => console.error("floating window", e)), []);
 
   useShortcut("app.about", () => openSettings("about"));
   useShortcut("app.checkUpdates", () => { openSettings("about"); void checkForUpdate(); });
   useShortcut("app.shortcuts", () => openSettings("shortcuts"));
-  useShortcut("app.addProject", () => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
+  useShortcut("app.addProject", () => navigateFromEnvironment(() => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); }));
   useShortcut("app.openRecent", () => setPaletteOpen(true));
-  useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });
-  useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
+  useShortcut("app.nextSession", () => navigateFromEnvironment(() => { setSettingsOpen(false); stepVisibleSession(1); }));
+  useShortcut("app.previousSession", () => navigateFromEnvironment(() => { setSettingsOpen(false); stepVisibleSession(-1); }));
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
@@ -244,7 +250,7 @@ export function AppShell() {
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
       <div className="flex min-h-0 flex-1">
-        {settingsOpen ? (
+        {cloudSetup ? <CloudSetupFlow organizationId={cloudSetup.organizationId} onExit={() => { setCloudSetup(null); openOrganizationsSettings(); }} onFinish={() => { setCloudSetup(null); setSettingsOpen(false); }} /> : settingsOpen ? (
           <Suspense fallback={viewFallback}>
             <SettingsPage
               initialTab={settingsTab}

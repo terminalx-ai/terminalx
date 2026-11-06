@@ -1,3 +1,4 @@
+import { CloudSetupNotice } from "@/components/cloud/CloudSetupNotice";
 import { useDictationContext } from "@/lib/dictationContext";
 import { cloudPipelineSettings } from "@/lib/issuePipeline";
 import { usePipelineLaunch, pipelineSettings, preparePipelineLaunch } from "@/lib/pipelineLaunch";
@@ -419,6 +420,7 @@ export function NewSessionView({
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
+          {!quick && <CloudSetupNotice organizationId={cloud?.project?.orgId} />}
           {!cloud && (
             <div className="mb-3 space-y-2">
               {!harness && <p role="status" className="px-1 text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}

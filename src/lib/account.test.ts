@@ -517,3 +517,26 @@ it("forwards capability-only native account announcements without inventing supp
   mocks.listeners.get("account_status")!({ payload: { ...before, workClaims: false } });
   expect(account.getAccount().status.workClaims).toBe(false);
 });
+
+describe("shared computer color", () => {
+  it("updates subscribers immediately, rolls a failed save back, and accepts a teammate's refreshed color", async () => {
+    vi.resetModules();
+    const status = { ...signedIn(true), context: { scope: "color", revision: "color:1", account: "color" }, organizations: [{ id: "org-a", name: "Team", role: "admin", computerColor: "blue" }] };
+    let rejectSave: (error: Error) => void = () => {};
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "account_status") return status;
+      if (command === "account_refresh_roles") return { status, fresh: true };
+      if (command === "organization_computer_color") return new Promise((_resolve, reject) => { rejectSave = reject; });
+      return null;
+    });
+    const account = await import("./account"); await account.bootAccount();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const changed = vi.fn(); const unsubscribe = account.subscribeAccount(changed);
+    const saving = account.setComputerColor("org-a", "teal");
+    expect(account.getAccount().status.organizations?.[0].computerColor).toBe("teal"); expect(changed).toHaveBeenCalled();
+    rejectSave(new Error("Offline")); await expect(saving).rejects.toThrow("Offline");
+    expect(account.getAccount().status.organizations?.[0].computerColor).toBe("blue");
+    mocks.listeners.get("account_status")!({ payload: { ...status, organizations: [{ ...status.organizations[0], computerColor: "pink" }] } });
+    expect(account.getAccount().status.organizations?.[0].computerColor).toBe("pink"); unsubscribe();
+  });
+});

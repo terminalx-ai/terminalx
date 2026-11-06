@@ -344,6 +344,8 @@ export const api = {
   organizationConsoleOpen: (organizationId: string) => invoke<void>("organization_console_open", { organizationId }),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
   /** `selected: false`: created, but selecting it failed. Select it by id; never create again. */
+  organizationComputerColor: (organizationId: string, contextRevision: string, color: string) =>
+    invoke<AccountStatus>("organization_computer_color", { organizationId, contextRevision, color }),
   organizationCreate: (name: string, idempotencyKey: string) =>
     invoke<OrganizationSummary & { selected?: boolean }>("organization_create", { name, idempotencyKey }),
   organizationSelect: (organizationId: string, contextRevision: string) =>
@@ -705,6 +707,7 @@ export const api = {
 };
 
 export interface OrganizationSummary {
+  computerColor?: string | null;
   id: string;
   name: string;
   role: string;
