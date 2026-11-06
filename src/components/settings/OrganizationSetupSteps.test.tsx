@@ -417,7 +417,7 @@ it("creates a guided setup with an unsent editable draft and completes when its 
   fireEvent.click(await screen.findByText("Create setup workspace"));
   await waitFor(() => expect(record.workspace?.id).toBe("ws-1"));
   const args = vi.mocked(api.cloudWorkspaceCreate).mock.calls[0][0];
-  expect(args.launch).toBeUndefined(); expect(record.draft?.text).toBe(ENVIRONMENT_CHECK_PROMPT);
+  expect(args.launch?.prompt).toBeNull(); expect(record.draft?.text).toBe(ENVIRONMENT_CHECK_PROMPT);
   vi.mocked(api.cloudWorkspaces).mockResolvedValue({ workspaces: [{ workspace: { ...snapshot.workspace, state: "ready", runtimeActivity: { online: true } }, latestOperation: null }] } as never);
   again(); fireEvent.click(screen.getByText("Check again"));
   await waitFor(() => expect(record.step).toBe("done"));
