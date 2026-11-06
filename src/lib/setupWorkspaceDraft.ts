@@ -3,8 +3,6 @@ import { getAccount, subscribeAccount } from "@/lib/account";
 import { errorMessage, type CloudWorkspaceLaunch } from "@/lib/api";
 import { sendToCloudAgent } from "@/lib/cloudAgents";
 import { loadSetups, saveSetup, type OrganizationSetupRecord } from "@/lib/organizationSetup";
-import { getSessionStore, selectCloudSession } from "@/lib/sessions";
-import { cloudSessionKey } from "@/types/target";
 
 const flights = new Map<string, Promise<void>>();
 const listeners = new Set<() => void>();
@@ -14,7 +12,7 @@ export const publishSetupDraft = () => { for (const listener of listeners) liste
 /** The runtime launch already owns the repository-scoped tab. Never create a second tab here.
  * The operation outlives its view; the persisted sending bit also prevents replay after an
  * app restart or an uncertain response. The ordinary session outbox owns delivery/retries. */
-export function sendSetupDraft(record: OrganizationSetupRecord, launch: CloudWorkspaceLaunch, client: WorkspaceRpcClient): Promise<void> {
+export function sendSetupDraft(record: OrganizationSetupRecord, launch: CloudWorkspaceLaunch, client: WorkspaceRpcClient, onSent: () => void): Promise<void> {
   const before = getAccount().status;
   const email = before.identity?.email;
   const account = before.context?.account;
@@ -35,7 +33,6 @@ export function sendSetupDraft(record: OrganizationSetupRecord, launch: CloudWor
   const latest = current();
   if (!latest?.draft || latest.draft.sent || latest.draft.sending || !latest.draft.text.trim()) return Promise.resolve();
   const unsubscribe = subscribeAccount(() => { current(); });
-  const navigation = getSessionStore().navigationVersion;
   // Start in a microtask so the map owns even synchronously rejected operations.
   const operation = Promise.resolve().then(async () => {
     try {
@@ -48,9 +45,8 @@ export function sendSetupDraft(record: OrganizationSetupRecord, launch: CloudWor
       const kept = current();
       if (kept?.draft) {
         saveSetup(email, { ...kept, draft: { ...kept.draft, sent: true, sending: false, commandId: receipt.clientCommandId } });
-        // Stay on the editable draft for pre-enqueue errors. A late success must not
-        // move someone who navigated away while Send was pending.
-        if (getSessionStore().navigationVersion === navigation) selectCloudSession(cloudSessionKey(orgId, workspaceId, launch.sessionId!));
+        // The originating view owns navigation; completion still persists after it closes.
+        onSent();
       }
     } catch (error) {
       const kept = current();
