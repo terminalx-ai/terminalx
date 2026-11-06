@@ -3,15 +3,25 @@ import { adjacentSession } from "./sessionNavigation";
 
 describe("next and previous session", () => {
   const sessions = [
-    { id: "old", modified: "2026-11-01" },
-    { id: "cloud:org:workspace:session", modified: "2026-11-05" },
-    { id: "pinned", modified: "2026-10-01", pinned: true },
-    { id: "archived", modified: "2026-11-06", archived: true },
+    { id: "old", created: "2026-11-01", modified: "2026-11-01", pinned: false },
+    { id: "cloud:org:workspace:session", created: "2026-11-05", modified: "2026-11-05", pinned: false },
+    { id: "pinned", created: "2026-10-01", modified: "2026-10-01", pinned: true },
+    { id: "archived", created: "2026-11-06", modified: "2026-11-06", pinned: false, archived: true },
   ];
   it("includes local and cloud sessions, skips archives, and wraps in sidebar order", () => {
     expect(adjacentSession(sessions, "pinned", 1)).toBe("cloud:org:workspace:session");
     expect(adjacentSession(sessions, "old", 1)).toBe("pinned");
     expect(adjacentSession(sessions, "pinned", -1)).toBe("old");
+  });
+  it("keeps sidebar message order when renaming changes modified, using created only without a message", () => {
+    const conversations = [
+      { id: "A", created: "2026-10-01", lastMessageAt: "2026-11-03", modified: "2026-11-03", pinned: false },
+      { id: "B", created: "2026-10-02", lastMessageAt: "2026-11-02", modified: "2026-11-06", pinned: false },
+      { id: "C", created: "2026-11-01", lastMessageAt: null, modified: "2026-11-01", pinned: false },
+    ];
+    expect(adjacentSession(conversations, "A", 1)).toBe("B");
+    expect(adjacentSession(conversations, "C", -1)).toBe("B");
+    expect(adjacentSession(conversations, "B", 1)).toBe("C");
   });
   it("enters at either end when no session is selected and handles empty lists", () => {
     expect(adjacentSession(sessions, null, 1)).toBe("pinned");

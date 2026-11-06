@@ -1,12 +1,12 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect } from "react";
-import { isFloatingWindow } from "./appWindow";
+import { isCompactWindow } from "./appWindow";
 import { hotkeysSuspended, registerShortcut, runShortcut, subscribeHotkeySuspension } from "./hotkeys";
 import { buildNativeMenu } from "./nativeMenu";
 import { subscribePrefs } from "./prefs";
 import { getSessionStore, openProjectOverview, subscribeSessionStore } from "./sessions";
-import { currentKeymap, isShortcutId } from "./shortcuts";
+import { currentKeymap, isShortcutId, SHORTCUT_ACTIONS } from "./shortcuts";
 
 // Serialize replacements, including across StrictMode mounts, so an older
 // keymap can never finish after (and overwrite) a newer one.
@@ -54,7 +54,18 @@ export function startNativeMenu(): () => void {
   }).then((unlisten) => {
     if (stopped) { unlisten(); return; }
     cleanups.push(unlisten);
-    if (isFloatingWindow()) return;
+    if (isCompactWindow()) {
+      // Native menus can carry only one accelerator. The ordinary dispatcher
+      // handles every alternative binding and forwards workbench actions too.
+      for (const action of SHORTCUT_ACTIONS) {
+        if (action.menu && action.menu.target !== "focused") {
+          cleanups.push(registerShortcut(action.id, () => {
+            void invoke("forward_menu_action", { action: action.id }).catch((error) => console.error("Menu action forwarding failed", error));
+          }));
+        }
+      }
+      return;
+    }
     cleanups.push(subscribePrefs(sync), subscribeSessionStore(sync), subscribeHotkeySuspension(sync));
     sync();
   }).catch((error) => console.error("Native menu listener failed", error));
@@ -72,6 +83,7 @@ export function useNativeMenus() {
       void getCurrentWebviewWindow().setZoom(zoom).catch(failed);
     };
     const cleanups = [
+      registerShortcut("app.newWindow", () => { void invoke("new_chat_window").catch(failed); }),
       registerShortcut("app.closeWindow", () => { void invoke("native_window_action", { action: "close" }).catch(failed); }),
       registerShortcut("app.fullscreen", () => { void invoke("native_window_action", { action: "fullscreen" }).catch(failed); }),
       registerShortcut("app.zoomIn", () => changeZoom(0.1)),

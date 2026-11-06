@@ -64,9 +64,9 @@ let visible: boolean;
 let pending: { sessionId: string; tabId?: string | null } | null;
 let status: { shortcut: string | null; alwaysOnTop: boolean; retentionDays: number; shortcutError: string | null };
 
-async function mount() {
+async function mount(label: "floating" | `chat-${string}` = "floating") {
   vi.resetModules();
-  (await import("@/lib/appWindow")).setAppWindowForTest("floating");
+  (await import("@/lib/appWindow")).setAppWindowForTest(label);
   const { FloatingShell } = await import("./FloatingShell");
   const sessions = await import("@/lib/sessions");
   const utils = render(
@@ -111,6 +111,7 @@ beforeEach(() => {
         return { events: [] };
       case "floating_hide":
       case "floating_open_in_main":
+      case "chat_window_open_in_main":
       case "frontend_log":
         return null;
       default:
@@ -280,4 +281,33 @@ describe("the floating chat window", () => {
     act(() => mocks.listeners.get("floating_visible")?.({ payload: true }));
     expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("half a thought");
   });
+});
+
+it("a new chat window neither restores nor replaces Quick Chat's selected conversation", async () => {
+  stored = [chat("chat-1", "Existing Quick Chat")];
+  localStorage.setItem("raccoon.floating.session", "chat-1");
+  const { sessions } = await mount("chat-test");
+  expect(await screen.findByTestId("start")).toBeTruthy();
+  expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+  expect(localStorage.getItem("raccoon.floating.session")).toBe("chat-1");
+  act(() => sessions.selectSession("chat-1"));
+  act(() => sessions.selectSession(null));
+  expect(localStorage.getItem("raccoon.floating.session")).toBe("chat-1");
+  expect(called("floating_take_pending")).toHaveLength(0);
+  expect(screen.queryByRole("button", { name: "Keep on top" })).toBeNull();
+});
+
+it("keeps an independent chat visible and hands off only that window", async () => {
+  stored = [chat("chat-1", "Independent chat")];
+  visible = false;
+  pending = { sessionId: "chat-1" };
+  const { sessions } = await mount("chat-test");
+  expect(await screen.findByTestId("start")).toBeTruthy();
+  act(() => sessions.selectSession("chat-1"));
+  expect(await screen.findByTestId("session-view")).toBeTruthy();
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(called("floating_hide")).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
+  expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab" }]);
+  expect(called("floating_open_in_main")).toHaveLength(0);
 });

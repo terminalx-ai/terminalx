@@ -48,7 +48,7 @@ interface ActionDef {
 const ACTIONS = [
   { id: "app.about", label: "About TerminalX", group: "App", keys: [], menu: { section: "app", order: 0, label: "About TerminalX" } },
   { id: "app.checkUpdates", label: "Check for updates", group: "App", keys: [], menu: { section: "app", order: 2, label: "Check for Updates…" } },
-  { id: "app.newWindow", label: "New chat window", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1, label: "New Window" } },
+  { id: "app.newWindow", label: "New chat window", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1, label: "New Window", target: "focused" } },
   { id: "app.addProject", label: "Add project", group: "App", keys: ["mod+o"], menu: { section: "file", order: 2, label: "Add Project…" } },
   { id: "app.openRecent", label: "Open recent", group: "App", keys: [], menu: { section: "file", order: 3, label: "Open Recent" } },
   { id: "app.closeWindow", label: "Close window", group: "App", keys: ["mod+shift+w"], menu: { section: "file", order: 5, label: "Close Window", target: "focused" } },

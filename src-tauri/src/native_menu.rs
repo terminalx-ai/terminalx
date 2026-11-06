@@ -84,7 +84,8 @@ fn build(app: &AppHandle, groups: &[Group]) -> tauri::Result<()> {
             {
                 submenu.append(&PredefinedMenuItem::separator(app)?)?;
                 submenu.append(&MenuItem::with_id(app, crate::quit::STOP_ALL_MENU_ID, "Stop all and quit", true, None::<&str>)?)?;
-                submenu.append(&MenuItem::with_id(app, crate::quit::MENU_ID, "Quit", true, Some("Alt+F4"))?)?;
+                // Alt+F4 belongs to the OS: close the focused window, not the app.
+                submenu.append(&MenuItem::with_id(app, crate::quit::MENU_ID, "Quit", true, None::<&str>)?)?;
             }
         }
         if matches!(group.id, Section::View) {
@@ -144,6 +145,13 @@ fn destination(id: &str) -> Option<(bool, &str)> {
     } else {
         None
     }
+}
+
+/// Alternative shortcuts in compact windows use the same main-window route
+/// as native accelerators and menu clicks.
+#[tauri::command]
+pub async fn forward_menu_action(app: AppHandle, action: String) {
+    dispatch(&app, &format!("command:main:{action}"));
 }
 
 #[tauri::command]

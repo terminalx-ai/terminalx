@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { waitFor } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { setPrefs } from "./prefs";
 import { registerShortcut, suspendHotkeys } from "./hotkeys";
 import { saveShortcut } from "./shortcuts";
 import { setAppWindowForTest } from "./appWindow";
-import { dispatchNativeMenu, startNativeMenu } from "./nativeMenuBridge";
+import { dispatchNativeMenu, startNativeMenu, useNativeMenus } from "./nativeMenuBridge";
 import type { NativeMenuGroup } from "./nativeMenu";
 
 const mocks = vi.hoisted(() => ({
@@ -120,6 +120,36 @@ describe("native menu integration", () => {
     await Promise.resolve();
     expect(mocks.listen).toHaveBeenCalledOnce();
     expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it.each(["floating", "chat-test"] as const)("forwards all main-window bindings from %s and follows rebinding", async (label) => {
+    setAppWindowForTest(label);
+    setPrefs({ shortcuts: { "app.settings": ["mod+,", "mod+shift+y"] } });
+    cleanups.push(startNativeMenu());
+    await Promise.resolve();
+    const press = (key: string) => document.body.dispatchEvent(new KeyboardEvent("keydown", { key, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    press("y");
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("forward_menu_action", { action: "app.settings" });
+    setPrefs({ shortcuts: { "app.settings": ["mod+,", "mod+shift+g"] } });
+    press("y");
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    press("g");
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    const resume = suspendHotkeys();
+    cleanups.push(resume);
+    press("g");
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["main", "floating", "chat-test"] as const)("creates a new chat window on each menu or shortcut invocation from %s", async (label) => {
+    setAppWindowForTest(label);
+    const { unmount } = renderHook(useNativeMenus);
+    cleanups.push(unmount);
+    await Promise.resolve();
+    dispatchNativeMenu("app.newWindow");
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "N", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    expect(mocks.invoke.mock.calls.filter(([name]) => name === "new_chat_window")).toHaveLength(2);
+    expect(mocks.invoke).not.toHaveBeenCalledWith("floating_show", expect.anything());
   });
 
   it("cleans up a listener that finishes after unmount and does not install a stale menu", async () => {

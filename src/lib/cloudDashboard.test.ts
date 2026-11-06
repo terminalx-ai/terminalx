@@ -1,3 +1,4 @@
+import { adjacentSession } from "./sessionNavigation";
 import { describe, expect, it } from "vitest";
 import type { RuntimeSession } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
@@ -110,6 +111,22 @@ const columnOf = (sessions: CloudDashboardSession[], key: string) => {
 };
 
 describe("cloud sessions in the dashboard's columns", () => {
+  it("preserves sidebar message activity and pins for session navigation", () => {
+    const sessions = project({
+      workspaces: [item("ws-1")],
+      cached: { "ws-1": [
+        session("A", "Newest message", "idle", { created: "2026-10-01", lastMessageAt: "2026-11-03", modified: "2026-11-03" }),
+        session("B", "Renamed today", "idle", { created: "2026-10-02", lastMessageAt: "2026-11-02", modified: "2026-11-06" }),
+        session("C", "No messages", "idle", { created: "2026-11-01", modified: "2026-11-01" }),
+        session("P", "Pinned", "idle", { created: "2026-09-01", modified: "2026-09-01", pinned: true }),
+      ] },
+    });
+    const key = (id: string) => `cloud:${ORG}:ws-1:${id}`;
+    expect(adjacentSession(sessions, key("A"), 1)).toBe(key("B"));
+    expect(adjacentSession(sessions, key("B"), 1)).toBe(key("C"));
+    expect(adjacentSession(sessions, key("A"), -1)).toBe(key("P"));
+  });
+
   it("uses the live tab state while connected: waiting is Needs you, in progress is Working", () => {
     const sessions = project({
       workspaces: [item("ws-1", { runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } })],

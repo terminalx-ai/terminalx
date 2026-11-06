@@ -115,6 +115,8 @@ mod pty;
 mod quit;
 #[cfg(feature = "desktop")]
 mod native_menu;
+#[cfg(feature = "desktop")]
+mod chat_windows;
 mod relay_e2ee;
 pub mod remote;
 mod session;
@@ -285,7 +287,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !chat_windows::is_chat_window(label)).build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -801,6 +803,9 @@ pub fn run() {
             commands::status_resource_overview,
             native_menu::set_native_menu,
             native_menu::native_window_action,
+            native_menu::forward_menu_action,
+            chat_windows::new_chat_window,
+            chat_windows::chat_window_open_in_main,
             commands::status_resource_sample,
             commands::status_resource_kill,
             browser::ui::browser_pages,
@@ -860,7 +865,9 @@ pub fn run() {
                         let_go_of_unresponsive_runtime(&state);
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
-                        if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
+                        for (label, secondary) in window.app_handle().webview_windows() {
+                            if label == floating::LABEL || chat_windows::is_chat_window(&label) { let _ = secondary.destroy(); }
+                        }
                         state.computer.shutdown();
                         state.browser.shutdown();
                     }

@@ -196,7 +196,6 @@ export function AppShell() {
   useShortcut("app.about", () => openSettings("about"));
   useShortcut("app.checkUpdates", () => { openSettings("about"); void checkForUpdate(); });
   useShortcut("app.shortcuts", () => openSettings("shortcuts"));
-  useShortcut("app.newWindow", () => { void showFloatingWindow("").catch((error) => console.error("new window", error)); });
   useShortcut("app.addProject", () => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
   useShortcut("app.openRecent", () => setPaletteOpen(true));
   useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });

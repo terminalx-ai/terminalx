@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { isChatWindow } from "@/lib/appWindow";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppWindow, ChevronDown, Ellipsis, MessageCirclePlus, Pin, PinOff, Trash2 } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
@@ -55,6 +57,7 @@ function focusPrompt() {
  * app state the main window shows too; hiding it stops nothing.
  */
 export function FloatingShell() {
+  const standalone = isChatWindow();
   const store = useSessionStore();
   const floating = useFloating();
   /** A session this window was asked to show before the session list had loaded. */
@@ -74,6 +77,7 @@ export function FloatingShell() {
   // Open on what was asked for; failing that, on the chat this window showed last.
   useEffect(() => {
     if (!store.loaded) return;
+    if (standalone) { settled.current = true; return; }
     if (asked) {
       settled.current = true;
       setAsked(null);
@@ -86,13 +90,13 @@ export function FloatingShell() {
     settled.current = true;
     const last = store.sessions.find((session) => session.id === floating.sessionId && !session.archived);
     if (last) selectSession(last.id);
-  }, [store.loaded, asked, store.sessions, floating.sessionId]);
+  }, [store.loaded, asked, store.sessions, floating.sessionId, standalone]);
 
   const selected = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
   const selectedId = selected?.id ?? null;
   useEffect(() => {
-    if (settled.current) setFloatingSession(selectedId);
-  }, [selectedId]);
+    if (!standalone && settled.current) setFloatingSession(selectedId);
+  }, [selectedId, standalone]);
 
   // The first prompt of a new chat is sent once its session exists, as in the main window.
   const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[]) => {
@@ -109,7 +113,7 @@ export function FloatingShell() {
   useShortcut("app.newSession", newChat);
 
   // Shown again (the shortcut, the tray, a notification): ready to type.
-  const visible = floating.visible;
+  const visible = standalone || floating.visible;
   useEffect(() => {
     if (!visible) return;
     const frame = requestAnimationFrame(focusPrompt);
@@ -120,6 +124,7 @@ export function FloatingShell() {
   // dialog closes first, a running turn is interrupted first, and a terminal
   // keeps its Escape. This listens after all of those (the bubble phase).
   useEffect(() => {
+    if (standalone) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
@@ -129,7 +134,7 @@ export function FloatingShell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [standalone]);
 
   const chrome: SessionChrome = {
     compact: true,
@@ -162,9 +167,9 @@ export function FloatingShell() {
               <QuickChatSwitcher current={null} onNew={newChat} />
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-0.5">
-              <PinButton />
+              {!isChatWindow() && <PinButton />}
               <WithTooltip label="Open the main window">
-                <Button variant="ghost" size="icon-sm" aria-label="Open the main window" onClick={() => void floatingWindow.openInMain("")}>
+                <Button variant="ghost" size="icon-sm" aria-label="Open the main window" onClick={() => void openChatInMain("")}>
                   <AppWindow />
                 </Button>
               </WithTooltip>
@@ -177,6 +182,13 @@ export function FloatingShell() {
       )}
     </div>
   );
+}
+
+/** Hand off only this view; an independent window never hides Quick Chat. */
+function openChatInMain(sessionId: string, tabId?: string | null): Promise<void> {
+  return isChatWindow()
+    ? invoke("chat_window_open_in_main", { sessionId, tabId: tabId ?? null })
+    : floatingWindow.openInMain(sessionId, tabId);
 }
 
 /** Keeps the window above other apps' windows, or lets it go behind them. */
@@ -204,11 +216,11 @@ function WindowActions({ session }: { session: SessionEntry }) {
     // On the tab this window shows, so the main window opens where the reader was.
     const shown = getTerminalState().selected[session.id];
     const tabId = shown?.kind === "agent" ? shown.id : (session.activeTab ?? null);
-    void floatingWindow.openInMain(session.id, tabId);
+    void openChatInMain(session.id, tabId);
   };
   return (
     <>
-      <PinButton />
+      {!isChatWindow() && <PinButton />}
       <WithTooltip label="Open in main window">
         <Button variant="ghost" size="icon-sm" aria-label="Open in main window" onClick={openInMain}>
           <AppWindow />
