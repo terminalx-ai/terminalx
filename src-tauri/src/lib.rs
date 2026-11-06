@@ -736,6 +736,7 @@ pub fn run() {
             commands::set_work_status_settings,
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
+            commands::set_read_only_commands,
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,

@@ -2480,6 +2480,7 @@ export interface WorkCloudSession {
 
 /** When an agent nobody is using is stopped (#696). */
 export interface AgentSettings {
+  readOnlyCommands: boolean;
   /** Minutes an agent may sit idle before it is stopped; 0 is never. */
   idleStopMinutes: number;
 }
@@ -2489,6 +2490,7 @@ export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
 
 export const agentSettings = {
   get: () => invoke<AgentSettings>("agent_settings"),
+  setReadOnlyCommands: (enabled: boolean) => invoke<AgentSettings>("set_read_only_commands", { enabled }),
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
 };
 

@@ -4456,6 +4456,15 @@ pub fn agent_settings() -> crate::store::settings::AgentSettings {
     store::settings::load().agents
 }
 
+/// Applied by the owner at the next permission hook, including running tabs.
+#[tauri::command]
+pub fn set_read_only_commands(enabled: bool) -> CmdResult<crate::store::settings::AgentSettings> {
+    let mut settings = store::settings::load();
+    settings.agents.read_only_commands = enabled;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.agents)
+}
+
 /// The runtime that owns the agents reads the limit again at its next look,
 /// within a minute.
 #[tauri::command]
