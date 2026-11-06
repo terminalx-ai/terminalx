@@ -447,3 +447,17 @@ it("copies the complete displayed build log", async () => {
   fireEvent.click(await screen.findByText("Copy logs"));
   expect(writeText).toHaveBeenCalledWith("[install] packages installed");
 });
+
+it("guards a provider change and retains edits when the leave prompt is canceled", async () => {
+  providers.mockResolvedValue({ providers: [provider("local-docker"), provider("box")] } as never);
+  mount(); await settled();
+  fireEvent.change(screen.getByLabelText("Machine install script"), { target: { value: "echo unbuilt" } });
+  fireEvent.change(screen.getByLabelText("Environment provider"), { target: { value: "box" } });
+  expect(screen.getByRole("heading", { name: "Leave without building?" })).toBeTruthy();
+  expect(environment.status).not.toHaveBeenCalledWith("box");
+  fireEvent.click(screen.getByText("Keep editing"));
+  expect((screen.getByLabelText("Machine install script") as HTMLTextAreaElement).value).toBe("echo unbuilt");
+  fireEvent.change(screen.getByLabelText("Environment provider"), { target: { value: "box" } });
+  fireEvent.click(screen.getByRole("button", { name: "Leave without building" }));
+  await waitFor(() => expect(environment.status).toHaveBeenCalledWith("box"));
+});
