@@ -8,7 +8,7 @@
 //! pid so a late exit from an old child can be told apart from the current one.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,15 +54,34 @@ impl LiveChild {
         // A partial frame cannot be interleaved with a control reply. Do
         // not wait here: callers may own the runtime the writer needs.
         let _frame = self.frame.try_lock().map_err(|_| anyhow::anyhow!("child input frame is still being written"))?;
-        let mut guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
-        let stdin = guard.as_mut().context("child stdin closed")?;
-        stdin.write_all(line.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()?;
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        let mut offset = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while offset < bytes.len() {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "child input pipe timed out");
+            match self.try_write_stdin(&bytes[offset..]) {
+                Ok(0) => bail!("child input pipe closed"),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
-    pub(crate) fn input_frame(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.frame.lock().unwrap_or_else(|error| error.into_inner())
+    pub(crate) fn input_frame(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.frame.try_lock() {
+                Ok(frame) => return Ok(frame),
+                Err(std::sync::TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    anyhow::ensure!(std::time::Instant::now() < deadline, "previous child input frame did not finish");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
     }
     /// Owned stdio writers never wait for pipe capacity
     /// while the caller holds final-admission/runtime authority. ChildStdin is

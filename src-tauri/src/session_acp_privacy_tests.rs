@@ -51,24 +51,25 @@ for line in sys.stdin:
 
 #[test]
 fn blocked_acp_pipe_releases_admission_and_allows_privacy_and_stop() {
-    for case in ["pipe-on", "pipe-cycle", "pipe-stop", "pipe-timeout"] {
+    for case in ["pipe-on", "pipe-cycle", "pipe-stop", "pipe-timeout", "pipe-model-off", "pipe-model-on", "pipe-model-cycle"] {
+        println!("ACP blocked-pipe case: {case}");
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("child.log");
         let log = std::fs::File::create(&log_path).unwrap();
         let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "session::watch_tests::prompts::privacy::acp_lifecycle::blocked_pipe_child", "--nocapture"])
-            .env(CASE, &case).env(DIRECTORY, dir.path())
+            .env(CASE, case).env(DIRECTORY, dir.path())
             .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
         let ready = dir.path().join("ready.json");
         wait_for("actual ACP input pipe is full", || ready.exists());
         let info: serde_json::Value = serde_json::from_slice(&std::fs::read(ready).unwrap()).unwrap();
-        if matches!(case, "pipe-on" | "pipe-cycle") {
+        if case.ends_with("-on") || case.ends_with("-cycle") {
             let preference = PathBuf::from(info["root"].as_str().unwrap()).join("data-privacy.json");
             store::write_json(&preference, &json!({"enabled":true})).unwrap();
             let started = Instant::now();
             assert!(refresh_owner(&info).enabled);
             assert!(started.elapsed() < Duration::from_secs(10), "a full pipe must not stall privacy acknowledgement");
-            if case == "pipe-cycle" {
+            if case.ends_with("-cycle") {
                 store::write_json(&preference, &json!({"enabled":false})).unwrap();
                 assert!(!refresh_owner(&info).enabled);
             }
@@ -111,6 +112,14 @@ fn blocked_pipe_child() {
         json!({"actor":actor,"connection":"connection","sessionId":SESSION,"tabId":TAB,"text":text,"prompt":text})).unwrap();
     let seq = sent["events"][0]["seq"].as_u64().unwrap();
     full_pipe.recv_timeout(WAIT).expect("the production writer observed WouldBlock");
+    if case.contains("model") {
+        crate::local_runtime::mobile::execute(&rig.manager, &lifetime, "setModel",
+            json!({"actor":actor,"connection":"connection","sessionId":SESSION,"tabId":TAB,"model":"remote-model"})).unwrap();
+        assert!(!rig.rt.lock().unwrap().stopping, "a control waits behind the partial prompt instead of breaking its pipe");
+        let pending = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+        assert_eq!(pending.requested_model.as_deref(), Some("remote-model"));
+        assert!(!pending.request_privacy.is_empty());
+    }
     let (released, available) = mpsc::channel();
     let runtime = rig.rt.clone();
     let probing = std::thread::spawn(move || {
@@ -122,6 +131,16 @@ fn blocked_pipe_child() {
     probing.join().unwrap();
     store::write_json(&coordination.join("ready.json"), &json!({"socket":endpoint.socket,"token":endpoint.token,"root":store::root().unwrap()})).unwrap();
     wait_for("parent privacy acknowledgement", || coordination.join("release").exists());
+    if case == "pipe-model-off" {
+        std::fs::remove_file(rig._dir.path().join("block-read")).unwrap();
+        wait_for("the full prompt and queued control are each delivered", || index::get(SESSION).unwrap().tab(TAB).unwrap().model == "remote-model");
+        wait_for("the provider completes the intact prompt", || !rig.rt.lock().unwrap().turn_open);
+        rig.manager.stop(SESSION, TAB).unwrap();
+        let requests = store::read_lines::<serde_json::Value>(&rig._dir.path().join("requests")).unwrap();
+        assert_eq!(requests.iter().filter(|request| request["method"] == "session/prompt").count(), 1);
+        assert_eq!(requests.iter().filter(|request| request["method"] == "session/set_model" && request["params"]["modelId"] == "remote-model").count(), 1);
+        return;
+    }
     if case == "pipe-stop" {
         let started = Instant::now();
         rig.manager.stop(SESSION, TAB).unwrap();
@@ -134,6 +153,7 @@ fn blocked_pipe_child() {
     // No partial frame is completed or replayed after off/on or Stop.
     let requests = store::read_lines::<serde_json::Value>(&rig._dir.path().join("requests")).unwrap();
     assert!(!requests.iter().any(|request| request["method"] == "session/prompt"));
+    assert!(!requests.iter().any(|request| request["method"] == "session/set_model"));
     assert!(rig.rt.lock().unwrap().child.is_none());
 }
 
@@ -146,6 +166,7 @@ fn phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write(
         }
     }
     for case in cases {
+        println!("ACP startup case: {case}");
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("child.log");
         let log = std::fs::File::create(&log_path).unwrap();
@@ -154,7 +175,11 @@ fn phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write(
             .env(CASE, &case).env(DIRECTORY, dir.path())
             .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
         let ready = dir.path().join("ready.json");
-        wait_for("phone input waiting for ACP session opening", || ready.exists());
+        let until = Instant::now() + WAIT;
+        while !ready.exists() {
+            assert!(child.0.try_wait().unwrap().is_none() && Instant::now() < until, "{case}: {}", std::fs::read_to_string(&log_path).unwrap());
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let info: serde_json::Value = serde_json::from_slice(&std::fs::read(ready).unwrap()).unwrap();
         if case.ends_with("-on") || case.ends_with("-cycle") {
             let preference = PathBuf::from(info["root"].as_str().unwrap()).join("data-privacy.json");
@@ -197,7 +222,7 @@ fn startup_child() {
     crate::hooks::serve_private(endpoint.clone(), |_| crate::hooks::HookReply::refused("test"), move |request| service.handle(request)).unwrap();
     let program = rig._dir.path().join("acp-server");
     executable(&program, SERVER);
-    let blocked = rig._dir.path().join(if case.contains("-init-") { "block-init" } else if case.contains("edit-auth-") { "block-auth" } else { "block-open" });
+    let blocked = rig._dir.path().join(if case.starts_with("edit-init-") { "block-init" } else if case.contains("edit-auth-") { "block-auth" } else { "block-open" });
     std::fs::write(&blocked, b"").unwrap();
     if case.contains("fallback") { std::fs::write(rig._dir.path().join("fail-load"), b"").unwrap(); }
     if case.contains("auth") { std::fs::write(rig._dir.path().join("needs-auth"), b"").unwrap(); }

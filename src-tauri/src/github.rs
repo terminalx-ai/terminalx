@@ -1151,7 +1151,7 @@ mod tests {
         crate::data_privacy::initialize();
         assert!(output_within(command(), Duration::from_secs(5)).is_err());
         assert!(!marker.exists(), "disabled GitHub requests never spawn");
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         assert!(runtime.block_on(star_request(command(), &[])).is_none());
         assert!(!marker.exists(), "star requests use the same admission");
         std::env::remove_var("TERMINALX_TEST_MANAGED_PRIVACY");

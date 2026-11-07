@@ -2935,13 +2935,14 @@ impl SessionManager {
         let lease = privacy.map(|ticket| ticket.enter()).transpose();
         // A complete frame has one writer. Waiting for that writer owns no
         // session/admission/sender lock, so Stop and other tabs can progress.
-        let _frame = child.as_ref().map(|child| child.input_frame());
+        let frame = child.as_ref().map(|child| child.input_frame()).transpose();
         let mut bytes = write.line.as_bytes().to_vec();
         bytes.push(b'\n');
         let mut offset = 0;
         let deadline = Instant::now() + Duration::from_secs(5);
         let result = (|| -> Result<()> {
             lease.as_ref().map_err(|error| anyhow!("{error}"))?;
+            frame.as_ref().map_err(|error| anyhow!("{error}"))?;
             while offset < bytes.len() {
                 {
                     let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
@@ -2998,25 +2999,53 @@ impl SessionManager {
         // Success retired the queued write; failure may have raced Stop or
         // replacement. Never close a later turn or write into a new child.
         if let Err(error) = result {
-            if !child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
-                || !matches!(&rt.engine, Engine::Acp(a) if a.delivery_current(write.id, write.delivery.seq)) { return; }
-            if let Engine::Acp(a) = &mut rt.engine { a.withdraw_delivery(write.id); }
-            log::warn!("ACP prompt delivery stopped: {error:#}");
-            if attempted {
-                // A failed pipe may contain part of the frame. Keep ownership
-                // for Stop and never append another prompt or replay this one.
-                rt.stopping = true;
-                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+            if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
+                && matches!(&rt.engine, Engine::Acp(a) if a.delivery_current(write.id, write.delivery.seq)) {
+                if let Engine::Acp(a) = &mut rt.engine { a.withdraw_delivery(write.id); }
+                log::warn!("ACP prompt delivery stopped: {error:#}");
+                self.prompt_withdrawn(&mut rt, write.delivery.seq, None);
+                self.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
             }
-            self.prompt_withdrawn(&mut rt, write.delivery.seq, None);
-            self.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
         }
+        let deferred = if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) {
+            match &mut rt.engine {
+                Engine::Acp(a) if a.writing == Some(write.id) => { a.writing = None; std::mem::take(&mut a.deferred_writes) }
+                _ => Vec::new(),
+            }
+        } else { Vec::new() };
+        drop(rt);
+        drop(frame);
         // The activation acknowledgement follows partial-frame cleanup.
         drop(lease);
+        for (action, ticket) in deferred {
+            let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
+            let privacy = ticket.as_ref().map(|ticket| ticket.enter()).transpose();
+            let mut rt = runtime.lock().unwrap();
+            if rt.stopping || !child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) { break; }
+            if privacy.is_err() || self.accepting_work().is_err() || crate::issue_pipeline::admission::check(&session, &tab).is_err() {
+                if let Engine::Acp(a) = &mut rt.engine { a.discard_write(&action); }
+                if let Err(error) = self.admit_pending_settings(&mut rt) { log::warn!("withdraw deferred ACP setting: {error:#}"); }
+                continue;
+            }
+            // A newer prompt may own the pipe now. Preserve this control's
+            // original authority if it has to wait for that frame too.
+            if let Engine::Acp(a) = &mut rt.engine {
+                if a.writing.is_some() { a.deferred_writes.push((action, ticket)); continue; }
+            }
+            self.apply_actions(&mut rt, vec![action]);
+        }
     }
 
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
         for a in actions {
+            if matches!(&a, Action::Write(_) | Action::AcpMode { .. }) {
+                if let Engine::Acp(engine) = &mut rt.engine {
+                    if engine.writing.is_some() {
+                        engine.deferred_writes.push((a, crate::data_privacy::remote_ticket()));
+                        continue;
+                    }
+                }
+            }
             match a {
                 Action::AcpMode { mode, line } => {
                     if rt.stopping { continue; }
@@ -3029,6 +3058,7 @@ impl SessionManager {
                     }
                 }
                 Action::AcpPrompt(write) => {
+                    if let Engine::Acp(a) = &mut rt.engine { a.writing = Some(write.id); }
                     let manager = self.clone();
                     let runtime = rt.me.clone();
                     let child = rt.child.clone();
@@ -3945,7 +3975,7 @@ impl SessionManager {
         }
         let turn_open = rt.turn_open;
         let stdio = self.codex_stdio_mode_change(session_id, tab_id, mode, turn_open)?;
-        let waits = (turn_open && matches!(rt.engine, Engine::Cli(_))) || matches!(&rt.engine, Engine::Acp(a) if !a.ready);
+        let waits = (turn_open && matches!(rt.engine, Engine::Cli(_))) || matches!(&rt.engine, Engine::Acp(a) if !a.ready || a.writing.is_some());
         let (before, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
         let mut restart = false;
         match &mut rt.engine {

@@ -76,6 +76,8 @@ pub struct Acp {
     opening: bool,
     undelivered: HashMap<u64, u64>,
     pub opening_model_request: Option<String>,
+    pub writing: Option<u64>,
+    pub deferred_writes: Vec<(Action, Option<crate::data_privacy::Ticket>)>,
     cwd: String,
     pub model: Option<String>,
     /// The model the agent last said the session is on, when it says.
@@ -191,6 +193,14 @@ impl Acp {
     }
     pub fn waiting_for_session(&self) -> bool { self.stashed.is_some() }
     pub fn delivered(&mut self, id: u64) { self.undelivered.remove(&id); }
+    pub fn discard_write(&mut self, action: &Action) {
+        let line = match action { Action::Write(line) | Action::AcpMode { line: Some(line), .. } => line, _ => return };
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            if value.get("method").is_some() {
+                if let Some(id) = value["id"].as_u64() { self.pending.remove(&id); }
+            }
+        }
+    }
     pub fn withdraw_delivery(&mut self, id: u64) {
         self.undelivered.remove(&id);
         self.pending.remove(&id);
