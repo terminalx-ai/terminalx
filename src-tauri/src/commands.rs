@@ -1979,7 +1979,7 @@ pub fn copy_text(text: String) -> CmdResult<()> {
 /// A project at a glance: branches, contributors, the newest commits and pull requests.
 #[tauri::command]
 pub async fn project_overview(project_path: String) -> CmdResult<crate::project_overview::ProjectOverview> {
-    tauri::async_runtime::spawn_blocking(move || crate::project_overview::overview(Path::new(&project_path)))
+    github_work(move || crate::project_overview::overview(Path::new(&project_path)))
         .await
         .map_err(err)
 }
@@ -4451,7 +4451,7 @@ pub fn set_merged_cleanup_settings(app: AppHandle, patch: MergedCleanupPatch) ->
 #[tauri::command]
 pub async fn work_claims_list(project_path: String, provider: String, issue_urls: Vec<String>, state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::work_claims::WorkClaimsAnswer> {
     let service = state.work_claims.clone();
-    tauri::async_runtime::spawn_blocking(move || service.list(&project_path, &provider, &issue_urls)).await.map_err(err)
+    github_work(move || service.list(&project_path, &provider, &issue_urls)).await.map_err(err)
 }
 
 /// The cloud sessions the window knows about, for their work status.
@@ -4713,7 +4713,7 @@ pub async fn local_vm_start_runtime() -> CmdResult<crate::local_vm::VmStatus> {
 /// many sessions (and transcripts) would go with it.
 #[tauri::command]
 pub async fn workspace_disposition(project_path: String, path: String, fetch: Option<bool>) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
-    tauri::async_runtime::spawn_blocking(move || crate::session_ops::workspace_disposition(Path::new(&project_path), Path::new(&path), fetch == Some(true)))
+    github_work(move || crate::session_ops::workspace_disposition(Path::new(&project_path), Path::new(&path), fetch == Some(true)))
     .await
     .map_err(err)?
 }

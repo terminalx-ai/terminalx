@@ -720,6 +720,7 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
 /// verdict too ("cannot be checked"), so the dialog can ask about it rather
 /// than wave it through.
 pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) -> Result<crate::workspaces::WorkspaceDisposition> {
+    let _request = crate::github_process::scope();
     let mut disposition = crate::workspaces::disposition(project, path);
     if fetch && !disposition.is_main {
         disposition.landed = Some(crate::landed::check(project, path, crate::landed::Fetch::Fresh));

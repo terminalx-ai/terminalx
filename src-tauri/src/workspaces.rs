@@ -201,6 +201,7 @@ pub struct WorkspaceDisposition {
 }
 
 pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
+    let _request = crate::github_process::scope();
     if !path.exists() {
         return WorkspaceDisposition::default();
     }

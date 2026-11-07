@@ -66,7 +66,11 @@ SSH/gh identity probes) share admission and cancellation. They are refused while
 enabled and terminated, reaped and drained before activation is acknowledged,
 including when a process stops reading a request body. Authority is captured
 before blocking dispatch and retained across pages and fallbacks; an off/on cycle
-cannot revive queued work. Local Git metadata and checkout issue templates remain
+cannot revive queued work. Overview and disposition reads keep one request ticket,
+and serving-runtime GitHub RPCs capture it before the relay async queue, retain it
+through the blocking queue, repository fan-out and reconciliation, and drain
+app-owned network processes before acknowledging that runtime’s policy. Local Git
+metadata and checkout issue templates remain
 available. Identity headers refresh when privacy is disabled, without signing in
 again. Agent-owned subprocesses retain their network access.
 Update checks and downloads use native admission too: an already admitted

@@ -221,6 +221,23 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
     }
 }
 
+/// Only app-owned network operations use this boundary. Local Git inspection,
+/// edits and the agent process runner keep their existing execution paths.
+fn run_network(command: Command, timeout: Duration, what: &str) -> Result<Ran, RpcError> {
+    let ticket = crate::github_process::ticket();
+    let out = match crate::github_process::output_admitted(command, timeout, None, ticket.clone()) {
+        Ok(out) => out,
+        Err(_) if !ticket.valid() => return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)),
+        // Keep uncertain outcomes eligible for the caller's existing read-back
+        // reconciliation, under the same ticket. Revocation never gets here.
+        Err(error) if error.is::<crate::github_process::TimedOut>() =>
+            return Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }),
+        Err(error) => return Err(failure_error(what, &error.to_string(), classify(&error.to_string(), false))),
+    };
+    Ok(Ran { ok: out.status.success(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(), timed_out: false })
+}
+
 pub(super) fn git_command(dir: &Path) -> Command {
     let mut command = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     command
@@ -327,6 +344,7 @@ impl WorkspaceGit {
 
     /// Answer a `git.*` method; `None` for any other.
     pub fn handle(&self, method: &str, params: &Value) -> Option<Result<Value, RpcError>> {
+        let _request = crate::github_process::scope();
         let result = match method {
             "git.repositories" => Ok(self.list()),
             "git.status" => self.status(params),
@@ -463,7 +481,11 @@ impl WorkspaceGit {
         for (key, value) in env {
             command.env(key, value);
         }
-        run_bounded(command, timeout).map_err(RpcError::internal)
+        if matches!(args.first().copied(), Some("fetch" | "pull" | "push" | "ls-remote")) {
+            run_network(command, timeout, "git")
+        } else {
+            run_bounded(command, timeout).map_err(RpcError::internal)
+        }
     }
 
     /// A repository-relative path: lexically inside it. Git refuses paths
@@ -864,7 +886,7 @@ impl WorkspaceGit {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("NO_COLOR", "1");
-        let ran = run_bounded(command, timeout).map_err(RpcError::internal)?;
+        let ran = run_network(command, timeout, "gh")?;
         if ran.ok {
             return Ok(ran.stdout);
         }
@@ -1032,10 +1054,11 @@ impl WorkspaceGit {
     /// delete. Read-only and bounded; a forge that cannot be asked in time is
     /// `openPullRequests: null`, never an error.
     pub fn disposition_repositories(&self) -> Vec<Value> {
+        let _request = crate::github_process::scope();
         let (names, _) = self.repositories();
         // Side by side, so the whole answer takes about one repository's budget.
         std::thread::scope(|scope| {
-            let running: Vec<_> = names.iter().map(|name| scope.spawn(move || self.repository_facts(name))).collect();
+            let running: Vec<_> = names.iter().map(|name| scope.spawn(crate::github_process::queued(move || self.repository_facts(name)))).collect();
             running.into_iter().zip(&names).map(|(handle, name)| handle.join().unwrap_or_else(|_| json!({ "path": name }))).collect()
         })
     }

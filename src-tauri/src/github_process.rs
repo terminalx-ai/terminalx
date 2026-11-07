@@ -14,6 +14,15 @@ use crate::data_privacy::Ticket;
 
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Debug)]
+pub(crate) struct TimedOut(Duration);
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GitHub did not answer within {} seconds.", self.0.as_secs())
+    }
+}
+impl std::error::Error for TimedOut {}
+
 thread_local! {
     static CURRENT: RefCell<Option<Ticket>> = const { RefCell::new(None) };
 }
@@ -87,7 +96,7 @@ pub(crate) fn output_admitted(mut command: Command, timeout: Duration, input: Op
     let deadline = Instant::now() + timeout;
     let status = loop {
         if !ticket.valid() { break Err(anyhow::anyhow!(crate::data_privacy::MESSAGE)); }
-        if Instant::now() >= deadline { break Err(anyhow::anyhow!("GitHub did not answer within {} seconds.", timeout.as_secs())); }
+        if Instant::now() >= deadline { break Err(TimedOut(timeout).into()); }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -108,11 +117,25 @@ pub(crate) fn output_admitted(mut command: Command, timeout: Duration, input: Op
     if let Some(written) = written {
         written.map_err(|_| anyhow::anyhow!("GitHub input writer failed"))??;
     }
-    match (stdout, stderr) {
+    let output = match (stdout, stderr) {
         (Ok(stdout), Ok(stderr)) => Ok(Output { status, stdout: stdout?, stderr: stderr? }),
         _ => bail!("GitHub output reader failed"),
+    };
+    // A completed process no longer holds activation open between the reads of
+    // a logical operation. Its caller must keep the original request ticket.
+    drop(_privacy);
+    #[cfg(test)]
+    {
+        let hook = AFTER_OUTPUT.lock().unwrap().take();
+        if let Some(hook) = hook { hook(); }
     }
+    output
 }
+
+// Deterministically pause between physical calls, after all I/O and admission
+// are released, without mocking the real process/operation under test.
+#[cfg(test)]
+pub(crate) static AFTER_OUTPUT: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
 
 #[cfg(all(test, unix))]
 #[path = "github_process_privacy_tests.rs"]

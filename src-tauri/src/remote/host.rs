@@ -919,11 +919,10 @@ impl RelayHost {
                                         continue;
                                     }
                                     Some(method) if SLOW_METHODS.contains(&method) => {
-                                        let rpc = self.rpc.clone();
-                                        let peer = peer.clone();
+                                        let answer = self.rpc.handle_owned(peer.clone(), request);
                                         let answers = answers_tx.clone();
                                         tokio::spawn(async move {
-                                            let _ = answers.send(rpc.handle(&peer, &request).await);
+                                            let _ = answers.send(answer.await);
                                         });
                                         continue;
                                     }

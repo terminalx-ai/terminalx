@@ -829,17 +829,29 @@ impl WorkspaceRpc {
 
     /// Answer one request. Returns the response frame; notifications for
     /// this peer go through its outbound queue.
-    pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) -> Value {
+    pub fn handle<'a>(self: &'a Arc<Self>, peer: &'a Arc<Peer>, request: &'a Value) -> impl std::future::Future<Output = Value> + Send + 'a {
+        self.handle_admitted(peer, request, crate::github_process::ticket())
+    }
+
+    /// Capture at ingress, before the relay queues its first async task. The
+    /// request retains this ticket through idempotency waits and blocking work.
+    pub fn handle_owned(self: &Arc<Self>, peer: Arc<Peer>, request: Value) -> impl std::future::Future<Output = Value> + Send + 'static {
+        let rpc = self.clone();
+        let ticket = crate::github_process::ticket();
+        async move { rpc.handle_admitted(&peer, &request, ticket).await }
+    }
+
+    async fn handle_admitted(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value, ticket: crate::data_privacy::Ticket) -> Value {
         let id = request.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         let method = request.get("method").and_then(Value::as_str).unwrap_or("").to_string();
         let params = request.get("params").cloned().unwrap_or(Value::Null);
-        match self.dispatch(peer, &method, params).await {
+        match self.dispatch(peer, &method, params, ticket).await {
             Ok(result) => protocol::success(&id, result),
             Err(error) => protocol::failure(&id, &error),
         }
     }
 
-    async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         if method == "rpc.hello" {
             let granted = protocol::negotiate(&params)?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
@@ -894,7 +906,7 @@ impl WorkspaceRpc {
             self.authorize_participant(peer, spec)?;
         }
         if !spec.idempotent {
-            return self.execute(peer, method, params).await;
+            return self.execute(peer, method, params, ticket).await;
         }
         let request_id = params
             .get("clientRequestId")
@@ -910,7 +922,7 @@ impl WorkspaceRpc {
             match previous {
                 Some(previous) => previous,
                 None => {
-                    let result = self.execute(peer, method, params).await;
+                    let result = self.execute(peer, method, params, ticket).await;
                     self.idempotency.lock().unwrap().put(&peer.device_id, &request_id, &result, Instant::now());
                     result
                 }
@@ -990,7 +1002,7 @@ impl WorkspaceRpc {
         }
     }
 
-    async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
             return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;
@@ -999,7 +1011,7 @@ impl WorkspaceRpc {
         let peer = peer.clone();
         let method = method.to_string();
         // File, Git and process work blocks; keep it off the socket's task.
-        tokio::task::spawn_blocking(crate::github_process::queued(move || rpc.execute_blocking(&peer, &method, params)))
+        tokio::task::spawn_blocking(move || crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params)))
             .await
             .map_err(RpcError::internal)?
     }
