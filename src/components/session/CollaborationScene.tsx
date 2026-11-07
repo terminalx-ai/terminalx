@@ -18,10 +18,10 @@ const AGENT = "var(--color-add)";
  */
 export function CollaborationScene({ className }: { className?: string }) {
   return (
-    <div aria-hidden className={cn("relative h-56 w-full", className)} data-testid="collaboration-scene">
+    <div aria-hidden className={cn("relative h-36 w-full", className)} data-testid="collaboration-scene">
       {/* The conversation as the app draws it: input, output, input, output, input. A prompt is a
           card with its sender's name; the model's answer is plain lines under its mark. */}
-      <div className="absolute inset-x-[12%] top-0 flex flex-col gap-1.5">
+      <div className="cs-window absolute inset-x-[12%] bottom-[4.75rem] top-0 flex flex-col justify-end overflow-hidden">
         <Prompt className="cs-row-1" color={ME} who="You" width="58%" />
         <Output turn={1} lines={["92%", "64%"]} />
         <Prompt className="cs-row-3" color={DESIGNER} who="Designer" width="46%" />
@@ -55,7 +55,7 @@ export function CollaborationScene({ className }: { className?: string }) {
 /** Input: a prompt as the transcript draws it, a card, with who sent it and a line of their words. */
 function Prompt({ className, color, who, width }: { className: string; color: string; who: string; width: string }) {
   return (
-    <span className={cn("cs-row flex h-5 items-center gap-2 px-1.5", className)}>
+    <span className={cn("cs-row flex h-6 shrink-0 items-center gap-2 px-1.5 pt-1", className)}>
       <Tag color={color}>{who}</Tag>
       <span className="h-1.5 rounded-full bg-foreground/30" style={{ width } as CSSProperties} />
     </span>
@@ -65,7 +65,7 @@ function Prompt({ className, color, who, width }: { className: string; color: st
 /** Output: the model's mark, a moment of thinking dots, then its answer as plain lines growing in. */
 function Output({ turn, lines }: { turn: 1 | 2; lines: string[] }) {
   return (
-    <span className={cn("cs-row flex items-start gap-2 px-1.5", `cs-agent-${turn}`)}>
+    <span className={cn("cs-row flex shrink-0 items-start gap-2 px-1.5 pt-1.5", `cs-agent-${turn}`)}>
       <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground"><Sparkles className="size-3.5" /></span>
       <span className="relative flex min-h-4 flex-1 flex-col justify-center gap-1.5 py-[3px]">
         <span className={cn("cs-think absolute left-0 top-1.5 flex items-center gap-0.5", `cs-think-${turn}`)}>
