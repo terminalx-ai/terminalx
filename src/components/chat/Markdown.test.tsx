@@ -26,6 +26,38 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("untrusted PR markdown", () => {
+  it("blocks remote images and local/application destinations, including code and citations", async () => {
+    const prose = '[website](https://example.test/review) [local](/Applications/Terminal.app) [file](file:///Applications/Terminal.app) [email](mailto:person@example.test) [relative](README.md) [routed](streamdown:terminalx/%2FApplications%2FTerminal.app)\n\n![tracking pixel](https://untrusted.example/pixel.png)\n\n`file:///Applications/Terminal.app`\n\n```text\nfile:///Applications/Terminal.app\n```\n\n:codex-file-citation{path="/Applications/Terminal.app" purpose="output"}';
+    const { container } = render(<Markdown text={prose} remoteImages={false} webLinksOnly linkContext={context} />);
+    const website = await screen.findByRole("link", { name: "website" });
+    expect(screen.getAllByRole("link")).toEqual([website]);
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("tracking pixel (image blocked)")).toBeTruthy();
+    for (const label of ["local", "file", "email", "relative", "routed"]) {
+      fireEvent.click(screen.getByText(label));
+      fireEvent.contextMenu(screen.getByText(label));
+    }
+    expect(fs.inspectPath).not.toHaveBeenCalled();
+    expect(fs.openPath).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.click(website);
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith("https://example.test/review");
+  });
+
+  it("keeps the restriction for settled chunks while streaming", async () => {
+    const settled = '[local](/Applications/Terminal.app)\n\n' + 'a'.repeat(3100) + '\n\n';
+    const { rerender } = render(<Markdown text={`${settled}![pixel](https://untrusted.example/pixel.png)`} streaming remoteImages={false} webLinksOnly />);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    rerender(<Markdown text={`${settled}done`} streaming remoteImages={false} webLinksOnly />);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(fs.inspectPath).not.toHaveBeenCalled();
+  });
+});
+
 describe("rendered chat links", () => {
   it("activates URLs inside inline code and fenced code, and copies the destination", async () => {
     const copy = vi.fn().mockResolvedValue(undefined);
