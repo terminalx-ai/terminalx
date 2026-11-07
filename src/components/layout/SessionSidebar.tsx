@@ -1,3 +1,6 @@
+import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
+import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -232,9 +235,11 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   const listed = useMemo(() => (filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions), [filter, store.sessions]);
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
   const showArchived = store.showArchived && !filter.active;
+  const { sections: localSections } = useLocalSections();
+  const sectionedSessions = useMemo(() => groupLocalSessions(listed, localSections), [listed, localSections]);
   const { groups, chats, archivedChats } = useMemo(
-    () => groupConversations(listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, order),
-    [listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, order],
+    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, order),
+    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, order],
   );
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -283,10 +288,18 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       <SidebarOrderError />
       <ShowAgents.Provider value={showAgents}>
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-2" aria-label="Conversations" data-testid="conversation-list">
+        <LocalSidebarSections
+          groups={sectionedSessions.sections.map(({ section, items }) => ({ section, items: [...orderConversations(items, store.selectedSessionId, showArchived), ...(showArchived ? archivedConversations(items) : [])] }))}
+          filtered={filter.active}
+          renderSession={(session) => {
+            const link = conversationLink(session, store.projects, chatsPath, store.workspaces);
+            return link ? <ConversationRow key={session.id} session={session} selected={store.selectedSessionId === session.id} branch={link.branch} locationLabel={[link.name, link.branch].filter(Boolean).join(" · ")} linkTo={null} /> : chatRow(session);
+          }}
+        />
         {groups.length === 0 && chats.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
-        ) : groups.length === 0 && chats.length === 0 && archivedChats.length === 0 ? (
+        ) : groups.length === 0 && chats.length === 0 && archivedChats.length === 0 && localSections.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -304,6 +317,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                   <ProjectGroup
                     key={group.path}
                     group={group}
+                    hasSections={localSections.length > 0}
                     filtered={filter.active}
                     selectedId={store.selectedSessionId}
                     workspaces={store.workspaces[group.path] ?? []}
@@ -433,12 +447,14 @@ export function ListSection({
 /** A project, then its conversations along a guide line: the latest few, the open one, and "View all". */
 function ProjectGroup({
   group,
+  hasSections = false,
   filtered = false,
   selectedId,
   workspaces,
   onNewSession,
 }: {
   group: ConversationGroup;
+  hasSections?: boolean;
   /** The sidebar's filter is on: the project shows everything that passed, opened. */
   filtered?: boolean;
   selectedId: string | null;
@@ -669,7 +685,7 @@ function ProjectGroup({
         <SidebarSortList items={shown.map(sortBranch)}>
           {shown.map(row)}
         </SidebarSortList>
-        {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">No chats yet</li>}
+        {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">{hasSections ? "No chats in the main list" : "No chats yet"}</li>}
         {more && (
           <li>
             <button
@@ -989,6 +1005,7 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
           <Separator />
         </>
       )}
+      <MoveToLocalSectionItems sessionIds={ids} contextMenu={contextMenu} />
       <Item onSelect={() => void pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </Item>
@@ -1029,7 +1046,7 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
 }
 
 export function RowContextMenu(props: ConversationMenuProps) {
-  return <ContextMenuContent className="w-56"><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
+  return <ContextMenuContent className="w-56" onCloseAutoFocus={keepFocusForNameField}><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
 }
 
 /** The state that matters most among several: a question waiting, then work in progress, then work done. */
@@ -1045,6 +1062,7 @@ function ConversationRow({
   selected,
   branch,
   named = "title",
+  locationLabel,
   merged = false,
   onNewSession = null,
   label,
@@ -1059,6 +1077,8 @@ function ConversationRow({
   selected: boolean;
   /** What the row is called: the conversation's title, or (alone on its branch in a project) the branch. */
   named?: "title" | "branch";
+  /** Cross-project sections name the project too, without changing branch actions. */
+  locationLabel?: string;
   /** The branch's commits are in the default branch. */
   merged?: boolean;
   /** Start another session on the row's branch, where it is checked out (or a workspace from it). */
@@ -1086,7 +1106,7 @@ function ConversationRow({
   const status = pressingStatus(peers.map(sessionStatus));
   const agent = useContext(ShowAgents) ? conversationAgent(session) : null;
   const mark = agent && <AgentMark id={agent} className={cn("size-3 text-faint", yieldsToRowActions)} />;
-  const branchName = label ?? branch;
+  const branchName = locationLabel ?? label ?? branch;
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
@@ -1137,10 +1157,10 @@ function ConversationRow({
                 <StatusMark status={status} />
               </>
             )}
-            {named === "branch" || status === "in_progress" ? null : branch ? (
+            {named === "branch" || status === "in_progress" ? null : locationLabel || branch ? (
               <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
-                <GitBranch className="size-3 shrink-0" />
-                <span className="truncate">{branch}</span>
+                {branch ? <GitBranch className="size-3 shrink-0" /> : <Folder className="size-3 shrink-0" />}
+                <span className="truncate">{locationLabel ?? branch}</span>
               </span>
             ) : (
               <RowTime at={conversationTime(session)} />
@@ -1159,7 +1179,7 @@ function ConversationRow({
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </ContextMenu>
-        <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
       </DropdownMenu>

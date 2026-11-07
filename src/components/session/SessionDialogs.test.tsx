@@ -54,6 +54,8 @@ beforeEach(() => {
     switch (command) {
       case "list_projects":
         return { projects, lastSelected: null };
+      case "local_sections":
+        return { revision: 0, sections: [] };
       case "list_sessions":
         return [stored];
       case "list_harnesses":

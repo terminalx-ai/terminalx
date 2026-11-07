@@ -1,3 +1,6 @@
+import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { LocalSidebarSections } from "./LocalSidebarSections";
+import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
 import { useMemo, useState } from "react";
 import { Ellipsis, GitBranch, Pin, Settings, SquarePen } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -80,8 +83,12 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
   const showAgents = useMemo(() => mixesAgents(listed), [listed]);
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
-  const live = conversations.filter((session) => !session.worktreeRemoved);
-  const removed = conversations.filter((session) => session.worktreeRemoved);
+  const { sections: localSections } = useLocalSections();
+  const sectioned = groupLocalSessions(listed, localSections);
+  const ungrouped = new Set(sectioned.ungrouped.map((session) => session.id));
+  const ungroupedArchived = archived.filter((session) => ungrouped.has(session.id));
+  const live = conversations.filter((session) => ungrouped.has(session.id)).filter((session) => !session.worktreeRemoved);
+  const removed = conversations.filter((session) => ungrouped.has(session.id)).filter((session) => session.worktreeRemoved);
   const chatRow = (session: SessionEntry, inArchive = false) => (
     <ChatRow
       key={session.id}
@@ -116,10 +123,11 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
 
       <SidebarOrderError />
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
+        <LocalSidebarSections groups={sectioned.sections} filtered={filter.active} renderSession={(session) => chatRow(session)} />
         {conversations.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
-        ) : conversations.length === 0 && archived.length === 0 ? (
+        ) : conversations.length === 0 && archived.length === 0 && localSections.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -140,9 +148,9 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
                 <SidebarSortList items={removed.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{removed.map((session) => chatRow(session))}</SidebarSortList>
               </RemovedWorkspaces>
             )}
-            {archived.length > 0 && (
-              <ArchivedSessions id="list" count={archived.length} opened={archived.some((session) => session.id === store.selectedSessionId)}>
-                <SidebarSortList items={archived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{archived.map((session) => chatRow(session, true))}</SidebarSortList>
+            {ungroupedArchived.length > 0 && (
+              <ArchivedSessions id="list" count={ungroupedArchived.length} opened={ungroupedArchived.some((session) => session.id === store.selectedSessionId)}>
+                <SidebarSortList items={ungroupedArchived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{ungroupedArchived.map((session) => chatRow(session, true))}</SidebarSortList>
               </ArchivedSessions>
             )}
           </ul>
@@ -256,7 +264,7 @@ function ChatRow({
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </ContextMenu>
-        <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </DropdownMenuContent>
       </DropdownMenu>
