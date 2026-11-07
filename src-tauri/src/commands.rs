@@ -2999,6 +2999,26 @@ pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdRes
 }
 
 #[tauri::command]
+pub async fn pr_review_threads(url: String) -> CmdResult<crate::github::reviews::ReviewThreads> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::list(&url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_files(url: String, head: String, base: String) -> CmdResult<Vec<crate::github::reviews::ReviewFile>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::files(&url, &head, &base).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_resolve(url: String, thread_id: String, resolved: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::resolve(&url, &thread_id, resolved).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_reply(url: String, thread_id: String, body: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::reply(&url, &thread_id, &body).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_create(cwd: String, title: String, body: String, base: Option<String>, draft: bool, session_id: Option<String>) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let url = crate::github::create_pr(Path::new(&cwd), &title, &body, base.as_deref(), draft).map_err(err)?;
