@@ -81,7 +81,7 @@ export function ContextPopover({ tab, used, max, reportedModel, local, turns, co
   };
   return <Popover.Root open={open} onOpenChange={setOpen}>
     <Popover.Trigger asChild>
-      <button type="button" aria-label={percent == null ? "Context details" : `Context ${percent}% used`} title="Context and session details" className="flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-veil-raised focus-visible:outline focus-visible:outline-ring">
+      <button type="button" aria-label={percent == null ? "Context details" : `Context ${percent}% used`} title={percent == null ? "No context data yet · Context and session details" : "Context and session details"} className="flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-veil-raised focus-visible:outline focus-visible:outline-ring">
         <svg viewBox="0 0 16 16" className="size-4 -rotate-90" aria-hidden="true">
           <circle cx="8" cy="8" r="6" fill="none" stroke="var(--hairline-strong)" strokeWidth="2" />
           <circle cx="8" cy="8" r="6" fill="none" stroke={(percent ?? 0) > 85 ? "var(--destructive)" : (percent ?? 0) > 65 ? "var(--warning)" : "var(--ink-muted)"} strokeWidth="2" strokeDasharray={`${((percent ?? 0) / 100) * 37.7} 37.7`} strokeLinecap="round" />
@@ -97,7 +97,7 @@ export function ContextPopover({ tab, used, max, reportedModel, local, turns, co
         <Detail label="Effort">{tab.requestedEffort ?? tab.effort ?? "Default"}</Detail>
         <Detail label="Session cost (estimate)">{estimate.cost == null ? "Unavailable" : `${money(estimate.cost)}${estimate.partial ? " · Partial" : ""}`}</Detail>
       </dl>
-      <p className="mt-1 text-[11px] text-muted-foreground">Recorded finished turns at API prices. Subscription charges may differ.{estimate.partial ? " Some turns have no price or usage data." : ""}</p>
+      <p className="mt-1 text-[11px] text-muted-foreground">Recorded finished turns for the main agent only, at API prices. Subscription charges may differ.{estimate.partial ? " Some turns have no price or usage data." : ""}</p>
       <AccountDetails key={`${local}:${tab.harness}`} agent={tab.harness} local={local} />
       {(tab.harness === "claude" || tab.harness === "codex") && <Button size="sm" variant="outline" className="mt-4 w-full" disabled={compactDisabled || compacting || sending} onClick={() => void compact()}>{compacting ? "Compacting…" : sending ? "Sending…" : "Compact now"}</Button>}
       {error && <p role="alert" className="mt-2 text-xs text-destructive">Could not send /compact. Try again.</p>}
@@ -134,9 +134,9 @@ export function TurnDetailsPopover({ turn, children }: { turn: Turn; children: R
         <Detail label="Cache read">{count(read)}</Detail>
         <Detail label="Cache write">{count(write)}</Detail>
         <Detail label="Cache hit rate">{hit}</Detail>
-        <Detail label="Output speed">{speed}</Detail>
+        <Detail label="Avg output rate">{speed}</Detail>
       </dl>
-      <p className="mt-2 text-[11px] text-muted-foreground">Output speed uses the full turn duration, including tool calls.</p>
+      <p className="mt-2 text-[11px] text-muted-foreground">Average output rate uses the full turn duration, including tool calls.</p>
     </Popover.Content></Popover.Portal>
   </Popover.Root>;
 }

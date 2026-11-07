@@ -29,7 +29,7 @@ describe("context popover", () => {
     render(<ContextPopover {...base} />);
     const dialog = await openContext();
     await waitFor(() => expect(dialog.textContent).toContain("Claude account"));
-    for (const text of ["80,000 / 100,000", "sonnet", "claude-opus-4-6", "high", "max", "$0.12", "42% used"]) expect(dialog.textContent).toContain(text);
+    for (const text of ["80,000 / 100,000", "sonnet", "claude-opus-4-6", "high", "max", "$0.12", "42% used", "main agent only"]) expect(dialog.textContent).toContain(text);
     expect(within(dialog).queryByText("Codex weekly")).toBeNull();
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -50,6 +50,8 @@ describe("context popover", () => {
     expect(screen.getByRole("button", { name: "Context 20% used" })).toBeDefined();
     view.rerender(<ContextPopover {...base} used={0} />);
     expect(screen.getByRole("button", { name: "Context 0% used" })).toBeDefined();
+    view.rerender(<ContextPopover {...base} used={undefined} />);
+    expect(screen.getByRole("button", { name: "Context details" }).title).toContain("No context data yet");
   });
 
   it("reports a failed compact and permits a retry", async () => {
@@ -88,7 +90,7 @@ describe("turn details", () => {
     render(<TurnDetailsPopover turn={turn}>Worked for 2s</TurnDetailsPopover>);
     fireEvent.click(screen.getByRole("button", { name: "Turn details" }));
     const dialog = await screen.findByRole("dialog", { name: "Turn details" });
-    for (const text of ["Claude", "claude-sonnet-4-6", "70.0%", "50.0 tokens/s", "Started", "Ended", "Input (uncached)", "Cache write"]) expect(dialog.textContent).toContain(text);
+    for (const text of ["Claude", "claude-sonnet-4-6", "70.0%", "50.0 tokens/s", "Avg output rate", "Started", "Ended", "Input (uncached)", "Cache write"]) expect(dialog.textContent).toContain(text);
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });

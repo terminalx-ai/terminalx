@@ -696,6 +696,10 @@ impl Streamer {
                             None
                         }
                     };
+                    // Account only for records the mapper accepted, excluding
+                    // sidechains and skipped fork history. A future content
+                    // type that maps to nothing must emit usage here or have
+                    // a mapped sibling of the same message carrying its totals.
                     if !out.is_empty() || mark.is_some() {
                         let record = serde_json::from_str::<serde_json::Value>(line).ok();
                         if let (Some(record), Some(_)) = (&record, self.marker) { self.usage.record(record, mark, &mut out); }
