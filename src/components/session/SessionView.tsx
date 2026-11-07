@@ -199,6 +199,10 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  *    placeholder ("not available here") is left out. A switch that works
  *    stays, and the location chip is left out instead: the sidebar row says
  *    where the session runs and has the same workspace menu.
+ * 6. In that same narrow header the icon buttons on the right are 32 px
+ *    instead of 40 px wide, still the bar's full height
+ *    (`HEADER_TIGHT_BUTTONS`), so the full-height buttons do not take the
+ *    title's first characters either.
  *
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
@@ -210,6 +214,7 @@ const HEADER_CHIP_ICON = "my-1 size-3 shrink-0";
 const HEADER_CHIP_LABEL = "min-w-[2ch] grow basis-0";
 const HEADER_PROJECT_YIELDS = "min-w-0 shrink-[40]";
 const HEADER_TIGHT = "@max-[360px]/session-header:hidden";
+const HEADER_TIGHT_BUTTONS = "@max-[360px]/session-header:[&_button:has(>svg:only-child)]:w-8";
 
 /** GitHub's mark (the Octicons `mark-github` outline, MIT), since the icon set carries no brand marks. */
 function GithubMark({ className }: { className?: string }) {
@@ -708,7 +713,7 @@ export function SessionView({
           {/* At the right edge whatever the width. */}
           {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
               20px in a 40px-wide button; one beside a label (Share) stays at the label's scale. */}
-          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", !compact && "max-w-[70%]")}>
+          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (

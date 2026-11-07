@@ -8,6 +8,7 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+mod archive_script;
 mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
@@ -82,6 +83,7 @@ mod media;
 mod media_types;
 mod branch_overview;
 mod git;
+mod checkpoints;
 mod git_media;
 mod github;
 mod unfinished_merge;
@@ -387,6 +389,7 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
+            store::settings::file::install(app.handle())?;
             let state = app.state::<AppState>();
             state.runtime_supervisor.start(app.handle())?;
             match local_runtime::supervisor::attach(app.handle()) {
@@ -640,6 +643,7 @@ pub fn run() {
             commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
+            commands::reset_chat,
             commands::tab_handoff,
             commands::tab_to_terminal,
             commands::ensure_tab_started,
@@ -678,6 +682,10 @@ pub fn run() {
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
+            commands::turn_checkpoint,
+            commands::keep_turn,
+            commands::undo_turn,
+            commands::restore_undo,
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,
@@ -687,6 +695,10 @@ pub fn run() {
             commands::pr_associations,
             commands::pr_associations_batch,
             commands::pr_details,
+            commands::pr_review_threads,
+            commands::pr_review_files,
+            commands::pr_review_resolve,
+            commands::pr_review_reply,
             commands::pr_landed,
             commands::pr_create,
             commands::pr_merge,
@@ -771,6 +783,9 @@ pub fn run() {
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,
+            store::settings::file::settings_file_status,
+            store::settings::file::update_user_preferences,
+            store::settings::file::create_settings_file,
             commands::set_experimental_settings,
             commands::organization_work_status,
             commands::set_organization_work_status,

@@ -1,3 +1,4 @@
+import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
@@ -41,7 +42,7 @@ export interface GitSource {
   pull(): Promise<string | null>;
   fetch?(): Promise<string | null>;
   /** Local only: discarding in a cloud workspace is left to its terminal. */
-  discard?(path: string): Promise<void>;
+  discard?(path: string, base?: string | null, oldPath?: string | null): Promise<void>;
   /** Local only: a merge left in progress, told apart file by file (#736). */
   unfinishedMerge?(): Promise<UnfinishedMerge | null>;
   /** Local only, with `unfinishedMerge`: commit or abort exactly the merge that was read. */
@@ -49,6 +50,8 @@ export interface GitSource {
   abortMerge?(merge: UnfinishedMerge): Promise<void>;
   ghAvailable(): Promise<boolean>;
   prs(branch: string): Promise<PullRequest[]>;
+  /** Review threads through this source's GitHub credentials, when supported. */
+  reviewThreads?(url: string): import("./reviewThreads").ReviewThreadAccess;
   /** Durable transport locator, separate from the repository/PR URL identity. */
   prScope?: PrScope;
   prAccess?(association: PrAssociation): {
@@ -84,12 +87,18 @@ export function localGitSource(cwd: string): GitSource {
     commit: (message) => git.commit(cwd, message).then(() => null),
     push: () => git.push(cwd).then(() => null),
     pull: () => git.pull(cwd).then(() => null),
-    discard: (path) => git.discard(cwd, path),
+    discard: (path, base, oldPath) => git.discard(cwd, path, base, oldPath),
     unfinishedMerge: () => git.unfinishedMerge(cwd),
     commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
     prs: (branch) => gh.list(cwd, branch),
+    reviewThreads: (url) => ({
+      read: () => gh.reviewThreads(url),
+      file: reviewFileReader((snapshot) => gh.reviewFiles(url, snapshot.headOid, snapshot.baseOid)),
+      resolve: (id, resolved) => gh.resolveReview(url, id, resolved),
+      reply: (id, body) => gh.replyReview(url, id, body),
+    }),
     prScope: { kind: "local", cwd },
     prAccess: (association) => {
       if (association.scope.kind !== "local") throw new Error("Reconnect this PR's cloud workspace to refresh it.");

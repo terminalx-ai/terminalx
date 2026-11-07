@@ -16,7 +16,7 @@ import { ToolCallRow, ToolGroupRow } from "./ToolCallRow";
 import { usePrefs } from "@/lib/prefs";
 import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
-import { DisclosureScope, useDisclosure } from "./disclosures";
+import { DisclosureScope, useDisclosure, useSearchSection } from "./disclosures";
 import { ChatMedia } from "./ChatMedia";
 import { mediaMentions } from "@/lib/chatMedia";
 import { classifyRecovery } from "@/lib/recovery";
@@ -44,6 +44,7 @@ export const TurnBlock = memo(function TurnBlock(props: TurnProps) {
 interface TurnProps {
   turn: Turn;
   sessionId: string;
+  checkpointTabId?: string;
   cwd?: string;
   stream: StreamBlock[];
   working: boolean;
@@ -54,11 +55,13 @@ interface TurnProps {
   onSendAgain?: (seq: number) => void;
   /** The time line above the turn when it opens a new sitting ("Yesterday, 5:21 PM"); see \`turnDivider\`. */
   divider?: string | null;
+  onReset?: (endSeq: number) => void;
 }
 
 function TurnBody({
   turn,
   sessionId,
+  checkpointTabId,
   cwd,
   stream,
   working,
@@ -66,9 +69,11 @@ function TurnBody({
   onSendQueuedNow,
   onSendAgain,
   divider,
+  onReset,
 }: TurnProps) {
   const prefs = usePrefs();
   const [expanded, setExpanded] = useDisclosure("fold");
+  const failureSection = useSearchSection("failure");
   const hasAnswer = turn.work.some((w) => w.kind === "text");
   const toolItems = turn.work.filter((w) => w.kind === "tool" || w.kind === "tool_group" || w.kind === "reasoning" || w.kind === "subagent");
   const foldable = prefs.foldToolCalls && !turn.live && toolItems.length > 0 && (hasAnswer || turn.completed);
@@ -146,15 +151,15 @@ function TurnBody({
         <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
           <CircleAlert className="mt-0.5 size-4 shrink-0" />
           <div className="min-w-0 select-text">
-            <div className="whitespace-pre-wrap"><LinkedText text={turn.finalText} context={linkContext} citations /></div>
-            {turn.detail && <AgentSaid text={turn.detail} />}
+            <div {...failureSection} className="whitespace-pre-wrap"><LinkedText text={turn.finalText} context={linkContext} citations /></div>
+            {turn.detail && <AgentSaid text={turn.detail} searchPart="failure-detail" />}
           </div>
         </div>
       )}
 
-      {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
+      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onReset={onReset} />}
     </div>
   );
 }
@@ -163,11 +168,12 @@ function TurnBody({
  * The agent's own last line under an error (#667): "update Codex" or "unauthorized (401)" without opening its terminal.
  * Plain text, already bounded and redacted by the runtime.
  */
-function AgentSaid({ text }: { text: string }) {
+function AgentSaid({ text, searchPart }: { text: string; searchPart: string }) {
+  const section = useSearchSection(searchPart);
   return (
     <p className="mt-1 break-words font-mono text-[12px] text-destructive/80" data-testid="agent-said">
       <span className="sr-only">The agent said: </span>
-      {text}
+      <span {...section}>{text}</span>
     </p>
   );
 }
@@ -200,7 +206,7 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * A settled turn's one footer row: when the answer came, how the turn went
  * when no header said so, and a copy of the answer on hover.
  */
-function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) {
+function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome | null; onReset?: (endSeq: number) => void }) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
   const text = answer.map((w) => w.text).join("\n\n");
@@ -211,10 +217,13 @@ function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) 
     return () => window.clearTimeout(id);
   }, [copied]);
   const quiet = outcome?.tone === "ok";
-  if (!messageTime(ts) && !outcome && !text) return null;
+  if (!messageTime(ts) && !outcome && !text && !onReset) return null;
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
       <MessageTime ts={ts} inline />
+      {onReset && turn.completed?.status === "ok" && turn.completed.seq != null && (
+        <button type="button" onClick={() => onReset(turn.completed!.seq!)} className="rounded px-1.5 py-1 hover:bg-veil-raised focus-visible:outline">Reset to here</button>
+      )}
       {outcome && (
         <span className={cn("flex items-center gap-1.5", outcome.tone === "failed" && "text-destructive")}>
           {!quiet && <OutcomeIcon tone={outcome.tone} />}
@@ -267,9 +276,10 @@ export function previewFromPartialJson(partial: string): string {
 }
 
 function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void }) {
+  const section = useSearchSection(item.kind === "queued" ? `message:${item.seq}` : item.key);
   switch (item.kind) {
     case "text":
-      return <div className="mb-3"><Markdown text={item.text} linkContext={linkContext} />{linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
+      return <div className="mb-3"><div {...section}><Markdown text={item.text} linkContext={linkContext} /></div>{linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
     case "reasoning":
       return <ReasoningRow name={item.key} text={item.text} linkContext={linkContext} />;
     case "tool":
@@ -284,7 +294,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
           <div className="flex items-center gap-2">
             <Clock className="size-3.5 shrink-0" />
             {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-            <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={item.text} context={linkContext} /><MessageTime ts={item.messageTs} /></div>
+            <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
             {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
               <WithTooltip label="Interrupt the agent and send this now">
                 <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
@@ -337,6 +347,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
 /** The prompt an automation or a handoff started the session with, folded under its status line. */
 /** An error in the conversation. Its time in view, in the tab in front, is told to the tab's recovery incidents (#815). */
 function ErrorRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "error" }>; linkContext?: { sessionId: string; cwd: string } }) {
+  const section = useSearchSection(item.key);
   const reporter = useRecoveryReporter();
   const ref = useRef<HTMLDivElement>(null);
   const inView = useInView(ref, !!reporter?.active);
@@ -345,8 +356,8 @@ function ErrorRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "erro
     <div ref={ref} className="my-1 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
       <CircleAlert className="mt-0.5 size-4 shrink-0" />
       <div className="min-w-0 select-text">
-        <span className="whitespace-pre-wrap"><LinkedText text={item.text} context={linkContext} /></span>
-        {item.detail && <AgentSaid text={item.detail} />}
+        <span {...section} className="whitespace-pre-wrap"><LinkedText text={item.text} context={linkContext} /></span>
+        {item.detail && <AgentSaid text={item.detail} searchPart={`${item.key}:detail`} />}
       </div>
     </div>
   );
@@ -427,6 +438,7 @@ function ReaderMessage({
   onSendAgain?: (seq: number) => void;
 }) {
   const layout = usePrefs().transcriptLayout;
+  const section = useSearchSection(`message:${message.seq}`);
   return (
     <div className={cn(className, "group/msg relative flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
       <div
@@ -451,7 +463,7 @@ function ReaderMessage({
           </div>
         ) : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
-        <div className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}><LinkedText text={message.text} context={linkContext} /></div>
+        <div {...(message.seq == null ? {} : section)} className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}><LinkedText text={message.text} context={linkContext} /></div>
         {message.sent !== undefined && (
           <details className="mt-2 text-xs text-muted-foreground" data-testid="prompt-changed">
             <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded focus-visible:outline focus-visible:outline-2">
@@ -529,6 +541,7 @@ function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: 
 
 function ReasoningRow({ name, text, linkContext }: { name: string; text: string; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useDisclosure(name);
+  const section = useSearchSection(name);
   const first = text.split("\n").find((l) => l.trim()) ?? "";
   return (
     <div>
@@ -540,7 +553,7 @@ function ReasoningRow({ name, text, linkContext }: { name: string; text: string;
         <span className="min-w-0 flex-1 truncate italic opacity-80">{open ? "Thinking" : <LinkedText text={first} context={linkContext} />}</span>
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning details" : "Expand reasoning details"}><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
       </div>
-      {open && <div className="ml-4.5 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
+      {open && <div {...section} className="ml-4.5 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
     </div>
   );
 }
