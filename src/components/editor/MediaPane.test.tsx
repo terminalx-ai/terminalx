@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fs } from "@/lib/api";
 import { liveEditorsFor } from "@/lib/editorViews";
-import { getEditors, openFile, closeAllEditors } from "@/lib/editors";
+import { getEditors, openFile, closeAllEditors, type FileEditorEntry } from "@/lib/editors";
 import { MediaPane } from "./MediaPane";
 
 vi.mock("@/lib/api", () => ({ fs: { openMedia: vi.fn(), closeMedia: vi.fn(), mtime: vi.fn(), readText: vi.fn(), writeText: vi.fn(), openPath: vi.fn() } }));
@@ -22,7 +22,7 @@ beforeEach(() => {
 afterEach(async () => { cleanup(); await closeAllEditors("media-test"); vi.restoreAllMocks(); vi.clearAllMocks(); });
 function entry(rel: string) {
   const id = openFile("media-test", "/workspace", rel);
-  return getEditors().editors.find((e) => e.id === id)!;
+  return getEditors().editors.find((e): e is FileEditorEntry => e.id === id && e.kind !== "diff" && e.kind !== "pr")!;
 }
 
 describe("media surfaces", () => {

@@ -1,7 +1,8 @@
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { RemoteGit } from "@terminalx/portable/workspaceGit";
 import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { cloudGitSource } from "@/lib/gitSource";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PullRequest } from "@/lib/api";
 import type { WorkspaceDisposition } from "@/types/session";
@@ -12,6 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const { PrPanel } = await import("./PrPanel");
+const render = (ui: Parameters<typeof rtlRender>[0]) => rtlRender(ui, { wrapper: TooltipProvider });
 
 const cwd = "/repos/raccoon/.raccoon/worktrees/65-delete-workspace";
 const projectPath = "/repos/raccoon";
@@ -367,4 +369,36 @@ it("keeps a merged cloud PR visible without offering creation when landed verifi
   expect(call).toHaveBeenCalledWith("git.prLanded", { repo: "app" });
   expect(screen.queryByRole("button", { name: "Create pull request" })).toBeNull();
   expect(screen.queryByText(/Could not refresh/)).toBeNull();
+});
+
+it("opens a PR from its header and refreshes the same identity after the checkout changes", async () => {
+  const { getEditors, dropEditors } = await import("@/lib/editors");
+  let title = "Review this PR";
+  let checks = "pending";
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "gh_available") return true;
+    if (command === "work_status") return { isRepo: true, dirty: false, branch: "new-branch", defaultBranch: "main", ahead: 0, behind: 0, aheadOfBase: 1 };
+    if (command === "pr_list" || command === "pr_details") {
+      const pr = { ...mergedPr, title, state: "OPEN", checks: [{ name: "CI", state: checks }] };
+      return command === "pr_list" ? [pr] : pr;
+    }
+    throw new Error(`Unexpected command: ${command}`);
+  });
+  const panel = render(<PrPanel cwd={cwd} branch="new-branch" active busy={false} inline />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open PR #62 in centre tab" }));
+  const entry = getEditors().editors.find((e) => e.kind === "pr" && e.root === cwd)!;
+  expect(entry.name).toBe("PR #62");
+  if (entry.kind !== "pr") throw new Error("Expected PR entry");
+  panel.unmount();
+  render(<PrPanel cwd={cwd} branch={entry.pr.head} selectedPr={entry.pr} active busy={false} />);
+  await screen.findByRole("button", { name: "Review this PR" });
+  expect(screen.getByLabelText("CI: pending")).toBeTruthy();
+  title = "Updated review";
+  checks = "success";
+  fireEvent.click(screen.getByRole("button", { name: "Refresh pull requests" }));
+  await screen.findByRole("button", { name: "Updated review" });
+  expect(screen.getByLabelText("CI: success")).toBeTruthy();
+  expect(mocks.invoke).toHaveBeenCalledWith("pr_details", { cwd, number: 62, url: mergedPr.url });
+  expect(screen.queryByRole("button", { name: "Create pull request" })).toBeNull();
+  dropEditors((e) => e.id === entry.id);
 });

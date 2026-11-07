@@ -3,15 +3,15 @@ import { FolderOpen, RotateCcw, ZoomIn, ZoomOut } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { fs, type MediaFile } from "@/lib/api";
-import type { EditorEntry } from "@/lib/editors";
+import type { FileEditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, useFileSource, type FileState } from "@/lib/workspaceFiles";
 
 /** A media tab never mounts CodeMirror or registers a saveable buffer. */
-export function MediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+export function MediaPane({ entry, visible }: { entry: FileEditorEntry; visible: boolean }) {
   return entry.source ? <CloudMediaPane entry={entry} visible={visible} /> : <LocalMediaPane entry={entry} visible={visible} />;
 }
 
-function LocalMediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+function LocalMediaPane({ entry, visible }: { entry: FileEditorEntry; visible: boolean }) {
   const pane = useRef<HTMLDivElement>(null);
   const [media, setMedia] = useState<MediaFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +103,7 @@ function LocalMediaPane({ entry, visible }: { entry: EditorEntry; visible: boole
  * A cloud workspace's media file (PRO-24): read from the runtime in parts
  * into an object URL, dropped when the tab closes or the file is reloaded.
  */
-function CloudMediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+function CloudMediaPane({ entry, visible }: { entry: FileEditorEntry; visible: boolean }) {
   const pane = useRef<HTMLDivElement>(null);
   const source = useFileSource(entry.source, entry.root);
   const [media, setMedia] = useState<{ url: string; state: FileState } | null>(null);

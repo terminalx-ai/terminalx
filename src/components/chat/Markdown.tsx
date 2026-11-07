@@ -18,14 +18,14 @@ const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] })
 const citedRemarkPlugins = [...Object.values(defaultRemarkPlugins), remarkCodexFileCitations];
 const routedRemarkPlugins = [...citedRemarkPlugins, routeMarkdownLinks];
 
-const Block = memo(function Block({ text, streaming, mode, linkContext }: { text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
+const Block = memo(function Block({ text, streaming, mode, linkContext, remoteImages = true }: { remoteImages?: boolean; text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
   // Streamdown would complete unfinished Markdown itself; done here, it leaves Codex file citations whole (#776).
   const source = useMemo(() => (streaming ? completeStreamingMarkdown(text) : text), [text, streaming]);
   const components = useMemo(() => ({
     a: chatLinkComponent(linkContext),
     table: MarkdownTable,
     // A picture on this computer is drawn under the message (ChatMedia); the web view cannot load its path.
-    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? <img src={src} alt={alt ?? ""} className="max-h-96 max-w-full rounded-lg" /> : null,
+    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? !remoteImages && /^https?:/i.test(src) ? <span>{alt || "Remote image"} (image blocked)</span> : <img src={src} alt={alt ?? ""} className="max-h-96 max-w-full rounded-lg" /> : null,
     inlineCode: ({ children }: { children?: ReactNode }) => <code className="rounded bg-well px-1 py-0.5 font-mono text-[0.9em]"><LinkedText text={String(children ?? "")} context={linkContext} /></code>,
     pre: ({ children }: { children?: ReactNode }) => {
       if (!isValidElement(children)) return children;
@@ -35,7 +35,7 @@ const Block = memo(function Block({ text, streaming, mode, linkContext }: { text
       const language = child.props.className?.match(/language-([^\s]+)/)?.[1] ?? "text";
       return <LinkedCode code={code} language={language} mode={mode} plugin={codePlugin} context={linkContext} />;
     },
-  }), [linkContext, mode]);
+  }), [linkContext, mode, remoteImages]);
   return (
     <div className="prose-chat select-text" data-mode={mode}>
       <Streamdown
@@ -67,11 +67,14 @@ export const Markdown = memo(function Markdown({
   streaming,
   className,
   linkContext,
+  remoteImages,
 }: {
   text: string;
   streaming?: boolean;
   className?: string;
   linkContext?: ChatLinkContext;
+  /** Disable network image loads for prose authored by other people, e.g. PR bodies. */
+  remoteImages?: boolean;
 }) {
   const { resolvedMode } = useTheme();
   const shown = useMemo(() => (streaming ? withoutPartialCodexFileCitation(text) : text), [text, streaming]);
@@ -79,7 +82,7 @@ export const Markdown = memo(function Markdown({
   if (chunks.length === 1) {
     return (
       <div className={className}>
-        <Block text={shown} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} />
+        <Block text={shown} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} />
       </div>
     );
   }
@@ -89,7 +92,7 @@ export const Markdown = memo(function Markdown({
   return (
     <div className={className}>
       {chunks.map((c, i) => (
-        <Block key={i} text={c} streaming={i === last} mode={resolvedMode} linkContext={linkContext} />
+        <Block key={i} text={c} streaming={i === last} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} />
       ))}
     </div>
   );

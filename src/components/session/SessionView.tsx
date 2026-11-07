@@ -29,7 +29,7 @@ import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSe
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
 import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
-import { setLastFocused, useEditors } from "@/lib/editors";
+import { isReviewEditor, setLastFocused, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
 import { ProjectSearch } from "@/components/editor/ProjectSearch";
@@ -422,6 +422,7 @@ export function SessionView({
   const project = store.projects.find((p) => p.path === session.projectPath);
   // The GitHub account the folder is connected to: a chat's is its linked repo's; a plain folder has none; a cloud session's is not this computer's to say.
   const githubIdentity = useGithubIdentity(cloud || !isGit ? null : (session.link?.path ?? session.cwd));
+  const ed = useEditors();
   const terminals = useTerminals();
   // A shell an agent was started in is that agent's tab (#437), drawn by its tab view and not as a shell beside it.
   const shellPanes = local ? terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden && !session.tabs.some((tab) => tab.pane === pane.id)) : [];
@@ -448,6 +449,7 @@ export function SessionView({
     activeTab: session.activeTab,
     terminalIds,
     browserIds: browserPages.map((page) => page.id),
+    reviewIds: local ? ed.editors.filter((e) => e.sessionId === session.id && isReviewEditor(e)).map((e) => e.id) : [],
   });
   const opened = !!kept || (!!session.activeTab && agentIds.includes(session.activeTab));
   shownTab.current = cloud && selected && opened ? { sessionId: session.id, tab: selected } : null;
@@ -488,7 +490,6 @@ export function SessionView({
   useShortcut("session.toggleTerminalView", () => {
     if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, viewPlace);
   });
-  const ed = useEditors();
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
@@ -897,7 +898,7 @@ export function SessionView({
                 </div>
               )}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active />}
+            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
           </div>
         </section>
       </div>

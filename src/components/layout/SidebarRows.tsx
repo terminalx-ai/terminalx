@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, type HTMLAttributes, type ReactNode, type Ref } from "react";
-import { Archive, ArrowUp, ChevronDown, Globe, Lock, Pin, Terminal, X } from "@/icons";
+import { Archive, ArrowUp, ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Pin, Terminal, X } from "@/icons";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { formatSize } from "@/lib/workspaceSizes";
@@ -386,4 +386,14 @@ export function BrowserTabRow({ label, url, agentTarget, ...row }: TabRowBase & 
       {agentTarget ? <span className="size-1.5 shrink-0 rounded-full bg-info" aria-label="Active page for agents" /> : null}
     </TabRow>
   );
+}
+
+/** A full-width diff or pull request, sharing selection with the workspace strip. */
+export function ReviewTabRow({ label, kind, dirty, ...row }: TabRowBase & { label: string; kind: "diff" | "pr"; dirty: boolean }) {
+  const Icon = kind === "diff" ? FileDiff : GitPullRequest;
+  return <TabRow {...row} tone="peer" label={label} title={label} closeLabel={`Close ${label}`}>
+    <Icon className="size-3.5 shrink-0" />
+    <span className="min-w-0 flex-1 truncate">{label}</span>
+    {dirty && <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" />}
+  </TabRow>;
 }

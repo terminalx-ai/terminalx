@@ -1,6 +1,7 @@
 import { ReviewCommentsProvider } from "./ReviewComments";
 import { useEffect, useId, useMemo, useState } from "react";
 import { Columns2, Rows2 } from "@/icons";
+import { openDiff } from "@/lib/editors";
 import { changeRange, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { cn } from "@/lib/cn";
@@ -34,6 +35,7 @@ function readChoice(source: GitSource): Choice {
 export function ChangesPanel(props: {
   reviewTabId?: string | null;
   cwd?: string;
+  sessionId?: string;
   source?: GitSource;
   events: AgentEvent[];
   version: number;
@@ -43,11 +45,13 @@ export function ChangesPanel(props: {
   workingTree?: boolean;
 }) {
   const source = useMemo(() => props.source ?? localGitSource(props.cwd ?? ""), [props.source, props.cwd]);
-  const panel = <ScopedChanges key={source.key} {...props} source={source} />;
+  const root = !source.cloud ? props.cwd ?? (source.key.startsWith("local:") ? source.key.slice(6) : undefined) : undefined;
+  const panel = <ScopedChanges key={source.key} {...props} source={source} editor={root ? { root, sessionId: props.sessionId ?? `checkout:${root}` } : undefined} />;
   return props.reviewTabId ? <ReviewCommentsProvider key={source.key} source={source} active={props.active} tabId={props.reviewTabId}>{panel}</ReviewCommentsProvider> : panel;
 }
 
-function ScopedChanges({ source, events, version, active, live, workingTree }: {
+function ScopedChanges({ source, events, version, active, live, workingTree, editor }: {
+  editor?: { root: string; sessionId: string };
   source: GitSource;
   events: AgentEvent[];
   version: number;
@@ -125,6 +129,10 @@ function ScopedChanges({ source, events, version, active, live, workingTree }: {
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [source, choice.scope, choice.target, choice.scope === "turn" ? turnRange?.base : null, choice.scope === "turn" ? turnRange?.head : null, active, tick, workingTree, live, reads]);
+  const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openDiff(editor.sessionId, editor.root, file.path, {
+    scope: choice.scope === "turn" ? "turn" : "all", range, oldPath: file.oldPath,
+    target: choice.target, uncommitted: choice.scope === "uncommitted",
+  }) : undefined;
   const label = choice.scope === "all" ? "All changes" : choice.scope === "uncommitted" ? "Uncommitted changes" : live ? "This turn" : "Last turn";
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -150,7 +158,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree }: {
       {result?.merge && <MergeInProgress source={source} merge={result.merge} allChanges={choice.scope === "all"} onChanged={() => setTick((t) => t + 1)} />}
       {result?.mergeError && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">Whether a merge is in progress could not be read: {result.mergeError}</div>}
       <div className="min-h-0 flex-1">
-        {repo ? <RepoPanel source={source} active={active} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} embedded /> : <ChangesBody key={`${choice.scope}:${choice.target}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
+        {repo ? <RepoPanel onOpenDiff={onOpenDiff} source={source} active={active} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} embedded /> : <ChangesBody onOpenDiff={onOpenDiff} key={`${choice.scope}:${choice.target}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
           groups={choice.scope === "uncommitted" && result?.merge ? mergeGroups(result.merge, result.files) : null}
           label={label} empty={loading ? "Loading changes…" : error ? "Changes unavailable." : "No changes in this scope."}
           noRange={loading ? "Loading changes…" : "Changes unavailable."} />}
@@ -169,7 +177,9 @@ function ChangesBody({
   label,
   empty,
   noRange,
+  onOpenDiff,
 }: {
+  onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   source: GitSource;
   files: ChangedFile[];
   /** The files of a merge in progress, by what they are; null to list them as one. */
@@ -205,6 +215,11 @@ function ChangesBody({
     return () => { cancelled = true; };
   }, [source, current?.path, current?.oldPath, range?.base, range?.head]);
 
+  const select = (path: string) => {
+    const file = files.find((f) => f.path === path);
+    if (onOpenDiff && file && range) onOpenDiff(file, range);
+    else setSelected((s) => s === path ? null : path);
+  };
   const totals = sumChanges(files);
 
   if (!range) return <div role={error ? "alert" : "status"} className="px-3 py-4 text-xs text-muted-foreground">{error ?? noRange}</div>;
@@ -218,7 +233,7 @@ function ChangesBody({
           {totals.deletions > 0 && <span className="text-destructive">−{totals.deletions}</span>}
         </span>
         {loading && <span className="text-faint">…</span>}
-        <div className="ml-auto flex items-center gap-0.5">
+        {!onOpenDiff && <div className="ml-auto flex items-center gap-0.5">
           <WithTooltip label="Unified">
             <Button variant={mode === "unified" ? "secondary" : "ghost"} size="icon-xs" aria-label="Unified" onClick={() => setMode("unified")}>
               <Rows2 />
@@ -229,16 +244,16 @@ function ChangesBody({
               <Columns2 />
             </Button>
           </WithTooltip>
-        </div>
+        </div>}
       </div>
       {error && <div className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", pair ? "max-h-[40%] border-b border-hairline" : "flex-1")}>
         {groups?.length ? groups.map((group) => (
           <section key={group.key} aria-label={group.title}>
             <h3 className="px-3 pt-2 text-[11px] font-medium text-faint">{group.title} · {group.files.length}</h3>
-            <FileList files={group.files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} />
+            <FileList files={group.files} selected={selected} onSelect={select} empty={empty} />
           </section>
-        )) : <FileList files={files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} />}
+        )) : <FileList files={files} selected={selected} onSelect={select} empty={empty} />}
       </div>
       {pairError && <div role="alert" className="px-3 py-2 text-xs text-destructive">{pairError}</div>}
       {current && !pair && !pairError && <div role="status" className="px-3 py-2 text-xs">Loading file diff…</div>}

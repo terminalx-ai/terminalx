@@ -274,3 +274,10 @@ describe("Codex file citations (#776)", () => {
     expect(screen.getAllByRole("link")).toHaveLength(1);
   });
 });
+
+
+it("blocks remote image loads in untrusted PR prose while preserving the image description", () => {
+  const { container } = render(<Markdown text="![build screenshot](https://untrusted.example/track.png)" remoteImages={false} />);
+  expect(container.querySelector("img")).toBeNull();
+  expect(screen.getByText("build screenshot (image blocked)")).toBeTruthy();
+});
