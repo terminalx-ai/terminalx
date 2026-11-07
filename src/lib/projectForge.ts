@@ -3,16 +3,18 @@ import { api, type ProjectForge } from "./api";
 
 // Share a project check between its sessions. Refresh while visible so signing
 // in to gh or changing origin does not require restarting the app.
-const checks = new Map<string, { at: number; value: Promise<ProjectForge> }>();
+const checks = new Map<string, { expiresAt: number | null; value: Promise<ProjectForge> }>();
 const RECHECK = 60_000;
+const RETRY = 10_000;
 export function projectForge(path: string): Promise<ProjectForge> {
   const cached = checks.get(path);
-  if (cached && Date.now() - cached.at < RECHECK) return cached.value;
-  const value = api.projectForge(path);
-  const entry = { at: Date.now(), value };
+  if (cached && (cached.expiresAt === null || Date.now() < cached.expiresAt)) return cached.value;
+  const value = api.projectForge(path).catch((): ProjectForge => "githubUnavailable");
+  const entry: { expiresAt: number | null; value: Promise<ProjectForge> } = { expiresAt: null, value };
   checks.set(path, entry);
-  const forget = () => { if (checks.get(path) === entry) checks.delete(path); };
-  void value.then((forge) => { if (forge === "githubUnavailable") forget(); }, forget);
+  // Share pending checks regardless of their duration. Start the short failure
+  // cache at completion, so remounts cannot immediately repeat a timed-out call.
+  void value.then((forge) => { entry.expiresAt = Date.now() + (forge === "githubUnavailable" ? RETRY : RECHECK); });
   return value;
 }
 

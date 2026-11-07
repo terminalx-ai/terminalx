@@ -754,8 +754,8 @@ pub enum ProjectForge {
     LocalOnly,
 }
 
-/// Preserve the same GitHub aliases and Enterprise hosts as the account UI.
-/// For other remotes, let gh resolve its host configuration from this checkout.
+/// Recognized forges work without gh. For opaque aliases and custom domains,
+/// ask gh using this checkout's host configuration.
 pub fn project_forge(cwd: &Path) -> ProjectForge {
     let origin = crate::git::remote_url(cwd);
     let has_remote = if origin.is_some() { true } else {
@@ -765,28 +765,52 @@ pub fn project_forge(cwd: &Path) -> ProjectForge {
         }
     };
     detect_forge(origin.as_deref(), has_remote, || {
-        let mut command = gh()?;
+        let Ok(mut command) = gh() else { return ForgeLookup::MissingCli; };
         command.current_dir(cwd).args(["repo", "view", "--json", "name"])
             .env_remove("GH_REPO").env("GH_NO_UPDATE_NOTIFIER", "1");
-        crate::git::output_within(command, BOUNDED).map_err(|error| anyhow!("{error}"))
+        forge_lookup(crate::git::capture_within(command, BOUNDED))
     })
 }
 
-fn detect_forge(origin: Option<&str>, has_remote: bool, lookup: impl FnOnce() -> Result<String>) -> ProjectForge {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForgeLookup {
+    Github,
+    NotGithub,
+    MissingCli,
+    LoggedOut,
+    Unavailable,
+}
+
+fn forge_lookup(output: std::io::Result<std::process::Output>) -> ForgeLookup {
+    match output {
+        Ok(output) if output.status.success() => ForgeLookup::Github,
+        // gh reserves exit 4 for authentication required. Do not depend on
+        // its login instructions, which differ between CLI versions.
+        Ok(output) if output.status.code() == Some(4) => ForgeLookup::LoggedOut,
+        Ok(output) if String::from_utf8_lossy(&output.stderr).contains("none of the git remotes configured for this repository point to a known GitHub host") => ForgeLookup::NotGithub,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ForgeLookup::MissingCli,
+        _ => ForgeLookup::Unavailable,
+    }
+}
+
+fn detect_forge(origin: Option<&str>, has_remote: bool, lookup: impl FnOnce() -> ForgeLookup) -> ProjectForge {
+    use crate::github_identity::{classify_remote_host, RemoteHost};
     if !has_remote {
         return ProjectForge::LocalOnly;
     }
-    if origin.is_some_and(|remote| crate::github_identity::remote_host_kind(remote) == "github") {
-        // Availability belongs to the PR UI's install/auth/network guidance;
-        // logging out must not turn a known GitHub project into a local one.
-        return ProjectForge::Github;
+    match origin.map(classify_remote_host) {
+        // Availability belongs to the PR UI's install/auth/network guidance.
+        Some(RemoteHost::Github) => return ProjectForge::Github,
+        Some(RemoteHost::Gitlab | RemoteHost::Other) => return ProjectForge::LocalOnly,
+        Some(RemoteHost::Unknown) | None => {}
     }
     match lookup() {
-        Ok(_) => ProjectForge::Github,
-        Err(error) if error.to_string().contains("none of the git remotes configured for this repository point to a known GitHub host") => ProjectForge::LocalOnly,
-        // Missing gh, timeouts, authentication and repository access failures
-        // do not prove that this remote is hosted somewhere else.
-        Err(_) => ProjectForge::GithubUnavailable,
+        ForgeLookup::Github => ProjectForge::Github,
+        // With no usable gh configuration, offer local workflows for unknown
+        // hosts. A later sign-in can identify a custom-domain GitHub instance.
+        ForgeLookup::NotGithub | ForgeLookup::MissingCli | ForgeLookup::LoggedOut => ProjectForge::LocalOnly,
+        // Network or access failures with a configured CLI do not change forge.
+        ForgeLookup::Unavailable => ProjectForge::GithubUnavailable,
     }
 }
 
@@ -1057,18 +1081,52 @@ mod tests {
     }
 
     #[test]
-    fn forge_detection_uses_gh_for_other_hosts_and_never_turns_a_failed_check_into_a_local_merge() {
+    fn forge_detection_offers_local_merges_without_gh_or_auth_for_non_github_remotes() {
         assert_eq!(detect_forge(None, false, || panic!("no remote needs no gh check")), ProjectForge::LocalOnly);
+        for remote in ["git@gitlab.com:acme/app.git", "https://gitlab.example.com/acme/app", "git@gitlab-work:acme/app.git", "https://bitbucket.org/acme/app", "ssh://git@bitbucket.example.com:7999/acme/app.git", "https://github.gitlab.example.com/acme/app", "https://mirror-of-github.gitlab.example/acme/app", "https://gitea.example.com/acme/app", "https://codeberg.org/acme/app", "git@git.sr.ht:~acme/app", "/tmp/app.git", "file:///tmp/app.git"] {
+            assert_eq!(detect_forge(Some(remote), true, || panic!("known non-GitHub remotes must not depend on gh or login")), ProjectForge::LocalOnly, "{remote}");
+        }
+    }
+
+    #[test]
+    fn unknown_hosts_use_gh_and_fall_back_to_local_only_when_it_is_missing_or_logged_out() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(project_forge(&dir.path().join("missing-checkout")), ProjectForge::GithubUnavailable);
-        for origin in [None, Some("git@work:acme/app.git"), Some("https://code.example.com/acme/app")] {
-            assert_eq!(detect_forge(origin, true, || Ok("{\"name\":\"app\"}".into())), ProjectForge::Github);
-        }
-        for remote in ["git@gitlab.com:acme/app.git", "https://bitbucket.org/acme/app", "/tmp/app.git"] {
-            assert_eq!(detect_forge(Some(remote), true, || Err(anyhow!("none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use `gh auth login`"))), ProjectForge::LocalOnly);
-            for error in ["timed out", "gh auth login", "GitHub CLI (gh) is not installed", "HTTP 404: Not Found", "HTTP 401: Bad credentials"] {
-                assert_eq!(detect_forge(Some(remote), true, || Err(anyhow!("{error}"))), ProjectForge::GithubUnavailable);
+        for origin in [None, Some("git@work:acme/app.git"), Some("https://code.example.com/acme/app"), Some("https://github.com.evil.test/acme/app"), Some("https://notgithub.com/acme/app")] {
+            for (lookup, expected) in [
+                (ForgeLookup::Github, ProjectForge::Github),
+                (ForgeLookup::NotGithub, ProjectForge::LocalOnly),
+                (ForgeLookup::MissingCli, ProjectForge::LocalOnly),
+                (ForgeLookup::LoggedOut, ProjectForge::LocalOnly),
+                (ForgeLookup::Unavailable, ProjectForge::GithubUnavailable),
+            ] {
+                assert_eq!(detect_forge(origin, true, || lookup), expected, "{origin:?}, {lookup:?}");
             }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forge_lookup_distinguishes_logout_and_missing_cli_from_network_or_access_failures() {
+        use std::os::unix::process::ExitStatusExt;
+        for (code, stderr, expected) in [
+            (0, "", ForgeLookup::Github),
+            (4, "To get started with GitHub CLI, please run: gh auth login", ForgeLookup::LoggedOut),
+            (4, "", ForgeLookup::LoggedOut),
+            (1, "none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use `gh auth login`", ForgeLookup::NotGithub),
+            (1, "HTTP 401: Bad credentials", ForgeLookup::Unavailable),
+            (1, "HTTP 404: Not Found", ForgeLookup::Unavailable),
+            (1, "network unreachable", ForgeLookup::Unavailable),
+        ] {
+            let output = std::process::Output { status: std::process::ExitStatus::from_raw(code << 8), stdout: Vec::new(), stderr: stderr.as_bytes().to_vec() };
+            assert_eq!(forge_lookup(Ok(output)), expected, "exit {code}: {stderr}");
+        }
+        for (error, expected) in [
+            (std::io::ErrorKind::NotFound, ForgeLookup::MissingCli),
+            (std::io::ErrorKind::TimedOut, ForgeLookup::Unavailable),
+            (std::io::ErrorKind::PermissionDenied, ForgeLookup::Unavailable),
+        ] {
+            assert_eq!(forge_lookup(Err(std::io::Error::from(error))), expected);
         }
     }
 
