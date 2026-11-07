@@ -4153,7 +4153,7 @@ mod command_tests {
             expected_sessions: None,
             direct: crate::git::DirectDelete::Allowed,
             fetch: crate::landed::Fetch::Skip,
-            guard: None, archive: None, archive_failure: None,
+            guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
         };
         crate::session_ops::remove_workspace(&sink, &request, &|_| {}).unwrap().sessions
     }
@@ -4311,8 +4311,7 @@ pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<Stri
     tauri::async_runtime::spawn_blocking(move || {
         let run = run.unwrap_or_default();
         let state = app.state::<crate::AppState>();
-        let (projects, _) = projects::list().map_err(err)?;
-        require_archive_runtime(&state, projects.iter().map(|project| project.path.as_str()))?;
+        state.sessions().map_err(err)?.require_archive_support().map_err(err)?;
         let removal: crate::cleanup::Removal = state.sessions().map_err(err)?.workspace("removeLeftovers", serde_json::json!({"ids":ids,"run":run})).map_err(err)?;
         let projects: std::collections::BTreeSet<&str> =
             removal.removed.iter().filter_map(|id| id.strip_prefix("worktree:")).filter_map(|rest| rest.rsplit_once(':')).map(|(project, _)| project).collect();
@@ -4739,7 +4738,7 @@ fn require_archive_runtime<'a>(state: &crate::AppState, paths: impl Iterator<Ite
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn remove_workspace(app: AppHandle, project_path: String, path: String, keep_sessions: bool,
-    delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>, archive_failure: Option<String>) -> CmdResult<WorkspaceRemoveReport> {
+    delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>, archive_failure: Option<String>, archive_retry: Option<String>) -> CmdResult<WorkspaceRemoveReport> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         require_archive_runtime(&state, std::iter::once(project_path.as_str()))?;
@@ -4749,6 +4748,7 @@ pub async fn remove_workspace(app: AppHandle, project_path: String, path: String
         });
         // Older owners deny unknown fields, even when null.
         if let Some(failure) = archive_failure { params["archiveFailure"] = failure.into(); }
+        if let Some(retry) = archive_retry { params["archiveRetry"] = retry.into(); }
         let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", params).map_err(err)?;
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         Ok(removed)

@@ -406,7 +406,7 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             unused()?;
             let before = landed::check(project, &path, Fetch::JustFetched);
             if !before.safe { return Err("It is no longer clean and merged; it was not deleted.".into()) }
-            crate::archive_script::before_removal(project, &path, &[], None, runner, &|| {}).map_err(|e| e.to_string())?;
+            crate::archive_script::before_removal(project, &path, &[], None, None, runner, &|| {}).map_err(|e| e.to_string())?;
             unused()?;
             let state = landed::check(project, &path, Fetch::JustFetched);
             let Some(head) = state.head.as_deref().filter(|_| state.safe && state.head == before.head && state.branch == before.branch) else {

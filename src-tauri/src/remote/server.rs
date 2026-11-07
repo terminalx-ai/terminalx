@@ -2799,7 +2799,7 @@ impl WorkspaceRpc {
                     expected_sessions: Some(&expected),
                     direct: crate::git::DirectDelete::Never,
                     fetch: crate::landed::Fetch::Fresh,
-                    guard: None, archive: None, archive_failure: None,
+                    guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
                 };
                 let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
                 kept_branch = removed.removal.kept_branch;
@@ -2892,7 +2892,7 @@ impl WorkspaceRpc {
             expected_sessions: Some(&p.expected_sessions),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
-            guard: None, archive: None, archive_failure: None,
+            guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
         };
         let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
         let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;

@@ -1,6 +1,7 @@
+import { RegisteredSetting, settingById } from "./settingsRegistry";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
+import { Segmented, Switch } from "@/components/ui/controls";
 import { signIn, useAccount } from "@/lib/account";
 import { defaultOrgId, useCloudCatalog } from "@/lib/cloudCatalog";
 import { isMultiOrg } from "@/lib/multiOrg";
@@ -10,7 +11,7 @@ import { forgetAgentLoginsRequest, onOpenOrganizationSettings, takeOrganizationR
 import { OrganizationSettings } from "./OrganizationSettings";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
 
-export function OrganizationsTab() {
+export function OrganizationsTab({ initialRow, openRequest = 0 }: { initialRow?: string | null; openRequest?: number } = {}) {
   const prefs = usePrefs();
   const { status, busy } = useAccount();
   const { all, selectedOrganization, temporaryOrganization } = useOrganizationVisibility();
@@ -35,6 +36,11 @@ export function OrganizationsTab() {
     open();
     return onOpenOrganizationSettings(open);
   }, [activeId]);
+  // A direct row link uses the active organization unless the existing link
+  // request already chose a specific page. Never replace that explicit choice.
+  useEffect(() => {
+    if (initialRow && settingById(initialRow)?.scope === "organization" && activeId) setPage((current) => current ?? activeId);
+  }, [initialRow, activeId, openRequest]);
   /** A page opened by hand: no earlier message's request scrolls it. */
   const openPage = (organizationId: string) => {
     forgetAgentLoginsRequest();
@@ -50,9 +56,7 @@ export function OrganizationsTab() {
   );
   return (
     <div className="flex flex-col">
-      <SettingRow
-        label="Organizations in sidebar"
-        description="Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace."
+      <RegisteredSetting setting="organizations.sidebar"
         control={
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Segmented aria-label="Organizations in sidebar" value={prefs.organizationDisplay} onChange={(organizationDisplay) => setPrefs({ organizationDisplay, selectedOrganization })} options={[{ value: "all", label: "All organizations" }, { value: "one", label: "One organization" }]} />
@@ -67,14 +71,14 @@ export function OrganizationsTab() {
       <p className="py-3 text-xs text-muted-foreground">Needs you, notifications, and the dock badge include every organization. Working, Done, the command palette, and sidebar keyboard navigation follow the visible organizations; search can find hidden sessions by name. Opening a hidden session shows its organization while selected. New cloud sessions can use any available organization.</p>
       {prefs.organizationDisplay === "one" && <p className="pb-3 text-xs text-muted-foreground">Show in sidebar toggles apply in All organizations mode. Switching back restores your choices.</p>}
       {!all.length && (
-        <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+        <RegisteredSetting setting="organizations.create"><div className="flex flex-wrap items-center justify-between gap-3 py-3">
           <p className="text-xs text-muted-foreground">No cloud-enabled organizations.</p>
           {status.state === "signed-in" && status.identity ? (
             !creating && <Button size="sm" onClick={() => setCreating(true)}>Create organization</Button>
           ) : (
             <Button size="sm" disabled={busy} onClick={() => void signIn()}>Sign in to create an organization</Button>
           )}
-        </div>
+        </div></RegisteredSetting>
       )}
       {creating && status.state === "signed-in" && status.identity && (
         <OrganizationOnboarding
@@ -90,7 +94,7 @@ export function OrganizationsTab() {
       )}
       {all.map((org) => {
         const running = organizationRunningCount(org.id, catalog);
-        return <SettingRow key={org.id} label={organizationName(org)} description={`${org.role} · ${running ? `${running} running workspace${running === 1 ? "" : "s"}` : "No running workspaces"}${temporaryOrganization === org.id ? " · Shown while selected" : ""}`} control={
+        return <RegisteredSetting setting="organizations.organization" instance={org.id} key={org.id} label={organizationName(org)} description={`${org.role} · ${running ? `${running} running workspace${running === 1 ? "" : "s"}` : "No running workspaces"}${temporaryOrganization === org.id ? " · Shown while selected" : ""}`} control={
           <div className="flex items-center gap-3">
             {settingsButton(org)}
             <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -102,7 +106,7 @@ export function OrganizationsTab() {
       })}
       {/* Organizations the sidebar does not list (no cloud there, or a server that does not say) still have their page. */}
       {memberships.filter((org) => !all.some((listed) => listed.id === org.id)).map((org) => (
-        <SettingRow key={org.id} label={organizationName(org)} description={org.role} control={settingsButton(org)} />
+        <RegisteredSetting setting="organizations.organization" instance={org.id} key={org.id} label={organizationName(org)} description={org.role} control={settingsButton(org)} />
       ))}
     </div>
   );

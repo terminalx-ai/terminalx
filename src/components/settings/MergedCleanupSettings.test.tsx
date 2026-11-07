@@ -266,3 +266,18 @@ describe("what was removed", () => {
     expect(await screen.findByText("Nothing has been removed yet.")).toBeTruthy();
   });
 });
+
+describe("repository settings entry (PRO-123)", () => {
+  it("edits only the named repository using the existing override store", async () => {
+    render(<MergedCleanupSettings projectPath="/repos/app" />);
+    const group = await screen.findByRole("radiogroup", { name: "Delete merged workspaces of App" });
+    await waitFor(() => expect(group.getAttribute("aria-disabled")).toBeNull());
+    expect(screen.queryByRole("radiogroup", { name: "Delete merged workspaces of Site" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Delete the workspace when its pull request is merged" })).toBeNull();
+    fireEvent.click(within(group).getByRole("radio", { name: "On" }));
+    await waitFor(() => expect(settings.projects).toEqual({ "/repos/app": true }));
+    expect(settings.enabled).toBe(false);
+    fireEvent.click(within(group).getByRole("radio", { name: "Default (off)" }));
+    await waitFor(() => expect(settings.projects).toEqual({}));
+  });
+});

@@ -3,22 +3,16 @@ import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { updateProject, useSessionStore } from "@/lib/sessions";
 import type { Project, RepositoryScripts } from "@/types/session";
+import { RegisteredSetting } from "./settingsRegistry";
 
-export function RepositoryScriptsTab() {
+export function RepositoryScriptsTab({ projectPath }: { projectPath: string }) {
   const { projects } = useSessionStore();
-  const repositories = projects.filter((project) => project.kind !== "folder");
-  const [selected, select] = useState("");
-  const project = repositories.find((project) => project.path === selected) ?? repositories[0];
+  const project = projects.find((project) => project.path === projectPath && !project.archived && project.kind !== "folder");
   if (!project) return <p className="text-sm text-muted-foreground">Open a repository to configure its scripts.</p>;
-  return <div className="space-y-5">
-    <label className="flex flex-col gap-2 text-sm">
-      Repository
-      <select className="rounded-md border border-hairline bg-well p-2" value={project.path} onChange={(event) => select(event.target.value)}>
-        {repositories.map((repo) => <option key={repo.path} value={repo.path}>{repo.name} — {repo.path}</option>)}
-      </select>
-    </label>
+  return <RegisteredSetting setting="repositories.scripts" instance={project.path}><div className="space-y-5">
+    <p className="break-all font-mono text-xs text-faint">{project.path}</p>
     <ScriptsEditor key={project.path} project={project} />
-  </div>;
+  </div></RegisteredSetting>;
 }
 
 function ScriptsEditor({ project }: { project: Project }) {

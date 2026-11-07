@@ -102,11 +102,13 @@ export function WorkspaceRemoveDialog() {
   const pr = disp?.pr ?? null;
   const verb = settle ? "Remove" : "Delete";
 
-  const remove = async (bypass?: string) => {
+  const remove = async (bypass?: string, retry?: string) => {
     if (settle && keepUnavailable) return;
     if (risky && !(await confirmRiskyRemoval(request.path, losses))) return;
     setBusy("remove");
     setError(null);
+    setFailure(null);
+    setShowLog(false);
     try {
       const report = await host.remove({
         keepSessions: settle,
@@ -114,6 +116,7 @@ export function WorkspaceRemoveDialog() {
         confirmedDigest: risky ? (landed?.digest ?? null) : null,
         expectedSessions: disp?.sessionIds ?? [],
         ...(bypass ? { archiveFailure: bypass } : {}),
+        ...(retry ? { archiveRetry: retry } : {}),
       });
       closeWorkspaceRemove();
       await reportBranchOutcome(report);
@@ -242,6 +245,7 @@ export function WorkspaceRemoveDialog() {
         {failure && <div role="alert" className="mt-3 text-xs text-destructive">
           <p>{archiveFailureMessage(failure)}</p>
           <Button variant="outline" size="xs" onClick={() => setShowLog(!showLog)}>{showLog ? "Hide log" : "Open log"}</Button>
+          <Button variant="outline" size="xs" className="ml-2" disabled={!!busy || !known || !confirmable || !!disp?.isMain || (settle && !!keepUnavailable)} onClick={() => void remove(undefined, failure.token)}>Run archive script again</Button>
         </div>}
         {(busy === "remove" && archivePane || showLog && failure?.pane) && <ArchiveTerminal pane={showLog && failure ? failure.pane : archivePane!} output={showLog ? failure?.log : undefined} />}
         <DialogFooter className="mt-4">

@@ -45,7 +45,7 @@
 //! have not been used since. What is restored is held, so it is not removed
 //! again.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -283,8 +283,7 @@ impl Ledger {
 /// Reissue consent in the interactive runner, without rerunning a known failed
 /// unattended hook. Read atomically; never take the sweep lock inside removal's
 /// admission fence (the sweep acquires those locks in the opposite order).
-fn recorded_archive_attempt(project: &Path, path: &Path, script: &str) -> anyhow::Result<Option<ArchivePause>> {
-    let mut ledger = Ledger::load()?;
+fn recorded_archive_attempt(mut ledger: Ledger, project: &Path, path: &Path, script: &str) -> anyhow::Result<Option<ArchivePause>> {
     let Some(seen) = ledger.seen.remove(path.to_string_lossy().as_ref()) else { return Ok(None) };
     if std::fs::canonicalize(&seen.project_path).ok().as_deref() != Some(project) { return Ok(None) }
     let fingerprint = crate::archive_script::fingerprint(path, script)?;
@@ -292,11 +291,20 @@ fn recorded_archive_attempt(project: &Path, path: &Path, script: &str) -> anyhow
 }
 
 pub(crate) fn archive_attempt_matches(project: &Path, path: &Path, script: &str) -> anyhow::Result<bool> {
-    Ok(recorded_archive_attempt(project, path, script)?.is_some())
+    Ok(recorded_archive_attempt(Ledger::load()?, project, path, script)?.is_some())
 }
 
 pub(crate) fn recorded_archive_failure(project: &Path, path: &Path, script: &str) -> anyhow::Result<Option<crate::archive_script::Failure>> {
-    Ok(recorded_archive_attempt(project, path, script)?.and_then(|pause| pause.failure))
+    // Manual removal can still run its hook if the automatic-cleanup ledger
+    // is damaged. Automatic cleanup must continue to fail closed.
+    let ledger = match Ledger::load() {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            log::warn!("Cannot read saved automatic archive failures; manual removal will run the hook: {error:#}");
+            return Ok(None);
+        }
+    };
+    Ok(recorded_archive_attempt(ledger, project, path, script)?.and_then(|pause| pause.failure))
 }
 
 fn stamp(at: DateTime<Utc>) -> String {
@@ -552,7 +560,12 @@ impl Pass<'_> {
             self.archives_started += 1;
         }
         match remove(self.run, self.scope, repository, entry, &candidate, &checked, &seen.pr) {
-            Err((reason, detail)) => {
+            Err((reason, detail, started)) => {
+                if !started && self.ledger.seen.get_mut(&key).unwrap().archive_pause.take().is_some() {
+                    // A normal pre-hook refusal has no archive side effects.
+                    // Let the next pass retry after the underlying issue clears.
+                    self.archives_started -= 1;
+                }
                 if let Some(pause) = self.ledger.seen.get_mut(&key).unwrap().archive_pause.as_mut() {
                     // Also latch a HEAD change made by the hook itself. That
                     // side effect must not trigger another unattended run.
@@ -583,10 +596,10 @@ impl Pass<'_> {
 }
 
 /// Remove one workspace that passed every check, with its branches.
-/// `Err` is why it stayed: `(brief, detail)`.
-fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, entry: &Listed, candidate: &Candidate, checked: &Landed, pr: &PrRef) -> Result<Record, (String, Option<String>)> {
+/// `Err` is why it stayed, and whether the archive process started.
+fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, entry: &Listed, candidate: &Candidate, checked: &Landed, pr: &PrRef) -> Result<Record, (String, Option<String>, bool)> {
     let (Some(branch), Some(head)) = (candidate.branch.as_deref(), checked.head.as_deref()) else {
-        return Err(("it has no branch checked out".into(), None));
+        return Err(("it has no branch checked out".into(), None, false));
     };
     let expected: Vec<String> = candidate.sessions.iter().map(|session| session.id.clone()).collect();
     // The idle agents in it are stopped by now. Anything still alive there
@@ -612,6 +625,8 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         }
         Ok(())
     };
+    let archive_started = Cell::new(false);
+    let on_archive_started = || archive_started.set(true);
     let request = WorkspaceRemoval {
         project_path: &repository.project.path,
         path: &candidate.path,
@@ -622,17 +637,18 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         expected_sessions: Some(&expected),
         direct: git::DirectDelete::Never,
         fetch: Fetch::JustFetched,
-        guard: Some(&guard), archive: run.host.archive.map(|runner| crate::archive_script::Runner { unattended: true, ..runner }), archive_failure: None,
+        guard: Some(&guard), archive: run.host.archive.map(|runner| crate::archive_script::Runner { unattended: true, ..runner }), archive_failure: None, archive_retry: None, archive_started: Some(&on_archive_started),
     };
     let removed = match session_ops::remove_workspace_fallible(run.sink, &request, run.stop) {
         Ok(removed) => removed,
         Err(error) => {
-            return Err(match refused.take() {
+            let (reason, detail) = match refused.take() {
                 Some(why) => why,
                 None if error.starts_with(session_ops::NEEDS_CONFIRMATION) => ("it is no longer clean and merged".into(), Some(error)),
                 None if error.starts_with(session_ops::SESSIONS_CHANGED) => ("its sessions changed while it was being checked".into(), Some(error)),
                 None => ("it could not be removed".into(), Some(error)),
-            })
+            };
+            return Err((reason, detail, archive_started.get()));
         }
     };
 

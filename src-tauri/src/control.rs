@@ -1150,7 +1150,7 @@ impl ControlService {
             expected_sessions: expected.as_deref(),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
-            guard: None, archive: Some(crate::archive_script::Runner { terminals: self.manager.terminals(), sink: &self.sink, unattended: false }), archive_failure: None,
+            guard: None, archive: Some(crate::archive_script::Runner { terminals: self.manager.terminals(), sink: &self.sink, unattended: false }), archive_failure: None, archive_retry: None, archive_started: None,
         };
         let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(|error| {
             if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {

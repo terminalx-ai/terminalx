@@ -112,7 +112,8 @@ impl Drop for RemovalLease {
 }
 
 /// Called inside the removal fence, before the final Git/session checks.
-pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], confirmed: Option<&str>, runner: Option<Runner<'_>>, started: &dyn Fn()) -> Result<bool> {
+pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], confirmed: Option<&str>, retry: Option<&str>, runner: Option<Runner<'_>>, started: &dyn Fn()) -> Result<bool> {
+    anyhow::ensure!(confirmed.is_none() || retry.is_none(), "Choose either retrying the archive script or removing anyway.");
     let script = projects::scripts(project)?.archive;
     if script.trim().is_empty() || !path.exists() { return Ok(false) }
     // Never run commands in an arbitrary path supplied to a forced removal.
@@ -121,14 +122,14 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
     let identity = checkout_identity(&path)?;
     let listed = crate::workspaces::list(&project)?;
     anyhow::ensure!(listed.iter().any(|tree| !tree.is_main && canonical(Path::new(&tree.path)) == path), "Not a removable worktree of this repository.");
-    if let Some(token) = confirmed {
+    if let Some(token) = confirmed.or(retry) {
         let receipt = receipts().lock().unwrap().remove(token);
         if let Some(receipt) = &receipt {
             if let Some(terminals) = receipt.terminals.upgrade() { terminals.kill(&receipt.pane); }
         }
         anyhow::ensure!(receipt.is_some_and(|receipt| receipt.path == path && receipt.project == project && receipt.script == script && receipt.identity == identity && receipt.at.elapsed() < RECEIPT_LIFETIME),
             "The archive failure confirmation expired or the script changed. Run removal again.");
-        return Ok(true)
+        if confirmed.is_some() { return Ok(true) }
     }
     let runner = runner.context("This repository has an archive script. Remove the workspace from this computer's workspace dialog to run it first.")?;
     if runner.unattended {
@@ -136,7 +137,7 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
     }
     // A recorded unattended failure is shown for explicit consent, even after
     // a runtime restart. It never reruns merely because a dialog was opened.
-    if !runner.unattended {
+    if !runner.unattended && retry.is_none() {
         if let Some(mut failure) = crate::merged_cleanup::recorded_archive_failure(&project, &path, &script)? {
             failure.token = uuid::Uuid::new_v4().to_string();
             failure.sessions_stopped |= !sessions.is_empty();
@@ -144,10 +145,9 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
             bail!("{FAILURE_PREFIX}{}", serde_json::to_string(&failure)?);
         }
     }
-    started();
     let session = sessions.iter().find(|session| canonical(Path::new(&session.cwd)) == path);
     let env = environment(&project, &path, session);
-    let failure = run(runner, &path, &script, &env, TIMEOUT)?;
+    let failure = run(runner, &path, &script, &env, TIMEOUT, started)?;
     if let Some(mut failure) = failure {
         failure.sessions_stopped = !sessions.is_empty();
         if !runner.unattended { remember(runner, project, path, identity, script, &failure); }
@@ -168,7 +168,7 @@ fn environment(project: &Path, path: &Path, session: Option<&SessionEntry>) -> V
     env
 }
 
-fn run(runner: Runner<'_>, path: &Path, script: &str, env: &[(String, String)], timeout: Duration) -> Result<Option<Failure>> {
+fn run(runner: Runner<'_>, path: &Path, script: &str, env: &[(String, String)], timeout: Duration, started: &dyn Fn()) -> Result<Option<Failure>> {
     let id = format!("archive:{}", uuid::Uuid::new_v4());
     // Literal argv avoids the user's shell syntax altogether (including nu).
     let mut file = tempfile::Builder::new().prefix("terminalx-archive-").suffix(".sh").tempfile()?;
@@ -182,7 +182,7 @@ fn run(runner: Runner<'_>, path: &Path, script: &str, env: &[(String, String)], 
             if exit.id == watched { let _ = send.send(exit.code); }
         }
     }));
-    let spawned = runner.terminals.spawn_program(runner.sink.clone(), &id, PaneSpec { cwd: &path.to_string_lossy(), cols: 100, rows: 24, command: None, env }, std::ffi::OsStr::new("/bin/sh"), &[file.path().as_os_str()]);
+    let spawned = runner.terminals.spawn_program(runner.sink.clone(), &id, PaneSpec { cwd: &path.to_string_lossy(), cols: 100, rows: 24, command: None, env }, std::ffi::OsStr::new("/bin/sh"), &[file.path().as_os_str()], started);
     if let Err(error) = spawned { runner.sink.unlisten(listener); return Err(error) }
     struct PaneCleanup<'a> { terminals: &'a Terminals, id: &'a str, keep: bool }
     impl Drop for PaneCleanup<'_> { fn drop(&mut self) { if !self.keep { self.terminals.kill(self.id); } } }
@@ -220,13 +220,13 @@ mod tests {
         let (terminals, sink) = runtime();
         let runner = Runner { terminals: &terminals, sink: &sink, unattended: false };
         let env = vec![("PRO149_VALUE".into(), "spaces ' and $literal".into())];
-        let failure = run(runner, &path, "printf '%s\\n' \"$PWD\" \"$PRO149_VALUE\"; exit 17", &env, Duration::from_secs(10)).unwrap().unwrap();
+        let failure = run(runner, &path, "printf '%s\\n' \"$PWD\" \"$PRO149_VALUE\"; exit 17", &env, Duration::from_secs(10), &|| {}).unwrap().unwrap();
         assert_eq!(failure.code, Some(17));
         assert!(!failure.timed_out);
         let output = String::from_utf8_lossy(&terminals.read_output(&failure.pane).unwrap()).into_owned();
         assert!(output.contains(path.to_str().unwrap()), "{output}");
         assert!(output.contains("spaces ' and $literal"), "{output}");
-        assert!(run(runner, &path, "exit 0", &[], Duration::from_secs(10)).unwrap().is_none());
+        assert!(run(runner, &path, "exit 0", &[], Duration::from_secs(10), &|| {}).unwrap().is_none());
         terminals.kill_all();
     }
 
@@ -236,7 +236,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (terminals, sink) = runtime();
             let start = Instant::now();
-            let failed = run(Runner { terminals: &terminals, sink: &sink, unattended }, dir.path(), "echo before-timeout; sleep 60 & wait", &[], Duration::from_secs(2)).unwrap().unwrap();
+            let failed = run(Runner { terminals: &terminals, sink: &sink, unattended }, dir.path(), "echo before-timeout; sleep 60 & wait", &[], Duration::from_secs(2), &|| {}).unwrap().unwrap();
             assert_eq!(failed.code, Some(124));
             assert!(failed.timed_out);
             assert!(start.elapsed() < Duration::from_secs(12));
@@ -256,7 +256,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, sink) = runtime();
         let runner = Runner { terminals: &terminals, sink: &sink, unattended: false };
-        let failure = run(runner, dir.path(), "exit 4", &[], Duration::from_secs(10)).unwrap().unwrap();
+        let failure = run(runner, dir.path(), "exit 4", &[], Duration::from_secs(10), &|| {}).unwrap().unwrap();
         remember(runner, dir.path().into(), dir.path().into(), "identity".into(), "exit 4".into(), &failure);
         assert_eq!(terminals.panes().len(), 1);
         receipts().lock().unwrap().get_mut(&failure.token).unwrap().at = Instant::now() - RECEIPT_LIFETIME - Duration::from_secs(1);

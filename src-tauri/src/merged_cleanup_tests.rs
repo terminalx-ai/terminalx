@@ -919,7 +919,7 @@ fn unattended_archive_failure_is_persisted_closed_and_removed_only_with_manual_c
     let mut request = WorkspaceRemoval {
         project_path: project.to_str().unwrap(), path: tree.to_str().unwrap(), sessions: SessionsFate::Keep,
         delete_branch: false, confirmation: Confirmation::Single, expected_sessions: Some(&[]), direct: git::DirectDelete::Never,
-        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }), archive_failure: None,
+        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }), archive_failure: None, archive_retry: None, archive_started: None,
     };
     let error = session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap_err();
     let failure = crate::archive_script::Failure::from_error(&error).unwrap();
@@ -981,4 +981,85 @@ fn a_head_change_made_by_a_failed_archive_does_not_schedule_it_again() {
     assert!(f.sweep(12)[0].archive_blocked);
     assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
     assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+}
+
+#[test]
+fn a_saved_archive_failure_can_be_explicitly_retried_after_an_external_fix() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-retry");
+    f.merge("archive-retry", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; test -f \"$TERMINALX_REPO_ROOT/ready\"");
+    f.sweep(0);
+    assert!(f.sweep(11)[0].archive_blocked);
+    let project = f.alpha();
+    let (terminals, sink) = f.archive.as_ref().unwrap();
+    let mut request = WorkspaceRemoval {
+        project_path: project.to_str().unwrap(), path: tree.to_str().unwrap(), sessions: SessionsFate::Keep,
+        delete_branch: false, confirmation: Confirmation::Single, expected_sessions: Some(&[]), direct: git::DirectDelete::Never,
+        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }),
+        archive_failure: None, archive_retry: None, archive_started: None,
+    };
+    let saved = session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap_err();
+    let saved = crate::archive_script::Failure::from_error(&saved).unwrap();
+    request.archive_retry = Some(&saved.token);
+    let retried = session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap_err();
+    let retried = crate::archive_script::Failure::from_error(&retried).unwrap();
+    assert_ne!(saved.token, retried.token);
+    // A failed explicit retry does not re-enable unattended execution.
+    assert!(f.sweep(12)[0].archive_blocked);
+    assert_eq!(std::fs::read_to_string(project.join("runs")).unwrap(), "ran\nran\n");
+    std::fs::write(project.join("ready"), "").unwrap();
+    request.archive_retry = Some(&retried.token);
+    session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap();
+    assert!(!tree.exists());
+    assert_eq!(std::fs::read_to_string(project.join("runs")).unwrap(), "ran\nran\nran\n");
+    assert!(terminals.panes().is_empty());
+}
+
+#[test]
+fn a_stop_error_before_the_archive_starts_does_not_pause_future_attempts() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-not-started");
+    f.merge("archive-not-started", 1);
+    f.session(&tree, TabStatus::Idle);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"");
+    f.sweep(0);
+    let failed = f.with_host(|host| sweep_fallible(&FallibleSweep {
+        host, sink: &*f.events, stop: &|_| Err("stop failed".into()),
+        pull_requests: &|_, _| Ok(f.prs.lock().unwrap().as_ref().unwrap().clone()), now: f.at(11),
+    }, &f.on()).unwrap());
+    assert_eq!(of(&failed.statuses, &tree).phase, Phase::Kept);
+    assert!(!of(&failed.statuses, &tree).archive_blocked);
+    assert!(Ledger::load().unwrap().seen[tree.to_str().unwrap()].archive_pause.is_none());
+    assert!(!f.alpha().join("runs").exists());
+    assert_eq!(of(&f.sweep(12), &tree).phase, Phase::Removed);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+}
+
+#[test]
+fn a_corrupt_automatic_ledger_blocks_sweeps_but_manual_removal_still_runs_its_hook() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-corrupt-ledger");
+    f.merge("archive-corrupt-ledger", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"");
+    f.sweep(0);
+    std::fs::write(Ledger::file().unwrap(), "{invalid").unwrap();
+    let result = f.with_host(|host| sweep_fallible(&FallibleSweep {
+        host, sink: &*f.events, stop: &|_| Ok(()),
+        pull_requests: &|_, _| Ok(f.prs.lock().unwrap().as_ref().unwrap().clone()), now: f.at(11),
+    }, &f.on()));
+    assert!(result.is_err());
+    assert!(tree.exists());
+    assert!(!f.alpha().join("runs").exists());
+    let project = f.alpha();
+    let (terminals, sink) = f.archive.as_ref().unwrap();
+    let request = WorkspaceRemoval {
+        project_path: project.to_str().unwrap(), path: tree.to_str().unwrap(), sessions: SessionsFate::Keep,
+        delete_branch: false, confirmation: Confirmation::Single, expected_sessions: Some(&[]), direct: git::DirectDelete::Never,
+        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }),
+        archive_failure: None, archive_retry: None, archive_started: None,
+    };
+    session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap();
+    assert!(!tree.exists());
+    assert_eq!(std::fs::read_to_string(project.join("runs")).unwrap(), "ran\n");
 }

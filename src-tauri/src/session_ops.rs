@@ -813,6 +813,9 @@ pub(crate) struct WorkspaceRemoval<'a> {
     pub guard: Option<&'a dyn Fn() -> Result<()>>,
     pub archive: Option<crate::archive_script::Runner<'a>>,
     pub archive_failure: Option<&'a str>,
+    pub archive_retry: Option<&'a str>,
+    /// Called only after the archive process has actually started.
+    pub archive_started: Option<&'a dyn Fn()>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -902,7 +905,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     for session in &affected {
         stop(session)?;
     }
-    crate::archive_script::before_removal(&project, &target, &affected, request.archive_failure, request.archive, &|| {}).map_err(err)?;
+    crate::archive_script::before_removal(&project, &target, &affected, request.archive_failure, request.archive_retry, request.archive, request.archive_started.unwrap_or(&|| {})).map_err(err)?;
     // Read again now that nothing is running in it. The default branch was
     // fetched a moment ago, so this does not go to the network again.
     let again = if before.fresh { crate::landed::Fetch::JustFetched } else { crate::landed::Fetch::Skip };
@@ -1592,7 +1595,7 @@ mod tests {
             expected_sessions: None,
             direct,
             fetch: crate::landed::Fetch::Skip,
-            guard: None, archive: None, archive_failure: None,
+            guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
         }
     }
 

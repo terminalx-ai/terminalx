@@ -524,6 +524,13 @@ pub struct PtyExit {
     pub code: Option<i32>,
 }
 
+#[derive(Clone, Copy)]
+struct PaneProgram<'a> {
+    executable: &'a std::ffi::OsStr,
+    args: &'a [&'a std::ffi::OsStr],
+    started: &'a dyn Fn(),
+}
+
 /// What a pane runs and where.
 pub struct PaneSpec<'a> {
     pub cwd: &'a str,
@@ -635,11 +642,11 @@ impl Terminals {
     }
 
     /// A program with literal argv, independent of the user's shell syntax.
-    pub(crate) fn spawn_program(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, program: &std::ffi::OsStr, args: &[&std::ffi::OsStr]) -> Result<()> {
-        self.spawn_after(sink, id, spec, Vec::new(), Some((program, args)))
+    pub(crate) fn spawn_program(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, program: &std::ffi::OsStr, args: &[&std::ffi::OsStr], started: &dyn Fn()) -> Result<()> {
+        self.spawn_after(sink, id, spec, Vec::new(), Some(PaneProgram { executable: program, args, started }))
     }
 
-    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>, executable: Option<(&std::ffi::OsStr, &[&std::ffi::OsStr])>) -> Result<()> {
+    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>, executable: Option<PaneProgram<'_>>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
@@ -659,11 +666,11 @@ impl Terminals {
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
-        let mut cmd = CommandBuilder::new(executable.map_or(std::ffi::OsStr::new(&sh), |(program, _)| program));
+        let mut cmd = CommandBuilder::new(executable.map_or(std::ffi::OsStr::new(&sh), |program| program.executable));
         // A login shell so PATH and prompts match the reader's own terminal.
         let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
-        if let Some((_, args)) = executable {
-            for arg in args { cmd.arg(arg); }
+        if let Some(program) = executable {
+            for arg in program.args { cmd.arg(arg); }
             // A lifecycle hook is not a provider/CLI call on behalf of an agent.
             cmd.env_remove("RACCOON_SESSION_ID");
             cmd.env_remove("TERMINALX_SESSION_ID");
@@ -699,6 +706,9 @@ impl Terminals {
             cmd.env(k, v);
         }
         let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
+        // Report actual execution even if setting up the reader or writer
+        // subsequently fails. Lifecycle callers must not repeat its effects.
+        if let Some(program) = executable { (program.started)(); }
         drop(pair.slave);
         let pid = child.process_id();
         let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);

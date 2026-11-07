@@ -1033,7 +1033,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         return result(item, Outcome::Skipped, "It has no commit checked out.".to_string());
     };
     let affected = session_ops::sessions_within(sessions, &target);
-    let ran = match crate::archive_script::before_removal(&repository.root, &target, &affected, item.archive_failure.as_deref(), host.archive, &|| step(Step::Archiving)) {
+    let ran = match crate::archive_script::before_removal(&repository.root, &target, &affected, item.archive_failure.as_deref(), None, host.archive, &|| step(Step::Archiving)) {
         Ok(ran) => ran,
         Err(error) => {
             let failure = crate::archive_script::Failure::from_error(&error.to_string());

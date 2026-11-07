@@ -325,3 +325,23 @@ it("offers consent for a recorded unattended failure and shows its saved log", a
   await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledTimes(2));
   expect(mocks.removeWorkspace.mock.calls[1][2].archiveFailure).toBe("saved-receipt");
 });
+
+it("explicitly retries a saved failure and requires new consent if the retry fails", async () => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace
+    .mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "saved", pane: "archive:old", code: 17, timedOut: false, log: "saved output" })}`)
+    .mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "new", pane: "archive:retry", code: 9, timedOut: false })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  fireEvent.click(await screen.findByRole("button", { name: "Run archive script again" }));
+  await screen.findByText(/Archive script failed \(exit 9\)/);
+  expect(mocks.removeWorkspace.mock.calls[1][2]).toMatchObject({ archiveRetry: "saved" });
+  expect(mocks.removeWorkspace.mock.calls[1][2]).not.toHaveProperty("archiveFailure");
+  fireEvent.click(screen.getByRole("button", { name: "Open log" }));
+  expect(screen.getByTestId("archive-log").textContent).toBe("archive:retry");
+  fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }));
+  await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledTimes(3));
+  expect(mocks.removeWorkspace.mock.calls[2][2].archiveFailure).toBe("new");
+});
