@@ -18,6 +18,9 @@ const animates = () => typeof document !== "undefined" && typeof document.docume
  * once rather than on every frame. While closing it keeps drawing what it
  * last showed, since the caller has already stopped rendering it. A panel
  * open when the window first draws is just there.
+ *
+ * What a panel shows only once its data is read fades in when it arrives:
+ * give that view's root `animate-panel-content`, from the same system.
  */
 export function PanelPresence({ open, side, children }: { open: boolean; side: "left" | "right"; children: ReactNode }) {
   const [phase, setPhase] = useState<Phase>(open ? "open" : "closed");

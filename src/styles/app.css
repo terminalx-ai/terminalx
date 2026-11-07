@@ -566,6 +566,8 @@ body:has([role="alertdialog"]) [data-star-reminder] {
   --panel-out-duration: 360ms;
   --panel-in-ease: cubic-bezier(0.22, 0.8, 0.24, 1);
   --panel-out-ease: cubic-bezier(0.4, 0, 0.7, 0.4);
+  /* A panel's content fading in, whether with the panel or when its data arrives after. */
+  --panel-content-duration: 420ms;
 }
 @keyframes panel-in {
   from { transform: translateX(calc(var(--panel-side, 1) * var(--panel-shift-in))); opacity: 0; }
@@ -576,7 +578,12 @@ body:has([role="alertdialog"]) [data-star-reminder] {
   to { transform: translateX(calc(var(--panel-side, 1) * var(--panel-shift-out))); opacity: 0; }
 }
 .animate-panel-in { animation: panel-in var(--panel-in-duration) var(--panel-in-ease) both; will-change: transform, opacity; }
+/* Content inside a panel that is drawn once its data is read (a branch, a list
+   of changes, a file tree) fades in as it arrives, so it never pops in after
+   the panel has finished sliding. Put it on the view's own root. */
+@keyframes panel-content-in { from { opacity: 0; } to { opacity: 1; } }
+.animate-panel-content { animation: panel-content-in var(--panel-content-duration) var(--panel-in-ease) both; }
 .animate-panel-out { animation: panel-out var(--panel-out-duration) var(--panel-out-ease) both; will-change: transform, opacity; }
 @media (prefers-reduced-motion: reduce) {
-  .animate-panel-in, .animate-panel-out { animation-duration: 1ms; }
+  .animate-panel-in, .animate-panel-out, .animate-panel-content { animation-duration: 1ms; }
 }
