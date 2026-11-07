@@ -45,6 +45,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.autocorrect",
   "general.useWorktree",
   "general.browser",
+  "general.startupDiagnostics",
   "general.floatingOnTop",
   "general.quickChatRetention",
   "general.computerUse",

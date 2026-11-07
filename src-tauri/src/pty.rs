@@ -403,6 +403,7 @@ const FLOW_STALL: Duration = Duration::from_secs(2);
 const EXIT_AFTER_OUTPUT: Duration = Duration::from_millis(500);
 
 pub struct Terminals {
+    startup: Mutex<Option<Arc<crate::startup::Monitor>>>,
     panes: Mutex<HashMap<String, Pane>>,
     groups: Mutex<Vec<Arc<OwnedGroup>>>,
     retained: Mutex<HashMap<String, crate::local_runtime::scrollback::History>>,
@@ -481,7 +482,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), frozen: Mutex::new(false) }
+        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), frozen: Mutex::new(false) }
     }
 }
 
@@ -602,6 +603,16 @@ fn push_scrollback(scrollback: &mut VecDeque<u8>, bytes: &[u8]) {
 }
 
 impl Terminals {
+    pub(crate) fn set_startup_monitor(&self, monitor: Arc<crate::startup::Monitor>) {
+        *self.startup.lock().unwrap() = Some(monitor);
+    }
+
+    fn startup_ticket(&self, id: &str, created: &str, pid: Option<u32>) -> Option<crate::startup::Ticket> {
+        self.startup.lock().unwrap().as_ref().and_then(|monitor| match monitor.begin(id, created, pid) {
+            Ok(ticket) => Some(ticket),
+            Err(error) => { log::warn!("track child startup: {error:#}"); None }
+        })
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -696,9 +707,15 @@ impl Terminals {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
+        let created = crate::store::index::now();
+        let startup = self.startup_ticket(id, &created, None);
+        let child = pair.slave.spawn_command(cmd).map_err(|e| {
+            if let Some(startup) = &startup { startup.exited(None); }
+            anyhow!("spawn shell: {e}")
+        })?;
         drop(pair.slave);
         let pid = child.process_id();
+        if let Some(startup) = &startup { startup.spawned(pid); }
         let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
         screen.process(&printed);
         let mut scrollback = VecDeque::with_capacity(SCROLLBACK_BYTES);
@@ -713,7 +730,7 @@ impl Terminals {
             explicit_command,
             environment: environment.stamp,
             cwd: cwd.to_string(),
-            created: crate::store::index::now(),
+            created,
             scrollback,
             printed: 0,
             screen,
@@ -725,6 +742,8 @@ impl Terminals {
     /// or one handed over by the runtime this one replaced (#765).
     fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
         let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, environment, cwd, created, scrollback, printed, screen, last_output } = parts;
+        let startup = self.startup_ticket(id, &created, pid);
+        if last_output.is_some() { if let Some(startup) = &startup { startup.ready(); } }
         #[cfg(unix)]
         let reader = Arc::new(Mutex::new(reader));
         #[cfg(not(unix))]
@@ -915,6 +934,7 @@ impl Terminals {
             let hold = hold.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let code = waiter.wait(pid, &hold);
+                if let Some(startup) = &startup { startup.exited(code.and_then(|code| code.try_into().ok())); }
                 let _ = group.pid();
                 // Let the emitter go if it is holding the pane for its view, then
                 // give it a moment to send the tail, so the exit is not announced

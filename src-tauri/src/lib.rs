@@ -40,6 +40,7 @@ mod commands;
 mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
+pub mod startup;
 #[cfg(feature = "desktop")]
 mod cloud_ports;
 #[cfg(feature = "desktop")]
@@ -527,6 +528,11 @@ pub fn run() {
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
+            startup::commands::startup_diagnostics_status,
+            startup::commands::startup_diagnostics_policy,
+            startup::commands::startup_diagnostics_probe,
+            startup::commands::startup_diagnostics_preview,
+            startup::commands::startup_diagnostics_export,
             cloud_agent_client::cloud_agent_enqueue,
             cloud_agent_client::cloud_agent_outbox,
             cloud_agent_client::cloud_agent_outbox_sync,
