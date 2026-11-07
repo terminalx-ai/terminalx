@@ -24,9 +24,11 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ organizationAgent, placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend, onPressed }: {
+export function RecoveryBanner({ actionsEnabled = true, organizationAgent, placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend, onPressed }: {
   /** Present only for a cloud tab. Only an allowlisted harness name reaches the clipboard. */
   organizationAgent?: string;
+  /** Read-only cloud viewers can copy an admin request without recovery authority. */
+  actionsEnabled?: boolean;
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -102,10 +104,10 @@ export function RecoveryBanner({ organizationAgent, placement = "top", kind, lim
       {copied !== "idle" && <span role="status">{copied === "copied" ? "Copied" : "Could not copy. Try again."}</span>}
     </div>}
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
-    {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
+    {actionsEnabled && asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
-    <div className="mt-2 flex flex-wrap gap-2">
+    {actionsEnabled && <div className="mt-2 flex flex-wrap gap-2">
       {offer.signIn && onSignIn && <Button size="sm" disabled={busy} onClick={pressed(onSignIn)}>Sign in</Button>}
       {offer.resend && onResend && <Button size="sm" disabled={busy} onClick={pressed(onResend)}>Resend last prompt</Button>}
       {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={pressed(() => onRetry())}>{offer.retry}</Button>}
@@ -116,6 +118,6 @@ export function RecoveryBanner({ organizationAgent, placement = "top", kind, lim
       </select>}
       <Button size="sm" variant="outline" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>
       {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={pressed(onContinue)}>Continue in new session</Button>}
-    </div>
+    </div>}
   </section>;
 }

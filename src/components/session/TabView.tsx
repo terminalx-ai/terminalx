@@ -602,7 +602,7 @@ export function TabView({
   // Pending requests and recovery sit with the composer in the chat, where the
   // reply goes; over a terminal there is no composer, so they head the pane.
   const banner = (placement: "top" | "composer") => (
-    <RecoveryBanner organizationAgent={backend.kind === "cloud" ? tab.harness : undefined} placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} native={tab.transport === "experimentalCodexStdio"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
+    <RecoveryBanner organizationAgent={backend.kind === "cloud" ? tab.harness : undefined} actionsEnabled={backend.caps.recovery && !readOnly} placement={placement} kind={recovery ?? (backend.kind === "cloud" && eventRecovery === "usage_limit" ? "usage_limit" : null)} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} native={tab.transport === "experimentalCodexStdio"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
         onPressed={actions.pressedWith}
         onRetry={(model) => void retry(model)} onStop={() => stop("banner")} onSendContinue={() => void sendContinue()} onResend={backend.resendUnsent && !gate?.blocked ? () => void resend() : undefined}

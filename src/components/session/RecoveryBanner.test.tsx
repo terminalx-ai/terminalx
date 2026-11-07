@@ -367,3 +367,9 @@ describe("organisation usage-limit card (PRO-200)", () => {
     ["ServiceQuotaExceededException", "usage_limit"], ["ThrottlingException: quota retry later", "capacity"], ["ServiceUnavailableException", "capacity"],
   ])("classifies %s separately", (message, kind) => expect(classifyRecovery(message)).toBe(kind));
 });
+
+
+it("lets a read-only cloud viewer copy an admin request without offering runtime controls", () => {
+  render(<RecoveryBanner {...props()} kind="usage_limit" organizationAgent="claude" actionsEnabled={false} />);
+  expect(screen.getAllByRole("button").map(button => button.textContent)).toEqual(["Copy request"]);
+});
