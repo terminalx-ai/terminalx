@@ -1799,11 +1799,6 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
               </span>
             </button>
             <span
-              class="shrink-0 text-[10px] tabular-nums text-faint group-hover/row:hidden group-focus-within/row:hidden group-has-[[data-state=open]]/row:hidden"
-            >
-              Sep 1
-            </span>
-            <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
             >
               <button
@@ -5817,11 +5812,6 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
                 Session empty
               </span>
             </button>
-            <span
-              class="shrink-0 text-[10px] tabular-nums text-faint group-hover/row:hidden group-focus-within/row:hidden group-has-[[data-state=open]]/row:hidden"
-            >
-              Sep 1
-            </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
             >
