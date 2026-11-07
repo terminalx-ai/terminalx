@@ -128,7 +128,8 @@ const fits = (layout) => ({
   await page.waitForTimeout(150);
   const afterOld = await sidebarShown();
   await page.keyboard.press("Meta+Shift+Y");
-  await page.waitForTimeout(150);
+  // PanelPresence keeps the closing sidebar mounted until its slide ends.
+  await page.getByTestId("sidebar-rail").waitFor({ state: "hidden" });
   const afterNew = await sidebarShown();
   await page.keyboard.press("Meta+Shift+Y");
   await sidebar(page);
