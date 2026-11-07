@@ -135,14 +135,13 @@ describe("Autocorrect (#525)", () => {
 });
 
 describe("Settings dismissal", () => {
-  it("offers Close and keeps Back working", () => {
+  it("leaves by one Back, at the head of its menu", () => {
     const onBack = vi.fn();
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(onBack).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
-    expect(onBack).toHaveBeenCalledTimes(2);
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 
   it("dismisses with Escape and unregisters when Settings unmounts", () => {
