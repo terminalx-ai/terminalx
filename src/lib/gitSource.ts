@@ -1,7 +1,7 @@
 import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
-import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
+import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
 import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
@@ -59,6 +59,7 @@ export interface GitSource {
     ready(): Promise<void>;
     merge(method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
   };
+  conversation?(pr: PullRequest, association?: PrAssociation): PrConversationAccess;
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
   mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
@@ -107,6 +108,10 @@ export function localGitSource(cwd: string): GitSource {
         ready: () => gh.ready(cwd, association.number, association.url),
         merge: (method) => gh.merge(cwd, association.number, method, association.url),
       };
+    },
+    conversation: (pr, association) => {
+      if (association && association.scope.kind !== "local") throw new Error("Reconnect this PR's cloud workspace to read its conversation.");
+      return gh.conversation(pr.url);
     },
     createPr: ({ title, body, base, draft, sessionId }) => gh.create(cwd, title, body, base, draft, sessionId).then(() => null),
     readyPr: (number) => gh.ready(cwd, number),
@@ -215,6 +220,11 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         ready: () => repository.readyPr(association.number).then(() => undefined),
         merge: (method) => repository.mergePr(association.number, method).then(() => undefined),
       };
+    },
+    conversation: (pr, association) => {
+      if (!association) return remote.prConversation(pr.url);
+      if (association.scope.kind !== "cloud" || association.scope.workspace !== input.workspaceKey || !association.scope.repo) throw new Error("Reconnect this PR's workspace to read its conversation.");
+      return new RemoteGit(remote.client, association.scope.repo).prConversation(pr.url);
     },
     createPr: async ({ title, body, base, draft, sessionId }) => {
       const result = await remote.createPr({ title, body, base, draft });

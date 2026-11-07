@@ -346,6 +346,7 @@ impl WorkspaceGit {
             "git.push" => self.push(params),
             "git.pull" => self.pull(params),
             "git.prs" => self.prs(params),
+            "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
             "git.prAssociations" => self.pr_associations(params),
             "git.prLanded" => self.pr_landed(params),
             "git.prCreate" => self.pr_create(params),
@@ -945,6 +946,38 @@ impl WorkspaceGit {
             let repo = repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name);
             json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo })
         }).collect::<Vec<_>>() })
+    }
+
+    fn pr_conversation(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        use crate::github::conversation::{self, Action, Target};
+        // Cloud gh uses an organisation App installation token, never the
+        // caller's personal identity. It must not satisfy required reviews.
+        let action = if method == "git.prConversationAction" {
+            let action = serde_json::from_value(params["action"].clone()).map_err(|_| RpcError::invalid("Invalid PR action"))?;
+            if matches!(action, Action::Approve { .. }) {
+                return Err(RpcError::forbidden("Approve from GitHub with your personal account. Cloud workspaces cannot approve as the organisation App."));
+            }
+            Some(action)
+        } else { None };
+        let repo = self.repo(params)?;
+        let target = Target::new(required_str(params, "url")?).map_err(RpcError::internal)?;
+        // Resolve through this repository's gh routing before allowing a supplied
+        // URL to address anything. A participant cannot use workspace credentials
+        // to read an unrelated private repository.
+        let info = self.gh(&repo, &["repo", "view", "--json", "url"], NETWORK_TIMEOUT)?;
+        let info: Value = serde_json::from_str(&info).map_err(RpcError::internal)?;
+        let expected = format!("https://{}/{}/{}", target.host, target.owner, target.name);
+        if info["url"].as_str().map(|url| url.trim_end_matches('/').to_lowercase()).as_deref() != Some(&expected) {
+            return Err(RpcError::invalid("The pull request belongs to another repository."));
+        }
+        let run = |args: &[&str]| self.gh(&repo, args, NETWORK_TIMEOUT).map_err(|error| anyhow::anyhow!("{}", error.message));
+        match method {
+            "git.prConversation" => conversation::read_with(&target, run).map(|value| json!(value)),
+            "git.prReviewerSearch" => conversation::search_with(&target, required_str(params, "query")?, run).map(|value| json!(value)),
+            _ => {
+                conversation::act_with(&target, action.ok_or_else(|| RpcError::invalid("Invalid PR action"))?, run).map(|()| Value::Null)
+            }
+        }.map_err(RpcError::internal)
     }
 
     fn pr_landed(&self, params: &Value) -> Result<Value, RpcError> {
