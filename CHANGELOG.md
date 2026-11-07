@@ -6,7 +6,8 @@
   sign-in terminal. Pushing a repository without a remote now offers a URL
   field, or creation of a GitHub repository when signed in. Git failures show
   a readable explanation with command output behind **Show details**. Connection
-  checks and login target the repository's host, connection failures offer retry,
+  checks and login target the repository's host after resolving SSH aliases and
+  excluding unrelated remotes. Connection failures offer retry,
   failed login output stays available, and repository creation works from linked
   worktrees. (PRO-166)
 

@@ -897,34 +897,89 @@ fn default_hostname() -> String {
 }
 
 fn hostname_from_remote(remote: &str) -> Option<String> {
+    hostname_from_remote_with(remote, &mut |host| ssh_hostname(host, Command::new(crate::binpath::resolve("ssh")?)))
+}
+
+fn hostname_from_remote_with(remote: &str, translate_ssh: &mut impl FnMut(&str) -> Option<String>) -> Option<String> {
     let url = if remote.contains("://") { remote.to_string() }
         else { format!("ssh://{}", remote.replacen(':', "/", 1)) };
     let url = url::Url::parse(&url).ok()?;
     let host = url.host_str()?;
-    Some(match (url.scheme(), url.port()) { ("https" | "http", Some(port)) => format!("{host}:{port}"), _ => host.to_string() })
+    if url.scheme() == "ssh" {
+        let host = translate_ssh(host).unwrap_or_else(|| host.to_string());
+        // gh's SSH translator applies this after expanding ~/.ssh/config aliases.
+        return Some(if host.eq_ignore_ascii_case("ssh.github.com") { "github.com".into() } else { host.to_ascii_lowercase() });
+    }
+    Some(match url.port() { Some(port) => format!("{host}:{port}"), None => host.to_ascii_lowercase() })
 }
 
-/// Resolve the destination without an API call: an unauthenticated Enterprise
-/// host must still be identifiable. Honor gh's explicit base remote first.
-fn repository_hostname(cwd: &Path) -> Option<String> {
-    if let Ok(resolved) = crate::git::run(cwd, &["config", "--get-regexp", r"^remote\..*\.gh-resolved$"]) {
-        for line in resolved.lines() {
-            let Some((key, value)) = line.split_once(' ') else { continue };
-            if value != "base" { continue; }
-            let remote = key.strip_prefix("remote.")?.strip_suffix(".gh-resolved")?;
-            if let Ok(url) = crate::git::run(cwd, &["remote", "get-url", remote]) {
-                if let Some(host) = hostname_from_remote(url.trim()) { return Some(host); }
-            }
-        }
+/// Like gh, ask OpenSSH to expand Host/HostName (including Include and patterns).
+/// -G prints configuration without opening a connection; keep even this local
+/// subprocess bounded, and never let a remote hostname become an SSH option.
+fn ssh_hostname(host: &str, mut command: Command) -> Option<String> {
+    validate_hostname(host).ok()?;
+    command.args(["-G", "--", host]);
+    let output = crate::git::capture_within(command, std::time::Duration::from_secs(5)).ok()?;
+    if !output.status.success() { return None; }
+    String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
+        let (key, value) = line.split_once(' ')?;
+        (key == "hostname" && !value.trim().is_empty()).then(|| value.trim().to_string())
+    })
+}
+
+fn github_config_dir() -> Option<PathBuf> {
+    for (key, suffix) in [("GH_CONFIG_DIR", ""), ("XDG_CONFIG_HOME", "gh")] {
+        if let Some(path) = std::env::var_os(key).filter(|value| !value.is_empty()) { return Some(PathBuf::from(path).join(suffix)); }
     }
-    // This is gh's remote preference when no explicit base has been selected.
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("AppData").filter(|value| !value.is_empty()) { return Some(PathBuf::from(path).join("GitHub CLI")); }
+    dirs::home_dir().map(|home| home.join(".config/gh"))
+}
+
+/// Read host names only, including accounts whose tokens live in the keychain.
+/// Authentication values are ignored, never returned or used for a probe here.
+fn configured_github_hosts(config_dir: &Path) -> BTreeSet<String> {
+    type Hosts = std::collections::BTreeMap<String, serde::de::IgnoredAny>;
+    #[derive(Deserialize, Default)]
+    struct Config { #[serde(default)] hosts: Hosts }
+    let hosts: Hosts = std::fs::read(config_dir.join("hosts.yml")).ok()
+        .and_then(|bytes| serde_yaml::from_slice(&bytes).ok()).unwrap_or_default();
+    // gh also accepts the older hosts section in config.yml when hosts.yml is empty.
+    let hosts = if hosts.is_empty() {
+        std::fs::read(config_dir.join("config.yml")).ok()
+            .and_then(|bytes| serde_yaml::from_slice::<Config>(&bytes).ok()).unwrap_or_default().hosts
+    } else { hosts };
+    hosts.into_keys().map(|host| host.to_ascii_lowercase()).collect()
+}
+
+/// Mirror gh's local resolution before any authentication check: translate SSH,
+/// filter to known GitHub hosts, then apply the default host and remote ordering.
+fn repository_hostname(cwd: &Path) -> Option<String> {
+    let hosts = github_config_dir().map(|path| configured_github_hosts(&path)).unwrap_or_default();
+    repository_hostname_with(cwd, &hosts, |host| ssh_hostname(host, Command::new(crate::binpath::resolve("ssh")?)))
+}
+
+fn repository_hostname_with(cwd: &Path, configured_hosts: &BTreeSet<String>, mut translate_ssh: impl FnMut(&str) -> Option<String>) -> Option<String> {
     let names = crate::git::run(cwd, &["remote"]).ok()?;
     let mut names: Vec<_> = names.lines().collect();
-    names.sort_by_key(|name| (match *name { "upstream" => 0, "github" => 1, "origin" => 2, _ => 3 }, *name));
-    names.into_iter().find_map(|name| {
+    names.sort_by_key(|name| match name.to_ascii_lowercase().as_str() { "upstream" => 0, "github" => 1, "origin" => 2, _ => 3 });
+    let mut remotes: Vec<_> = names.into_iter().filter_map(|name| {
         let url = crate::git::run(cwd, &["remote", "get-url", name]).ok()?;
-        hostname_from_remote(url.trim())
-    })
+        let host = hostname_from_remote_with(url.trim(), &mut translate_ssh)?;
+        (host == "github.com" || configured_hosts.contains(&host)).then_some((name, host))
+    }).collect();
+    // gh prefers its sole configured host if this repository has a remote there.
+    // connection_hostname handles GH_HOST and GH_REPO before calling this resolver.
+    if let Some(host) = configured_hosts.iter().next().filter(|_| configured_hosts.len() == 1) {
+        if remotes.iter().any(|(_, remote_host)| remote_host == host) { remotes.retain(|(_, remote_host)| remote_host == host); }
+    }
+    let resolved = crate::git::run(cwd, &["config", "--get-regexp", r"^remote\..*\.gh-resolved$"]).unwrap_or_default();
+    let bases: BTreeSet<_> = resolved.lines().filter_map(|line| {
+        let (key, value) = line.split_once(' ')?;
+        (value == "base").then(|| key.strip_prefix("remote.")?.strip_suffix(".gh-resolved")).flatten()
+    }).collect();
+    // An explicit base on an unrelated host is excluded just like any other remote.
+    remotes.iter().find(|(name, _)| bases.contains(name)).or_else(|| remotes.first()).map(|(_, host)| host.clone())
 }
 
 fn connection_hostname(cwd: Option<&Path>) -> String {
@@ -1128,15 +1183,103 @@ mod connection_tests {
     #[test]
     fn repository_hostname_uses_remote_and_explicit_gh_base() {
         let dir = tempfile::tempdir().unwrap();
+        let hosts = BTreeSet::from(["github.com".into(), "github.enterprise.test".into()]);
+        let hostname = || repository_hostname_with(dir.path(), &hosts, |host| Some(host.into()));
         crate::git::run(dir.path(), &["init"]).unwrap();
         crate::git::run(dir.path(), &["remote", "add", "origin", "git@github.com:owner/repo.git"]).unwrap();
-        assert_eq!(repository_hostname(dir.path()).as_deref(), Some("github.com"));
+        assert_eq!(hostname().as_deref(), Some("github.com"));
         crate::git::run(dir.path(), &["remote", "add", "upstream", "https://github.enterprise.test/owner/repo.git"]).unwrap();
-        assert_eq!(repository_hostname(dir.path()).as_deref(), Some("github.enterprise.test"));
+        assert_eq!(hostname().as_deref(), Some("github.enterprise.test"));
         crate::git::run(dir.path(), &["config", "remote.origin.gh-resolved", "base"]).unwrap();
-        assert_eq!(repository_hostname(dir.path()).as_deref(), Some("github.com"));
+        assert_eq!(hostname().as_deref(), Some("github.com"));
         assert_eq!(hostname_from_remote("ssh://git@github.enterprise.test:2222/owner/repo.git").as_deref(), Some("github.enterprise.test"));
         assert_eq!(hostname_from_remote("file:///tmp/repo.git"), None);
+    }
+
+    #[test]
+    fn unrelated_remotes_are_filtered_before_preferences_and_explicit_base() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::git::run(dir.path(), &["init"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "origin", "https://github.com/owner/repo.git"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "upstream", "https://gitlab.com/owner/repo.git"]).unwrap();
+        crate::git::run(dir.path(), &["config", "remote.upstream.gh-resolved", "base"]).unwrap();
+        // github.com remains a valid sign-in destination even with no accounts yet.
+        assert_eq!(repository_hostname_with(dir.path(), &BTreeSet::new(), |_| None).as_deref(), Some("github.com"));
+        // A sole configured host is preferred only if a remote actually uses it.
+        let hosts = BTreeSet::from(["github.enterprise.test".into()]);
+        assert_eq!(repository_hostname_with(dir.path(), &hosts, |_| None).as_deref(), Some("github.com"));
+        crate::git::run(dir.path(), &["remote", "add", "enterprise", "https://github.enterprise.test/owner/repo.git"]).unwrap();
+        assert_eq!(repository_hostname_with(dir.path(), &hosts, |_| None).as_deref(), Some("github.enterprise.test"));
+        crate::git::run(dir.path(), &["remote", "remove", "origin"]).unwrap();
+        assert_eq!(repository_hostname_with(dir.path(), &BTreeSet::new(), |_| None), None);
+    }
+
+    #[test]
+    fn known_hosts_include_keychain_accounts_and_legacy_config_without_using_tokens() {
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("config.yml"), "hosts:\n  legacy.example.test:\n    user: person\n").unwrap();
+        assert_eq!(configured_github_hosts(config.path()), BTreeSet::from(["legacy.example.test".into()]));
+        std::fs::write(config.path().join("hosts.yml"), "GitHub.COM:\n  user: person\n  users:\n    person: {}\ngithub.enterprise.test:\n  user: other\n  oauth_token: test-not-a-credential\n").unwrap();
+        assert_eq!(configured_github_hosts(config.path()), BTreeSet::from(["github.com".into(), "github.enterprise.test".into()]));
+    }
+
+    #[test]
+    fn ssh_translation_is_only_for_ssh_and_falls_back_if_the_config_cannot_be_read() {
+        assert_eq!(hostname_from_remote_with("ssh://git@ssh.github.com:443/owner/repo.git", &mut |_| None).as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote_with("git@personal:owner/repo.git", &mut |_| Some("ssh.github.com".into())).as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote_with("git@work:owner/repo.git", &mut |_| Some("github.enterprise.test".into())).as_deref(), Some("github.enterprise.test"));
+        assert_eq!(hostname_from_remote_with("https://github.com/owner/repo.git", &mut |_| panic!("HTTPS does not use SSH aliases")).as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote_with("git@unknown:owner/repo.git", &mut |_| None).as_deref(), Some("unknown"));
+        assert_eq!(ssh_hostname("-oProxyCommand=bad", Command::new("must-not-run")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_aliases_and_mixed_remotes_choose_the_same_host_as_installed_gh() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(ssh) = crate::binpath::resolve("ssh") else { return; };
+        if !available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let ssh_config = dir.path().join("ssh-config");
+        let included = dir.path().join("included-config");
+        std::fs::write(&ssh_config, format!("Include {}\n", included.display())).unwrap();
+        std::fs::write(&included, "Host personal\n  HostName ssh.github.com\n  Port 443\nHost work-*\n  HostName github.enterprise.test\n").unwrap();
+        // Both paths use the real OpenSSH parser with an isolated config. The
+        // wrapper only supplies -F to gh's ssh invocation; no CLI output is faked.
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+        std::fs::write(bin.join("ssh"), format!("#!/bin/sh\nexec {} -F {} \"$@\"\n", quote(&ssh), quote(&ssh_config))).unwrap();
+        std::fs::set_permissions(bin.join("ssh"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::git::run(dir.path(), &["init"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "origin", "https://github.com/owner/repo.git"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "upstream", "https://gitlab.com/owner/repo.git"]).unwrap();
+        let proxy = RejectingProxy::new();
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+        for (remote, expected) in [
+            ("https://github.com/owner/repo.git", "github.com"),
+            ("ssh://git@ssh.github.com:443/owner/repo.git", "github.com"),
+            ("git@personal:owner/repo.git", "github.com"),
+            ("ssh://git@personal:443/owner/repo.git", "github.com"),
+            ("git@work-account:owner/repo.git", "github.enterprise.test"),
+        ] {
+            std::fs::write(config.path().join("hosts.yml"), format!("{expected}:\n  user: test\n")).unwrap();
+            crate::git::run(dir.path(), &["remote", "set-url", "origin", remote]).unwrap();
+            let host = repository_hostname_with(dir.path(), &configured_github_hosts(config.path()), |host| {
+                let mut command = Command::new(&ssh);
+                command.args(["-F"]).arg(&ssh_config);
+                ssh_hostname(host, command)
+            }).unwrap();
+            assert_eq!(host, expected, "{remote}");
+            let mut command = proxy.command(config.path());
+            command.env("PATH", &path).current_dir(dir.path()).args(["repo", "view", "--json", "url"]);
+            let output = crate::git::capture_within(command, std::time::Duration::from_secs(15)).unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            let endpoint = if expected == "github.com" { "https://api.github.com/graphql".to_string() } else { format!("https://{expected}/api/graphql") };
+            assert!(!output.status.success());
+            assert!(error.contains(&endpoint), "gh must choose the same host for {remote}: {error}");
+        }
     }
 
     #[test]

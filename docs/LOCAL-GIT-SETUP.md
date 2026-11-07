@@ -8,6 +8,18 @@ remote and host/repository environment overrides). Settings and repository
 creation use `GH_HOST`, or github.com when it is unset. The selected host is
 shown in the setup card and passed to login too.
 
+Remote selection follows gh's local resolver: SSH URLs and SCP-style destinations
+are expanded with `ssh -G`, including SSH config aliases, patterns and includes.
+The SSH endpoint `ssh.github.com` becomes `github.com`, and SSH transport ports
+are not used as API ports. The resolver then keeps github.com and hosts configured
+in gh's `hosts.yml` (including accounts stored in the keychain), before applying
+gh's sole-configured-host preference, explicit base, and upstream/github/origin
+ordering. A GitLab upstream therefore cannot displace a GitHub origin. The config
+directory follows `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, then gh's platform default;
+legacy `hosts` in `config.yml` is also supported. Only host names are used; tokens
+are neither returned nor used by this step. `GH_HOST` and `GH_REPO` remain explicit
+overrides, including for Enterprise hosts not yet configured in gh.
+
 The check runs `gh auth status --active --hostname <host>`, with a 15-second
 deadline. An absent account requests login. A failed active-account check is
 ambiguous: gh 2.70 calls transport failures an invalid token too. In that case,
@@ -50,5 +62,7 @@ Coverage: `GitRecovery.test.tsx` exercises the recovery actions and hidden
 diagnostics; `PrPanel.test.tsx` retains PR ownership/cleanup safeguards;
 `github::connection_tests` checks a real signed-out CLI, unrelated-host credentials,
 and a failing local proxy in isolated configs; it also exercises host selection
-and shared remote configuration from a real linked worktree. `git::tests` adds a
-remote and pushes to a real bare repository.
+and shared remote configuration from a real linked worktree. SSH destinations,
+real OpenSSH aliases, and mixed GitLab/GitHub remotes are compared with the
+installed gh's selected API endpoint through a rejecting local proxy, without
+external requests. `git::tests` adds a remote and pushes to a real bare repository.
