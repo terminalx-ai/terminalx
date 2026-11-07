@@ -34,8 +34,9 @@ import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ContinuationDialog } from "./ContinuationDialog";
+import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
 import { useModels } from "@/lib/models";
-import { openWorkspaceDelete } from "@/lib/dialogs";
+import { openAgentHandoff, openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
@@ -194,6 +195,8 @@ export function TabView({
   const now = useNowUntil(lease?.expiresAt);
   const tabLive = tab.status === "in_progress" || tab.status === "waiting";
   const gate = shared ? tabGate(shared.you, lease, now, tabLive, nameOf) : null;
+  const counterpart = local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure)
+    ? otherAgent(tab.harness, harnesses) : undefined;
   const [notesOpen, setNotesOpen] = useState(false);
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
@@ -657,6 +660,7 @@ export function TabView({
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
+      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
       footer={
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
@@ -708,6 +712,8 @@ export function TabView({
           onSend={send}
           sentAfter={sentAfter}
           history={history}
+          hasConversation={transcript.turns.length > 0}
+          agentHandoff={counterpart ? { id: counterpart.id, name: counterpart.name, run: () => openAgentHandoff(session, tab, counterpart.id) } : undefined}
           // Stop is Escape first; once that went unanswered, the same control ends the process.
           onStop={interrupts && !unanswered ? () => interrupt() : () => stop("chat")}
           stopMode={!interrupts ? "stop" : unanswered ? "force" : "interrupt"}

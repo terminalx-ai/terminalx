@@ -35,7 +35,8 @@ import { AgentMark } from "@/components/AgentMark";
 import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, MenuShortcut } from "@/components/ui/menu";
 import { isCompactWindow } from "@/lib/appWindow";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
-import { openCloseTabs, openRenameTab } from "@/lib/dialogs";
+import { openAgentHandoff, openCloseTabs, openRenameTab } from "@/lib/dialogs";
+import { otherAgent } from "@/lib/agentHandoff";
 import { showFloatingWindow } from "@/lib/floating";
 import { isMac, useShortcutKeycaps } from "@/lib/hotkeys";
 import { openSessionShare } from "@/lib/localSharing";
@@ -96,6 +97,7 @@ export function TabMenuItems({
   const inTerminalView = tab.kind === "agent" && tabViewIn(tabViews.views, tab.tab) === "terminal";
   // What is in the tab now: an agent with a conversation, or a terminal.
   const agentTab = tab.kind === "agent" && !isShellPeer(tab) ? tab.tab : null;
+  const counterpart = agentTab && otherAgent(agentTab.harness, store.harnesses);
   const drawnAs = peerAgent(tab);
   const bulk = BULK.map((action) => ({ action, plan: planBulkClose(action, row.tabs, tab) })).filter(({ plan }) => plan.targets.length + plan.pinned.length > 0);
   const open = (what: NewTabKind) => void newTab(row, what, tab).catch(failed("opening a tab"));
@@ -134,6 +136,11 @@ export function TabMenuItems({
       {agentTab ? (
         <ContextMenuItem disabled={off} onSelect={() => void forkSession(session.id, tab.id).catch(failed("forking the conversation"))}>
           <GitFork /> Fork conversation
+        </ContextMenuItem>
+      ) : null}
+      {agentTab && counterpart ? (
+        <ContextMenuItem disabled={off} onSelect={() => openAgentHandoff(session, agentTab, counterpart.id)}>
+          <AgentMark id={counterpart.id} decorative /> Hand off to {counterpart.name}
         </ContextMenuItem>
       ) : null}
       {tab.kind === "agent" && !floating ? (

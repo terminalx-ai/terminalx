@@ -9,6 +9,8 @@ vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: { codex: "codex-de
 import { continuationPrompt, IN_INPUT, launchContinuation, type ContinuationContext } from "./continuation";
 import { clearDrafts, getDraft, setDraft } from "@/lib/drafts";
 import type { LaunchSettings } from "@/lib/useSessionAgent";
+import { secondOpinionPrompt } from "./agentHandoff";
+import type { Turn } from "./transcript";
 const settings = (harness: string): LaunchSettings => ({ harness, model: `${harness}-model`, effort: "medium", permissionMode: "acceptEdits" });
 const codex = settings("codex");
 const providers = [{ id: "claude", available: true }, { id: "codex", available: true }] as HarnessInfo[];
@@ -38,6 +40,23 @@ describe("context", () => {
   });
 });
 describe("launch and actual send boundary", () => {
+  it("opens exactly one review tab and sends the turn's diff once, without taking its pipeline", async () => {
+    const turn: Turn = { key: "turn", seq: 1, ts: "", live: false, toolCount: 1, editedFiles: 1,
+      prompt: { text: "Fix it", ts: "", seq: 1 }, completed: { status: "ok", ts: "" },
+      work: [{ kind: "tool", key: "edit", call: { callId: "edit", name: "Edit", toolType: "edit", input: {}, seq: 2, edits: [{ path: "file.ts", kind: "update", oldText: "before", newText: "after" }] } }, { kind: "text", key: "answer", seq: 3, text: "Fixed it" }],
+    };
+    const prompt = secondOpinionPrompt(turn);
+    mocks.start.mockRejectedValueOnce(new Error("temporary launch failure"));
+    const failed = await launchContinuation(context, codex, prompt, vi.fn(), undefined, undefined, "review");
+    expect(failed.stage).toBe("launch");
+    const result = await launchContinuation(context, codex, prompt, vi.fn(), failed.launched, undefined, "review");
+    expect(result.stage).toBe("delivered");
+    expect(mocks.add).toHaveBeenCalledExactlyOnceWith("workspace", "codex", codex.model, codex.effort, codex.permissionMode);
+    expect(prompt).toContain("-before");
+    expect(prompt).toContain("+after");
+    expect(mocks.send).toHaveBeenCalledExactlyOnceWith("workspace", "fresh", prompt, undefined, true);
+    expect(mocks.pipeline).not.toHaveBeenCalled();
+  });
   it.each(["claude", "codex"].flatMap((source) => ["claude", "codex"].flatMap((destination) => ["focused", "full"].map((mode) => ({ source, destination, mode: mode as "focused" | "full" })))))("$source → $destination with $mode", async ({ source, destination, mode }) => {
     const sourceContext = { ...context, provider: source };
     const prompt = continuationPrompt(sourceContext, mode);

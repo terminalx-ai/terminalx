@@ -52,6 +52,7 @@ interface TurnProps {
   onSendQueuedNow?: (seq: number) => void;
   /** Send a message the agent dropped unanswered again, as a new message (#722); absent where that cannot be done. */
   onSendAgain?: (seq: number) => void;
+  onSecondOpinion?: (turn: Turn) => void;
   /** The time line above the turn when it opens a new sitting ("Yesterday, 5:21 PM"); see \`turnDivider\`. */
   divider?: string | null;
 }
@@ -65,6 +66,7 @@ function TurnBody({
   streamingTool,
   onSendQueuedNow,
   onSendAgain,
+  onSecondOpinion,
   divider,
 }: TurnProps) {
   const prefs = usePrefs();
@@ -154,7 +156,7 @@ function TurnBody({
 
       {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} />}
     </div>
   );
 }
@@ -200,7 +202,7 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * A settled turn's one footer row: when the answer came, how the turn went
  * when no header said so, and a copy of the answer on hover.
  */
-function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) {
+function TurnFooter({ turn, outcome, onSecondOpinion }: { turn: Turn; outcome: Outcome | null; onSecondOpinion?: (turn: Turn) => void }) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
   const text = answer.map((w) => w.text).join("\n\n");
@@ -211,7 +213,7 @@ function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) 
     return () => window.clearTimeout(id);
   }, [copied]);
   const quiet = outcome?.tone === "ok";
-  if (!messageTime(ts) && !outcome && !text) return null;
+  if (!messageTime(ts) && !outcome && !text && !onSecondOpinion) return null;
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
       <MessageTime ts={ts} inline />
@@ -232,6 +234,11 @@ function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) 
           >
             {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
           </button>
+      )}
+      {onSecondOpinion && (
+        <button type="button" onClick={() => onSecondOpinion(turn)} className="rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
+          Second opinion
+        </button>
       )}
     </div>
   );
