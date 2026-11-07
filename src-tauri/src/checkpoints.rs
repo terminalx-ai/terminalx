@@ -11,16 +11,22 @@ use std::{
     sync::Mutex,
 };
 
-static LOCK: Mutex<()> = Mutex::new(());
 // Sends may publish checkpoint events, so this is separate from the store lock.
 type SendLocks = Mutex<std::collections::HashMap<String, std::sync::Arc<Mutex<()>>>>;
 static SEND_LOCKS: std::sync::LazyLock<SendLocks> = std::sync::LazyLock::new(Mutex::default);
 pub fn send_lock(session: &str, tab: &str) -> std::sync::Arc<Mutex<()>> {
     SEND_LOCKS.lock().unwrap().entry(format!("{session}/{tab}")).or_default().clone()
 }
-fn locked<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _lock = LOCK.lock().unwrap();
-    store::transaction::run(&store::root()?.join("checkpoints.lock"), std::time::Duration::from_secs(30), f)
+fn workspace_locked<T>(cwd: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    use sha2::{Digest, Sha256};
+    // The desktop and runtime must share a lock, including different sessions
+    // in one checkout, without making unrelated workspaces wait for a snapshot.
+    let workspace = root(cwd).unwrap_or_else(|_| cwd.to_string());
+    let key = format!("{:x}", Sha256::digest(workspace.as_bytes()));
+    store::transaction::run(&store::root()?.join(format!("checkpoints-{key}.lock")), std::time::Duration::from_secs(30), f)
+}
+fn locked<T>(session: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    workspace_locked(&index::get(session)?.cwd, f)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -112,9 +118,9 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
     ) {
         return Ok(None);
     }
-    locked(|| {
+    locked(session, || {
         let entry = index::get(session)?;
-        if entry.worktree_removed || !git::is_repo(Path::new(&entry.cwd)) {
+        if !git::is_repo(Path::new(&entry.cwd)) {
             return Ok(None);
         }
         let cwd = root(&entry.cwd)?;
@@ -179,11 +185,11 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
 }
 
 pub fn get(session: &str, tab: &str, seq: u64) -> Result<Option<Checkpoint>> {
-    locked(|| Ok(load(session, tab)?.turns.into_iter().find(|t| t.seq == seq && t.end.is_some())))
+    locked(session, || Ok(load(session, tab)?.turns.into_iter().find(|t| t.seq == seq && t.end.is_some())))
 }
 
 pub fn keep(session: &str, tab: &str, seq: u64) -> Result<()> {
-    locked(|| {
+    locked(session, || {
         let mut state = load(session, tab)?;
         let turn = state
             .turns
@@ -225,7 +231,7 @@ fn note(paths: &[String], number: Option<usize>) -> Note {
 }
 
 pub fn undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>) -> Result<UndoResult> {
-    locked(|| {
+    locked(session, || {
         let mut state = load(session, tab)?;
         let at = state
             .turns
@@ -283,7 +289,7 @@ pub fn undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>) -> Resu
 /// Discard from the displayed base (HEAD for Uncommitted). Notify each conversation
 /// that edited the file; a file with no turn provenance is described without inventing one.
 pub fn discard(cwd: &str, path: &str, base: Option<&str>, old_path: Option<&str>) -> Result<()> {
-    locked(|| {
+    workspace_locked(cwd, || {
         let cwd = root(cwd)?;
         idle(&cwd)?;
         let p = Path::new(&cwd);
@@ -327,13 +333,13 @@ pub fn discard(cwd: &str, path: &str, base: Option<&str>, old_path: Option<&str>
 }
 
 pub fn pending(session: &str, tab: &str) -> Result<Vec<Note>> {
-    locked(|| Ok(load(session, tab)?.notes))
+    locked(session, || Ok(load(session, tab)?.notes))
 }
 pub fn context(notes: &[Note]) -> String {
     notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>().join("\n")
 }
 pub fn acknowledge(session: &str, tab: &str, notes: &[Note]) -> Result<()> {
-    locked(|| {
+    locked(session, || {
         if notes.is_empty() {
             return Ok(());
         }
@@ -344,14 +350,25 @@ pub fn acknowledge(session: &str, tab: &str, notes: &[Note]) -> Result<()> {
 }
 
 pub fn prune(session: &index::SessionEntry) {
-    let result = locked(|| {
+    let result = workspace_locked(&session.cwd, || {
         // Git stores these refs in the common directory, which outlives a removed worktree.
         // Keep its location even for quick chats, which have no project_path fallback.
         let mut repositories = std::collections::BTreeSet::new();
-        for tab in &session.tabs {
-            if let Some(repository) = load(&session.id, &tab.id)?.repository {
+        let mut metadata = Vec::new();
+        // Closed tabs can still own refs. Their metadata goes with the workspace too.
+        trees::reference(&session.id, "validate", "start")?;
+        for entry in std::fs::read_dir(store::session_dir(&session.id)?)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("checkpoints-") || !name.ends_with(".json") {
+                continue;
+            }
+            let state: State = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+            if let Some(repository) = state.repository {
                 repositories.insert(repository);
             }
+            metadata.push(entry.path());
         }
         for cwd in [&session.cwd, &session.project_path] {
             if let Ok(common) = git::run(Path::new(cwd), &["rev-parse", "--path-format=absolute", "--git-common-dir"]) {
@@ -363,8 +380,8 @@ pub fn prune(session: &index::SessionEntry) {
                 trees::prune(Path::new(&repository), &session.id)?;
             }
         }
-        for tab in &session.tabs {
-            match std::fs::remove_file(file(&session.id, &tab.id)?) {
+        for path in metadata {
+            match std::fs::remove_file(path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),

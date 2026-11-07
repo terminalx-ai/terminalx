@@ -48,6 +48,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [openCommit, setOpenCommit] = useState<string | null>(null);
 
   useEffect(() => {
+    setDiscarding(null);
     setStatus(null);
     setCommits(null);
     setSelected(null);

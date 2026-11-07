@@ -36,28 +36,28 @@ export function FileList({
         const status = STATUS[f.status];
         return (
           <div key={f.path} className="group flex items-center">
-          <button
-            type="button"
-            title={`${status.word} · ${f.path}`}
-            onClick={() => onSelect(f.path)}
-            className={cn(
-              "flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-              selected === f.path ? "bg-selected" : "hover:bg-selected/50",
-            )}
-          >
-            <span className="relative flex shrink-0" data-status={f.status}>
-              <FileTypeIcon name={fileName(f.path)} isDir={false} size={14} />
-              {status.dot && <span aria-hidden className={cn("absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-2 ring-background", status.dot)} />}
-              <span className="sr-only">{status.word}</span>
-            </span>
-            <span className={cn("shrink-0 truncate font-mono", f.status === "deleted" && "text-muted-foreground line-through")}>{fileName(f.path)}</span>
-            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{dirName(f.path)}</span>
-            <span className="shrink-0 font-mono text-[11px] tabular-nums">
-              {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{" "}
-              {f.deletions > 0 && <span className="text-destructive">−{f.deletions}</span>}
-            </span>
-          </button>
-          {trailing?.(f)}
+            <button
+              type="button"
+              title={`${status.word} · ${f.path}`}
+              onClick={() => onSelect(f.path)}
+              className={cn(
+                "flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                selected === f.path ? "bg-selected" : "hover:bg-selected/50",
+              )}
+            >
+              <span className="relative flex shrink-0" data-status={f.status}>
+                <FileTypeIcon name={fileName(f.path)} isDir={false} size={14} />
+                {status.dot && <span aria-hidden className={cn("absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-2 ring-background", status.dot)} />}
+                <span className="sr-only">{status.word}</span>
+              </span>
+              <span className={cn("shrink-0 truncate font-mono", f.status === "deleted" && "text-muted-foreground line-through")}>{fileName(f.path)}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{dirName(f.path)}</span>
+              <span className="shrink-0 font-mono text-[11px] tabular-nums">
+                {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{" "}
+                {f.deletions > 0 && <span className="text-destructive">−{f.deletions}</span>}
+              </span>
+            </button>
+            {trailing?.(f)}
           </div>
         );
       })}

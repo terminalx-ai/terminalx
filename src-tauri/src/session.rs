@@ -6040,7 +6040,7 @@ impl SessionManager {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
-                if frame.event == "UserPromptSubmit" && !frame.payload["prompt"].as_str().is_some_and(tui::is_slash_command) {
+                if frame.event == "UserPromptSubmit" {
                     // Prompts typed directly into a CLI bypass send_admitted. Its blocking
                     // hook can deliver pending revert context before the model sees them.
                     // A composer send already carries the note and owns this lock until admitted.

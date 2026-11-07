@@ -33,7 +33,7 @@ export function DiscardDialog({ source, file, base, onClose, onDiscarded }: {
       </DialogDescription>
       {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
       <DialogFooter>
-        <Button variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
+        <Button variant="secondary" disabled={busy} onClick={() => { setError(null); onClose(); }}>Cancel</Button>
         <Button variant="destructive" disabled={busy} onClick={() => void discard()}>{busy ? "Discarding…" : "Discard"}</Button>
       </DialogFooter>
     </DialogContent>
