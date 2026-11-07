@@ -51,6 +51,8 @@ export interface RemoteGitStatus {
 export interface RemoteChangedFile {
   path: string;
   oldPath?: string;
+  /** Head blob ID, or deleted:<removed blob ID>. Absent on older runtimes. */
+  blobHash?: string;
   status: "added" | "modified" | "deleted" | "renamed";
   additions: number;
   deletions: number;
