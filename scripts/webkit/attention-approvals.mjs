@@ -100,6 +100,71 @@ try {
     }
   }
 
+  // Shared guests render approvals through Chat, outside TabView and modal dialogs.
+  const guestExtra = extra + `
+    const guestEvents = [];
+    const guestEvent = payload => ({ id: "guest-" + (guestEvents.length + 1), seq: guestEvents.length + 1,
+      sessionId: "invited-session", tabId: "tab", harness: "claude", ts: new Date().toISOString(), payload });
+    guestEvents.push(guestEvent({ type: "user_message", text: "Check the guest approval", queued: false }));
+    const guestPush = payload => {
+      const event = guestEvent(payload);
+      guestEvents.push(event);
+      stub.emit("session_guest_message", { connectionId: "connection", message: { method: "session.event", params: { event } } });
+    };
+    window.__PW_GUEST_ASK__ = () => guestPush({ type: "permission_requested", requestId: "guest-ask", toolName: "Bash",
+      input: { command: "touch /tmp/guest-asked" }, options: [{ id: "allow", label: "Allow", kind: "allow_once" }, { id: "deny", label: "Deny", kind: "deny" }] });
+    const originalGuestSend = stub.answers.session_guest_send;
+    stub.answers.session_guest_send = args => {
+      const { request } = args;
+      const respond = result => {
+        window.__PW_SHARE_CALLS__.push(request);
+        queueMicrotask(() => stub.emit("session_guest_message", { connectionId: "connection", message: { id: request.id, ok: true, result } }));
+      };
+      if (request.method === "session.status") return respond({ admitted: true, you: { person: { userId: "guest" }, role: "driver", canApprove: true }, state: { active: true, people: [], leases: [], notes: [], queue: [], activity: [], links: [] } });
+      if (request.method === "session.tail") return respond({ events: guestEvents, hasMore: false });
+      if (request.method === "permission.respond") {
+        respond({ accepted: true });
+        guestPush({ type: "permission_decided", requestId: "guest-ask", allowed: true, label: "Allowed", automatic: false });
+        return;
+      }
+      return originalGuestSend(args);
+    };
+  `;
+  for (const [width, height, zoom] of [[760, 600, 1], [640, 480, 1], [760, 600, 1.5]]) {
+    for (const order of ["approval-first", "notification-first"]) {
+      const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4, localSharing: "guest" }, { width, height }, { extra: guestExtra });
+      page.setDefaultTimeout(10_000);
+      await page.getByText("Check the guest approval", { exact: true }).waitFor();
+      await page.evaluate(zoom => { document.documentElement.style.zoom = String(zoom); }, zoom);
+      if (order === "notification-first") {
+        await raise(page);
+        assert.equal(await notices(page).count(), 4);
+      }
+      await page.evaluate(() => window.__PW_GUEST_ASK__());
+      const allow = page.getByRole("button", { name: /^Allow/ }).filter({ visible: true });
+      const deny = page.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true });
+      await allow.waitFor();
+      await allow.focus();
+      await raise(page);
+      await raise(page);
+      await allow.scrollIntoViewIfNeeded();
+      await unobscured(allow, "guest Allow");
+      await unobscured(deny, "guest Deny");
+      assert.equal(await notices(page).count(), 0);
+      assert.ok(await allow.evaluate(el => el === document.activeElement));
+      await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+      assert.ok(await deny.evaluate(el => el === document.activeElement));
+      await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
+      if (order === "approval-first") await allow.click({ position: { x: 8, y: 3 } });
+      else await page.keyboard.press("Enter");
+      await notices(page).first().waitFor();
+      assert.equal(await notices(page).count(), 4);
+      assert.equal(await page.evaluate(() => window.__PW_SHARE_CALLS__.filter(call => call.method === "permission.respond").length), 1);
+      console.log(`ok guest ${width}x${height}-${zoom}-${order}: controls clear, focus and answering work, notices resume`);
+      await page.close();
+    }
+  }
+
   // A real permission-mode confirmation exercises the shared modal surface separately.
   for (const order of ["approval-first", "notification-first"]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4 }, { width: 760, height: 600 }, { extra: extra + `
