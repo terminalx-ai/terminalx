@@ -321,7 +321,7 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
-      const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
+      const s = await createQuickChat({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
@@ -354,6 +354,7 @@ export function NewSessionView({
       const named = checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
       const worktreeName = named ? await api.previewWorkspaceName(project.path, named).catch(() => workspaceName) : workspaceName;
       const s = await api.createSession({
+        ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}),
         projectPath: project.path,
         title,
         useWorktree: preset?.cwd ? false : useWorktree,

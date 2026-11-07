@@ -39,15 +39,18 @@ export function BrowserPanel({ sessionId, cwd, active }: { sessionId: string; cw
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="panel-browser">
       {pages.length > 0 && (
-        <div role="tablist" aria-label="Pages" className="flex shrink-0 items-center gap-0.5 overflow-x-auto scrollbar-none border-b border-hairline px-2 py-1">
+        <div role="tablist" aria-label="Pages" className="flex h-9 shrink-0 items-stretch gap-1 overflow-x-auto scrollbar-none border-b border-hairline px-2">
           {pages.map((p) => {
             const selected = !showStart && p.id === page?.id;
             return (
               <div
                 key={p.id}
                 className={cn(
-                  "group flex h-6 max-w-[11rem] shrink-0 items-center gap-1 rounded-md pl-2 pr-0.5 text-xs transition-colors",
-                  selected ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
+                  // The same height and underline as the chat's tab row, so the two lines meet.
+                  "group relative flex max-w-[11rem] shrink-0 items-center gap-1 pl-2 pr-0.5 text-xs transition-colors",
+                  selected
+                    ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-t-full after:bg-foreground"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
               >
                 <button type="button" role="tab" aria-selected={selected} className="min-w-0 truncate" title={p.url} onClick={() => opened(p.id)}>
@@ -65,7 +68,7 @@ export function BrowserPanel({ sessionId, cwd, active }: { sessionId: string; cw
             );
           })}
           <WithTooltip label="New page">
-            <Button variant="ghost" size="icon-xs" aria-label="New page" className="shrink-0" onClick={() => setAdding(true)}>
+            <Button variant="ghost" size="icon-xs" aria-label="New page" className="shrink-0 self-center" onClick={() => setAdding(true)}>
               <Plus />
             </Button>
           </WithTooltip>

@@ -108,7 +108,7 @@ describe("the chat's Delete workspace action", () => {
     mocks.forge = forge;
     mocks.changed = { files: [{ path: "changed.txt" }] };
     const session = sessionAt(worktree);
-    const payloads: Payload[] = [{ type: "user_message", text: "Make a change", queued: false }, { type: "turn_completed", status: "ok", authFailed: false }];
+    const payloads = Array.from({ length: 5 }, (): Payload[] => [{ type: "user_message", text: "Make a change", queued: false }, { type: "turn_completed", status: "ok", authFailed: false }]).flat();
     const events: AgentEvent[] = payloads.map((payload, index) => ({
       id: `${session.tabs[0].id}-${index}`, seq: index + 1, sessionId: session.id, tabId: session.tabs[0].id,
       harness: "claude", ts: "2026-10-12T10:00:00.000Z", payload,
@@ -135,7 +135,7 @@ describe("the chat's Delete workspace action", () => {
   });
 
   it("sits alongside Commit, Create PR and Run it after a turn that changed files", () => {
-    const done = { turns: [{ completed: { status: "ok" } }] } as unknown as Transcript;
+    const done = { turns: Array.from({ length: 5 }, () => ({ completed: { status: "ok" } })) } as unknown as Transcript;
     const run = vi.fn();
     expect(handoffsFor(done, true, undefined, false)?.map((step) => step.label)).toEqual(["Commit", "Run it"]);
     expect(handoffsFor(done, true)?.map((step) => step.label)).toEqual(["Commit", "Create PR", "Run it"]);
@@ -145,6 +145,10 @@ describe("the chat's Delete workspace action", () => {
     // It needs neither a finished turn nor changes.
     expect(handoffsFor({ turns: [] } as unknown as Transcript, false, run)).toEqual([{ label: "Delete workspace", run }]);
     expect(handoffsFor(done, false)).toBeUndefined();
+    // Not before the conversation has had five prompts.
+    const early = { turns: Array.from({ length: 4 }, () => ({ completed: { status: "ok" } })) } as unknown as Transcript;
+    expect(handoffsFor(early, true)).toBeUndefined();
+    expect(handoffsFor(early, true, run)).toEqual([{ label: "Delete workspace", run }]);
   });
 
   it("is absent for a session in the project's main directory, which is never read as a worktree", async () => {

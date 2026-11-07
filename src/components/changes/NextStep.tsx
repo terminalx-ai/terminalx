@@ -63,7 +63,7 @@ const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
 /** The one next step, in the same look wherever it is said. */
 export function NextLine({ tone, text, why, children, actions, testId = "next-step" }: { tone: StepTone; text: ReactNode; why?: ReactNode; children?: ReactNode; actions?: ReactNode; testId?: string }) {
   return (
-    <div className="flex flex-col gap-1 rounded-md bg-well px-2 py-1.5" data-testid={testId} data-tone={tone}>
+    <div className="flex flex-col gap-1.5 rounded-lg bg-well px-3 py-2.5" data-testid={testId} data-tone={tone}>
       <div className="flex min-h-6 items-center gap-2">
         <span
           aria-hidden
@@ -76,9 +76,9 @@ export function NextLine({ tone, text, why, children, actions, testId = "next-st
           )}
         />
         <span className={cn("min-w-0 flex-1 truncate text-xs", tone === "muted" ? "text-muted-foreground" : "text-foreground")}>{text}</span>
-        {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
+        {actions && <div className="-my-0.5 flex shrink-0 items-center gap-1.5">{actions}</div>}
       </div>
-      {why && <p className="pl-3.5 text-[11px] leading-snug text-faint" data-testid="next-step-why">{why}</p>}
+      {why && <p className="pl-3.5 text-[11px] leading-relaxed text-faint" data-testid="next-step-why">{why}</p>}
       {children}
     </div>
   );
