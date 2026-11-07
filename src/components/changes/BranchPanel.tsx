@@ -198,9 +198,10 @@ export function BranchPanel({
 
   return (
     <div className={inline ? undefined : "h-full overflow-y-auto scrollbar-thin"} data-testid="branch-panel">
-      {/* One rule for the tab: a box's edge 16px from the panel, and every row's content at 28px, where a box's own content starts. */}
+      {/* One left edge for the tab, 16px from the panel: the branch icon, each box's own edge, the graph's dots and every row
+          start on it. Only what is inside a box is indented. */}
       <div className="flex flex-col gap-3 px-4 py-3">
-        <header className="flex min-h-6 min-w-0 items-center gap-2 px-3">
+        <header className="flex min-h-6 min-w-0 items-center gap-2">
           {/* The glyph's drawing starts 3px into its box: pulled left by that, its ink lines up with the text and dots below. */}
           <GitBranch className="-ml-[3px] size-4 shrink-0 text-accent" aria-hidden />
           <h3 className="truncate font-mono text-[13px] text-foreground" title={branch ?? "Detached HEAD"} data-testid="branch-name">
@@ -214,7 +215,7 @@ export function BranchPanel({
         </header>
 
         {done && !step && (
-          <p role="status" className="px-3 text-xs text-success">
+          <p role="status" className="text-xs text-success">
             {done}
           </p>
         )}
@@ -245,7 +246,7 @@ export function BranchPanel({
 
         {/* The base moving on blocks nothing until it conflicts, which is the step above. */}
         {!overview.onBase && overview.behind > 0 && step?.kind !== "conflicts" && (
-          <div className="flex items-center gap-1.5 px-3" data-testid="branch-behind">
+          <div className="flex items-center gap-1.5" data-testid="branch-behind">
             <span className="min-w-0 flex-1 text-xs text-faint">
               {baseName} is {count(overview.behind)} ahead
             </span>
@@ -320,7 +321,7 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
   const forkY = y(0) + ROW * 0.55;
   const fade = `branch-fade-${useId().replace(/:/g, "")}`;
   return (
-    <section aria-label="Commits" data-testid="branch-graph" className="px-3">
+    <section aria-label="Commits" data-testid="branch-graph">
       <div className="relative" style={{ height }}>
         <svg className="pointer-events-none absolute inset-0 overflow-visible" width={BRANCH_X + 8} height={height} aria-hidden>
           {lastBase > 0 && <line x1={BASE_X} x2={BASE_X} y1={y(0)} y2={y(lastBase)} className="stroke-muted-foreground/60" strokeWidth={1.5} />}
