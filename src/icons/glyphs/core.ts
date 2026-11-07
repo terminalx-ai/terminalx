@@ -12,7 +12,7 @@
  * are the ones the rest of the app imports (the same as the lucide icon
  * each one stands in for), so a glyph here replaces that icon everywhere.
  */
-import { dot, FOLDER, FOLDER_FOLD, type Glyph } from "./shared";
+import { dot, FOLDER, type Glyph } from "./shared";
 
 export const GLYPHS: Record<string, Glyph> = {
   // ---- navigation and chrome
@@ -170,7 +170,7 @@ export const GLYPHS: Record<string, Glyph> = {
   Command: [["path", { d: "M5.5 5.5h5v5h-5zM5.5 5.5H4a2 2 0 1 1 1.5-1.5zM10.5 5.5H12a2 2 0 1 0-1.5-1.5zM5.5 10.5H4a2 2 0 1 0 1.5 1.5zM10.5 10.5H12a2 2 0 1 1-1.5 1.5z" }]],
   Database: [["path", { d: "M13.5 4c0 1.1-2.5 2-5.5 2S2.5 5.1 2.5 4s2.5-2 5.5-2 5.5.9 5.5 2zM2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2" }]],
   EyeOff: [["path", { d: "M2.5 2.5l11 11M6.7 6.8a1.8 1.8 0 0 0 2.5 2.5M4.4 4.5A8.2 8.2 0 0 0 1.5 8c1.3 2.6 3.7 4 6.5 4a6.6 6.6 0 0 0 2.6-.5M7 4.1A6.9 6.9 0 0 1 8 4c2.8 0 5.2 1.4 6.5 4a8.4 8.4 0 0 1-1.6 2.2" }]],
-  Folder: [["path", { d: FOLDER }], ["path", { d: FOLDER_FOLD }]],
+  Folder: [["path", { d: FOLDER }]],
   Gauge: [["path", { d: "M3.2 12.5a6 6 0 1 1 9.6 0M8 9.5l2.5-3.5" }], dot(8, 9.5, 0.9)],
   GitFork: [["circle", { cx: 4, cy: 3.5, r: 1.5 }], ["circle", { cx: 12, cy: 3.5, r: 1.5 }], ["circle", { cx: 8, cy: 12.5, r: 1.5 }], ["path", { d: "M4 5v1a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V5M8 8v3" }]],
   Moon: [["path", { d: "M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z" }]],
