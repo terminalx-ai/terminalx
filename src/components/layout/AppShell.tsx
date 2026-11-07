@@ -1,3 +1,4 @@
+import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
 import { PanelLeft, PanelRight } from "@/icons";
@@ -239,6 +240,7 @@ export function AppShell() {
       <CloudShareDialogHost />
       <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
+      <SignInLinkDialog />
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />

@@ -1,6 +1,6 @@
 import { Loader2, UserRound } from "@/icons";
 import { Button } from "@/components/ui/button";
-import { signIn, useAccount } from "@/lib/account";
+import { openPasteLink, signIn, useAccount } from "@/lib/account";
 import { AccountAvatar } from "./AccountAvatar";
 import { RelayStatus } from "./RelayStatus";
 
@@ -33,7 +33,9 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
       variant="ghost"
       className="w-full min-w-0 justify-start gap-2 overflow-hidden px-2"
       disabled={!account.ready || account.busy}
-      onClick={() => void signIn()}
+      // In the dev app, a sign-in under way is finished by pasting its link: bring that dialog back rather than start
+      // another sign-in, which would make the link already copied useless.
+      onClick={() => (signingIn && import.meta.env.DEV ? openPasteLink() : void signIn())}
       title={account.status.lastError ?? undefined}
     >
       {signingIn || !account.ready ? <Loader2 className="animate-spin" /> : <UserRound />}
