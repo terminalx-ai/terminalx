@@ -89,7 +89,7 @@ esac
 hold=''
 if [ -f "$TERMINALX_HOME/hold" ]; then read -r hold < "$TERMINALX_HOME/hold"; fi
 case "$hold:$*" in
- all:*|write:*' -X PATCH '*|create:'pr create '*)
+ all:*|write:*' -X PATCH '*|create:'pr create '*|panel-checks:'pr checks '*|panel-merge:'pr merge '*)
    : > "$TERMINALX_HOME/held-$$"
    exec /bin/sleep 30 ;;
 esac
@@ -99,6 +99,15 @@ esac
 case "$*" in
  'auth status '*) printf 'Logged in to github.com account privacy-reader\n  Active account: true\n'; exit 0 ;;
 esac
+if [ -f "$TERMINALX_HOME/panel-pr" ]; then
+ case "$*" in
+  'pr list '*) exec /bin/cat "$TERMINALX_HOME/panel-list.json" ;;
+  'pr view '*) exec /bin/cat "$TERMINALX_HOME/panel-view.json" ;;
+  'pr checks '*) exec /bin/cat "$TERMINALX_HOME/panel-required.json" ;;
+  'api graphql '*) exec /bin/cat "$TERMINALX_HOME/panel-queue.json" ;;
+  'pr merge '*' --auto') : > "$TERMINALX_HOME/panel-enqueued"; exit 0 ;;
+ esac
+fi
 if [ -f "$TERMINALX_HOME/create-pr" ]; then
  case "$*" in
   'pr list '*) if [ ! -f "$TERMINALX_HOME/created-pr" ]; then printf '[]\n'; exit 0; fi ;;
@@ -229,6 +238,7 @@ fn privacy_entry_points_child() {
     }
     overview_reads_share_authority(&root, &ssh, managed);
     workspace_rpc(&root, &ssh, managed);
+    panel::run(&root, &ssh, managed);
     let fetch = fresh_fixture(&root);
     fresh_runtime(&root, &fetch, managed);
     cleanup_keeps_revoked_branches(&root, &fetch, managed);
@@ -274,6 +284,7 @@ fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool)
         else { assert!(launches(root) > before); }
     }
     fresh_ipcs(root, fetch, managed, &runtime);
+    panel::ipc_queues(root, cwd, managed, &runtime);
 }
 
 #[cfg(feature = "desktop")]
@@ -739,3 +750,6 @@ fn forwarded_cleanup_keeps_denial(root: &Path, fixture: &FetchFixture, managed: 
 
 #[path = "github_transport_privacy_tests.rs"]
 mod transport;
+
+#[path = "github_panel_privacy_tests.rs"]
+mod panel;

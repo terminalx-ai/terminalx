@@ -399,6 +399,39 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
 }
 
 #[test]
+fn panel_queue_details_and_actions_follow_the_selected_repository() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let pr = json!({
+        "number": 7, "title": "Queued work", "url": "https://github.test/octo/repo/pull/7",
+        "state": "OPEN", "headRefName": "main", "baseRefName": "develop", "headRefOid": "fake-head",
+        "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
+        "statusCheckRollup": [{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":""}],
+        "requiredChecks": ["build"]
+    });
+    std::fs::write(f.state.join("pr-7.json"), pr.to_string()).unwrap();
+    // A queue click cannot silently enable auto-merge on a non-queue base.
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":7,"method":"queue"})), "conflict");
+    assert!(!f.gh_calls().contains("\"--auto\""));
+    f.fault("merge-queue");
+    let listed = f.call("git.prs", json!({"repo":"app"})).unwrap();
+    assert_eq!(listed["prs"][0]["mergeQueueEnabled"], true);
+    assert_eq!(listed["prs"][0]["requiredChecks"], json!(["build"]));
+    assert!(listed["prs"][0]["detailsError"].is_null());
+    f.call("git.prMerge", json!({"repo":"app","number":7,"method":"queue"})).unwrap();
+    assert!(f.gh_calls().contains("[\"pr\", \"merge\", \"7\", \"--auto\"]"));
+    let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
+    assert_eq!(listed["prs"][0]["state"], "OPEN");
+    assert_eq!(listed["prs"][0]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    f.fault("queue-offline");
+    let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
+    assert_eq!(listed["prs"][0]["number"], 7);
+    assert!(listed["prs"][0]["detailsError"].as_str().unwrap().contains("connecting"));
+    assert!(listed["prs"][0]["mergeQueueEntry"].is_null());
+}
+
+#[test]
 fn disposition_facts_report_unpublished_work_per_repository() {
     let f = fixture();
     let remote = f.remote("origin");
