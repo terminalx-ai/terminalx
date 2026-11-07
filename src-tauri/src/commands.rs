@@ -3023,6 +3023,12 @@ pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.spawn(&id, &cwd, cols, rows, command.as_deref(), title.as_deref())).await.map_err(err)?.map_err(err)
 }
 
+#[tauri::command]
+pub async fn pty_local_links(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.local_links(&id)).await.map_err(err)?.map_err(err)
+}
+
 
 /// Which of these shell tabs are running a command now, for a close that would end it.
 #[tauri::command]

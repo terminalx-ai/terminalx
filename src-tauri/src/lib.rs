@@ -694,6 +694,7 @@ pub fn run() {
             star_nag::star_nag_dismiss,
             star_nag::star_nag_act,
             commands::pty_spawn,
+            commands::pty_local_links,
             commands::pty_shells,
             commands::pty_rename,
             commands::pty_busy,
