@@ -27,14 +27,15 @@ export function BranchAutopilot({ sessionId, offer }: { sessionId?: string; offe
   const expanded = open ?? !!role;
   const project = store.projects.find((candidate) => candidate.path === session.projectPath);
   return (
-    <section aria-label="Autopilot" className="flex flex-col gap-1.5" data-testid="branch-autopilot">
+    // A box like the next step's above it: same well, corner and padding, so the two read as one set.
+    <section aria-label="Autopilot" className="flex flex-col rounded-lg bg-well" data-testid="branch-autopilot">
       <button
         type="button"
         aria-expanded={expanded}
         onClick={() => setOpen(!expanded)}
-        className="group/autopilot flex h-7 min-w-0 items-center gap-2 rounded-md px-3 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="group/autopilot flex min-h-10 min-w-0 items-center gap-2 rounded-lg px-3 py-2 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       >
-        <span className="shrink-0 text-muted-foreground group-hover/autopilot:text-foreground">Autopilot</span>
+        <span className="shrink-0 text-foreground">Autopilot</span>
         {/* Its state on the right, where the switches will line up beneath it. */}
         <span className="ml-auto flex min-w-0 items-center gap-1 text-faint group-hover/autopilot:text-muted-foreground">
           {role ? (
@@ -42,14 +43,23 @@ export function BranchAutopilot({ sessionId, offer }: { sessionId?: string; offe
           ) : (
             <span className="truncate">Off</span>
           )}
-          <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} aria-hidden />
+          <ChevronRight className={cn("size-3 shrink-0 transition-transform duration-200", expanded && "rotate-90")} aria-hidden />
         </span>
       </button>
-      {expanded && (
-        <div className="flex flex-col gap-2.5 px-3 pb-1" data-testid="branch-autopilot-body">
-          <SessionPipelineControls session={session} project={project} tabId={session.activeTab ?? undefined} pipeline={role?.pipeline} plain />
+      {/* Opens and closes by growing its row of the grid from nothing to its height, the contents fading with it. */}
+      <div
+        className={cn("grid transition-[grid-template-rows,opacity] duration-250 ease-out", expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")}
+        inert={!expanded}
+        aria-hidden={!expanded}
+        data-state={expanded ? "open" : "closed"}
+        data-testid="branch-autopilot-body"
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="flex flex-col gap-2.5 px-3 pb-3 pt-0.5">
+            <SessionPipelineControls session={session} project={project} tabId={session.activeTab ?? undefined} pipeline={role?.pipeline} plain />
+          </div>
         </div>
-      )}
+      </div>
     </section>
   );
 }

@@ -19,8 +19,9 @@ it("is one line while off, and opens its switches in place", () => {
   const line = screen.getByRole("button", { name: /Autopilot/ });
   expect(line.textContent).toContain("Off");
   expect(line.getAttribute("aria-expanded")).toBe("false");
-  expect(screen.queryByText("autopilot switches")).toBeNull();
+  expect(screen.getByTestId("branch-autopilot-body").getAttribute("data-state")).toBe("closed");
   fireEvent.click(line);
+  expect(screen.getByTestId("branch-autopilot-body").getAttribute("data-state")).toBe("open");
   expect(screen.getByText("autopilot switches")).toBeTruthy();
 });
 
