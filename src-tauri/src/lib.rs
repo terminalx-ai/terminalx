@@ -637,6 +637,7 @@ pub fn run() {
             commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
+            commands::reset_chat,
             commands::tab_handoff,
             commands::tab_to_terminal,
             commands::ensure_tab_started,

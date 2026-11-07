@@ -42,6 +42,8 @@ use crate::{git, pty, store};
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_reset.rs"]
+mod reset;
 #[path = "session_unsent.rs"]
 mod unsent;
 #[path = "session_retire.rs"]
@@ -1795,7 +1797,7 @@ impl SessionManager {
             let entry = index::get(session_id)?;
             let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
             let log_path = store::log_path(session_id, tab_id)?;
-            let seq = store::last_seq(&log_path)?;
+            let seq = store::last_seq(&log_path)?.max(tab.unknown.get("resetSeq").and_then(Value::as_u64).unwrap_or(0));
             let rt = Arc::new(Mutex::new(TabRuntime {
                 session_id: session_id.into(),
                 tab_id: tab_id.into(),

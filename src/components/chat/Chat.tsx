@@ -100,6 +100,7 @@ export function Chat({
   onSendQueuedNow,
   sending = null,
   onSendAgain,
+  onReset,
 }: {
   sessionId: string;
   transcript: Transcript;
@@ -123,6 +124,7 @@ export function Chat({
   sending?: { text: string; images: { url: string; name?: string }[]; pressedAt: number } | null;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
+  onReset?: (endSeq: number) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -421,6 +423,7 @@ export function Chat({
                 // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
+                onReset={!isLast && !live && !sending ? onReset : undefined}
                 divider={turnDivider(turns[start + i - 1], t)}
               />
             );
