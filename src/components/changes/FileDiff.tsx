@@ -8,7 +8,7 @@ import mediaTypes from "@/lib/mediaTypes.json";
 import { DiffPane } from "./DiffPane";
 
 type Content = { data: string; mime: string };
-type Pair = { kind: "text"; before: string; after: string } | { kind: "media"; before: Content | null; after: Content | null };
+type Pair = { kind: "text"; before: string; after: string; deleted: boolean; originalPath?: string } | { kind: "media"; before: Content | null; after: Content | null };
 export function diffMediaKind(path: string): "image" | "pdf" | "svg" | null {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "svg" || ext === "pdf") return ext;
@@ -16,12 +16,12 @@ export function diffMediaKind(path: string): "image" | "pdf" | "svg" | null {
 }
 
 /** Owns the revision read so switching files/scopes never leaves stale content or copy actions. */
-type FileDiffProps = { source: GitSource; path: string; oldPath?: string; base: string; head: string | null; revision?: number };
+type FileDiffProps = { source: GitSource; path: string; oldPath?: string; base: string; head: string | null; revision?: number; recoverRename?: boolean; onText?: (pair: { before: string; after: string; deleted: boolean; originalPath?: string }) => void };
 export function FileDiff(props: FileDiffProps) {
   return <FileDiffContent key={JSON.stringify([props.source.key, props.path, props.oldPath, props.base, props.head, props.revision])} {...props} />;
 }
 
-function FileDiffContent({ source, path, oldPath, base, head }: FileDiffProps) {
+function FileDiffContent({ source, path, oldPath, base, head, onText, recoverRename }: FileDiffProps) {
   const fileKey = diffFileKey(source.key, path);
   const options = useDiffOptions(fileKey);
   const kind = diffMediaKind(path);
@@ -41,15 +41,19 @@ function FileDiffContent({ source, path, oldPath, base, head }: FileDiffProps) {
         return { kind: "media", before, after };
       }
       const next = await source.fileContentsAt(path, base, head);
-      const before = oldPath ? (await source.fileContentsAt(oldPath, base, head)).before : next.before;
+      const originalPath = oldPath ?? (recoverRename && next.before === null && next.after !== null
+        ? (await source.changesBetween(base, head)).find((file) => file.path === path)?.oldPath : undefined);
+      const before = originalPath ? (await source.fileContentsAt(originalPath, base, head)).before : next.before;
+      if (before === null && next.after === null) throw new Error("This file is not present in either snapshot.");
+      if (!cancelled) onText?.({ before: before ?? "", after: next.after ?? "", deleted: next.after === null, originalPath });
       if (before === "<file too large to show>" || next.after === "<file too large to show>") {
         throw new Error("This file exceeds the text preview limit. Open it in the workspace to read or copy its full contents.");
       }
-      return { kind: "text", before: before ?? "", after: next.after ?? "" };
+      return { kind: "text", before: before ?? "", after: next.after ?? "", deleted: next.after === null, originalPath };
     };
     void read().then((next) => { if (!cancelled) setPair(next); }).catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
-  }, [source, path, oldPath, base, head, kind, retry]);
+  }, [source, path, oldPath, base, head, kind, retry, onText, recoverRename]);
 
   const textView = pair?.kind === "text" && (kind !== "svg" || raw);
   return <div className="flex h-full min-h-0 min-w-0 flex-col">
@@ -69,7 +73,8 @@ function FileDiffContent({ source, path, oldPath, base, head }: FileDiffProps) {
     {copyStatus && <p role="status" className="px-3 py-1 text-xs">{copyStatus}</p>}
     {error ? <div role="alert" className="p-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
       : !pair ? <div role="status" className="p-3 text-xs">Loading file diff…</div>
-      : pair.kind === "text" && textView ? <div className="min-h-0 flex-1"><DiffPane path={path} before={pair.before} after={pair.after} mode={options.mode} wrap={options.wrap} hideWhitespace={options.hideWhitespace} /></div>
+      : pair.kind === "text" && (pair.before.includes("\0") || pair.after.includes("\0")) ? <p className="p-3 text-xs text-muted-foreground">Binary file changed.</p>
+      : pair.kind === "text" && textView ? <div className="min-h-0 flex-1"><DiffPane path={path} before={pair.before} after={pair.after} base={base} originalPath={pair.originalPath} mode={options.mode} wrap={options.wrap} hideWhitespace={options.hideWhitespace} /></div>
       : <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-hairline">
         {(["before", "after"] as const).map((side) => <section key={side} aria-label={side === "before" ? "Before" : "After"} className="flex min-h-0 min-w-0 flex-col">
           <h4 className="shrink-0 border-b border-hairline px-2 py-1 text-xs text-muted-foreground">{side === "before" ? "Before" : "After"}</h4>

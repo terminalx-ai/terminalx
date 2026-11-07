@@ -152,7 +152,7 @@ function TurnBody({
         </div>
       )}
 
-      {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
+      {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} range={turn.prompt?.baseline && turn.completed?.head ? { base: turn.prompt?.baseline, head: turn.completed.head } : null} />}
 
       {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} />}
     </div>

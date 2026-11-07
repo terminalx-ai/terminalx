@@ -53,6 +53,8 @@ vi.mock("@/components/terminal/TerminalView", () => ({
   ),
   createTerminal: () => mocks.createTerminal(),
 }));
+vi.mock("@/components/editor/DiffEditorPane", () => ({ DiffEditorPane: () => <div>File review</div> }));
+vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => <div>PR review</div> }));
 vi.mock("@/components/browser/BrowserView", () => ({ BrowserView: () => <div data-testid="browser-view" /> }));
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 vi.mock("@/components/chat/Composer", async () => {
@@ -78,6 +80,7 @@ import { SessionView } from "./SessionView";
 import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { agentTerminalId, agentTerminalOf, cloudTerminalFactory, ensureAgentTerminal, resetCloudTerminals, typeIntoCloudTerminal } from "@/lib/cloudTerminals";
+import { dropEditors, openDiff, openPr } from "@/lib/editors";
 import { getInstance } from "@/lib/terminal";
 import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
@@ -306,6 +309,25 @@ describe("a local session's row of tabs under the title bar", () => {
     mocks.prefs.tabStrip = false;
     // A shell one test opened is not there for the next.
     dropSessionTerminals(["strip-1"]);
+    dropEditors((e) => e.sessionId === "strip-1");
+  });
+
+  it.each(["diff", "pr"] as const)("shows the selected agent transcript after leaving a %s tab", async (kind) => {
+    show();
+    act(() => {
+      const session = local();
+      if (kind === "diff") openDiff(session.id, session.cwd, "app.ts", { scope: "all", range: { base: "base", head: null } });
+      else openPr(session.id, session.cwd, { url: "https://github.com/org/repo/pull/12", number: 12, head: "fix", scope: { kind: "local", cwd: session.cwd } });
+    });
+    const name = kind === "diff" ? "app.ts · All changes" : "PR #12";
+    expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Prompt" })).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Write the fix" }));
+    await waitFor(() => expect(screen.queryByRole("tabpanel", { name })).toBeNull());
+    expect(screen.getByRole("textbox", { name: "Prompt" })).toBeTruthy();
+    expect(screen.getByRole("tabpanel", { name: "Write the fix" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name }));
+    expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
   });
 
   it("names the place in the title bar, with the actions at the right, and puts the tabs in a row under it with the + after them", () => {

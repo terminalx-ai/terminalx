@@ -60,12 +60,27 @@ export interface TerminalState {
   agents: Record<string, string>;
 }
 
-export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser"; id: string };
+export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser" | "review"; id: string };
 
-let state: TerminalState = { panes: [], active: {}, selected: {}, agents: {} };
+const SELECTION_KEY = "terminalx:selected-tabs:v1";
+export function restoreSessionTabSelection(raw: string | null): Record<string, SelectedSessionTab> {
+  try {
+    const saved = JSON.parse(raw ?? "{}");
+    return Object.fromEntries(Object.entries(saved).filter(([, value]) => {
+      const tab = value as SelectedSessionTab | null;
+      return tab && ["agent", "terminal", "browser", "review"].includes(tab.kind) && typeof tab.id === "string";
+    })) as Record<string, SelectedSessionTab>;
+  } catch { return {}; }
+}
+let state: TerminalState = { panes: [], active: {}, selected: restoreSessionTabSelection((() => {
+  try { return localStorage.getItem(SELECTION_KEY); } catch { return null; }
+})()), agents: {} };
 const listeners = new Set<() => void>();
 function set(patch: Partial<TerminalState>) {
   state = { ...state, ...patch };
+  if (patch.selected) {
+    try { localStorage.setItem(SELECTION_KEY, JSON.stringify(state.selected)); } catch { /* Optional persistence. */ }
+  }
   for (const l of listeners) l();
 }
 
@@ -585,6 +600,13 @@ export function setActiveTerminal(sessionId: string, id: string) {
  */
 export function selectSessionTab(sessionId: string, tab: SelectedSessionTab) {
   set({ selected: { ...state.selected, [sessionId]: tab } });
+}
+
+export function clearSelectedReview(sessionId: string, id: string) {
+  if (state.selected[sessionId]?.kind !== "review" || state.selected[sessionId].id !== id) return;
+  const selected = { ...state.selected };
+  delete selected[sessionId];
+  set({ selected });
 }
 
 /** Forget the tab asked for in every session whose id starts with `prefix` (a cloud workspace whose content is gone for this person). */

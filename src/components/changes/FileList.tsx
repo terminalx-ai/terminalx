@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+import { useReviewComments } from "./ReviewComments";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
 import { cn } from "@/lib/cn";
 import { dirName, fileName } from "@/lib/paths";
@@ -22,13 +24,21 @@ export function FileList({
   onSelect,
   empty,
   trailing,
+  base,
 }: {
+  base?: string;
   files: ChangedFile[];
   selected: string | null;
   onSelect: (path: string) => void;
   empty: string;
   trailing?: (f: ChangedFile) => React.ReactNode;
 }) {
+  const review = useReviewComments();
+  const counts = useMemo(() => {
+    const result = new Map<string, number>();
+    for (const c of review?.comments ?? []) if (base && c.base === base && files.some((file) => file.path === c.path && (file.oldPath ?? file.path) === (c.originalPath ?? c.path))) result.set(c.path, (result.get(c.path) ?? 0) + 1);
+    return result;
+  }, [review?.comments, base, files]);
   if (!files.length) return <div className="px-3 py-4 text-xs text-muted-foreground">{empty}</div>;
   return (
     <div className="flex flex-col px-1.5 py-1">
@@ -56,6 +66,7 @@ export function FileList({
               {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{" "}
               {f.deletions > 0 && <span className="text-destructive">−{f.deletions}</span>}
             </span>
+            {!!counts.get(f.path) && <span className="shrink-0 text-[11px] text-info">{counts.get(f.path)} {counts.get(f.path) === 1 ? "comment" : "comments"}</span>}
             {trailing?.(f)}
           </button>
         );
