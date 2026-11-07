@@ -601,6 +601,11 @@ impl ControlService {
                     Err(()) => Err(ControlError::not_found(format!("No terminal benchmark request {id}."))),
                 }
             }
+            "config.show" => {
+                let project = optional_string(&params, "project").map(|selector| resolve_project(&selector)).transpose()?;
+                let resolved = crate::store::configuration::view(project.as_ref().map(|p| p.path.as_str())).map_err(ControlError::internal)?;
+                serde_json::to_value(resolved).map_err(ControlError::internal)
+            }
             "projects.list" => {
                 let (projects, last_selected) = projects::list().map_err(ControlError::internal)?;
                 Ok(json!({"projects": projects, "lastSelected": last_selected}))

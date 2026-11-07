@@ -1876,6 +1876,10 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// deletable.
 #[tauri::command]
 pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
+    if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
+        && !crate::configuration_commands::review(&app, &req.project_path).await? {
+        return Err("Repository configuration was not trusted. No workspace was created.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex_session(&mut req);
         create_session_blocking(&app, req)

@@ -514,14 +514,21 @@ pub(crate) fn start(lifetime: &std::sync::Arc<crate::local_runtime::Lifetime>) -
 // Runtime launches use only the in-memory cache, never the Keychain. A missing
 // or failed read deliberately degrades to no overrides and a per-tab notice.
 #[cfg(not(test))]
-pub fn launch(cwd: &str) -> Launch {
+pub fn launch(cwd: &str) -> Result<Launch> {
     let repo = if cfg!(target_os = "macos") {
         repository(Path::new(cwd))
     } else {
         None
     };
     let index = store().and_then(|store| store.index());
-    cache().lock().unwrap().resolve(index.as_ref().ok(), repo)
+    let cache = cache().lock().unwrap();
+    let mut launch = cache.resolve(index.as_ref().ok(), repo.clone());
+    drop(cache);
+    let local_names = repo.as_ref().and_then(|key| index.as_ref().ok()?.get(key)).map(|scope| &scope.names);
+    let repository = super::configuration::repository(Path::new(cwd)).ok();
+    let resolution = super::configuration::Store::current()?.resolve(repository.as_ref())?;
+    apply_configuration(&mut launch, resolution, local_names)?;
+    Ok(launch)
 }
 
 // PTY fixtures must never read the developer's saved names or depend on the
@@ -533,13 +540,31 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub fn launch(_cwd: &str) -> Launch {
-    TEST_LAUNCH
+pub fn launch(_cwd: &str) -> Result<Launch> {
+    Ok(TEST_LAUNCH
         .with(|slot| slot.borrow_mut().take())
         .unwrap_or_else(|| Launch {
             values: Values::new(),
             stamp: Stamp::default(),
-        })
+        }))
+}
+
+
+/// Keychain repository entries are a legacy local layer: they override shared
+/// file values, while explicit local-file entries and managed policy win.
+fn apply_configuration(launch: &mut Launch, resolution: super::configuration::Resolution, local_names: Option<&BTreeSet<String>>) -> Result<()> {
+    resolution.require_trust()?;
+    // Preserve the existing all-or-nothing behavior for unavailable Keychain values.
+    if launch.stamp.unavailable {
+        ensure!(!resolution.values.keys().any(|key| key.starts_with("environment.")), "Environment overrides are unavailable; no partial layered environment was applied.");
+        return Ok(());
+    }
+    for (key, resolved) in resolution.values {
+        let Some(name) = key.strip_prefix("environment.") else { continue; };
+        if resolved.source == super::configuration::Layer::RepositoryShared && local_names.is_some_and(|names| names.contains(name)) { continue; }
+        if let Some(value) = resolved.value.as_str() { launch.values.insert(name.into(), value.into()); }
+    }
+    Ok(())
 }
 
 fn wait_until_ready(mut ready: impl FnMut() -> bool, timeout: Duration) -> bool {
@@ -610,6 +635,19 @@ pub fn list(project: Option<&str>) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
+
+pub(super) fn configuration_sources(project: Option<&str>, values: &mut BTreeMap<String, super::configuration::ResolvedValue>) -> Result<()> {
+    use super::configuration::{Layer, ResolvedValue};
+    for row in list(project)? {
+        let key = format!("environment.{}", row.name);
+        let local = row.scope == "repository";
+        if values.get(&key).is_none_or(|value| local && matches!(value.source, Layer::User | Layer::RepositoryShared)) {
+            values.insert(key, ResolvedValue { value: serde_json::Value::Null, source: if local { Layer::RepositoryLocal } else { Layer::User }, locked: false, redacted: true });
+        }
+    }
+    Ok(())
+}
+
 pub fn reveal(project: Option<&str>, name: &str) -> Result<String> {
     validate_name(name)?;
     let key = scope_key(project)?;
@@ -623,11 +661,22 @@ pub fn reveal(project: Option<&str>, name: &str) -> Result<String> {
         .context("Variable no longer exists.")
 }
 
+
+fn refuse_managed_names<'a>(project: Option<&str>, names: impl Iterator<Item = &'a str>) -> Result<()> {
+    let resolved = super::configuration::resolve(project)?;
+    for name in names {
+        ensure!(!resolved.values.get(&format!("environment.{name}")).is_some_and(|value| value.locked), "This variable is locked by managed configuration.");
+    }
+    Ok(())
+}
+
 pub fn save(project: Option<&str>, inputs: Vec<Input>, previous: Option<&str>) -> Result<()> {
+    refuse_managed_names(project, inputs.iter().map(|input| input.name.as_str()).chain(previous))?;
     store()?.save(&scope_key(project)?, inputs, previous)
 }
 
 pub fn delete(project: Option<&str>, name: &str) -> Result<()> {
+    refuse_managed_names(project, std::iter::once(name))?;
     validate_name(name)?;
     store()?.change(&scope_key(project)?, |values| {
         ensure!(values.remove(name).is_some(), "Variable no longer exists.");
@@ -683,7 +732,7 @@ fn open_env_file(root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(unix)]
-fn open_env_relative(mut directory: std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
+pub(super) fn open_env_relative(mut directory: std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     let mut components = relative.components().peekable();
@@ -712,6 +761,25 @@ fn open_env_file(_root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_environment_cannot_reach_a_launch_until_trusted_and_local_credentials_win() {
+        use super::super::configuration::{Layer, ResolvedValue, Resolution, Trust, REGISTRY};
+        let resolution = |required| Resolution {
+            values: [("environment.API_URL".into(), ResolvedValue { value: serde_json::json!("$(echo literal)"), source: Layer::RepositoryShared, locked: false, redacted: false })].into(),
+            registry: REGISTRY, warnings: Vec::new(), trust: Some(Trust { hash: "hash".into(), required, keys: vec!["environment.API_URL".into()] }),
+        };
+        let mut launch = Launch { values: [("API_URL".into(), "private".into())].into(), stamp: Stamp::default() };
+        assert!(apply_configuration(&mut launch, resolution(true), None).is_err());
+        assert_eq!(launch.values["API_URL"], "private", "declining applies no shared value");
+        let names = ["API_URL".into()].into();
+        apply_configuration(&mut launch, resolution(false), Some(&names)).unwrap();
+        assert_eq!(launch.values["API_URL"], "private");
+        apply_configuration(&mut launch, resolution(false), None).unwrap();
+        assert_eq!(launch.values["API_URL"], "$(echo literal)");
+        launch.stamp.unavailable = true;
+        assert!(apply_configuration(&mut launch, resolution(false), None).is_err());
+    }
+
     use super::*;
     use crate::keychain::testing::MemorySecrets;
 

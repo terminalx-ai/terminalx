@@ -65,6 +65,21 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
 
+### Layered configuration
+
+```text
+terminalx config show [--project <project>] --json
+```
+
+Reads supported effective settings with their source layer and managed lock.
+Environment values are redacted. Precedence is managed, repository local,
+repository shared, user, defaults. All workspaces inherit files from the primary
+checkout: `.terminalx/settings.json` and ignored `.terminalx/settings.local.json`.
+Shared environment and branch prefixes require the person's native trust approval;
+the CLI cannot grant it. An untrusted launch directs the person to Settings →
+General → Layered configuration. Script execution remains unavailable pending its
+repository-settings dependencies. See `docs/layered-configuration.md` for scope.
+
 ### Archive sessions
 
 ```text
