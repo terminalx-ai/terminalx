@@ -1,13 +1,13 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BranchOverview } from "@/lib/api";
+import type { BranchOverview, ProjectForge } from "@/lib/api";
 import { getDraft } from "@/lib/drafts";
 
 // The panel reads the branch, then its pull request: two answers in turn, slow on a busy machine.
 const WAIT = { timeout: 5000 };
 
 const { invoke, forge, session, openSettle } = vi.hoisted(() => ({
-  invoke: vi.fn(), forge: { value: "github" as "github" | "localOnly" | undefined }, openSettle: vi.fn(),
+  invoke: vi.fn(), forge: { value: "github" as ProjectForge | undefined }, openSettle: vi.fn(),
   session: { id: "s1", projectPath: "/repo", cwd: "/repo/wt", title: "Add login", archived: false, worktreeRemoved: false, worktreeName: "wt", worktreeBase: { commit: "0000000" }, activeTab: "tab-1", tabs: [{ id: "tab-1", status: "idle", front: "agent" }] },
 }));
 vi.mock("@/lib/projectForge", () => ({ useProjectForge: () => forge.value }));
@@ -29,6 +29,7 @@ const overview = (patch: Partial<BranchOverview> = {}): BranchOverview => ({
   base: "origin/main",
   onBase: false,
   mainCheckout: "/repo",
+  inMainCheckout: false,
   forkPoint: commit("aaaaaaa1", "Base", "Cy"),
   ahead: 2,
   behind: 3,
@@ -73,6 +74,29 @@ function answer(next: BranchOverview, prs: unknown[] = []) {
 }
 
 describe("the Branch tab", () => {
+  it.each([undefined, "githubUnavailable"] as const)("reads the branch and retains PR actions while forge is %s", async (state) => {
+    forge.value = state;
+    answer(overview({ unpulled: 0, unpushed: 0, dirty: false, behind: 0, merge: { state: "clean", conflicted: [] } }));
+    const view = render(<BranchPanel cwd="/repo/wt" active sessionId="s1"><p>Create PR</p></BranchPanel>);
+    expect(await screen.findByTestId("branch-name", {}, WAIT)).toBeTruthy();
+    expect(screen.getByText("Create PR")).toBeTruthy();
+    expect(screen.queryByTestId("local-git-actions")).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("branch_overview", { cwd: "/repo/wt", base: null, localOnly: false });
+    const reads = invoke.mock.calls.filter(([command]) => command === "branch_overview").length;
+    forge.value = "github";
+    view.rerender(<BranchPanel cwd="/repo/wt" active sessionId="s1"><p>Create PR</p></BranchPanel>);
+    expect(screen.getByTestId("branch-name")).toBeTruthy();
+    expect(invoke.mock.calls.filter(([command]) => command === "branch_overview")).toHaveLength(reads);
+  });
+
+  it("does not offer to merge from the main checkout reached through a different path", async () => {
+    forge.value = "localOnly";
+    answer(overview({ base: "main", mainCheckout: "/private/repo/main", inMainCheckout: true }));
+    render(<BranchPanel cwd="/repo/main" active sessionId="s1" />);
+    expect(await screen.findByRole("button", { name: "Commit" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Merge into main" })).toBeNull();
+  });
+
   it("says the one next step, then draws the branch against where it started", async () => {
     answer(overview({ baseCommits: [commit("eeeeeee5", "Bump deps", "Cy")], behind: 1 }));
     render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);

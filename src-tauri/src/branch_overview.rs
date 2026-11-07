@@ -63,6 +63,8 @@ pub struct BranchOverview {
     pub on_base: bool,
     /// The main checkout, read from Git rather than inferred from a worktree path.
     pub main_checkout: Option<String>,
+    /// Compared using canonical checkout roots, not the session's path spelling.
+    pub in_main_checkout: bool,
     pub fork_point: Option<CommitInfo>,
     /// Commits only on the branch, and on the base since the fork.
     pub ahead: u32,
@@ -109,16 +111,22 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
         .filter(|r| !r.is_empty() && *r != "HEAD" && status.branch.as_deref() != Some(*r))
         .filter(|r| git::run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).is_ok())
         .map(String::from);
-    let base = recorded.or(default);
     // A remote-tracking ref can lag behind a local merge. Local actions and
     // their cleanup must be checked against the actual local target branch.
-    let base = if local_only { base.and_then(|base| local_base(cwd, &base)) } else { base };
+    let base = if local_only {
+        recorded.as_deref().and_then(|base| local_base(cwd, base))
+            .or_else(|| status.default_branch.as_deref().and_then(|base| local_base(cwd, base)))
+    } else { recorded.or(default) };
     let on_base = status.branch.is_some() && (status.branch == base || (!local_only && status.branch == status.default_branch));
-    let main_checkout = git::run(cwd, &["worktree", "list", "--porcelain", "-z"]).ok()
-        .and_then(|list| list.split('\0').next()?.strip_prefix("worktree ").map(String::from));
+    let main_checkout = main_checkout(cwd);
+    let main_root = main_checkout.as_deref().and_then(|path| std::fs::canonicalize(path).ok());
+    let current_root = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|path| std::fs::canonicalize(path.strip_suffix('\n').unwrap_or(&path)).ok());
+    // An unverified path must not permit switching the agent's own checkout.
+    let in_main_checkout = main_root.zip(current_root).is_none_or(|(main, current)| main == current);
     let mut out = BranchOverview {
         branch: status.branch.clone(),
         main_checkout,
+        in_main_checkout,
         on_base,
         upstream: status.upstream.clone(),
         unpushed: status.ahead,
@@ -133,9 +141,10 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
         out.incoming = git::log_commits(cwd, Some("HEAD..@{upstream}"), LISTED).unwrap_or_default();
     }
     let Some(base) = base else { return out };
-    let fork = git::run(cwd, &["merge-base", &base, "HEAD"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let mine = format!("{base}..HEAD");
-    let theirs = format!("HEAD..{base}");
+    let base_ref = if local_only { format!("refs/heads/{base}") } else { base.clone() };
+    let fork = git::run(cwd, &["merge-base", &base_ref, "HEAD"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let mine = format!("{base_ref}..HEAD");
+    let theirs = format!("HEAD..{base_ref}");
     out.ahead = count(cwd, &mine);
     out.behind = count(cwd, &theirs);
     out.commits = git::log_commits(cwd, Some(&mine), LISTED).unwrap_or_default();
@@ -143,20 +152,51 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
     out.contributors = contributors(cwd, &mine);
     out.base_contributors = contributors(cwd, &theirs);
     out.fork_point = fork.as_deref().and_then(|sha| git::log_commits(cwd, Some(sha), 1).ok()).and_then(|mut v| v.pop());
-    out.merge = if out.ahead == 0 && (!local_only || git::run(cwd, &["merge-base", "--is-ancestor", "HEAD", &base]).is_ok()) { MergeCheck { state: "merged".into(), conflicted: vec![] } } else { merge_check(cwd, &base) };
+    out.merge = if out.ahead == 0 && (!local_only || git::run(cwd, &["merge-base", "--is-ancestor", "HEAD", &base_ref]).is_ok()) { MergeCheck { state: "merged".into(), conflicted: vec![] } } else { merge_check(cwd, &base_ref) };
     out.base = Some(base);
     out
 }
 
 /// Only a branch is a local merge target, never a tag or an arbitrary commit.
 fn local_base(cwd: &Path, base: &str) -> Option<String> {
-    let full = git::run(cwd, &["rev-parse", "--symbolic-full-name", base]).ok()?;
-    let full = full.trim();
-    let branch = full.strip_prefix("refs/heads/").or_else(|| full.strip_prefix("refs/remotes/")?.split_once('/').map(|(_, branch)| branch))?;
-    git::run(cwd, &["show-ref", "--verify", &format!("refs/heads/{branch}")]).ok()?;
-    Some(branch.to_string())
+    let exists = |branch: &str| git::run(cwd, &["show-ref", "--verify", &format!("refs/heads/{branch}")]).is_ok();
+    if let Some(branch) = base.strip_prefix("refs/heads/") {
+        return exists(branch).then(|| branch.to_string());
+    }
+    // Prefer the local branch even when a tag has the same short name.
+    if !base.starts_with("refs/") && exists(base) {
+        return Some(base.to_string());
+    }
+    if base.starts_with("refs/") && !base.starts_with("refs/remotes/") {
+        return None;
+    }
+    let remote = base.strip_prefix("refs/remotes/").unwrap_or(base);
+    git::run(cwd, &["show-ref", "--verify", &format!("refs/remotes/{remote}")]).ok()?;
+    let (_, branch) = remote.split_once('/')?;
+    exists(branch).then(|| branch.to_string())
 }
 
+fn main_checkout(cwd: &Path) -> Option<String> {
+    git::run(cwd, &["worktree", "list", "--porcelain", "-z"]).ok()
+        .and_then(|list| main_checkout_in(&list, true))
+        // -z was added in Git 2.36. Older versions still support porcelain.
+        .or_else(|| git::run(cwd, &["-c", "core.quotePath=false", "worktree", "list", "--porcelain"]).ok()
+            .and_then(|list| main_checkout_in(&list, false)))
+}
+
+fn main_checkout_in(list: &str, nul: bool) -> Option<String> {
+    let path = list.split(if nul { '\0' } else { '\n' }).next()?.strip_prefix("worktree ")?;
+    if !nul && path.starts_with('"') {
+        // core.quotePath=false leaves UTF-8 intact; quotes and control
+        // characters still need decoding. Unknown escapes fail closed.
+        serde_json::from_str(path).ok()
+    } else {
+        Some(path.to_string())
+    }
+}
+
+// Retained for existing command clients. The Branch panel uses an agent prompt
+// so committing and conflict reporting happen in the active conversation.
 /// Merges the checked-out branch into the local branch `into`, for a project
 /// with nowhere to open a pull request. Nothing is left half done: where
 /// `into` is checked out (the project's own folder, usually) the merge runs
@@ -293,6 +333,14 @@ mod tests {
         assert_eq!(before.main_checkout.as_deref().map(std::path::PathBuf::from), Some(std::fs::canonicalize(&main).unwrap()));
         assert_eq!(before.ahead, 1);
         assert!(!before.on_base);
+        assert!(!before.in_main_checkout);
+        assert!(overview(&main, None, true).in_main_checkout);
+        #[cfg(unix)]
+        {
+            let alias = dir.path().join("main-alias");
+            std::os::unix::fs::symlink(&main, &alias).unwrap();
+            assert!(overview(&alias, None, true).in_main_checkout);
+        }
         sh(&main, &["switch", "-q", "develop"]);
         sh(&main, &["merge", "--ff-only", "feature"]);
         let after = overview(&worktree, Some("upstream/develop"), true);
@@ -301,8 +349,26 @@ mod tests {
         assert_eq!(overview(&worktree, Some("upstream/develop"), false).ahead, 1, "the remote-tracking ref has not moved");
         sh(&main, &["tag", "release"]);
         assert_eq!(local_base(&main, "release"), None);
+        let sha = git::run(&main, &["rev-parse", "HEAD"]).unwrap();
+        for recorded in ["release", sha.trim(), "refs/tags/release"] {
+            assert_eq!(overview(&worktree, Some(recorded), true).base.as_deref(), Some("main"));
+        }
         sh(&main, &["update-ref", "refs/remotes/upstream/missing", "HEAD"]);
         assert_eq!(local_base(&main, "upstream/missing"), None);
+        assert_eq!(overview(&worktree, Some("upstream/missing"), true).base.as_deref(), Some("main"));
+        sh(&main, &["branch", "release", "main"]);
+        let release = overview(&worktree, Some("release"), true);
+        assert_eq!(release.base.as_deref(), Some("release"));
+        assert_eq!(release.ahead, 1, "use the branch, not the same-named tag at HEAD");
+    }
+
+    #[test]
+    fn main_checkout_supports_nul_and_older_porcelain_output() {
+        assert_eq!(main_checkout_in("worktree /repo/main's checkout\0HEAD abc\0\0", true).as_deref(), Some("/repo/main's checkout"));
+        assert_eq!(main_checkout_in("worktree /repo/main's checkout\nHEAD abc\n\n", false).as_deref(), Some("/repo/main's checkout"));
+        assert_eq!(main_checkout_in("worktree \"/repo/line\\nname\"\nHEAD abc\n", false).as_deref(), Some("/repo/line\nname"));
+        assert_eq!(main_checkout_in("worktree /repo/line\nname\0HEAD abc\0", true).as_deref(), Some("/repo/line\nname"));
+        assert_eq!(main_checkout_in("worktree \"/repo/unsupported\\a\"\n", false), None);
     }
 
     #[test]

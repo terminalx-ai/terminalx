@@ -749,45 +749,45 @@ pub fn available() -> bool {
 #[serde(rename_all = "camelCase")]
 pub enum ProjectForge {
     Github,
+    /// The forge check could not complete. Never a local-merge verdict.
+    GithubUnavailable,
     LocalOnly,
 }
 
-/// PR actions need both a GitHub origin and a working CLI for that repo.
-/// Explicitly name the repository so GH_REPO cannot select another project.
+/// Preserve the same GitHub aliases and Enterprise hosts as the account UI.
+/// For other remotes, let gh resolve its host configuration from this checkout.
 pub fn project_forge(cwd: &Path) -> ProjectForge {
-    detect_forge(crate::git::remote_url(cwd).as_deref(), |repo| {
-        run_bounded(cwd, &["repo", "view", &format!("https://github.com/{repo}"), "--json", "name"]).is_ok()
+    let origin = crate::git::remote_url(cwd);
+    let has_remote = if origin.is_some() { true } else {
+        match crate::git::run(cwd, &["remote"]) {
+            Ok(remotes) => !remotes.trim().is_empty(),
+            Err(_) => return ProjectForge::GithubUnavailable,
+        }
+    };
+    detect_forge(origin.as_deref(), has_remote, || {
+        let mut command = gh()?;
+        command.current_dir(cwd).args(["repo", "view", "--json", "name"])
+            .env_remove("GH_REPO").env("GH_NO_UPDATE_NOTIFIER", "1");
+        crate::git::output_within(command, BOUNDED).map_err(|error| anyhow!("{error}"))
     })
 }
 
-fn detect_forge(remote: Option<&str>, gh_works: impl FnOnce(&str) -> bool) -> ProjectForge {
-    match remote.and_then(forge_repo) {
-        Some(repo) if gh_works(&repo) => ProjectForge::Github,
-        _ => ProjectForge::LocalOnly,
+fn detect_forge(origin: Option<&str>, has_remote: bool, lookup: impl FnOnce() -> Result<String>) -> ProjectForge {
+    if !has_remote {
+        return ProjectForge::LocalOnly;
     }
-}
-
-/// Parse the host, rather than searching for "github" in an arbitrary URL.
-/// URL parsing also handles SSH ports, HTTPS credentials and host casing.
-fn forge_repo(remote: &str) -> Option<String> {
-    let remote = remote.trim();
-    let expanded;
-    let remote = if remote.contains("://") {
-        remote
-    } else {
-        let (authority, path) = remote.split_once(':')?;
-        expanded = format!("ssh://{authority}/{path}");
-        &expanded
-    };
-    let url = url::Url::parse(remote).ok()?;
-    let host = url.host_str()?.to_ascii_lowercase();
-    let github = host == "github.com" || (url.scheme() == "ssh" && host == "ssh.github.com");
-    if !github || !matches!(url.scheme(), "https" | "http" | "ssh" | "git") || url.query().is_some() || url.fragment().is_some() {
-        return None;
+    if origin.is_some_and(|remote| crate::github_identity::remote_host_kind(remote) == "github") {
+        // Availability belongs to the PR UI's install/auth/network guidance;
+        // logging out must not turn a known GitHub project into a local one.
+        return ProjectForge::Github;
     }
-    let path = url.path().trim_matches('/');
-    let repo = path.strip_suffix(".git").unwrap_or(path);
-    crate::issues::is_github_repo(repo).then(|| repo.to_string())
+    match lookup() {
+        Ok(_) => ProjectForge::Github,
+        Err(error) if error.to_string().contains("none of the git remotes configured for this repository point to a known GitHub host") => ProjectForge::LocalOnly,
+        // Missing gh, timeouts, authentication and repository access failures
+        // do not prove that this remote is hosted somewhere else.
+        Err(_) => ProjectForge::GithubUnavailable,
+    }
 }
 
 // ---- for the removal of a workspace once its pull request has merged --------
@@ -1050,13 +1050,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forge_detection_requires_a_github_remote_and_a_working_cli() {
-        for remote in ["git@github.com:acme/app.git", "https://github.com/acme/app.git", "ssh://git@github.com/acme/app.git", "ssh://git@github.com:22/acme/app.git", "ssh://git@ssh.github.com:443/acme/app.git", "https://user@GITHUB.COM/acme/app.git", "git@GITHUB.COM:acme/app.git", "github.com:acme/app.git"] {
-            assert_eq!(detect_forge(Some(remote), |repo| { assert_eq!(repo, "acme/app"); true }), ProjectForge::Github);
-            assert_eq!(detect_forge(Some(remote), |_| false), ProjectForge::LocalOnly);
+    fn forge_detection_preserves_github_aliases_and_enterprise_without_waiting_for_the_network() {
+        for remote in ["git@github.com:acme/app.git", "https://github.com/acme/app.git", "ssh://git@github.com:22/acme/app.git", "ssh://git@ssh.github.com:443/acme/app.git", "https://user@GITHUB.COM/acme/app.git", "git@github-work:acme/app.git", "ssh://git@github-work/acme/app.git", "https://github.example.com/acme/app.git", "git@github.example.com:acme/app.git"] {
+            assert_eq!(detect_forge(Some(remote), true, || panic!("a known GitHub host needs no network check")), ProjectForge::Github);
         }
-        for remote in [None, Some("git@gitlab.com:acme/app.git"), Some("https://bitbucket.org/acme/app"), Some("https://github.com.evil.test/acme/app"), Some("/tmp/github.com/app.git"), Some("https://github.com/acme/app/extra"), Some("https://github.com@evil.test/acme/app")] {
-            assert_eq!(detect_forge(remote, |_| panic!("a non-GitHub remote must not run gh")), ProjectForge::LocalOnly);
+    }
+
+    #[test]
+    fn forge_detection_uses_gh_for_other_hosts_and_never_turns_a_failed_check_into_a_local_merge() {
+        assert_eq!(detect_forge(None, false, || panic!("no remote needs no gh check")), ProjectForge::LocalOnly);
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(project_forge(&dir.path().join("missing-checkout")), ProjectForge::GithubUnavailable);
+        for origin in [None, Some("git@work:acme/app.git"), Some("https://code.example.com/acme/app")] {
+            assert_eq!(detect_forge(origin, true, || Ok("{\"name\":\"app\"}".into())), ProjectForge::Github);
+        }
+        for remote in ["git@gitlab.com:acme/app.git", "https://bitbucket.org/acme/app", "/tmp/app.git"] {
+            assert_eq!(detect_forge(Some(remote), true, || Err(anyhow!("none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use `gh auth login`"))), ProjectForge::LocalOnly);
+            for error in ["timed out", "gh auth login", "GitHub CLI (gh) is not installed", "HTTP 404: Not Found", "HTTP 401: Bad credentials"] {
+                assert_eq!(detect_forge(Some(remote), true, || Err(anyhow!("{error}"))), ProjectForge::GithubUnavailable);
+            }
         }
     }
 

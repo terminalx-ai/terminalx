@@ -17,6 +17,7 @@ it("names the worktree, local base and main checkout, and keeps conflict reporti
   expect(prompt).toContain("list the conflicting files in chat");
   expect(prompt).toContain("Do not resolve conflicts, retry the merge, reset, or discard changes");
   expect(prompt).toContain("Leave the worktree and branch in place");
+  expect(prompt).toContain("report the main checkout's final branch");
 });
 
 it("the prompt's commands protect local files, merge the named branch, and abort conflicts", () => {

@@ -31,6 +31,29 @@ it("never carries the previous project's forge into a new project and retries fa
   hook.rerender({ path: "/next" });
   expect(hook.result.current).toBeUndefined();
   await act(async () => { await Promise.resolve(); });
+  expect(hook.result.current).toBe("githubUnavailable");
   invoke.mockResolvedValueOnce("localOnly");
   expect(await projectForge("/next")).toBe("localOnly");
+});
+
+it("shares an in-flight check but immediately retries an unavailable answer", async () => {
+  let resolve!: (forge: string) => void;
+  invoke.mockImplementationOnce(() => new Promise<string>((done) => { resolve = done; }));
+  const first = projectForge("/unavailable");
+  expect(projectForge("/unavailable")).toBe(first);
+  resolve("githubUnavailable");
+  expect(await first).toBe("githubUnavailable");
+  invoke.mockResolvedValueOnce("github");
+  expect(await projectForge("/unavailable")).toBe("github");
+  expect(invoke).toHaveBeenCalledTimes(2);
+});
+
+it("keeps unavailable checks distinct from local-only and retries on visibility without waiting for the TTL", async () => {
+  invoke.mockResolvedValueOnce("githubUnavailable");
+  const hook = renderHook(() => useProjectForge("/logged-out"));
+  await waitFor(() => expect(hook.result.current).toBe("githubUnavailable"));
+  invoke.mockResolvedValueOnce("github");
+  await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+  expect(hook.result.current).toBe("github");
+  expect(invoke).toHaveBeenCalledTimes(2);
 });

@@ -121,31 +121,16 @@ fn ensure_terminalx_launcher() {
     let source = "../native/terminalx-launcher/main.rs";
     println!("cargo:rerun-if-changed={source}");
     let output = format!("binaries/terminalx-{target}");
-    // The linker embeds the filename in the ad-hoc signature. Keep it stable
-    // so an unchanged launcher is byte-identical, even across build processes.
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("system clock").as_nanos();
-    let temporary_dir = format!("binaries/.terminalx-launcher-{}-{nonce}", std::process::id());
-    let temporary = format!("{temporary_dir}/terminalx-{target}");
+    let temporary = format!("{output}.tmp-{}", std::process::id());
     std::fs::create_dir_all("binaries").expect("create sidecar directory");
-    std::fs::create_dir(&temporary_dir).expect("create launcher build directory");
     let status = std::process::Command::new(std::env::var_os("RUSTC").expect("Cargo rustc"))
         .args(["--edition=2021", "--crate-name", "terminalx_launcher", "--target", &target,
             "-C", if std::env::var("PROFILE").as_deref() == Ok("debug") { "opt-level=0" } else { "opt-level=2" },
             source, "-o", &temporary])
         .status().expect("build native CLI launcher");
     if !status.success() {
-        let _ = std::fs::remove_dir_all(&temporary_dir);
+        let _ = std::fs::remove_file(&temporary);
         panic!("native CLI launcher build failed");
     }
-    let built = std::fs::read(&temporary).expect("read native CLI launcher");
-    let permissions = std::fs::metadata(&temporary).expect("read launcher permissions").permissions();
-    if std::fs::symlink_metadata(&output).is_ok_and(|previous| previous.is_file() && previous.permissions() == permissions)
-        && std::fs::read(&output).is_ok_and(|previous| previous == built) {
-        std::fs::remove_file(&temporary).expect("remove unchanged native CLI launcher");
-    } else {
-        // Tauri watches this resource. Rewriting identical bytes would make
-        // every subsequent Cargo command rebuild the entire application.
-        std::fs::rename(&temporary, &output).expect("publish native CLI launcher");
-    }
-    std::fs::remove_dir(&temporary_dir).expect("remove launcher build directory");
+    std::fs::rename(&temporary, &output).expect("publish native CLI launcher");
 }

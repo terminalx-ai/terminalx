@@ -11,7 +11,8 @@ export function projectForge(path: string): Promise<ProjectForge> {
   const value = api.projectForge(path);
   const entry = { at: Date.now(), value };
   checks.set(path, entry);
-  void value.catch(() => { if (checks.get(path) === entry) checks.delete(path); });
+  const forget = () => { if (checks.get(path) === entry) checks.delete(path); };
+  void value.then((forge) => { if (forge === "githubUnavailable") forget(); }, forget);
   return value;
 }
 
@@ -24,7 +25,7 @@ export function useProjectForge(path: string | null): ProjectForge | undefined {
       if (document.visibilityState === "hidden") return;
       void projectForge(path).then((forge) => {
         if (!cancelled) setRead({ path, forge });
-      }).catch(() => { if (!cancelled) setRead(null); });
+      }).catch(() => { if (!cancelled) setRead({ path, forge: "githubUnavailable" }); });
     };
     refresh();
     const timer = window.setInterval(refresh, RECHECK);

@@ -59,17 +59,17 @@ export function BranchPanel({
   const sessions = useSessionStore().sessions;
   const session = sessions.find((s) => s.id === sessionId);
   const forge = useProjectForge(session?.projectPath || cwd);
-  const github = forge === "github";
+  const github = forge !== "localOnly";
   const localOnly = forge === "localOnly";
   const sending = useRef(false);
   const busy = sessions.some((s) => s.cwd === cwd && s.tabs.some((tab) => turnLive(tab.status)));
-  const readKey = JSON.stringify([cwd, from, forge]);
+  const readKey = JSON.stringify([cwd, from, localOnly]);
   const overview = read?.key === readKey ? read.overview : null;
   const activeTab = session?.tabs.find((tab) => tab.id === session.activeTab);
   const canSend = !!activeTab && activeTab.front !== "terminal";
 
   useEffect(() => {
-    if (!active || !forge) return;
+    if (!active) return;
     let cancelled = false;
     // An agent's turn changes the branch as it works: read again, but not on every event.
     const id = window.setTimeout(() => {
@@ -86,7 +86,7 @@ export function BranchPanel({
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [cwd, from, active, version, reread, forge, busy]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cwd, from, active, version, reread, localOnly, busy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // What others pushed shows only once fetched: on opening, then every five minutes while shown.
   useEffect(() => {
@@ -116,7 +116,7 @@ export function BranchPanel({
   const branch = overview?.branch ?? null;
   // Only whether a pull request exists: what it says, and does, is the pull request's own section.
   useEffect(() => {
-    if (!active || !github || !branch || overview?.onBase) return;
+    if (!active || !github || !branch || overview?.onBase || !overview?.hasRemote) return;
     let cancelled = false;
     const source = localGitSource(cwd);
     source
@@ -127,7 +127,7 @@ export function BranchPanel({
     return () => {
       cancelled = true;
     };
-  }, [cwd, branch, active, overview?.onBase, github, reread]);
+  }, [cwd, branch, active, overview?.onBase, overview?.hasRemote, github, reread]);
 
   const baseName = (localOnly ? overview?.base : overview?.base?.replace(/^origin\//, "")) ?? "the base";
   const step = overview ? localStep(overview, pr, baseName, localOnly) : null;
@@ -182,7 +182,7 @@ export function BranchPanel({
   );
 
   const sendMerge = async () => {
-    if (sending.current || !localOnly || !canSend || busy || !session?.activeTab || !branch || !overview.base || !overview.mainCheckout) return;
+    if (sending.current || !localOnly || !canSend || busy || !session?.activeTab || !branch || !overview.base || !overview.mainCheckout || overview.inMainCheckout) return;
     sending.current = true;
     setWorking("merge");
     setActionError(null);
@@ -240,7 +240,7 @@ export function BranchPanel({
         {localOnly && (
           <div className="flex flex-wrap items-center gap-2" data-testid="local-git-actions">
             <button type="button" onClick={() => showPanelTab("changes")} className={AGENT_BUTTON}>Commit</button>
-            {branch && overview.base && !overview.onBase && overview.mainCheckout && overview.mainCheckout !== cwd && (
+            {branch && overview.base && !overview.onBase && overview.mainCheckout && !overview.inMainCheckout && (
               <button type="button" className={AGENT_BUTTON} disabled={!!working || busy || !canSend}
                 onClick={() => void sendMerge()}>
                 {working === "merge" && <Loader2 className="size-3 animate-spin" aria-hidden />}
@@ -274,7 +274,7 @@ export function BranchPanel({
           </NextLine>
         )}
 
-        {!overview.onBase && github && children}
+        {!overview.onBase && overview.hasRemote && github && children}
 
         <BranchGraph overview={overview} baseName={baseName} branch={branch} who={who} github={github} landed={landed} />
 

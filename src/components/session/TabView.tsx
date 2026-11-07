@@ -624,7 +624,7 @@ export function TabView({
           modelClient={backend.modelClient}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
-          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace, !local || forge === "github")}
+          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace, !local || forge !== "localOnly")}
           disabled={!!gate?.blocked}
           settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
           modelLockedReason={handLock.model}
