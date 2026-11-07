@@ -1,5 +1,23 @@
 use url::Url;
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct WorkspaceLink {
+    pub org: String,
+    pub number: u32,
+}
+
+impl WorkspaceLink {
+    pub fn valid(&self) -> bool {
+        let bytes = self.org.as_bytes();
+        !bytes.is_empty() && bytes.len() <= 63
+            && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+            && self.number > 0 && self.number <= i32::MAX as u32
+    }
+}
+
+
 /// Selected by the bundled Tauri identity, not Cargo's optimization profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DesktopLinks {
@@ -42,6 +60,19 @@ impl DesktopLinks {
             && url.path() == "/callback"
     }
 
+    pub fn workspace_link(self, url: &Url) -> Option<WorkspaceLink> {
+        if !self.accepts_scheme(url.scheme()) || url.host_str() != Some("o")
+            || !url.username().is_empty() || url.password().is_some()
+            || url.port().is_some() || url.query().is_some() || url.fragment().is_some()
+        { return None; }
+        let parts: Vec<_> = url.path().split('/').collect();
+        if parts.len() != 4 || !parts[0].is_empty() || parts[2] != "w"
+            || parts[3].starts_with('0') || !parts[3].bytes().all(|b| b.is_ascii_digit())
+        { return None; }
+        let link = WorkspaceLink { org: parts[1].into(), number: parts[3].parse().ok()? };
+        link.valid().then_some(link)
+    }
+
     pub fn is_join_link(self, url: &Url) -> bool {
         self.accepts_scheme(url.scheme()) && url.host_str() == Some("join")
             && matches!(url.path(), "" | "/") && url.query().is_none() && url.fragment().is_some()
@@ -51,6 +82,21 @@ impl DesktopLinks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_links_are_strict_and_build_scoped() {
+        let release = DesktopLinks::Release;
+        assert_eq!(release.workspace_link(&Url::parse("terminalx://o/acme-team/w/12").unwrap()),
+            Some(WorkspaceLink { org: "acme-team".into(), number: 12 }));
+        assert!(DesktopLinks::Dev.workspace_link(&Url::parse("terminalx-dev://o/acme/w/1").unwrap()).is_some());
+        for raw in ["terminalx-dev://o/acme/w/1", "https://o/acme/w/1", "terminalx://o/acme/w/0",
+            "terminalx://o/acme/w/01", "terminalx://o/acme/w/-1", "terminalx://o/acme/w/2147483648",
+            "terminalx://o/acme/w/1/", "terminalx://o/acme/w/1?token=x", "terminalx://o/acme/w/1#x",
+            "terminalx://user@o/acme/w/1", "terminalx://o:123/acme/w/1", "terminalx://o/Acme/w/1",
+            "terminalx://o/ac%2Fme/w/1", "terminalx://o/-acme/w/1", "terminalx://o/acme/w/+1"] {
+            assert!(release.workspace_link(&Url::parse(raw).unwrap()).is_none(), "{raw}");
+        }
+    }
 
     #[test]
     fn bundled_identities_register_and_use_distinct_schemes() {

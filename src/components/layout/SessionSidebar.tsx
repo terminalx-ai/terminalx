@@ -382,6 +382,7 @@ export function FilteredEmpty({ text }: { text: string }) {
  * `title` is the header's tooltip; `forceOpen` keeps it open whatever its fold.
  */
 export function ListSection({
+  icon,
   id,
   label,
   children,
@@ -394,6 +395,7 @@ export function ListSection({
 }: {
   id: string;
   label: string;
+  icon?: ReactNode;
   children: ReactNode;
   actions?: ReactNode;
   notes?: ReactNode;
@@ -423,6 +425,7 @@ export function ListSection({
           title={title}
           className="flex h-6 min-w-0 items-center gap-1 rounded-sm px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
         >
+          {icon}
           <span className="min-w-0 truncate">{label}</span>
           <ChevronDown className={cn("size-3 shrink-0 transition-transform", !open && "-rotate-90")} />
         </button>

@@ -674,6 +674,12 @@ pub enum WorkspaceAccessMode {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspace {
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub number: Option<u32>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub owner_name: Option<String>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
     pub id: String,
     pub org_id: String,
     pub name: String,
@@ -1830,7 +1836,15 @@ fn valid_cursor(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedWorkspaceLink {
+    pub org_id: String,
+    pub workspace_id: String,
+}
+
 pub struct CloudWorkspaceService {
+    pending_link: std::sync::Mutex<Option<crate::desktop_links::WorkspaceLink>>,
     account: Arc<AccountManager>,
     client: Client,
 }
@@ -1840,6 +1854,7 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::production(),
+            pending_link: std::sync::Mutex::new(None),
         }
     }
 
@@ -1848,6 +1863,7 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::for_test(base, timeout),
+            pending_link: std::sync::Mutex::new(None),
         }
     }
 
@@ -2454,6 +2470,34 @@ impl CloudWorkspaceService {
                 result => result?,
             };
             ensure_snapshot(result, &context.organization_id, None, RequestRisk::Create)
+        })
+    }
+
+    pub fn set_pending_link(&self, link: crate::desktop_links::WorkspaceLink) {
+        *self.pending_link.lock().unwrap() = Some(link);
+    }
+
+    pub fn pending_link(&self) -> Option<crate::desktop_links::WorkspaceLink> {
+        self.pending_link.lock().unwrap().clone()
+    }
+
+    pub fn clear_pending_link(&self, link: &crate::desktop_links::WorkspaceLink) {
+        let mut pending = self.pending_link.lock().unwrap();
+        if pending.as_ref() == Some(link) { *pending = None; }
+    }
+
+    pub fn resolve_link(&self, link: &crate::desktop_links::WorkspaceLink) -> Result<ResolvedWorkspaceLink, CloudWorkspaceClientError> {
+        if !link.valid() { return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false)); }
+        // Use the existing authenticated, bounded HTTP path, including its
+        // privacy-policy transport. The server resolves the target membership;
+        // the active org in the path grants nothing to this target.
+        self.run(RequestRisk::Read, |client, context| {
+            let result: ResolvedWorkspaceLink = client.request(context, &["workspace-links", &link.org, &link.number.to_string()], None, None, None, RequestRisk::Read)?;
+            if !valid_resource_id(&result.org_id) || !valid_resource_id(&result.workspace_id) {
+                return Err(invalid_response());
+            }
+            self.account.context_in(&result.org_id).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+            Ok(result)
         })
     }
 
@@ -4984,6 +5028,7 @@ mod tests {
         let list = CloudWorkspaceList {
             workspaces: vec![CloudWorkspaceListItem {
                 workspace: CloudWorkspace {
+                    number: None, owner_name: None, web_url: None,
                     id: "workspace-1".into(),
                     org_id: "another-org".into(),
                     name: "one".into(),

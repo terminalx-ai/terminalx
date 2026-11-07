@@ -1,3 +1,4 @@
+import { workspaceLabel, workspaceOwner } from "@/lib/cloudWorkspaceLinks";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -216,6 +217,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
             />
           </span>
           <span className="min-w-0 flex-1 truncate text-[13px]">{project.fullName}</span>
+          {only?.item.workspace.number && <Chip>#{only.item.workspace.number} · {workspaceOwner(only.item.workspace)}</Chip>}
           {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
           {extra && <Chip data-testid="cloud-extra-repositories">{extra.label}</Chip>}
           {project.blank && <Chip>no repo</Chip>}
@@ -459,7 +461,8 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <GitBranch className="size-3.5 shrink-0 text-faint" />
-          <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{workspace.name}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{workspaceLabel(workspace)}</span>
+          {workspaceOwner(workspace) && <span className="max-w-28 truncate text-[10px] text-faint">{workspaceOwner(workspace)}</span>}
           {extra && <Chip data-testid="cloud-extra-repositories">{extra.label}</Chip>}
           <span className={cn("flex shrink-0 items-center gap-1 text-[10px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
             <span aria-hidden className={cn("size-1.5 rounded-full", DOT[activity.tone])} />
@@ -711,7 +714,8 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
         >
           <span className="flex min-w-0 items-center gap-2">
             <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", DOT[state.tone])} />
-            <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{workspace.name}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{workspaceLabel(workspace)}</span>
+          {workspaceOwner(workspace) && <span className="max-w-28 truncate text-[10px] text-faint">{workspaceOwner(workspace)}</span>}
             <span className={cn("shrink-0 text-[10px] text-faint", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
               {state.label}
             </span>

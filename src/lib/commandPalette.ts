@@ -41,6 +41,7 @@ export interface PaletteWorkspaceItem extends PaletteEntityBase {
 }
 
 export interface PaletteProjectItem extends PaletteEntityBase {
+  cloudWorkspaceKey?: string;
   group: "projects";
   /** A local project; absent for a cloud one. */
   project?: Project;
@@ -283,7 +284,7 @@ export interface CloudPaletteProject {
   identity: string;
   blank: boolean;
   orgName: string;
-  workspaces: { name: string; lastActivity: number }[];
+  workspaces: { name: string; lastActivity: number; key?: string; number?: number; ownerName?: string | null }[];
 }
 
 /**
@@ -292,7 +293,7 @@ export interface CloudPaletteProject {
  * name, repository, organization and workspace name.
  */
 export function buildCloudPaletteProjects(projects: readonly CloudPaletteProject[]): PaletteProjectItem[] {
-  return projects.map((project): PaletteProjectItem => {
+  const entries = projects.map((project): PaletteProjectItem => {
     const where = project.blank ? "no repository" : project.identity;
     const secondary = `${project.orgName} cloud · ${where}`;
     return {
@@ -305,6 +306,15 @@ export function buildCloudPaletteProjects(projects: readonly CloudPaletteProject
       searchFields: searchFields(project.fullName, secondary, [project.orgName, ...project.workspaces.map((workspace) => workspace.name)]),
     };
   });
+  const seen = new Set<string>();
+  for (const project of projects) for (const workspace of project.workspaces) {
+    if (!workspace.number || !workspace.key || seen.has(workspace.key)) continue;
+    seen.add(workspace.key);
+    const primary = `#${workspace.number} · ${workspace.name}`;
+    const secondary = [project.orgName, workspace.ownerName, project.fullName].filter(Boolean).join(" · ");
+    entries.push({ id: `cloud-workspace:${workspace.key}`, group: "projects", cloudWorkspaceKey: workspace.key, primary, secondary, recentAt: workspace.lastActivity, searchFields: searchFields(primary, secondary, [project.orgName]) });
+  }
+  return entries;
 }
 
 /**

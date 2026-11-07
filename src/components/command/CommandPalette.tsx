@@ -1,4 +1,4 @@
-import { conversationTitle } from "@/lib/sessions";
+import { selectCloudWorkspace, conversationTitle } from "@/lib/sessions";
 import { openSectionDialog } from "@/lib/localSections";
 import {
   useCallback,
@@ -596,7 +596,7 @@ export function CommandPalette({
   const paletteIndex = useMemo(() => {
     const projects = cloudProjects
       .filter((org) => deferredQuery.trim() || visibleIds.has(org.orgId))
-      .flatMap((org) => org.projects.map((project) => ({ ...project, orgName: org.orgName, workspaces: project.workspaces.map((node) => ({ name: node.item.workspace.name, lastActivity: lastActivity(node.item.workspace) })) })));
+      .flatMap((org) => org.projects.map((project) => ({ ...project, orgName: org.orgName, workspaces: project.workspaces.map((node) => ({ key: node.key, name: node.item.workspace.name, number: node.item.workspace.number, ownerName: node.item.workspace.ownerName ?? node.item.workspace.createdBy, lastActivity: lastActivity(node.item.workspace) })) })));
     return withCloudProjects(
       withCloudSessions(store.paletteIndex, buildCloudPaletteSessions(visiblePaletteSessions(cloudSessions, visibleIds, deferredQuery), store.harnesses)),
       buildCloudPaletteProjects(projects),
@@ -677,7 +677,8 @@ export function CommandPalette({
     ));
     const workspaceRows = entityMatches.workspaces.map((match) => entityRow(match, "workspace", () => void openWorkspace(match.item.projectPath, match.item.workspace.path)));
     const projectRows = entityMatches.projects.map((match) => {
-      const { project, cloudKey } = match.item;
+      const { project, cloudKey, cloudWorkspaceKey } = match.item;
+      if (cloudWorkspaceKey) return entityRow(match, "workspace", () => selectCloudWorkspace(cloudWorkspaceKey), { icon: Cloud });
       // A cloud project opens its new-session form like a local one (a member's only focuses it); nothing is woken.
       if (cloudKey) return entityRow(match, "project", () => startCloudSessionIn(cloudKey), { icon: Cloud });
       return entityRow(match, "project", () => {

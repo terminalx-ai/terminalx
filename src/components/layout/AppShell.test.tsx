@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
 vi.mock("@/components/session/LocalSectionDialogs", () => ({ LocalSectionDialogs: () => null }));
+vi.mock("@/components/cloud/CloudWorkspaceLinkHost", () => ({ CloudWorkspaceLinkHost: () => null }));
 vi.mock("@/components/session/GuestSession", () => ({ GuestSessionHost: () => null }));
 vi.mock("@/components/session/ShareSessionDialog", () => ({ ShareSessionDialogHost: () => null }));
 

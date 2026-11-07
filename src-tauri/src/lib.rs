@@ -340,9 +340,11 @@ pub fn run() {
                 let links = desktop_links::DesktopLinks::for_identifier(&app.config().identifier);
                 let account = account.clone();
                 let joining = pairing.clone();
+                let workspace_links = app.state::<AppState>().cloud_workspaces.clone();
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     for url in urls {
                         if links.is_join_link(&url) { let _ = joining.set_pending_join(url.to_string()); }
+                        if let Some(link) = links.workspace_link(&url) { workspace_links.set_pending_link(link); }
                     }
                 }
                 app.deep_link().on_open_url(move |event| {
@@ -351,6 +353,10 @@ pub fn run() {
                             account::focus_main_window(&app_handle);
                             if links.is_join_link(&url) {
                                 if joining.set_pending_join(url.to_string()).is_err() { log::warn!("ignored invalid session link"); }
+                            } else if let Some(link) = links.workspace_link(&url) {
+                                workspace_links.set_pending_link(link);
+                                use tauri::Emitter;
+                                let _ = app_handle.emit("cloud_workspace_link_requested", ());
                             } else if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
@@ -494,6 +500,9 @@ pub fn run() {
             commands::cloud_workspace_preflight,
             commands::cloud_workspace_repositories,
             commands::cloud_workspaces,
+            commands::cloud_workspace_link_pending,
+            commands::cloud_workspace_link_clear,
+            commands::cloud_workspace_link_resolve,
             commands::cloud_catalog_feed,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,

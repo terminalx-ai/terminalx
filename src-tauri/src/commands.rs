@@ -1379,6 +1379,21 @@ pub async fn cloud_workspace_repositories(
 }
 
 #[tauri::command]
+pub fn cloud_workspace_link_pending(state: tauri::State<'_, crate::AppState>) -> Option<crate::desktop_links::WorkspaceLink> {
+    state.cloud_workspaces.pending_link()
+}
+
+#[tauri::command]
+pub fn cloud_workspace_link_clear(link: crate::desktop_links::WorkspaceLink, state: tauri::State<'_, crate::AppState>) {
+    state.cloud_workspaces.clear_pending_link(&link);
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_link_resolve(link: crate::desktop_links::WorkspaceLink, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::ResolvedWorkspaceLink, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.resolve_link(&link))
+}
+
+#[tauri::command]
 pub async fn cloud_workspaces(
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,

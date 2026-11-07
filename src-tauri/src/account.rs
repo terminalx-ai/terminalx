@@ -149,6 +149,10 @@ pub struct OrganizationSummary {
     pub id: String,
     pub name: String,
     pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     /// The user's personal organization (PRO-69); absent from older servers.
     #[serde(default)]
     pub is_personal: bool,
@@ -287,6 +291,10 @@ struct CloudIdentity {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Organization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    avatar_url: Option<String>,
     org_id: String,
     name: String,
     role: String,
@@ -464,7 +472,7 @@ impl AccountManager {
         let session = inner.session.as_mut().expect("signed in");
         session.organizations = organizations
             .iter()
-            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None })
+            .map(|id| Organization { slug: None, avatar_url: None, org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None })
             .collect();
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
     }
@@ -1377,7 +1385,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
             let account = account_key(&session.cloud.user_id, &session.cloud.cloud_profile_id);
             OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope, account }
         }),
-        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { slug: org.slug.clone(), avatar_url: org.avatar_url.clone(), id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
@@ -1665,7 +1673,7 @@ mod tests {
 
     #[test]
     fn a_created_organization_says_whether_it_was_selected() {
-        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
+        let organization = OrganizationSummary { slug: None, avatar_url: None, id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
         let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
         assert_eq!(
             serde_json::to_value(&unselected).unwrap(),
@@ -2254,7 +2262,7 @@ mod tests {
         let mut session = from.clone();
         session.access_token = "rotated-access".into();
         session.refresh_token = "rotated-refresh".into();
-        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None }];
+        session.organizations = vec![Organization { slug: None, avatar_url: None, org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None }];
         session
     }
 

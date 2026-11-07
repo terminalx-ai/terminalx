@@ -35,6 +35,7 @@ import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
+import { CloudWorkspaceLinkHost } from "@/components/cloud/CloudWorkspaceLinkHost";
 import { GuestSessionHost } from "@/components/session/GuestSession";
 import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
@@ -239,6 +240,7 @@ export function AppShell() {
       <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
       <GuestSessionHost />
+      <CloudWorkspaceLinkHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
       <WorktreeCleanupDialog />

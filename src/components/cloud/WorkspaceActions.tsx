@@ -1,3 +1,6 @@
+import { copyWorkspaceLink } from "@/lib/cloudWorkspaceLinks";
+import { useShortcutKeys } from "@/lib/hotkeys";
+import { Link } from "@/icons";
 import { useState } from "react";
 import { Archive, ArchiveRestore, CalendarClock, Lock, Pause, Play, Trash2, Users } from "@/icons";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
@@ -37,6 +40,7 @@ export function WorkspaceActionItems({
   run: (work: () => Promise<void>) => void;
   archived?: boolean;
 }) {
+  const copyKeys = useShortcutKeys("workspace.copyLink");
   const state = deriveCloudActivity(item);
   const actions = actionsFor(item);
   const busy = state.tone === "changing";
@@ -69,6 +73,9 @@ export function WorkspaceActionItems({
     (workspace.state === "suspended" && !archived) || (actions.includes("stop") && !archived) || actions.includes("archive") || archived || actions.includes("delete");
   return (
     <>
+      {present && workspace.webUrl && <DropdownMenuItem onSelect={() => void run(() => copyWorkspaceLink(workspace))}>
+        <Link /> Copy link <span className="ml-auto text-[10px] text-faint">{copyKeys.join("")}</span>
+      </DropdownMenuItem>}
       {shareable && shareBlocked && (
         <DropdownMenuItem disabled title={VISIBILITY_ADMIN_REASON} data-testid="cloud-share-locked">
           <Users />

@@ -339,6 +339,7 @@ function OrganizationSection({
     <ListSection
       id={`org:${org.id}`}
       label={name}
+      icon={org.avatarUrl ? <img src={org.avatarUrl} alt="" className="size-4 shrink-0 rounded object-cover" /> : <span aria-hidden className="flex size-4 shrink-0 items-center justify-center rounded bg-muted text-[9px]">{name.slice(0, 1).toUpperCase()}</span>}
       title={temporary ? "Shown while selected; your sidebar preference is unchanged" : org.isPersonal ? `${org.name} (personal)` : org.name}
       forceOpen={temporary}
       actions={actions}

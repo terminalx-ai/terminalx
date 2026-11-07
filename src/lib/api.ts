@@ -707,6 +707,8 @@ export const api = {
 };
 
 export interface OrganizationSummary {
+  slug?: string;
+  avatarUrl?: string | null;
   id: string;
   name: string;
   role: string;
@@ -1132,6 +1134,9 @@ export interface CloudWorkspaceQuote {
 }
 
 export interface CloudWorkspace {
+  number?: number;
+  ownerName?: string | null;
+  webUrl?: string;
   id: string;
   orgId: string;
   name: string;

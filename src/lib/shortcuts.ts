@@ -46,6 +46,7 @@ interface ActionDef {
 }
 
 const ACTIONS = [
+  { id: "workspace.copyLink", label: "Copy workspace link", group: "Session", keys: ["mod+shift+c"] },
   { id: "app.about", label: "About TerminalX", group: "App", keys: [], menu: { section: "app", order: 0, label: "About TerminalX" } },
   { id: "app.checkUpdates", label: "Check for updates", group: "App", keys: [], menu: { section: "app", order: 2, label: "Check for Updates…" } },
   { id: "app.newWindow", label: "New chat window", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1, label: "New Window" } },
