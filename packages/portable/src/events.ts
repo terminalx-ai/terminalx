@@ -119,7 +119,17 @@ export type Delta =
 
 export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "unsent" | "disconnected" | "permission_expired" | "signed_out" | "failed";
 
+export interface HeldFollowUp { id: string; text: string; images: ImageRef[] }
+export interface HeldQueue {
+  items: HeldFollowUp[];
+  paused: boolean;
+  sending: string | null;
+  next: string | null;
+  error: string | null;
+}
+
 export type Payload =
+  | { type: "held_queue"; queue: HeldQueue }
   | { type: "recovery"; kind: RecoveryKind | null }
   | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number; startedBy?: string; initiatingPrompt?: string }
   | {

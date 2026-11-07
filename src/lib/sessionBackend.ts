@@ -111,7 +111,9 @@ export interface SessionBackend {
   /** `pressedAt`: when Send was pressed, which a local runtime notes with its own timings of the send (#727). */
   send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean; pressedAt?: number }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
-  /** Local only: send a message queued behind the running turn now, interrupting the turn. `seq` is the message's event. */
+  /** Local only: persist and control messages held until the turn ends. */
+  changeHeldQueue?(tabId: string, change: import("@/lib/heldQueue").HeldQueueChange): Promise<SendResult>;
+  /** Local only: interrupt so the CLI sends input it already holds. */
   sendQueuedNow?(tabId: string, seq: number): Promise<void>;
   /** Local only: send the last prompt the agent never received again, as it was sent (#663). */
   resendUnsent?(tabId: string): Promise<SendResult>;
@@ -220,6 +222,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     },
     send: (tabId, text, images, options) => agent.send(sessionId, tabId, text, images, false, options?.pressedAt),
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
+    changeHeldQueue: (tabId, change) => agent.changeHeldQueue(sessionId, tabId, change),
     sendQueuedNow: (tabId, seq) => agent.sendQueuedNow(sessionId, tabId, seq),
     resendUnsent: (tabId) => agent.resendUnsent(sessionId, tabId),
     resendMessage: (tabId, seq) => agent.resendMessage(sessionId, tabId, seq),
