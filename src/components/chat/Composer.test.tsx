@@ -1222,6 +1222,29 @@ describe.each([
   });
 });
 
+it.each([false, true])("sends a new unmatched token while a canceled attachment request is still pending (Escape=%s)", async (escape) => {
+  Element.prototype.scrollIntoView = vi.fn();
+  let finish!: (path: string) => void;
+  invoke.mockImplementation(async (command: string, args: { query?: string }) => {
+    if (command === "pr_search" && args.query === "12") return [{ number: 12, title: "Fix parser", author: "alice", state: "OPEN" }];
+    if (command === "pr_attach") return new Promise<string>((resolve) => { finish = resolve; });
+    return [];
+  });
+  const onSend = vi.fn();
+  render(<TestComposer cwd="/repo" onSend={onSend} />);
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "Review #12" } });
+  fireEvent.mouseDown(await screen.findByRole("option", { name: /#12 Fix parser/ }));
+  if (escape) fireEvent.keyDown(field, { key: "Escape" });
+  fireEvent.change(field, { target: { value: "fix #45" } });
+  await screen.findByText("No matching pull requests");
+  expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+  fireEvent.keyDown(field, { key: "Enter" });
+  await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith("fix #45", []));
+  await act(async () => finish("/context/pr-12.md"));
+  expect((field as HTMLTextAreaElement).value).toBe("");
+});
+
 it.each([false, true])("waits for PR context before sending, unless Escape cancels it (cancel=%s)", async (cancel) => {
   Element.prototype.scrollIntoView = vi.fn();
   let finish!: (path: string) => void;

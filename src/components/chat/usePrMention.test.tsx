@@ -77,3 +77,27 @@ it("Escape cancels a pending insertion, and a new token can reopen the picker", 
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "Review #12" } });
   await screen.findByRole("option");
 });
+
+it("starts a new attachment after Escape and keeps its busy state when the canceled request finishes", async () => {
+  let finishOld!: (path: string) => void;
+  let finishNew!: (path: string) => void;
+  vi.mocked(gh.attach)
+    .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+    .mockImplementationOnce(() => new Promise((resolve) => { finishNew = resolve; }));
+  vi.mocked(gh.search).mockImplementation(async (_cwd, query) => [{ ...pr, number: Number(query) }]);
+  render(<Harness />);
+  const field = screen.getByRole("textbox");
+  await screen.findByRole("option", { name: /#12/ });
+  fireEvent.keyDown(field, { key: "Enter" });
+  fireEvent.keyDown(field, { key: "Escape" });
+  fireEvent.change(field, { target: { value: "Review #13" } });
+  await screen.findByRole("option", { name: /#13/ });
+  fireEvent.keyDown(field, { key: "Enter" });
+  expect(gh.attach).toHaveBeenLastCalledWith("/repo", 13);
+
+  await act(async () => finishOld("/context/pr-12.md"));
+  expect((field as HTMLTextAreaElement).value).toBe("Review #13");
+  expect(screen.getByText("Attaching pull request…")).toBeTruthy();
+  await act(async () => finishNew("/context/pr-13.md"));
+  expect((field as HTMLTextAreaElement).value).toBe("Review @/context/pr-13.md ");
+});

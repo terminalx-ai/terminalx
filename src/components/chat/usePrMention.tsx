@@ -25,6 +25,12 @@ export function usePrMention(
   useEffect(() => {
     setDismissed(null);
   }, [key]);
+  useEffect(() => {
+    // An attachment belongs to the draft and project that selected it.
+    operation.current++;
+    pending.current = false;
+    setAttaching(false);
+  }, [draft, cwd]);
   useEffect(
     () => () => {
       operation.current++;
@@ -59,8 +65,10 @@ export function usePrMention(
     } catch (error) {
       if (operation.current === request) setFailure({ key, message: errorMessage(error) });
     } finally {
-      pending.current = false;
-      setAttaching(false);
+      if (operation.current === request) {
+        pending.current = false;
+        setAttaching(false);
+      }
     }
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -69,6 +77,8 @@ export function usePrMention(
       event.preventDefault();
       event.stopPropagation();
       operation.current++;
+      pending.current = false;
+      setAttaching(false);
       setDismissed(key);
       return true;
     }
