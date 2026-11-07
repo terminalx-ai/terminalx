@@ -5,7 +5,7 @@ import type { SessionBackend } from "@/lib/sessionBackend";
 import type { Transcript } from "@/lib/transcript";
 
 // #411: once the worktree's pull request has merged, the chat offers Delete workspace next to Commit, Create PR and Run it.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), changed: { files: [] as unknown[] }, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), changed: { files: [] as unknown[] }, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => () => {}) }) }));

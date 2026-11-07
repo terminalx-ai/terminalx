@@ -616,6 +616,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_terminal_view,
             commands::resend_unsent,
             commands::resend_message,
             commands::submit_waiting_prompt,

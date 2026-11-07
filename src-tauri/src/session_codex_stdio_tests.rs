@@ -9,6 +9,10 @@ const WAIT: Duration = Duration::from_secs(3);
 
 thread_local! {
     static FULL_PIPE: std::cell::RefCell<Option<mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    static HANDOFF_FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn handoff_fenced() {
+    HANDOFF_FENCED.with(|hook| { if let Some(run) = hook.borrow_mut().take() { run(); } });
 }
 pub(super) fn observed_full_pipe() {
     FULL_PIPE.with(|hook| { if let Some(tx) = hook.borrow_mut().take() { tx.send(()).unwrap(); } });
@@ -197,30 +201,80 @@ fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::V
 }
 
 /// Opening the terminal view hands the thread to Codex's own terminal: never
-/// mid-turn, only once the connection has exited, and for good.
+/// mid-turn: the request waits without fencing its writer. Once idle it moves
+/// only after the connection has exited, and for good.
 fn to_terminal_fixture(manager: &SessionManager) {
     let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let local_move = |defer| {
+        let mut params = json!({"sessionId":"stdio-owner", "tabId":"tab"});
+        if defer { params["deferUntilIdle"] = json!(true); }
+        crate::local_runtime::calls::execute(manager, &manager.sink, "runtime.session.toTerminal", params)
+    };
     let chat = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
-        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. })).count();
+        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. } | Payload::Recovery { .. })).count();
     let before = chat();
     rt.lock().unwrap().turn_open = true;
-    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
-    assert!(refused.to_string().contains("finish this turn"), "{refused:#}");
+    crate::issue_pipeline::admission::observe_next_lock(Some(Box::new(|| {
+        assert!(!crate::issue_pipeline::admission::held("stdio-owner", "tab"), "checking an active turn must not fence its writer");
+    })), None);
+    assert!(!manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap(), "an active turn defers the switch without an error");
+    assert!(local_move(false).unwrap_err().to_string().contains("still working"), "a protocol 1 caller cannot interpret a deferred success");
+    assert!(!serde_json::from_value::<bool>(local_move(true).unwrap()).unwrap());
     assert!(matches!(rt.lock().unwrap().engine, Engine::CodexStdio(_)));
     rt.lock().unwrap().turn_open = false;
+    // Interrupt was queued just before natural completion. Release its writer
+    // inside the real handoff's fence, before missing history refuses the move.
+    let (launch, interrupt) = {
+        let mut rt = rt.lock().unwrap();
+        let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
+        engine.handle(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"finishing"}}}"#).unwrap();
+        let StdioAction::Write(frame) = engine.interrupt().unwrap().remove(0) else { panic!("missing interrupt") };
+        engine.handle(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"finishing","status":"completed"}}}"#).unwrap();
+        (engine.launch.clone(), frame)
+    };
+    let (writer, runtime) = (manager.clone(), Arc::downgrade(&rt));
+    HANDOFF_FENCED.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        assert!(crate::issue_pipeline::admission::held("stdio-owner", "tab"));
+        writer.write_codex_frame(&runtime, &launch, interrupt, None).expect("a completed turn's queued interrupt must retire without failing its owner");
+    })));
+    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
+    assert!(refused.to_string().contains("saved conversation is not available"), "{refused:#}");
+    assert!(matches!(&rt.lock().unwrap().engine, Engine::CodexStdio(engine) if !engine.failed()), "a missing rollout keeps the native owner usable");
+    assert_eq!(rt.lock().unwrap().recovery, None);
+    let relative = "sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl";
+    let source = codex::home::native_root().unwrap().join(relative);
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "{}\n").unwrap();
+    // A previous refused handoff's copy must not hide later native work.
+    let managed = codex::home::managed_root().unwrap().join(relative);
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, "").unwrap();
     // An exit Stop cannot confirm leaves the tab where it was, to retry.
     rt.lock().unwrap().stop_in_flight = true;
     assert!(manager.codex_stdio_to_terminal("stdio-owner", "tab").is_err());
     assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().transport, AgentTransport::ExperimentalCodexStdio);
     rt.lock().unwrap().stop_in_flight = false;
+    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::Timeout);
     let child = rt.lock().unwrap().child.clone().expect("a running connection");
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
     assert!(child.terminal_receipt().is_some(), "the connection exits before the tab changes engine");
     assert!(matches!(rt.lock().unwrap().engine, Engine::None) && rt.lock().unwrap().child.is_none());
     let tab = index::get("stdio-owner").unwrap().tab("tab").unwrap().clone();
     assert_eq!((tab.transport, tab.provider_session_id.as_deref()), (AgentTransport::Pty, Some("thread-1")));
+    assert_eq!(std::fs::read(&managed).unwrap(), std::fs::read(&source).unwrap(), "the terminal takes the latest saved conversation");
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
-    assert_eq!(chat(), before, "the move adds nothing to the chat");
+    assert_eq!(chat(), before, "the move adds no prompts, turns or errors to the chat");
+    serde_json::from_value::<()>(local_move(false).unwrap()).expect("an older desktop must still decode a completed handoff as null");
+    assert!(serde_json::from_value::<bool>(local_move(true).unwrap()).unwrap());
+    assert_eq!(rt.lock().unwrap().recovery, None, "the successful handoff clears the previous connection's warning");
+    let path = rt.lock().unwrap().diagnostics_path();
+    let trace: Vec<serde_json::Value> = store::read_lines::<serde_json::Value>(&path).unwrap().into_iter()
+        .filter(|line| line["type"] == "terminal_view_transition").collect();
+    assert!(trace.iter().any(|line| line["report"]["stage"] == "waiting_for_turn" && line["turn_open"] == true && line["transport"] == "experimentalCodexStdio"));
+    assert!(trace.iter().any(|line| line["report"]["errorCategory"] == "owner_cleanup"));
+    assert!(trace.iter().any(|line| line["report"]["errorCategory"] == "conversation_unavailable" && line["transport"] == "experimentalCodexStdio"));
+    assert!(trace.iter().any(|line| line["report"]["stage"] == "transport_changed" && line["transport"] == "pty"));
+    assert!(!serde_json::to_string(&trace).unwrap().contains("carry on"), "no conversation content in diagnostics");
 }
 
 /// Continue in New Session into an experimental tab: confirmed once Codex
