@@ -2566,6 +2566,17 @@ pub async fn report_send_shown(state: State<'_, AppState>, session_id: String, t
     tauri::async_runtime::spawn_blocking(move || m.note_shown(&session_id, &tab_id, seq, &timings).map_err(err)).await.map_err(err)?
 }
 
+/// What the window showed of a tab's warning, or what was done in it (#815).
+/// The report is labels and numbers only (`recovery_log::UiReport` refuses
+/// anything else); the app's own build is put on it here. Recording is best
+/// effort: the window does not wait on it or show its failure.
+#[tauri::command]
+pub async fn report_recovery_ui(state: State<'_, AppState>, session_id: String, tab_id: String, report: crate::recovery_log::UiReport) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    let report = report.bounded(env!("CARGO_PKG_VERSION"));
+    tauri::async_runtime::spawn_blocking(move || m.note_incident_ui(&session_id, &tab_id, &report).map_err(err)).await.map_err(err)?
+}
+
 /// The recovery banner's "Resend last prompt": the prompt the tab's agent
 /// never received, sent again as it was (#663). Sending starts the CLI, so
 /// it does not run on the main thread.
@@ -4511,6 +4522,46 @@ pub fn set_read_only_commands(enabled: bool) -> CmdResult<crate::store::settings
     settings.agents.read_only_commands = enabled;
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.agents)
+}
+
+/// Settings → About: whether recovery incidents are recorded (#815).
+#[tauri::command]
+pub fn diagnostics_settings() -> crate::store::settings::DiagnosticsSettings {
+    store::settings::load().diagnostics
+}
+
+/// The runtime follows the change at its next line: it reads the file again
+/// whenever the file has changed.
+#[tauri::command]
+pub fn set_recovery_incidents(enabled: bool) -> CmdResult<crate::store::settings::DiagnosticsSettings> {
+    let mut settings = store::settings::load();
+    settings.diagnostics.recovery_incidents = enabled;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.diagnostics)
+}
+
+/// The recorded incidents, summed up by reason, build and transport.
+#[tauri::command]
+pub async fn recovery_incidents_summary() -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(|| crate::recovery_log::read_all().map(|lines| crate::recovery_log::summarize(&lines)).map_err(err)).await.map_err(err)?
+}
+
+/// Write the incidents, sessions and tabs named by salted hashes, and their
+/// summary to `path`, a file the reader chose.
+#[tauri::command]
+pub async fn recovery_incidents_export(path: String) -> CmdResult<()> {
+    let mut target = std::path::PathBuf::from(&path);
+    if !target.is_absolute() { return Err("Choose where to save the export.".into()); }
+    if !target.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
+        target.as_mut_os_string().push(".json");
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::recovery_log::export(&target).map_err(err)).await.map_err(err)?
+}
+
+/// Remove every recorded incident.
+#[tauri::command]
+pub fn clear_recovery_incidents() -> CmdResult<()> {
+    crate::recovery_log::clear().map_err(err)
 }
 
 /// The runtime that owns the agents reads the limit again at its next look,
