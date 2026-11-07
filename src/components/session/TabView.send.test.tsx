@@ -176,7 +176,7 @@ describe("held follow-ups", () => {
   afterEach(async () => { const { setPrefs } = await import("@/lib/prefs"); setPrefs({ followUps: "now" }); });
   it.each([
     ["hold", false, false], ["now", true, false], ["hold", true, true],
-  ] as const)("routes setting %s, Cmd+Enter=%s through the queue (send now=%s)", async (setting, alternate, sendNow) => {
+  ] as const)("routes setting %s, alternate shortcut=%s through the queue (send now=%s)", async (setting, alternate, sendNow) => {
     const { setPrefs } = await import("@/lib/prefs");
     setPrefs({ followUps: setting, shortcuts: {} });
     runtime(false);
@@ -188,7 +188,7 @@ describe("held follow-ups", () => {
     });
     render(<Tab />);
     fireEvent.change(field(), { target: { value: "Fix the typo" } });
-    fireEvent.keyDown(field(), { key: "Enter", metaKey: alternate });
+    fireEvent.keyDown(field(), { key: "Enter", ctrlKey: alternate });
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("change_held_queue", expect.objectContaining({ change: { type: "enqueue", text: "Fix the typo", images: [], sendNow } })));
     await screen.findByRole("region", { name: "Held follow-ups" });
     await waitFor(() => expect(sendingText()).toBeNull());

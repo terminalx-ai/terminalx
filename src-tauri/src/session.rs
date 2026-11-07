@@ -1183,6 +1183,9 @@ pub struct WaitView {
 }
 
 struct PromptText {
+    /// A new desktop follow-up: decide again under the final send lock.
+    /// Some(true) requests interrupt-and-send; Some(false) holds it.
+    hold_if_busy: Option<bool>,
     mobile: Option<crate::local_runtime::mobile::WritePermit>,
     shared_connection: Option<crate::local_sharing::WritePermit>,
     author: Option<crate::local_sharing::Person>,
@@ -1943,6 +1946,7 @@ impl SessionManager {
         rt.incident_agent();
         rt.incident(|incidents, ctx| incidents.raised(ctx, kind, source, event.seq));
         self.set_status(rt, TabStatus::Waiting);
+        self.schedule_held(rt);
     }
 
     /// Take the tab's warning down, published and noted with `cause` (#815).
@@ -2083,7 +2087,17 @@ impl SessionManager {
         // snapshot. A history read must never write that item back after it.
         if rt.held_queue.sending.is_none() && held::Queue::replay(&events) != rt.held_queue {
             let queue = rt.held_queue.clone();
-            events.push(self.save_held(&mut rt, queue)?);
+            match self.save_held(&mut rt, queue.clone()) {
+                Ok(event) => events.push(event),
+                Err(error) => {
+                    log::warn!("persist restored held queue while reading history: {error:#}");
+                    // Reading a transcript still shows the safe restored state,
+                    // including a paused claim, when the disk cannot save it.
+                    let event = Self::held_event(&rt, queue);
+                    rt.seq = event.seq;
+                    events.push(event);
+                }
+            }
         }
         self.reconcile_input_waits(&mut rt, &mut events);
         self.reconcile_compactions(&mut rt, &mut events)?;
@@ -2502,7 +2516,7 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
@@ -2585,7 +2599,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -2604,7 +2618,7 @@ impl SessionManager {
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -2738,7 +2752,7 @@ impl SessionManager {
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -2777,7 +2791,7 @@ impl SessionManager {
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -2786,7 +2800,7 @@ impl SessionManager {
 
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
-        self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -2821,7 +2835,9 @@ impl SessionManager {
         let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt);
         self.note_send(session_id, tab_id, origin, found, &outcome);
         let outcome = outcome?;
-        self.observer.answered(session_id, tab_id);
+        if outcome.events.iter().any(|event| matches!(event.payload, Payload::UserMessage { .. })) {
+            self.observer.answered(session_id, tab_id);
+        }
         Ok(outcome)
     }
 
@@ -2862,11 +2878,18 @@ impl SessionManager {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
+        // Admission orders app sends; the terminal can still start a turn
+        // between change_held's idle check and this lock. Hold it here too.
+        if let Some(send_now) = prompt.hold_if_busy.filter(|_| rt.turn_open_for_prompts()) {
+            return self.enqueue_held(session_id, tab_id, &rt_arc, rt, prompt.display, images, send_now);
+        }
         // A turn may have begun in the terminal after the queue claimed an
         // idle boundary. Held input must still never be typed mid-turn.
-        if rt.held_queue.sending.is_some() && (rt.turn_open_for_prompts() || !rt.pending.is_empty()
-            || (rt.held_queue.paused && rt.held_queue.next.is_none())) {
-            bail!("The agent started another turn or the queue was paused. The follow-up is still held.");
+        if rt.held_queue.sending.is_some() {
+            if rt.turn_open_for_prompts() || (rt.held_queue.paused && rt.held_queue.next.is_none()) {
+                bail!("The agent started another turn or the queue was paused. The follow-up is still held; use Resume or Send now to retry.");
+            }
+            if let Some(reason) = rt.held_queue.blocked(&rt) { bail!(reason); }
         }
         // A CLI the reader started by hand is theirs to drive: it runs with
         // whatever permissions they gave it, which no share was checked
@@ -3327,7 +3350,7 @@ impl SessionManager {
             || rt.stdio_starting
             || !rt.pending.is_empty()
             || !rt.queued.is_empty()
-            || !rt.held_queue.items.is_empty()
+            || rt.held_queue.keeps_runtime_busy()
             || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting);
         if busy {
             return None;
@@ -6710,7 +6733,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();

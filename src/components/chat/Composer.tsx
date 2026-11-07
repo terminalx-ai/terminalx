@@ -467,14 +467,14 @@ export function Composer({
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
     if (!pickerOpen && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
     if (e.nativeEvent.isComposing) return;
-    if (followUps && e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      void send(true);
-      return;
-    }
     if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
+      return;
+    }
+    if (followUps && matchesShortcut(e.nativeEvent, "composer.sendAlternate")) {
+      e.preventDefault();
+      void send(true);
       return;
     }
     // Enter that is not Send already breaks the line; any other key for New line has to do it itself.
@@ -484,6 +484,11 @@ export function Composer({
     }
   };
 
+  const alternateKeys = keysOf("composer.sendAlternate").join("+");
+  const sendLabel = busy && followUps === "hold" ? "Hold until the turn ends" : "Send";
+  const sendHint = busy && followUps && alternateKeys
+    ? `${sendLabel} · ${alternateKeys} ${followUps === "hold" ? "interrupts and sends" : "holds until the turn ends"}`
+    : sendLabel;
   const placeholder = busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
@@ -683,7 +688,7 @@ export function Composer({
                 </Button>
               </WithTooltip>
             ) : (
-              <WithTooltip label={sending ? "Sending…" : followUps === "hold" ? "Hold until the turn ends · Cmd+Enter interrupts and sends" : followUps ? "Send · Cmd+Enter holds until the turn ends" : "Send"} keys={keysOf("composer.send")}>
+              <WithTooltip label={sending ? "Sending…" : sendHint} keys={keysOf("composer.send")}>
                 <Button
                   size="icon-sm"
                   className={CORNER}

@@ -173,3 +173,160 @@ fn a_runtime_handover_waits_for_a_claimed_delivery_to_finish() {
     rig.manager.save_held(&mut rig.rt().lock().unwrap(), claimed).unwrap();
     assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_err());
 }
+
+#[test]
+fn a_fresh_idle_prompt_sends_despite_a_paused_queue_or_recovery() {
+    for recovery in [None, Some(RecoveryKind::Failed), Some(RecoveryKind::UsageLimit), Some(RecoveryKind::DeliveryUnconfirmed), Some(RecoveryKind::SignedOut)] {
+        let rig = started();
+        enqueue(&rig, "older held message");
+        change(&rig, Change::Pause { paused: true });
+        hook(&rig, "Stop", json!({}));
+        let saved = queue(&rig);
+        rig.rt().lock().unwrap().recovery = recovery;
+        let outcome = change(&rig, Change::Enqueue {
+            text: "fresh idle message".into(),
+            images: vec![ImageInput { media_type: "image/png".into(), data: "aW1hZ2U=".into(), name: Some("shot.png".into()) }],
+            send_now: false,
+        });
+        assert!(!outcome.queued, "idle send with {recovery:?}");
+        assert!(outcome.events.iter().any(|event| matches!(&event.payload,
+            Payload::UserMessage { text, images, queued: false, .. } if text == "fresh idle message" && images.len() == 1)));
+        assert_eq!(queue(&rig), saved, "the older paused queue stays intact");
+        assert!(rig.rt().lock().unwrap().recovery.is_none());
+    }
+}
+
+#[test]
+fn the_first_prompt_is_sent_immediately_even_with_an_empty_paused_queue() {
+    let rig = Rig::new(claude_tab(None), LISTENS);
+    change(&rig, Change::Pause { paused: true });
+    enqueue(&rig, "first prompt");
+    rig.up();
+    prompt(&rig, "first prompt");
+    assert!(queue(&rig).items.is_empty());
+}
+
+#[test]
+fn an_idle_send_that_meets_a_new_terminal_turn_is_held_at_the_final_send_lock() {
+    let rig = started();
+    let admission = crate::issue_pipeline::admission::lock_for(SESSION, TAB);
+    let outcome = rig.manager.send_admitted(&admission, SESSION, TAB,
+        PromptText { hold_if_busy: Some(false), mobile: None, shared_connection: None, author: None,
+            agent: "arrived during turn".into(), display: "arrived during turn".into() },
+        Vec::new(), None, crate::recovery_log::Origin::Composer).unwrap();
+    assert!(outcome.queued);
+    assert_eq!(queue(&rig).items[0].text, "arrived during turn");
+    assert!(!rig.typed().contains("arrived during turn"));
+}
+
+#[test]
+fn recovery_explains_why_delivery_is_paused_and_explicit_send_now_can_retry() {
+    let rig = started();
+    enqueue(&rig, "retry held");
+    // Keep the boundary from dispatching until the recovery is in place.
+    change(&rig, Change::Pause { paused: true });
+    hook(&rig, "Stop", json!({}));
+    {
+        let rt_arc = rig.rt();
+        let mut rt = rt_arc.lock().unwrap();
+        rt.held_queue.paused = false;
+        rt.recovery = Some(RecoveryKind::UsageLimit);
+    }
+    rig.manager.deliver_held(SESSION, TAB).unwrap();
+    let blocked = queue(&rig);
+    assert!(blocked.paused);
+    assert!(blocked.error.as_deref().unwrap().contains("usage limit"));
+    assert!(blocked.error.as_deref().unwrap().contains("Send now"));
+    change(&rig, Change::SendNow { id: blocked.items[0].id.clone() });
+    prompt(&rig, "retry held");
+    rig.wait("explicit retry delivered", || queue(&rig).items.is_empty());
+}
+
+#[test]
+fn resume_retries_recovery_but_unconfirmed_cli_input_explains_how_to_get_unstuck() {
+    let rig = started();
+    enqueue(&rig, "resume held");
+    change(&rig, Change::Pause { paused: true });
+    hook(&rig, "Stop", json!({}));
+    {
+        let rt_arc = rig.rt();
+        let mut rt = rt_arc.lock().unwrap();
+        rt.recovery = Some(RecoveryKind::DeliveryUnconfirmed);
+        if let Engine::Cli(cli) = &mut rt.engine { cli.awaiting_delivery = Some(1); }
+    }
+    change(&rig, Change::Pause { paused: false });
+    rig.wait("blocked explanation", || queue(&rig).error.is_some());
+    assert!(queue(&rig).error.unwrap().contains("not confirmed an earlier message"));
+    assert_eq!(queue(&rig).items.len(), 1);
+    if let Engine::Cli(cli) = &mut rig.rt().lock().unwrap().engine { cli.awaiting_delivery = None; }
+    change(&rig, Change::Pause { paused: false });
+    prompt(&rig, "resume held");
+    rig.wait("resumed recovery delivered", || queue(&rig).items.is_empty());
+}
+
+#[test]
+fn a_paused_queue_does_not_keep_the_runtime_busy_but_a_claim_does() {
+    let rig = started();
+    enqueue(&rig, "durable");
+    assert!(queue(&rig).keeps_runtime_busy());
+    change(&rig, Change::Pause { paused: true });
+    assert!(!queue(&rig).keeps_runtime_busy());
+    let mut claimed = queue(&rig);
+    claimed.sending = Some(claimed.items[0].id.clone());
+    assert!(claimed.keeps_runtime_busy());
+}
+
+#[test]
+fn a_failed_queue_reconciliation_write_does_not_hide_the_transcript() {
+    let rig = started();
+    enqueue(&rig, "still held");
+    let rt_arc = rig.rt();
+    let path = rt_arc.lock().unwrap().log_path.clone();
+    {
+        let mut rt = rt_arc.lock().unwrap();
+        rt.held_queue.paused = true;
+        rt.log_path = rig._dir.path().to_path_buf();
+    }
+    let events = rig.manager.load_events(SESSION, TAB).unwrap();
+    assert!(events.iter().any(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "initial")));
+    assert!(queue(&rig).paused);
+    assert!(Queue::replay(&events).paused);
+    rt_arc.lock().unwrap().log_path = path;
+}
+
+#[test]
+fn a_failed_delivery_claim_write_pauses_visibly_and_keeps_the_item() {
+    let rig = started();
+    enqueue(&rig, "keep on disk failure");
+    change(&rig, Change::Pause { paused: true });
+    hook(&rig, "Stop", json!({}));
+    let rt_arc = rig.rt();
+    let path = rt_arc.lock().unwrap().log_path.clone();
+    {
+        let mut rt = rt_arc.lock().unwrap();
+        rt.held_queue.paused = false;
+        rt.log_path = rig._dir.path().to_path_buf();
+    }
+    assert!(rig.manager.deliver_held(SESSION, TAB).is_err());
+    let held = queue(&rig);
+    assert!(held.paused && held.sending.is_none());
+    assert_eq!(held.items.len(), 1);
+    assert!(held.error.unwrap().contains("Could not save the delivery claim"));
+    assert!(!rig.typed().contains("keep on disk failure"));
+    rt_arc.lock().unwrap().log_path = path;
+}
+
+#[test]
+fn archive_uses_live_membership_and_invalidates_unopened_log_membership_after_an_edit() {
+    let rig = started();
+    enqueue(&rig, "pending archive");
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert!(rig.manager.has_held_queue(SESSION, TAB).unwrap());
+    rig.manager.tabs.lock().unwrap().remove(&key_of(SESSION, TAB));
+    assert!(rig.manager.has_held_queue(SESSION, TAB).unwrap());
+    let id = queue(&rig).items[0].id.clone();
+    change(&rig, Change::Delete { id });
+    assert!(!rig.manager.has_held_queue(SESSION, TAB).unwrap());
+    rig.manager.tabs.lock().unwrap().remove(&key_of(SESSION, TAB));
+    assert!(!rig.manager.has_held_queue(SESSION, TAB).unwrap());
+}

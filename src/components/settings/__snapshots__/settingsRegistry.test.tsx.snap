@@ -172,6 +172,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.issues.comment",
   "shortcuts.composer.dictate",
   "shortcuts.composer.send",
+  "shortcuts.composer.sendAlternate",
   "shortcuts.composer.newLine",
   "shortcuts.composer.historyPrevious",
   "shortcuts.composer.historyNext",

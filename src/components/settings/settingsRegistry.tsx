@@ -123,7 +123,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "agents.followUps", section: "agents", title: "Follow-ups while the agent works",
-    description: "In local chats, held messages are not read mid-turn. They wait in an editable queue and go one per finished turn. Cmd+Enter sends the other way: hold when the default is now, or interrupt and send when the default is hold.",
+    description: "For local desktop chats on this device. Held messages are not read mid-turn; they go one per finished turn. Idle messages send immediately. The “Send the other way” shortcut in Shortcuts reverses this choice: hold, or interrupt and send. Phone and cloud messages keep their current behavior.",
     searchTerms: ["queue", "hold", "follow-ups", "pause", "composer"], scope: "user",
     storage: { kind: "localStorage", location: "raccoon.prefs#followUps" },
   }),

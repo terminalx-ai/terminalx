@@ -37,14 +37,20 @@ it("collapses, pauses before editing, keeps attachments, reorders, deletes, and 
   fireEvent.click(screen.getByLabelText("Edit follow-up 2"));
   const editor = await screen.findByLabelText("Edit held follow-up");
   expect(changed).toHaveBeenLastCalledWith({ type: "pause", paused: true });
+  expect(document.activeElement).toBe(editor);
   fireEvent.change(editor, { target: { value: "corrected" } });
   fireEvent.click(screen.getByText("Save"));
   await screen.findByText("corrected");
+  await waitFor(() => expect(changed).toHaveBeenLastCalledWith({ type: "pause", paused: false }));
+  expect(document.activeElement).toBe(screen.getByLabelText("Edit follow-up 2"));
   expect(screen.getByText("screenshot.png")).toBeTruthy();
   fireEvent.click(screen.getByLabelText("Move follow-up 2 up"));
   await waitFor(() => expect(within(screen.getAllByRole("listitem")[0]).getByText("corrected")).toBeTruthy());
   fireEvent.click(screen.getByLabelText("Delete follow-up 2"));
   await waitFor(() => expect(screen.queryByText("first")).toBeNull());
+  expect(screen.getByRole("status").textContent).toBe("Deleted held follow-up.");
+  fireEvent.click(screen.getByText("Pause queue"));
+  await screen.findByText("Resume");
   fireEvent.click(screen.getByText("Resume"));
   await waitFor(() => expect(changed).toHaveBeenLastCalledWith({ type: "pause", paused: false }));
   fireEvent.click(screen.getAllByText("Send now")[0]);
@@ -68,5 +74,56 @@ it("disables changes when read-only or when a delivery is being claimed", () => 
   render(<HeldQueueTray queue={{ ...initial, sending: "first" }} busy onChange={change} />);
   expect((screen.getByText("Pause queue") as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getAllByText("Send now")[0]);
+  expect(change).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("Escape cancels an edit and restores the queue's prior paused=%s state", async paused => {
+  const change = vi.fn<(change: HeldQueueChange) => Promise<void>>().mockResolvedValue();
+  render(<HeldQueueTray queue={{ ...initial, paused }} busy onChange={change} />);
+  const edit = screen.getByLabelText("Edit follow-up 1");
+  fireEvent.click(edit);
+  const editor = await screen.findByLabelText("Edit held follow-up");
+  fireEvent.change(editor, { target: { value: "discard this edit" } });
+  fireEvent.keyDown(editor, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByLabelText("Edit held follow-up")).toBeNull());
+  expect(change.mock.calls.map(([action]) => action)).toEqual(paused
+    ? [{ type: "pause", paused: true }]
+    : [{ type: "pause", paused: true }, { type: "pause", paused: false }]);
+  expect(document.activeElement).toBe(edit);
+});
+
+it("saves an edit with Ctrl+Enter and leaves a queue that was already paused paused", async () => {
+  const change = vi.fn<(change: HeldQueueChange) => Promise<void>>().mockResolvedValue();
+  render(<HeldQueueTray queue={{ ...initial, paused: true }} busy onChange={change} />);
+  fireEvent.click(screen.getByLabelText("Edit follow-up 1"));
+  const editor = await screen.findByLabelText("Edit held follow-up");
+  fireEvent.change(editor, { target: { value: "corrected" } });
+  fireEvent.keyDown(editor, { key: "Enter", ctrlKey: true });
+  await waitFor(() => expect(screen.queryByLabelText("Edit held follow-up")).toBeNull());
+  expect(change.mock.calls.map(([action]) => action)).toEqual([
+    { type: "pause", paused: true }, { type: "edit", id: "first", text: "corrected" },
+  ]);
+});
+
+it("shows a recovery reason and offers an explicit retry or deletion", async () => {
+  const change = vi.fn<(change: HeldQueueChange) => Promise<void>>().mockResolvedValue();
+  const error = "The agent has not confirmed an earlier message. Check its terminal or stop the agent, then use Send now to retry.";
+  render(<HeldQueueTray queue={{ ...initial, paused: true, error }} busy={false} onChange={change} />);
+  expect(screen.getByRole("alert").textContent).toBe(error);
+  fireEvent.click(screen.getAllByText("Send now")[0]);
+  await waitFor(() => expect(change).toHaveBeenCalledWith({ type: "sendNow", id: "first" }));
+  await waitFor(() => expect((screen.getByLabelText("Delete follow-up 1") as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByLabelText("Delete follow-up 1"));
+  await waitFor(() => expect(change).toHaveBeenCalledWith({ type: "delete", id: "first" }));
+});
+
+it("hides an empty paused tray and does not let editing cancel a pending Send now", () => {
+  const change = vi.fn();
+  const { rerender } = render(<HeldQueueTray queue={{ ...initial, items: [], paused: true }} busy={false} onChange={change} />);
+  expect(screen.queryByRole("region", { name: "Held follow-ups" })).toBeNull();
+  rerender(<HeldQueueTray queue={{ ...initial, next: "first" }} busy onChange={change} />);
+  expect((screen.getByLabelText("Edit follow-up 1") as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByLabelText("Drag follow-up 1").tabIndex).toBe(-1);
+  fireEvent.click(screen.getByLabelText("Edit follow-up 1"));
   expect(change).not.toHaveBeenCalled();
 });

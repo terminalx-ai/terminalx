@@ -305,9 +305,7 @@ pub fn busy(manager: &crate::session::SessionManager, session: &SessionEntry, li
     }
     // A queue survives its runtime. Before the tab is opened after a restart,
     // wait_view has no runtime to report it from. Keep that session visible.
-    if session.tabs.iter().any(|tab| crate::store::log_path(&session.id, &tab.id)
-        .and_then(|path| crate::session::held::Queue::restore(&path))
-        .is_ok_and(|queue| !queue.items.is_empty())) {
+    if session.tabs.iter().any(|tab| manager.has_held_queue(&session.id, &tab.id).unwrap_or(true)) {
         return Some(Kept::Queued);
     }
     // Work a turn left running: a file to read, and the process table.

@@ -85,7 +85,7 @@ impl SessionManager {
                 work.push(Work::of(WorkKind::ByHand, &tab));
                 continue;
             }
-            let prompt = !tab.pending.is_empty() || !tab.queued.is_empty() || !tab.held_queue.items.is_empty() || tab.stop_in_flight || tab.stopping
+            let prompt = !tab.pending.is_empty() || !tab.queued.is_empty() || tab.held_queue.keeps_runtime_busy() || tab.stop_in_flight || tab.stopping
                 || tab.restart_claim.is_some() || tab.stdio_starting
                 || cli.is_some_and(|cli| !cli.ready.settled() || cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || !cli.held.is_empty());
             if prompt {

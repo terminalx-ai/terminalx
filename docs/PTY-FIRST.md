@@ -384,22 +384,32 @@ with a message queued behind a running turn:
 | Codex 0.153.4 | The same: its queue line reads "press esc to interrupt and send immediately", and it then says "Model interrupted to submit steer instructions". The rollout has `turn_aborted` (`interrupted`), then a new `task_started` with the prompt. | "Conversation interrupted", and `turn_aborted`. |
 
 **Held follow-ups belong to the app (PRO-254).** “Hold until the turn ends”
-keeps local composer messages in the tray above the input. They are not read
-mid-turn. The tray can collapse, edit, delete, drag or move items with buttons,
-and pause/resume delivery. Editing pauses the queue. Successful `Stop`/turn
+keeps local desktop composer messages typed during a running turn in the tray
+above the input. Idle prompts send immediately, including when an older queue
+is paused or the tab needs recovery. Held messages are not read mid-turn. The tray can
+collapse, edit, delete, drag or move items with buttons, and pause/resume
+delivery. Editing pauses the queue until Save or Cancel, then restores its
+previous pause state. Successful `Stop`/turn
 completion dispatches one item through normal prompt delivery; a failed turn
 or ordinary interrupt does not drain it. “Send now” selects one held item,
 interrupts the current turn, then sends that item once the turn ends, even
-when the queue is paused. Cmd+Enter chooses the opposite of the setting:
-hold under “now”, interrupt-and-send under “hold”. The default remains “now”.
+when the queue is paused. The rebindable “Send the other way” shortcut defaults
+to Cmd/Ctrl+Enter and chooses the opposite of the setting: hold under “now”,
+interrupt-and-send under “hold”. An existing Send binding takes precedence
+over that new default. The setting defaults to “now” and is stored per device.
 
 `held_queue` snapshots in the tab log preserve order, edits, archived image
 references and pause state. Delivery claims are recorded before sending; a
 claim interrupted before its prompt is logged is restored paused. Once the
 normal user-message event exists, restart does not resend it. A hard Stop
 pauses and retains held items. After reopening an idle tab, Resume/Send next
-starts the queue; otherwise its next finished turn does. Cloud mailboxes and
-messages already typed into the CLI retain their existing behavior.
+starts the queue; otherwise its next finished turn does. Recovery blocks
+automatic delivery with a visible reason; explicit Resume or Send now retries.
+Unconfirmed CLI input still needs attention in the terminal or a hard Stop
+before retrying. A paused queue does not keep an idle agent or runtime alive.
+Cloud mailboxes and messages already typed into the CLI retain their existing
+behavior. The phone does not display or edit this queue, and phone messages
+use their existing delivery path, ahead of held items when the CLI takes them.
 
 So the chat keeps expecting a queued message when its turn is stopped. When
 the CLI's record of it arrives it becomes the prompt of the next turn, which
