@@ -258,6 +258,14 @@ export function MergedCleanupSettings({ projectPath }: { projectPath?: string } 
   const unread = (reason: string | undefined) => (reason ? `Its pull requests could not be read: ${reason}` : null);
   const cloudUnread = (key: string) => Object.entries(unreadable).find(([entry]) => entry.startsWith(`${key}\n`))?.[1];
 
+  const pausedArchives = Object.values(statuses)
+    .filter((status) => status.hostId === LOCAL_HOST && status.archiveBlocked && (!projectPath || status.projectPath === projectPath))
+    .map((status) => <div key={status.path} className="mt-3 rounded-lg bg-well p-3 text-xs">
+      <p className="font-medium">Archive cleanup paused: {status.name}</p>
+      <p className="mt-1 text-muted-foreground">{status.detail}</p>
+      <Button className="mt-2" size="xs" variant="outline" onClick={() => openWorkspaceRemove({ projectPath: status.projectPath, path: status.path, name: status.name, mode: "settle", archiveNotice: status.detail ?? undefined })}>Review removal</Button>
+    </div>);
+
   if (projectPath) {
     const project = store.projects.find((candidate) => !candidate.archived && candidate.path === projectPath);
     return project ? (
@@ -271,6 +279,7 @@ export function MergedCleanupSettings({ projectPath }: { projectPath?: string } 
               {mergedCleanupOn(settings, project.path) ? <HeadBranchOffer projectPath={project.path} /> : null}
             </ProjectChoice>
           </ul>}
+          {pausedArchives}
           <p className="text-xs text-muted-foreground">The default, waiting period and conversation cleanup are in Settings → Storage.</p>
           {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         </section>
@@ -345,11 +354,7 @@ export function MergedCleanupSettings({ projectPath }: { projectPath?: string } 
         </>
       ) : null}
 
-      {Object.values(statuses).filter((status) => status.hostId === LOCAL_HOST && status.archiveBlocked).map((status) => <div key={status.path} className="mt-3 rounded-lg bg-well p-3 text-xs">
-        <p className="font-medium">Archive cleanup paused: {status.name}</p>
-        <p className="mt-1 text-muted-foreground">{status.detail}</p>
-        <Button className="mt-2" size="xs" variant="outline" onClick={() => openWorkspaceRemove({ projectPath: status.projectPath, path: status.path, name: status.name, mode: "settle", archiveNotice: status.detail ?? undefined })}>Review removal</Button>
-      </div>)}
+      {pausedArchives}
       <RemovedList changes={removals} />
     </section>
   );

@@ -115,7 +115,24 @@ impl Drop for RemovalLease {
 pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], confirmed: Option<&str>, retry: Option<&str>, runner: Option<Runner<'_>>, started: &dyn Fn()) -> Result<bool> {
     anyhow::ensure!(confirmed.is_none() || retry.is_none(), "Choose either retrying the archive script or removing anyway.");
     let script = projects::scripts(project)?.archive;
-    if script.trim().is_empty() || !path.exists() { return Ok(false) }
+    if script.trim().is_empty() || !path.exists() {
+        // A cleared hook no longer needs consent. Release its matching old log
+        // immediately rather than retaining it until expiry.
+        if let Some(token) = confirmed.or(retry) {
+            let project = canonical(project);
+            let path = canonical(path);
+            let receipt = {
+                let mut pending = receipts().lock().unwrap();
+                if pending.get(token).is_some_and(|receipt| receipt.project == project && receipt.path == path) {
+                    pending.remove(token)
+                } else { None }
+            };
+            if let Some(receipt) = receipt {
+                if let Some(terminals) = receipt.terminals.upgrade() { terminals.kill(&receipt.pane); }
+            }
+        }
+        return Ok(false)
+    }
     // Never run commands in an arbitrary path supplied to a forced removal.
     let project = canonical(project);
     let path = canonical(path);

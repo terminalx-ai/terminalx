@@ -1656,6 +1656,34 @@ mod tests {
         terminals.kill_all();
     }
 
+    #[test]
+    fn clearing_archive_script_releases_pending_retry_and_bypass_logs() {
+        let _home = crate::store::temp_home();
+        for retry in [false, true] {
+            let dir = repo();
+            let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
+            let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+                scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            }).unwrap();
+            save("exit 8");
+            let session = worktree_session(dir.path());
+            let terminals = Arc::new(crate::pty::Terminals::new());
+            let sink: Arc<dyn EventSink> = Arc::new(sink());
+            let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
+            removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
+            let failure = crate::archive_script::Failure::from_error(&remove_workspace(&*sink, &removal, &|_| {}).unwrap_err()).unwrap();
+            assert_eq!(terminals.panes().len(), 1);
+            save("");
+            // An unrelated checkout cannot discard this workspace's log.
+            assert!(!crate::archive_script::before_removal(dir.path(), dir.path(), &[], Some(&failure.token), None, None, &|| {}).unwrap());
+            assert_eq!(terminals.panes().len(), 1);
+            if retry { removal.archive_retry = Some(&failure.token); } else { removal.archive_failure = Some(&failure.token); }
+            remove_workspace(&*sink, &removal, &|_| {}).unwrap();
+            assert!(!Path::new(&session.cwd).exists());
+            assert!(terminals.panes().is_empty());
+        }
+    }
+
     /// Remove a session's workspace with a blanket second confirmation.
     /// These repositories have no remote, so nothing in them can be verified
     /// as merged.

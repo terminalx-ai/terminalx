@@ -268,6 +268,22 @@ describe("what was removed", () => {
 });
 
 describe("repository settings entry (PRO-123)", () => {
+  it("shows only this repository's paused archives and opens their removal review", async () => {
+    settings.enabled = true;
+    statuses = [record({ name: "app-paused" }), record({ projectPath: "/repos/site", path: "/repos/site/worktree", name: "site-paused" })]
+      .map((removed) => ({ ...removed, phase: "kept" as const, record: null, due: null, reason: "automatic archive cleanup is paused", detail: "Archive script failed (exit 17). Automatic retries are paused.", fresh: false, sessions: [], archiveBlocked: true }));
+    const view = render(<MergedCleanupSettings projectPath="/repos/app" />);
+    await screen.findByText("Archive cleanup paused: app-paused");
+    expect(screen.queryByText("Archive cleanup paused: site-paused")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Review removal" }));
+    expect(mocks.openWorkspaceRemove).toHaveBeenLastCalledWith({ projectPath: statuses[0].projectPath, path: statuses[0].path, name: "app-paused", mode: "settle", archiveNotice: statuses[0].detail });
+    view.rerender(<MergedCleanupSettings projectPath="/repos/site" />);
+    expect(screen.queryByText("Archive cleanup paused: app-paused")).toBeNull();
+    expect(screen.getByText("Archive cleanup paused: site-paused")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Review removal" }));
+    expect(mocks.openWorkspaceRemove).toHaveBeenLastCalledWith({ projectPath: statuses[1].projectPath, path: statuses[1].path, name: "site-paused", mode: "settle", archiveNotice: statuses[1].detail });
+  });
+
   it("edits only the named repository using the existing override store", async () => {
     render(<MergedCleanupSettings projectPath="/repos/app" />);
     const group = await screen.findByRole("radiogroup", { name: "Delete merged workspaces of App" });
