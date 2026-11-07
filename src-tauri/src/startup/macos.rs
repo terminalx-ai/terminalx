@@ -67,9 +67,10 @@ pub(super) fn children(terminals: &crate::pty::Terminals, state: &Snapshot) -> V
             }
             let mut pids = [0i32; 256];
             // SAFETY: the fixed buffer and its length match; no strings or
-            // environment values are requested. Return value is bytes written.
-            let bytes = unsafe { libc::proc_listchildpids(pid as i32, pids.as_mut_ptr().cast(), std::mem::size_of_val(&pids) as i32) };
-            for child in pids.into_iter().take((bytes.max(0) as usize / std::mem::size_of::<i32>()).min(256)).filter(|child| *child > 0) {
+            // environment values are requested. Unlike proc_listpids, this
+            // wrapper returns a PID count, not the number of bytes written.
+            let count = unsafe { libc::proc_listchildpids(pid as i32, pids.as_mut_ptr().cast(), std::mem::size_of_val(&pids) as i32) };
+            for child in pids.into_iter().take((count.max(0) as usize).min(256)).filter(|child| *child > 0) {
                 pending.push((child as u32, Some(pid)));
             }
         }
@@ -156,6 +157,25 @@ mod tests {
         assert_eq!(bsd(std::process::id()).unwrap().pbi_pid, std::process::id());
         assert!(task(std::process::id()).unwrap().pti_resident_size > SMALL_IMAGE);
         assert!(version()["build"].as_str().is_some());
+    }
+
+    #[test]
+    fn kernel_census_includes_a_real_child_of_a_recorded_owner() {
+        use std::process::{Command, Stdio};
+        // The pipe keeps this owned child alive without a timing assumption.
+        let mut child = Command::new("/bin/sh").args(["-c", "read release"])
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let pid = child.id();
+        let mut owner = super::super::tests::launch("validation", Phase::Running);
+        owner.pid = Some(std::process::id());
+        owner.pid_birth = identity(std::process::id());
+        owner.recorder = Some(uuid::Uuid::new_v4().to_string());
+        let state = Snapshot { launches: vec![owner], ..Snapshot::default() };
+        let observed = children(&crate::pty::Terminals::new(), &state);
+        let found = observed.iter().any(|observed| observed.pid == pid && Some(observed.birth.clone()) == identity(pid));
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(found, "owned-child enumeration dropped a real child PID");
     }
 
     #[test]

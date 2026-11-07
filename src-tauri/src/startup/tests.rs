@@ -1,6 +1,6 @@
 use super::*;
 
-fn launch(pane: &str, phase: Phase) -> Launch {
+pub(super) fn launch(pane: &str, phase: Phase) -> Launch {
     Launch { id: uuid::Uuid::new_v4().to_string(), pane: pane.into(), generation: "generation".into(), pid: Some(42),
         category: Category::Agent, evidence: Evidence::Readiness, phase, started_at: 0, last_progress_at: 0,
         exit_code: None, cpu_time: None, resident_bytes: None, pid_birth: None, recorder: None, pipeline_id: None }

@@ -132,6 +132,12 @@ Pipeline tests exercise blockers with unchanged author metadata and no PR,
 and successful CI that must not admit a host-blocked local check. UI tests
 exercise preview, consent, canceled destinations and a pending probe.
 
+Production-binary subprocess tests also exercise both health-probe steps,
+private durable result files, a leader's exact exit while a grandchild holds
+its output pipe, bounded real stdout/stderr, and signal termination. A macOS
+kernel census regression verifies that a recorded owner includes its actual
+child, rather than only testing synthetic observations.
+
 Run the four checks in `CONTRIBUTING.md` before review/merge. A launcher, build
 script or test process that has not reached test code is **not a passing test**.
 Do not run duplicate heavy checks into an unresolved host incident.
