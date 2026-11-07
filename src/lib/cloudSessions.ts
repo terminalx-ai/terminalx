@@ -172,7 +172,7 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => voi
       const known = live.get(key);
       if (open && known?.sessions.some((session) => session.rowStatus)) takeLive(target, known.sessions.map((session) => ({ ...session, rowStatus: undefined })), capabilities, manage);
     }).finally(() => { readingStatus = false; });
-  }, 2_000);
+  }, 10_000);
   const stopTabs = watchLiveTabs(scope, client);
   const stopSessions = client.onSessions((sessions) => open && takeLive(target, sessions, capabilities, manage));
   return () => {

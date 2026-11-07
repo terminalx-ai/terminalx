@@ -67,11 +67,15 @@ as they take any other.
 
 `sessions list` and `sessions show` include `detailedStatus` (id, label, icon,
 colour token and tooltip) and `rowStatus` (the live facts behind it). Agent
-attention takes precedence over the branch's PR. PR facts are shared by sessions
-on that branch; they do not establish which session created the PR. Visible
-projects refresh at most once every 30 seconds, with rate-limit backoff. A first
-read can return agent status while the PR query is in flight; read again to see
-the result. The existing tab `status` remains the agent's lifecycle state.
+attention takes precedence over the session's associated PR. The existing
+session-PR registry supplies ownership; a shared branch alone never does. A
+local head must match the PR head before a row says Ready to merge or Merged.
+Default branches and detached heads carry agent status only. Local facts refresh
+in the background every 10 seconds; associated PRs are batched once per project
+every 120 seconds, with rate-limit backoff and at least 1,000 points reserved for
+other GitHub work. A first read can return agent status while the cache warms;
+read again to see the result. The existing tab `status` remains the agent's
+lifecycle state.
 
 ### Archive sessions
 

@@ -21,7 +21,7 @@ export default function SessionsScreen() {
   useFocusEffect(useCallback(() => {
     const timer = setInterval(() => {
       if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions(true);
-    }, 2_000);
+    }, 10_000);
     return () => clearInterval(timer);
   }, [app.connectionStage, app.refreshSessions]));
   // Removing the computer from here goes back to the device list.

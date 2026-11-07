@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { combinedSessionStatus, type SessionStatusInput } from "@terminalx/portable/sessionStatus";
+import { SESSION_STATUSES, combinedSessionStatus, type SessionStatusInput } from "@terminalx/portable/sessionStatus";
 import { api } from "./api";
 import type { SessionEntry } from "@/types/session";
 
@@ -9,7 +9,6 @@ let snapshot: Record<string, SessionStatusInput> = {};
 let timer: ReturnType<typeof setTimeout> | undefined;
 let reading = false;
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
-const current = () => snapshot;
 
 async function refresh() {
   timer = undefined;
@@ -33,7 +32,7 @@ async function refresh() {
     }
   } finally {
     reading = false;
-    if (visible.size) timer = setTimeout(() => void refresh(), 2_000);
+    if (visible.size) timer = setTimeout(() => void refresh(), 10_000);
   }
 }
 
@@ -55,6 +54,7 @@ export function useSessionRowStatus(sessions: readonly SessionEntry[]) {
       }
     };
   }, [key]);
-  const rows = useSyncExternalStore(subscribe, current);
-  return combinedSessionStatus(sessions.map((session) => rows[session.id] ?? session.rowStatus ?? session));
+  // Subscribe to this row's selected value: unrelated row changes do not render it.
+  const id = useSyncExternalStore(subscribe, () => combinedSessionStatus(sessions.map((session) => snapshot[session.id] ?? session.rowStatus ?? session)).id);
+  return SESSION_STATUSES.find((status) => status.id === id)!;
 }

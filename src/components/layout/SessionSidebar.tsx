@@ -1090,6 +1090,7 @@ function ConversationRow({
                 {mark}
                 {/* One status for all sessions represented by this branch row. */}
                 <SessionStatus session={session} peers={peers} className="max-w-[48%] shrink" />
+                <RowTime at={conversationTime(session)} />
               </>
             ) : (
               <>

@@ -9,6 +9,8 @@ export interface BranchStatus {
   /** The branch this observation belongs to. Never apply it to another branch. */
   branch: string;
   checked: boolean;
+  /** True only when the observed local branch tip equals the associated PR head. */
+  headMatches?: boolean | null;
   pr?: {
     number: number;
     state: string;

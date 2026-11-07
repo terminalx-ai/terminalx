@@ -819,7 +819,7 @@ const BRANCHES_PER_REQUEST: usize = 40;
 /// variables, never inside the query text.
 fn branch_prs_query(count: usize) -> String {
     let variables: String = (0..count).map(|i| format!(",$b{i}:String!")).collect();
-    let fields = "number title url state isCrossRepository headRefOid baseRefName isDraft mergeable mergeStateStatus mergeQueueEntry{id} commits(last:1){nodes{commit{statusCheckRollup{state}}}}";
+    let fields = "number title url state isCrossRepository headRefOid baseRefName";
     // Ask for the open PR separately: many closed attempts must not hide an
     // older, still-open PR. Two connections, still one request per project.
     let fields: String = (0..count).map(|i| format!(
@@ -834,6 +834,10 @@ fn branch_prs_query(count: usize) -> String {
 fn pick_pr(nodes: &[Value]) -> Option<BranchPr> {
     let own = nodes.iter().filter(|pr| pr["isCrossRepository"].as_bool() != Some(true));
     let pr = own.max_by_key(|pr| (pr["state"].as_str() == Some("OPEN"), pr["number"].as_u64().unwrap_or(0)))?;
+    parse_branch_pr(pr)
+}
+
+fn parse_branch_pr(pr: &Value) -> Option<BranchPr> {
     Some(BranchPr {
         number: pr["number"].as_u64().filter(|number| *number > 0)?,
         title: pr["title"].as_str().unwrap_or("").into(),
