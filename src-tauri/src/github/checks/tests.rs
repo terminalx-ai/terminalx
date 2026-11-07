@@ -3,10 +3,16 @@ use serde_json::{json, Value};
 
 const PR: &str = "https://github.com/terminalx-ai/terminalx/pull/809";
 const RUN: &str = "https://github.com/terminalx-ai/terminalx/actions/runs/42294938164";
+const HEAD_SHA: &str = "1111111111111111111111111111111111111111";
 // Recorded with gh run view 42294938164 --repo terminalx-ai/terminalx
 // --json jobs / --log-failed on 2026-11-07. The log fixture retains only a
 // failure excerpt, excluding environment/setup output; job metadata is projected.
 const RECORDED_LOG: &str = include_str!("fixtures/failed-output.txt");
+
+fn rerun_metadata() -> (Value, Value) {
+    (json!({ "databaseId": 42294938164_u64, "headSha": HEAD_SHA }),
+        json!({ "url": PR, "state": "OPEN", "headRefOid": HEAD_SHA }))
+}
 
 #[test]
 fn maps_recorded_actions_job_urls_without_confusing_run_and_job_ids() {
@@ -47,16 +53,81 @@ fn commands_pin_repository_and_rerun_the_workflow_not_the_job() {
     let check = map_check(PR, &check_url).unwrap();
     assert_eq!(log_args(&repository(PR).unwrap(), &check, true), ["run", "view", "42294938164", "--repo", "github.com/terminalx-ai/terminalx", "--log-failed", "--job", "128157610557"]);
     for failed in [true, false] {
+        let (target, pr) = rerun_metadata();
+        let mut calls = 0;
         rerun_with(Path::new("."), PR, &check_url, failed, |_, args| {
-            let mut expected = vec!["run", "rerun", "42294938164", "--repo", "github.com/terminalx-ai/terminalx"];
-            if failed { expected.push("--failed"); }
-            assert_eq!(args, expected);
-            Ok(String::new())
+            calls += 1;
+            match calls {
+                1 => {
+                    assert_eq!(args, ["run", "view", "42294938164", "--repo", "github.com/terminalx-ai/terminalx", "--json", "databaseId,headSha"]);
+                    Ok(target.to_string())
+                }
+                2 => {
+                    assert_eq!(args, ["pr", "view", "809", "--repo", "github.com/terminalx-ai/terminalx", "--json", "url,state,headRefOid"]);
+                    Ok(pr.to_string())
+                }
+                3 => {
+                    let mut expected = vec!["run", "rerun", "42294938164", "--repo", "github.com/terminalx-ai/terminalx"];
+                    if failed { expected.push("--failed"); }
+                    assert_eq!(args, expected);
+                    Ok(String::new())
+                }
+                _ => panic!("unexpected GitHub command: {args:?}"),
+            }
         }).unwrap();
+        assert_eq!(calls, 3);
     }
     assert!(rerun_with(Path::new("."), PR, RUN, true, |_, _| bail!("not authorized")).unwrap_err().to_string().contains("not authorized"));
     assert!(rerun_with(Path::new("."), PR, "https://ci.example.com/build/1", true, |_, _| unreachable!()).is_err());
     assert_eq!(repository("https://git.example.com:8443/team/repo/pull/1").unwrap(), "git.example.com:8443/team/repo");
+}
+
+#[test]
+fn reruns_reject_other_commits_closed_prs_and_incomplete_evidence_without_writing() {
+    for case in ["other run", "deploy on main", "head moved", "closed", "merged", "different PR", "missing run head", "missing PR head", "both heads empty"] {
+        let (mut target, mut pr) = rerun_metadata();
+        match case {
+            "other run" => target["databaseId"] = json!(99),
+            "deploy on main" => { target["headSha"] = json!("2222222222222222222222222222222222222222"); target["headBranch"] = json!("main"); }
+            "head moved" => pr["headRefOid"] = json!("2222222222222222222222222222222222222222"),
+            "closed" => pr["state"] = json!("CLOSED"),
+            "merged" => pr["state"] = json!("MERGED"),
+            "different PR" => pr["url"] = json!("https://github.com/terminalx-ai/terminalx/pull/810"),
+            "missing run head" => target["headSha"] = Value::Null,
+            "missing PR head" => pr["headRefOid"] = Value::Null,
+            "both heads empty" => { target["headSha"] = json!(""); pr["headRefOid"] = json!(""); }
+            _ => unreachable!(),
+        }
+        for failed in [true, false] {
+            let mut reads = 0;
+            let result = rerun_with(Path::new("."), PR, RUN, failed, |_, args| {
+                reads += 1;
+                match &args[..2] {
+                    ["run", "view"] => Ok(target.to_string()),
+                    ["pr", "view"] => Ok(pr.to_string()),
+                    _ => panic!("{case}: must not re-run without matching head evidence: {args:?}"),
+                }
+            });
+            assert!(result.is_err(), "{case}");
+            assert!((1..=2).contains(&reads), "{case}");
+        }
+    }
+}
+
+#[test]
+fn a_failed_pr_read_never_reaches_the_rerun_command() {
+    let (target, _) = rerun_metadata();
+    let mut reads = 0;
+    let error = rerun_with(Path::new("."), PR, RUN, true, |_, args| {
+        reads += 1;
+        match &args[..2] {
+            ["run", "view"] => Ok(target.to_string()),
+            ["pr", "view"] => bail!("PR lookup denied"),
+            _ => panic!("must not re-run after a failed lookup"),
+        }
+    }).unwrap_err();
+    assert_eq!(reads, 2);
+    assert!(error.to_string().contains("PR lookup denied"));
 }
 
 #[cfg(unix)]

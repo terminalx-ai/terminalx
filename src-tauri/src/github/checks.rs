@@ -158,10 +158,26 @@ pub fn rerun(_cwd: &Path, pr_url: &str, check_url: &str, failed: bool) -> Result
     rerun_with(&super::outside_checkouts(), pr_url, check_url, failed, super::run)
 }
 
-fn rerun_with(cwd: &Path, pr_url: &str, check_url: &str, failed: bool, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<()> {
+fn rerun_with(cwd: &Path, pr_url: &str, check_url: &str, failed: bool, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<()> {
     let check = map_check(pr_url, check_url).context("This check is not a GitHub Actions run in this PR's repository.")?;
+    let identity = crate::pr_associations::identity(pr_url)?;
+    let number = identity.rsplit('/').next().context("Invalid pull request URL")?;
     let repo = repository(pr_url)?;
     let id = check.run_id.to_string();
+    // A commit status can link to any run in this repository, including a
+    // deployment on main. Resolve the run's immutable commit before reading
+    // the PR's current head, immediately ahead of the outward action.
+    let target: serde_json::Value = serde_json::from_str(&run(cwd, &["run", "view", &id, "--repo", &repo, "--json", "databaseId,headSha"])?)?;
+    if target["databaseId"].as_u64() != Some(check.run_id) { bail!("GitHub returned a different Actions run."); }
+    let run_head = target["headSha"].as_str().filter(|sha| !sha.is_empty()).context("GitHub omitted the Actions run's head commit.")?;
+    let pr: serde_json::Value = serde_json::from_str(&run(cwd, &["pr", "view", number, "--repo", &repo, "--json", "url,state,headRefOid"])?)?;
+    let returned_url = pr["url"].as_str().context("GitHub omitted the pull request URL.")?;
+    if crate::pr_associations::identity(returned_url)? != identity { bail!("GitHub returned a different pull request."); }
+    if pr["state"].as_str() != Some("OPEN") { bail!("This pull request is no longer open."); }
+    let pr_head = pr["headRefOid"].as_str().filter(|sha| !sha.is_empty()).context("GitHub omitted the pull request's head commit.")?;
+    if run_head != pr_head {
+        bail!("This Actions run does not match the pull request's current head. Refresh the checks before re-running.");
+    }
     let mut args = vec!["run", "rerun", &id, "--repo", &repo];
     if failed { args.push("--failed"); }
     run(cwd, &args)?;
