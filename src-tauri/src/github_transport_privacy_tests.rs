@@ -9,7 +9,11 @@ use crate::{control::{ControlRequest, ControlResponse, ControlService}, hooks, l
 pub(super) fn run(root: &Path, fixture: &FetchFixture, managed: bool) {
     forwarding(root, fixture, managed);
     configured_ssh(root, fixture, managed);
+    variants::run(root, fixture, managed);
 }
+
+#[path = "github_ssh_variant_privacy_tests.rs"]
+mod variants;
 
 fn service(root: &Path, endpoint: &hooks::ControlEndpoint) -> ControlService {
     let lifetime = Lifetime::new(Duration::from_secs(60));
