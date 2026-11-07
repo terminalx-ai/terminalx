@@ -387,6 +387,7 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
+            store::settings::file::install(app.handle())?;
             let state = app.state::<AppState>();
             state.runtime_supervisor.start(app.handle())?;
             match local_runtime::supervisor::attach(app.handle()) {
@@ -773,6 +774,9 @@ pub fn run() {
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,
+            store::settings::file::settings_file_status,
+            store::settings::file::update_user_preferences,
+            store::settings::file::create_settings_file,
             commands::set_experimental_settings,
             commands::organization_work_status,
             commands::set_organization_work_status,

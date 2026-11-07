@@ -6,7 +6,14 @@ import { DEFAULT_SETTINGS_TAB, SettingsPage } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { isMac } from "@/lib/hotkeys";
 
+const settingsFile = vi.hoisted(() => ({ error: null as string | null }));
+vi.mock("@/lib/settingsFile", () => ({
+  useSettingsFile: () => ({ error: settingsFile.error, file: null, revision: 0 }),
+  createSettingsFile: vi.fn(async () => {}),
+}));
+
 beforeEach(() => {
+  settingsFile.error = null;
   Element.prototype.scrollIntoView = vi.fn();
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
 });
@@ -14,6 +21,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("Settings search", () => {
+  it("keeps one invalid-file diagnostic visible while searching sections", () => {
+    settingsFile.error = "preferences.sounds, line 3: expected true or false";
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search settings" }), { target: { value: "font" } });
+    expect(screen.getByRole("option", { name: /Appearance/ })).toBeTruthy();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
+  });
+
   it("focuses with the find shortcut, highlights font matches, and opens the section with Enter", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     const input = screen.getByRole("combobox", { name: "Search settings" });

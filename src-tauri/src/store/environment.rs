@@ -841,7 +841,10 @@ mod tests {
         let secrets = MemorySecrets::default();
         let path = root.path().join("environment.lock");
         secrets.on_call(move || {
-            super::super::transaction::run(&path, Duration::ZERO, || Ok(())).unwrap();
+            // A child forked by another test can inherit a released lock until
+            // it execs. Allow that brief overlap, as transaction's unwind test
+            // does; a nested transaction still fails immediately.
+            super::super::transaction::run(&path, Duration::from_secs(10), || Ok(())).unwrap();
         });
         let store = Store {
             root: root.path().into(),

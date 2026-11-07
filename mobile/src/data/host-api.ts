@@ -81,13 +81,22 @@ export class HostApi {
 
   private capabilities?: Promise<HostFeatures>;
   private featureListeners = new Set<() => void>();
+  private settingsListeners = new Set<() => void>();
   private lists = new Map<string, { version: string; value: unknown }>();
   private pendingLists = new Map<string, Promise<unknown>>();
 
   constructor(private readonly connection: HostConnection) {
     // What the Mac offers comes from its background runtime, which an update
     // replaces while the phone stays connected (#730).
-    connection.onEvent((event) => { if (event.method === "sync.capabilitiesChanged") this.featuresChanged(); });
+    connection.onEvent((event) => {
+      if (event.method === "sync.capabilitiesChanged") this.featuresChanged();
+      if (event.method === "settings.changed") for (const listener of this.settingsListeners) listener();
+    });
+  }
+
+  onSettingsChanged(listener: () => void): () => void {
+    this.settingsListeners.add(listener);
+    return () => { this.settingsListeners.delete(listener); };
   }
 
   resetConnection(hostChanged = false): void {

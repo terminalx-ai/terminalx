@@ -1,3 +1,4 @@
+import { SettingsFileError } from "./SettingsFile";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, Search, X } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -187,6 +188,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
           ))}
         </nav>
         <section ref={content} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby={searching ? "settings-results-title" : "settings-section-title"}>
+          <div className="mx-auto w-full max-w-[48rem] px-6 pt-6 empty:hidden"><SettingsFileError /></div>
           {searching && <div className="mx-auto w-full max-w-[48rem] p-6">
             <h2 id="settings-results-title" className="mb-3 text-sm font-medium">Settings sections</h2>
             <div ref={resultsRef} id="settings-search-results" role="listbox" aria-label="Settings search results">

@@ -21,6 +21,8 @@ export default function SettingsScreen() {
   const [mac, setMac] = useState<MacSettings | null | undefined>(undefined);
   const [macError, setMacError] = useState<string | null>(null);
   const connected = app.connectionStage === "connected";
+  const [settingsRevision, setSettingsRevision] = useState(0);
+  useEffect(() => app.api.onSettingsChanged(() => setSettingsRevision((value) => value + 1)), [app.api]);
 
   // Asked again when the Mac starts or stops offering them (#730).
   const macOffered = useHostFeatures(app.api, app.activeHost?.id)?.macSettings === 1;
@@ -31,7 +33,7 @@ export default function SettingsScreen() {
     if (!connected) return;
     app.api.macSettings().then((value) => { if (current) setMac(value); }).catch((cause: unknown) => { if (current) { setMac(null); setMacError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { current = false; };
-  }, [app.api, connected, app.activeHost?.id, macOffered]);
+  }, [app.api, connected, app.activeHost?.id, macOffered, settingsRevision]);
 
   const toggleNativeCodex = async (on: boolean) => {
     const before = mac;
