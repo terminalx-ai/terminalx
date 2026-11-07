@@ -335,6 +335,7 @@ impl WorkspaceGit {
             "git.reviewRange" => self.review_range(params),
             "git.changesBetween" => self.changes_between(params),
             "git.fileContents" => self.file_contents(params),
+            "git.mediaContent" => self.media_content(params),
             "git.log" => self.log(params),
             "git.branches" => self.branches(params),
             "git.checkout" => self.checkout(params),
@@ -580,7 +581,7 @@ impl WorkspaceGit {
         let repo = self.repo(params)?;
         let head = crate::git::head_tree(&repo.dir).map_err(git_error)?;
         let snapshot = crate::git::snapshot_tree(&repo.dir).map_err(git_error)?;
-        let mut files = if head == snapshot { Vec::new() } else { crate::git::changes_between(&repo.dir, &head, Some(&snapshot)).map_err(git_error)? };
+        let mut files = if head == snapshot { Vec::new() } else { crate::git::changes_between_options(&repo.dir, &head, Some(&snapshot), params.get("hideWhitespace").and_then(Value::as_bool).unwrap_or(false)).map_err(git_error)? };
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "head": head, "files": files, "truncated": truncated }))
@@ -601,10 +602,28 @@ impl WorkspaceGit {
         if !valid_object_id(base) || head.is_some_and(|head| !valid_object_id(head)) {
             return Err(RpcError::invalid("base and head are tree ids"));
         }
-        let mut files = crate::git::changes_between(&repo.dir, base, head).map_err(git_error)?;
+        let mut files = crate::git::changes_between_options(&repo.dir, base, head, params.get("hideWhitespace").and_then(Value::as_bool).unwrap_or(false)).map_err(git_error)?;
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "files": files, "truncated": truncated }))
+    }
+
+    fn media_content(&self, params: &Value) -> Result<Value, RpcError> {
+        let repo = self.repo(params)?;
+        let path = Self::repo_path(required_str(params, "path")?)?;
+        let tree = params.get("tree").and_then(Value::as_str);
+        // The same workspace containment check as text and fs/1, before any live read.
+        if tree.is_none() {
+            let relative = if repo.name == "." { path.clone() } else { format!("{}/{path}", repo.name) };
+            match self.files.existing_path(&relative) {
+                Ok(_) => {},
+                Err(error) if error.code == "not_found" => return Ok(Value::Null),
+                Err(error) => return Err(error),
+            }
+        }
+        // Base64 plus the envelope fits the relay's 1 MiB frame.
+        let content = crate::git_media::read(&repo.dir, &path, tree, 512 * 1024).map_err(git_error)?;
+        Ok(json!(content))
     }
 
     /// One file at tree `base` and at tree `head` (or in the working tree).
@@ -851,6 +870,13 @@ impl WorkspaceGit {
     // ---- pull requests ---------------------------------------------------
 
     fn gh(&self, repo: &Repo, args: &[&str], timeout: Duration) -> Result<String, RpcError> {
+        let ran = self.gh_output(repo, args, timeout)?;
+        if ran.ok { return Ok(ran.stdout); }
+        let text = ran.text();
+        Err(failure_error(&format!("gh {}", args.iter().take(2).copied().collect::<Vec<_>>().join(" ")), &text, classify(&text, ran.timed_out)))
+    }
+
+    fn gh_output(&self, repo: &Repo, args: &[&str], timeout: Duration) -> Result<Ran, RpcError> {
         let bin = self
             .gh
             .clone()
@@ -864,12 +890,15 @@ impl WorkspaceGit {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("NO_COLOR", "1");
-        let ran = run_bounded(command, timeout).map_err(RpcError::internal)?;
-        if ran.ok {
-            return Ok(ran.stdout);
-        }
-        let text = ran.text();
-        Err(failure_error(&format!("gh {}", args.iter().take(2).copied().collect::<Vec<_>>().join(" ")), &text, classify(&text, ran.timed_out)))
+        run_bounded(command, timeout).map_err(RpcError::internal)
+    }
+
+    fn panel_pr(&self, repo: &Repo, pr: &mut crate::github::PullRequest) {
+        crate::github::enrich_panel_pr(pr, |args| {
+            let ran = self.gh_output(repo, args, NETWORK_TIMEOUT).map_err(|error| anyhow::anyhow!("{}", error.message))?;
+            if ran.timed_out { anyhow::bail!("GitHub did not answer within {} seconds.", NETWORK_TIMEOUT.as_secs()); }
+            Ok(crate::github::GhOutput { success: ran.ok, stdout: ran.stdout, stderr: ran.stderr })
+        });
     }
 
     fn list_prs(&self, repo: &Repo, branch: &str, state: &str, timeout: Duration) -> Result<Vec<crate::github::PullRequest>, RpcError> {
@@ -929,11 +958,13 @@ impl WorkspaceGit {
     fn prs(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         if params.get("number").is_some() {
-            let pr = self.pr_view(&repo, &Self::pr_number(params)?)?;
+            let mut pr = self.pr_view(&repo, &Self::pr_number(params)?)?;
+            self.panel_pr(&repo, &mut pr);
             return Ok(json!({ "repo": repo.name, "branch": pr.head, "prs": [pr] }));
         }
         let branch = self.branch_param(&repo, params)?;
-        let prs = self.list_prs(&repo, &branch, "all", NETWORK_TIMEOUT)?;
+        let mut prs = self.list_prs(&repo, &branch, "all", NETWORK_TIMEOUT)?;
+        for pr in &mut prs { self.panel_pr(&repo, pr); }
         Ok(json!({ "repo": repo.name, "branch": branch, "prs": prs }))
     }
 
@@ -1014,7 +1045,15 @@ impl WorkspaceGit {
             "merge" => "--merge",
             "squash" => "--squash",
             "rebase" => "--rebase",
-            _ => return Err(RpcError::invalid("method is merge, squash or rebase")),
+            "queue" => {
+                let pr = self.pr_view(&repo, &number)?;
+                let (host, query) = crate::github::queue_query(&pr.url).map_err(RpcError::internal)?;
+                let out = self.gh(&repo, &["api", "graphql", "--hostname", &host, "-f", &query], NETWORK_TIMEOUT)?;
+                let queue = crate::github::parse_queue_response(&out).map_err(RpcError::internal)?;
+                crate::github::ensure_queue_enabled(&queue).map_err(|error| RpcError::new("conflict", error.to_string()))?;
+                "--auto"
+            }
+            _ => return Err(RpcError::invalid("method is merge, squash, rebase or queue")),
         };
         let result = self.gh(&repo, &["pr", "merge", &number, flag], NETWORK_TIMEOUT);
         // `gh pr merge` can fail with the merge already through; ask again.

@@ -2452,8 +2452,8 @@ pub async fn review_range(cwd: String, target: Option<String>, uncommitted: bool
 }
 
 #[tauri::command]
-pub async fn changes_between(cwd: String, base: String, head: Option<String>) -> CmdResult<Vec<git::ChangedFile>> {
-    tauri::async_runtime::spawn_blocking(move || git::changes_between(Path::new(&cwd), &base, head.as_deref()).map_err(err))
+pub async fn changes_between(cwd: String, base: String, head: Option<String>, hide_whitespace: Option<bool>) -> CmdResult<Vec<git::ChangedFile>> {
+    tauri::async_runtime::spawn_blocking(move || git::changes_between_options(Path::new(&cwd), &base, head.as_deref(), hide_whitespace.unwrap_or(false)).map_err(err))
         .await
         .map_err(err)?
 }
@@ -2463,6 +2463,11 @@ pub async fn changes_between(cwd: String, base: String, head: Option<String>) ->
 pub struct FilePair {
     pub before: Option<String>,
     pub after: Option<String>,
+}
+
+#[tauri::command]
+pub async fn diff_media_content(cwd: String, path: String, tree: Option<String>) -> CmdResult<Option<crate::git_media::MediaContent>> {
+    tauri::async_runtime::spawn_blocking(move || crate::git_media::read(Path::new(&cwd), &path, tree.as_deref(), 16 * 1024 * 1024).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2563,6 +2568,17 @@ pub async fn send_message(
 pub async fn report_send_shown(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64, timings: crate::session::SendShown) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.note_shown(&session_id, &tab_id, seq, &timings).map_err(err)).await.map_err(err)?
+}
+
+/// What the window showed of a tab's warning, or what was done in it (#815).
+/// The report is labels and numbers only (`recovery_log::UiReport` refuses
+/// anything else); the app's own build is put on it here. Recording is best
+/// effort: the window does not wait on it or show its failure.
+#[tauri::command]
+pub async fn report_recovery_ui(state: State<'_, AppState>, session_id: String, tab_id: String, report: crate::recovery_log::UiReport) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    let report = report.bounded(env!("CARGO_PKG_VERSION"));
+    tauri::async_runtime::spawn_blocking(move || m.note_incident_ui(&session_id, &tab_id, &report).map_err(err)).await.map_err(err)?
 }
 
 /// The recovery banner's "Resend last prompt": the prompt the tab's agent
@@ -2938,12 +2954,12 @@ pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<
 /// Uncommitted changes: HEAD's tree against a snapshot of the checkout. The
 /// snapshot (not `git diff <tree>`) is what makes untracked files count.
 #[tauri::command]
-pub async fn working_changes(cwd: String) -> CmdResult<(String, Vec<git::ChangedFile>)> {
+pub async fn working_changes(cwd: String, hide_whitespace: Option<bool>) -> CmdResult<(String, Vec<git::ChangedFile>)> {
     tauri::async_runtime::spawn_blocking(move || {
         let p = Path::new(&cwd);
         let head = git::head_tree(p).map_err(err)?;
         let snapshot = git::snapshot_tree(p).map_err(err)?;
-        let files = if head == snapshot { Vec::new() } else { git::changes_between(p, &head, Some(&snapshot)).map_err(err)? };
+        let files = if head == snapshot { Vec::new() } else { git::changes_between_options(p, &head, Some(&snapshot), hide_whitespace.unwrap_or(false)).map_err(err)? };
         Ok((head, files))
     })
     .await
@@ -2956,8 +2972,13 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 }
 
 #[tauri::command]
+pub async fn pr_associations_batch(session_keys: Vec<String>) -> CmdResult<std::collections::BTreeMap<String, Vec<crate::pr_associations::Association>>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_sessions(&session_keys).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github::PullRequest>> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2967,7 +2988,7 @@ pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
 
 #[tauri::command]
 pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdResult<crate::github::PullRequest> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::associated_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -4509,6 +4530,46 @@ pub fn set_read_only_commands(enabled: bool) -> CmdResult<crate::store::settings
     settings.agents.read_only_commands = enabled;
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.agents)
+}
+
+/// Settings → About: whether recovery incidents are recorded (#815).
+#[tauri::command]
+pub fn diagnostics_settings() -> crate::store::settings::DiagnosticsSettings {
+    store::settings::load().diagnostics
+}
+
+/// The runtime follows the change at its next line: it reads the file again
+/// whenever the file has changed.
+#[tauri::command]
+pub fn set_recovery_incidents(enabled: bool) -> CmdResult<crate::store::settings::DiagnosticsSettings> {
+    let mut settings = store::settings::load();
+    settings.diagnostics.recovery_incidents = enabled;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.diagnostics)
+}
+
+/// The recorded incidents, summed up by reason, build and transport.
+#[tauri::command]
+pub async fn recovery_incidents_summary() -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(|| crate::recovery_log::read_all().map(|lines| crate::recovery_log::summarize(&lines)).map_err(err)).await.map_err(err)?
+}
+
+/// Write the incidents, sessions and tabs named by salted hashes, and their
+/// summary to `path`, a file the reader chose.
+#[tauri::command]
+pub async fn recovery_incidents_export(path: String) -> CmdResult<()> {
+    let mut target = std::path::PathBuf::from(&path);
+    if !target.is_absolute() { return Err("Choose where to save the export.".into()); }
+    if !target.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
+        target.as_mut_os_string().push(".json");
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::recovery_log::export(&target).map_err(err)).await.map_err(err)?
+}
+
+/// Remove every recorded incident.
+#[tauri::command]
+pub fn clear_recovery_incidents() -> CmdResult<()> {
+    crate::recovery_log::clear().map_err(err)
 }
 
 /// The runtime that owns the agents reads the limit again at its next look,

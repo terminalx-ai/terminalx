@@ -3,6 +3,8 @@ import { SESSION_STATUSES, combinedSessionStatus, type SessionStatusInput } from
 import { api } from "./api";
 import type { SessionEntry } from "@/types/session";
 
+export type StatusSession = SessionStatusInput & Pick<SessionEntry, "id" | "rowStatus">;
+
 const visible = new Map<string, number>();
 const listeners = new Set<() => void>();
 let snapshot: Record<string, SessionStatusInput> = {};
@@ -37,7 +39,7 @@ async function refresh() {
 }
 
 /** Register rendered rows once, across sidebar, overview and dashboard. */
-export function useSessionRowStatus(sessions: readonly SessionEntry[]) {
+export function useSessionRowStatus(sessions: readonly StatusSession[]) {
   const key = JSON.stringify(sessions.filter((s) => !s.id.startsWith("cloud:")).map((s) => s.id).sort());
   useEffect(() => {
     const ids: string[] = JSON.parse(key);

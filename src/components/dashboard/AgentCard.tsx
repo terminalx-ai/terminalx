@@ -11,7 +11,7 @@ import { agent, errorMessage, type SessionSummary } from "@/lib/api";
 import { archiveSession, selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
-import { workspaceName, type ColumnId } from "@/lib/dashboard";
+import { workspaceName, type DashboardState } from "@/lib/dashboard";
 import { isQuickChat, quickChatPlace, sessionProjectName } from "@/lib/quickChats";
 import type { CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { Project, SessionEntry } from "@/types/session";
@@ -36,7 +36,7 @@ export function AgentCard({
 }: {
   session: SessionEntry;
   summary?: SessionSummary;
-  column: ColumnId;
+  column: DashboardState;
   project?: Project;
   agentName: string;
   focused: boolean;
@@ -84,7 +84,7 @@ export function AgentCard({
             column === "needs" && "bg-warning",
             column === "working" && "bg-info animate-pulse-soft",
             column === "done" && "bg-add",
-            column === "not-started" && "bg-faint",
+            (column === "not-started" || column === "archived") && "bg-faint",
           )}
         />
 
@@ -165,8 +165,8 @@ export function AgentCard({
           </DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void archiveSession(session.id, true)}>
-          <Archive /> Archive
+        <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
+          <Archive /> {session.archived ? "Unarchive" : "Archive"}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -188,7 +188,7 @@ export function CloudAgentCard({
   onOpen,
 }: {
   session: CloudDashboardSession;
-  column: ColumnId;
+  column: DashboardState;
   agentName: string;
   focused: boolean;
   onFocus: () => void;
@@ -200,7 +200,7 @@ export function CloudAgentCard({
   useEffect(() => {
     if (focused) ref.current?.scrollIntoView({ block: "nearest" });
   }, [focused]);
-  const state = column === "needs"
+  const state = column === "archived" ? "Archived" : column === "needs"
     ? waiting?.failure ? "Workspace needs recovery" : waiting?.waitingOn ? `Wants to use ${waiting.waitingOn}` : "Waiting for your decision"
     : column === "working" ? "Working" : column === "not-started" ? "Not started" : session.stopped ? "Workspace stopped" : "Finished";
 
@@ -231,7 +231,7 @@ export function CloudAgentCard({
             column === "needs" && "bg-warning",
             column === "working" && "bg-info animate-pulse-soft",
             column === "done" && "bg-add",
-            column === "not-started" && "bg-faint",
+            (column === "not-started" || column === "archived") && "bg-faint",
           )}
         />
 

@@ -431,6 +431,7 @@ export type CleanupProgress =
  */
 export interface RuntimeSession {
   rowStatus?: import("./sessionStatus").SessionStatusInput;
+  automation?: { id: string } | null;
   id: string;
   projectPath: string;
   cwd: string;

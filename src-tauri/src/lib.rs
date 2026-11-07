@@ -82,6 +82,7 @@ mod media;
 mod media_types;
 mod branch_overview;
 mod git;
+mod git_media;
 mod github;
 mod unfinished_merge;
 mod pr_associations;
@@ -130,6 +131,7 @@ mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod recovery_log;
 mod continuation;
 pub mod skills;
 mod store;
@@ -624,11 +626,13 @@ pub fn run() {
             commands::changes_between,
             commands::review_range,
             commands::file_contents_at,
+            commands::diff_media_content,
             commands::log_commits,
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_recovery_ui,
             commands::resend_unsent,
             commands::resend_message,
             commands::submit_waiting_prompt,
@@ -679,6 +683,7 @@ pub fn run() {
             commands::working_changes,
             commands::pr_list,
             commands::pr_associations,
+            commands::pr_associations_batch,
             commands::pr_details,
             commands::pr_landed,
             commands::pr_create,
@@ -756,6 +761,11 @@ pub fn run() {
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
             commands::set_read_only_commands,
+            commands::diagnostics_settings,
+            commands::set_recovery_incidents,
+            commands::recovery_incidents_summary,
+            commands::recovery_incidents_export,
+            commands::clear_recovery_incidents,
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,

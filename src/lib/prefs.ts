@@ -1,3 +1,4 @@
+import { dashboardPreferences, DEFAULT_DASHBOARD_PREFERENCES, type DashboardPreferences } from "@terminalx/portable/dashboard";
 import { useSyncExternalStore } from "react";
 import { FIRST_RUN_PERMISSION_MODE } from "@terminalx/portable/agentSettings";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
@@ -10,6 +11,7 @@ import type { IssuePipelineSettings } from "@/types/issuePipeline";
  * ~/.raccoon/settings.json instead (see store/settings.rs).
  */
 export interface Prefs {
+  dashboard: DashboardPreferences;
   linkBrowser: "terminalx" | "system" | "ask";
   /** The reader used Settings or remembered a browser choice, rather than inheriting a default. */
   linkBrowserChosen: boolean;
@@ -28,6 +30,11 @@ export interface Prefs {
    */
   branchSessions: "tabs" | "sidebar";
   panelWidth: number;
+  diffMode: "unified" | "split";
+  diffHideWhitespace: boolean;
+  diffWrap: boolean;
+  /** Explicit per-source, per-path choices. Missing keys follow diffWrap. */
+  diffWrapFiles: Record<string, boolean>;
   /** The right panel's terminal dock: shown below the panel's tabs, and its height. */
   panelTerminalOpen: boolean;
   panelTerminalHeight: number;
@@ -128,6 +135,7 @@ export interface Prefs {
 const CLOUD_ISSUE_PIPELINES_VERSION = 1;
 
 const DEFAULTS: Prefs = {
+  dashboard: DEFAULT_DASHBOARD_PREFERENCES,
   linkBrowser: "ask",
   linkBrowserChosen: false,
   linkActions: true,
@@ -137,6 +145,10 @@ const DEFAULTS: Prefs = {
   tabStrip: true,
   branchSessions: "tabs",
   panelWidth: 400,
+  diffMode: "unified",
+  diffHideWhitespace: false,
+  diffWrap: true,
+  diffWrapFiles: {},
   panelTerminalOpen: false,
   panelTerminalHeight: 260,
   editorPaneWidth: 520,
@@ -209,12 +221,18 @@ function load(): Prefs {
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw);
     const prefs = { ...DEFAULTS, ...parsed };
+    prefs.dashboard = dashboardPreferences(prefs.dashboard);
     prefs.hiddenOrganizations = Array.isArray(prefs.hiddenOrganizations) ? [...new Set(prefs.hiddenOrganizations.filter((id: unknown) => typeof id === "string"))] : [];
     prefs.organizationDisplay = prefs.organizationDisplay === "one" ? "one" : "all";
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
     prefs.autocorrect = prefs.autocorrect === true;
+    prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";
+    prefs.diffHideWhitespace = prefs.diffHideWhitespace === true;
+    prefs.diffWrap = prefs.diffWrap !== false;
+    prefs.diffWrapFiles = prefs.diffWrapFiles && typeof prefs.diffWrapFiles === "object" && !Array.isArray(prefs.diffWrapFiles)
+      ? Object.fromEntries(Object.entries(prefs.diffWrapFiles).filter(([, value]) => typeof value === "boolean")) : {};
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     prefs.issueCloudProject = typeof prefs.issueCloudProject === "string" && prefs.issueCloudProject.startsWith("cloud:") ? prefs.issueCloudProject : null;
     const pipelines = prefs.cloudIssuePipelines;

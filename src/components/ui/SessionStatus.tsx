@@ -1,7 +1,6 @@
 import { Check, Circle, CircleAlert, Clock, FileText, GitBranch, GitMerge, GitPullRequest, GitPullRequestDraft, ListOrdered, Loader2, MessageCircleQuestion, ShieldQuestion, Square, TriangleAlert } from "@/icons";
 import type { StatusDescription } from "@terminalx/portable/sessionStatus";
-import type { SessionEntry } from "@/types/session";
-import { useSessionRowStatus } from "@/lib/sessionRowStatus";
+import { useSessionRowStatus, type StatusSession } from "@/lib/sessionRowStatus";
 import { cn } from "@/lib/cn";
 import { Working } from "./StatusMark";
 
@@ -16,6 +15,6 @@ export function StatusBadge({ status, className }: { status: StatusDescription; 
   </span>;
 }
 
-export function SessionStatus({ session, peers, className }: { session: SessionEntry; peers?: readonly SessionEntry[]; className?: string }) {
+export function SessionStatus({ session, peers, className }: { session: StatusSession; peers?: readonly StatusSession[]; className?: string }) {
   return <StatusBadge status={useSessionRowStatus(peers ?? [session])} className={className} />;
 }
