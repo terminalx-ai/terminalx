@@ -11,10 +11,10 @@ static FOUND: Mutex<Option<Found>> = Mutex::new(None);
 pub struct Available { id: String, version: String }
 
 #[derive(Clone, Serialize)]
-#[serde(tag = "event", content = "data")]
+#[serde(tag = "event", content = "data", rename_all_fields = "camelCase")]
 pub enum DownloadEvent {
-    Started { #[serde(rename = "contentLength")] content_length: Option<u64> },
-    Progress { #[serde(rename = "chunkLength")] chunk_length: usize },
+    Started { content_length: Option<u64> },
+    Progress { chunk_length: usize },
     Finished,
 }
 
