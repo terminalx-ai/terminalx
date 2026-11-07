@@ -83,7 +83,7 @@ type Destination = { id: string; label: string; shortcut: ShortcutId; icon: Reac
 /** The destinations as named rows, each with its count or dot on the right. */
 function DestinationList({ active, destinations }: { active: string | null; destinations: Destination[] }) {
   return (
-    <div className="flex flex-col" role="toolbar" aria-orientation="vertical" aria-label="Destinations" data-testid="destination-list">
+    <div className="flex flex-col gap-0.5" role="toolbar" aria-orientation="vertical" aria-label="Destinations" data-testid="destination-list">
       {destinations.map((destination) => {
         const status = destination.status ?? destination.dot?.label;
         const pressed = active === destination.id;

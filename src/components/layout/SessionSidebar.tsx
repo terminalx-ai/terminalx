@@ -305,7 +305,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
             )}
             {(chats.length > 0 || archivedChats.length > 0) && (
               <ListSection id="chats" label="Chats">
-                <ul className="flex flex-col gap-px">
+                <ul className="flex flex-col gap-0.5">
                   {chats.map(chatRow)}
                   {archivedChats.length > 0 && (
                     <ArchivedSessions id="chats" count={archivedChats.length} opened={archivedChats.some((session) => session.id === store.selectedSessionId)}>
@@ -332,7 +332,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       )}
 
       <SidebarBulkBar sessions={store.sessions} />
-      <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 pb-2 pt-1" data-testid="sidebar-account-row">
+      <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 py-2" data-testid="sidebar-account-row">
         {/* The account; Settings keeps the far end. */}
         <div className="min-w-0 max-w-[70%]">
           <AccountSidebarEntry onOpenAccount={onOpenAccount} />
@@ -391,9 +391,9 @@ export function ListSection({
   const [expanded, toggle] = useFold(`list:${id}`, true);
   const open = expanded || forceOpen;
   return (
-    <section aria-labelledby={`list-${id}`} className="mb-3" {...rest}>
+    <section aria-labelledby={`list-${id}`} className="mb-5" {...rest}>
       <div
-        className={cn(actionRow, "flex h-6 min-w-0 items-center gap-1 pr-1")}
+        className={cn(actionRow, "mb-1 flex h-6 min-w-0 items-center gap-1 pr-1")}
         onContextMenu={onMenu && ((event) => { event.preventDefault(); onMenu(); })}
         onKeyDown={onMenu && ((event) => {
           if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
@@ -553,7 +553,7 @@ function ProjectGroup({
       />
     );
   return (
-    <div role="group" aria-label={group.name} className="mb-1">
+    <div role="group" aria-label={group.name} className="mb-3 last:mb-0">
       <DropdownMenu {...menu.root}>
         <div {...menu.surface} className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md px-2 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
@@ -642,7 +642,7 @@ function ProjectGroup({
         data-testid="project-branches"
       >
         <div className="min-h-0 overflow-hidden">
-      <ul className="ml-[15px] flex flex-col gap-px pl-1.5">
+      <ul className="ml-[15px] mt-0.5 flex flex-col gap-0.5 pl-1.5">
         {shown.map(row)}
         {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">No chats yet</li>}
         {more && (
@@ -709,7 +709,7 @@ export function RemovedWorkspaces({ id, count, opened, children }: { id: string;
         <span className="min-w-0 truncate">Removed workspaces ({count})</span>
         <ChevronDown className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")} />
       </button>
-      {expanded && <ul className="flex flex-col gap-px">{children}</ul>}
+      {expanded && <ul className="flex flex-col gap-0.5">{children}</ul>}
     </li>
   );
 }
@@ -735,7 +735,7 @@ export function ArchivedSessions({ id, count, opened, children }: { id: string; 
         <span className="min-w-0 truncate">Archived ({count})</span>
         <ChevronDown className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")} />
       </button>
-      {expanded && <ul className="flex flex-col gap-px">{children}</ul>}
+      {expanded && <ul className="flex flex-col gap-0.5">{children}</ul>}
     </li>
   );
 }
@@ -821,7 +821,7 @@ function BranchRow({
       </ContextMenuContent>
       </ContextMenu>
       {expanded && (
-        <ul className="ml-[13px] flex flex-col gap-px pl-1.5">
+        <ul className="ml-[13px] mt-0.5 flex flex-col gap-0.5 pl-1.5">
           {sessions.map((session) => (
             <ConversationRow key={session.id} session={session} selected={selectedId === session.id} branch={null} linkTo={null} />
           ))}
