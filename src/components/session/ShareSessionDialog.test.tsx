@@ -52,6 +52,9 @@ describe("Share session", () => {
 
   it("creates a read-only link that admits each person only once approved, with a finite expiry (PRO-162)", async () => {
     await open();
+    // Limits are off until chosen: no people field until Limit people is on.
+    expect(screen.getByRole("switch", { name: "Limit people" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByLabelText("Maximum people")).toBeNull();
     // A host who has shared before is not shown the introduction again, only offered it.
     expect(screen.queryByTestId("share-intro")).toBeNull();
     expect(screen.getByRole("button", { name: "How sharing works" })).toBeTruthy();
@@ -76,7 +79,8 @@ describe("Share session", () => {
             role: "viewer",
             approveEachPerson: true,
             canApprove: false,
-            maximumPeople: 8,
+            // No limit chosen: as many as the host takes.
+            maximumPeople: 32,
             singleUse: false,
           }),
         }),

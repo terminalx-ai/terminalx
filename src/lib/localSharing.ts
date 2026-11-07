@@ -144,6 +144,9 @@ export async function copyShareLink(sessionId: string) {
  * host to admit them. Driving the session, or joining unseen, is for the host
  * to turn on for a link, never what a forwarded link does by default.
  */
+/** The most people a link may admit, the host's own cap (MAX_GUESTS in local_sharing.rs). */
+export const MAX_SHARE_PEOPLE = 32;
+
 /**
  * The longest a link may last: the host accepts an expiry up to 24 hours out
  * (local_sharing.rs), less a minute for the request to reach it. Sharing ends
@@ -161,7 +164,7 @@ export function defaultShareSettings(): ShareSettings {
     expiresAt: longestShareExpiry(),
     approveEachPerson: true,
     canApprove: false,
-    maximumPeople: 8,
+    maximumPeople: MAX_SHARE_PEOPLE,
     singleUse: false,
   };
 }

@@ -6,7 +6,7 @@ import { cn } from "@/lib/cn";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { CollaborationScene } from "./CollaborationScene";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { changeShare, closeSessionShare, createShare, defaultShareSettings, isWaitingGuest, longestShareExpiry, openSessionShare, refreshShare, type ShareLink, type ShareRole, type ShareSettings, useLocalShare, useShareDialog } from "@/lib/localSharing";
+import { changeShare, closeSessionShare, createShare, defaultShareSettings, isWaitingGuest, longestShareExpiry, MAX_SHARE_PEOPLE, openSessionShare, refreshShare, type ShareLink, type ShareRole, type ShareSettings, useLocalShare, useShareDialog } from "@/lib/localSharing";
 import { errorMessage } from "@/lib/api";
 import { usePairing } from "@/lib/pairing";
 import { useAccount, signIn } from "@/lib/account";
@@ -57,6 +57,8 @@ function SettingsForm({ value, set, extra }: { value: ShareSettings; set: (value
   const minutes = Math.max(1, Math.round((value.expiresAt - Date.now()) / 60_000));
   // Off, a link lasts as long as the host allows: until TerminalX restarts, 24 hours at most. On, it ends sooner.
   const [customExpiry, setCustomExpiry] = useState(false);
+  // Off, as many people as the host takes; on, fewer.
+  const [limitPeople, setLimitPeople] = useState(value.maximumPeople < MAX_SHARE_PEOPLE);
   const sheet = "flex flex-col divide-y divide-hairline rounded-xl bg-well hairline";
   return (
     <div className="flex flex-col gap-3">
@@ -122,8 +124,21 @@ function SettingsForm({ value, set, extra }: { value: ShareSettings; set: (value
           />
         </div>
       </Row>
-      <Row label="Maximum people">
-        <input aria-label="Maximum people" type="number" min={1} max={32} className={`${field} w-16 text-right tabular-nums`} value={value.maximumPeople} onChange={(event) => patch({ maximumPeople: Number(event.target.value) })} />
+      <Row label="Limit people" hint={limitPeople ? undefined : `Off: as many as a session takes, ${MAX_SHARE_PEOPLE}.`}>
+        <div className="flex items-center gap-2">
+          {limitPeople && (
+            <input aria-label="Maximum people" type="number" min={1} max={MAX_SHARE_PEOPLE} className={`${field} w-16 text-right tabular-nums`} value={value.maximumPeople} onChange={(event) => patch({ maximumPeople: Math.min(MAX_SHARE_PEOPLE, Math.max(1, Number(event.target.value) || 1)) })} />
+          )}
+          <Switch
+            aria-label="Limit people"
+            checked={limitPeople}
+            onCheckedChange={(on) => {
+              setLimitPeople(on);
+              // On, it starts at a handful; off, back to as many as allowed.
+              patch({ maximumPeople: on ? 8 : MAX_SHARE_PEOPLE });
+            }}
+          />
+        </div>
       </Row>
       <Row label="Approve each person" hint="Each one waits until you admit them.">
         <Switch aria-label="Approve each person" checked={value.approveEachPerson} onCheckedChange={(approveEachPerson) => patch({ approveEachPerson })} />
