@@ -9,6 +9,7 @@ import { command, terminalxResult } from "./process.mjs";
 import { desktopEnvironment, nativeObserver } from "./native.mjs";
 import { postResult } from "./post-result.mjs";
 import { run } from "./run.mjs";
+import { finalizeRun } from "./results.mjs";
 
 async function temporary(t) {
   const path = await mkdtemp(join(tmpdir(), "team-harness-unit-"));
@@ -91,6 +92,19 @@ test("desktop process environment fences credentials and Keychain per account", 
   assert.notEqual(env.RACCOON_DEV_KEYCHAIN_SERVICE, desktopEnvironment({ ...base, account: "B" }).RACCOON_DEV_KEYCHAIN_SERVICE);
   assert.throws(() => desktopEnvironment({ ...base, account: "A", apiOrigin: "https://login.terminalx.ai" }), /loopback/);
 });
+test("a failed native refresh invalidates every previously selected element", async () => {
+  for (const failure of ["own_app_protected", "busy", "timeout", "invalid-json"]) {
+    let count = 0;
+    const observer = nativeObserver({ pid: 555, run: async () => {
+      count++;
+      return { code: 0, stdout: count === 1 ? JSON.stringify({ ok: true, result: { snapshot: { app: { pid: 555 }, treeText: "42 button Fixture" } } }) : failure === "invalid-json" ? "broken" : JSON.stringify({ ok: false, error: { code: failure } }) };
+    } });
+    await observer.snapshot();
+    await assert.rejects(observer.snapshot());
+    await assert.rejects(observer.click(42), /fresh/);
+    assert.equal(count, 2);
+  }
+});
 test("nightly result sink posts incomplete and propagates posting failure without an external message", async (t) => {
   const { report } = await run(["--preflight", "--artifacts", await temporary(t)]);
   let text = "";
@@ -98,4 +112,30 @@ test("nightly result sink posts incomplete and propagates posting failure withou
   assert.match(text, /E2E: incomplete/);
   assert.match(text, /invite-accept/);
   await assert.rejects(postResult(report, { append: async () => { throw new Error("local sink failed"); } }), /local sink failed/);
+  for (const mode of ["contract-test", "real"]) {
+    await assert.rejects(postResult({ ...report, mode, status: "passed" }, { append: async () => { assert.fail("synthetic pass must not reach sink"); } }), /Uncertified/);
+  }
+});
+test("finalization refuses fabricated labels, mismatched provenance, and missing evidence", async (t) => {
+  const { directory, runId } = await createRun(await temporary(t));
+  await assert.rejects(finalizeRun({ mode: "contract-test", runId }, directory), /real native/);
+  await assert.rejects(finalizeRun({ mode: "real", runId }, directory), /provenance/);
+  const identity = { runId, accountA: "alice", accountB: "bob", machineA: "mac-a", machineB: "mac-b", desktopHeadA: "a".repeat(40), desktopHeadB: "a".repeat(40), serverHead: "b".repeat(40) };
+  const side = (name, pid) => ({ platform: "darwin", machineId: identity[`machine${name}`], pid, head: identity[`desktopHead${name}`], accountId: identity[`account${name}`], binarySha256: "c".repeat(64) });
+  const provenance = { runId, source: "terminalx-native-capture-v1", serverHead: identity.serverHead, A: side("A", 55), B: side("B", 66) };
+  const attempt = { id: "unit", provenance: { runId, ...provenance.B }, artifacts: [{ kind: "log", path: "missing.log", sha256: "d".repeat(64) }] };
+  await assert.rejects(finalizeRun({ mode: "real", runId, identity, provenance, attempts: [attempt] }, directory), /ENOENT/);
+  await assert.rejects(finalizeRun({ mode: "real", runId, identity, provenance, attempts: [{ ...attempt, provenance: { ...attempt.provenance, pid: 67 } }] }, directory), /Stale/);
+  const observation = { runId, orgId: "org", observerId: "bob" };
+  const captured = { runId, source: "terminalx-native-capture-v1", attemptId: attempt.id, observation, provenance: attempt.provenance };
+  const bytes = Buffer.from(JSON.stringify(captured));
+  await writeFile(join(directory, "observation.log"), bytes);
+  const evidence = { ...attempt, observation, scenario: "share", phase: "baseline", status: "completed", source: "terminalx-native", artifacts: [{ kind: "log", path: "observation.log", sha256: createHash("sha256").update(bytes).digest("hex") }] };
+  const result = await finalizeRun({ mode: "real", runId, identity, provenance, attempts: [evidence] }, directory);
+  assert.equal(result.evidenceValidation.state, "files-and-provenance-validated");
+  assert.equal(result.status, "incomplete");
+  assert.equal(result.certification.state, "native-recorder-unavailable");
+  await assert.rejects(postResult({ ...result, status: "passed", certification: { state: "verified" } }, { append: async () => assert.fail("caller cannot certify execution") }, { directory }), /no longer passes/);
+  await writeFile(join(directory, "observation.log"), "tampered");
+  await assert.rejects(finalizeRun({ mode: "real", runId, identity, provenance, attempts: [evidence] }, directory), /hash mismatch/);
 });

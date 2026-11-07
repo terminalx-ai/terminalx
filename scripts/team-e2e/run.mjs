@@ -24,7 +24,7 @@ export async function run(args) {
     if (result.code === 0) desktopHead = result.stdout.trim();
   } catch { prerequisites.push("Could not record desktop source head."); }
   const report = {
-    ...evaluateRun({ runId, prerequisites, cleanup: [{ name: "preflight-created-no-app-server-or-provider-resources", ok: true }] }),
+    ...evaluateRun({ runId, mode: "real", prerequisites, cleanup: [{ name: "preflight-created-no-app-server-or-provider-resources", ok: true }] }),
     startedAt, finishedAt: new Date().toISOString(), desktopHead, inventory,
     execution: { started: false, reason: "Prerequisites incomplete; no real scenario or deliberate break executed.", activePids: [] },
     nightly: { activated: false, postingVerified: false },

@@ -43,7 +43,7 @@ jobs:
             const report = await readFile(path, 'utf8').then(JSON.parse).catch(() => null);
             if (!report) continue;
             found = true;
-            await postResult(report, { append: (text) => appendFile(process.env.GITHUB_STEP_SUMMARY, text) });
+            await postResult(report, { append: (text) => appendFile(process.env.GITHUB_STEP_SUMMARY, text) }, { directory: `artifacts/team-e2e/${dir}` });
           }
           if (!found) {
             await appendFile(process.env.GITHUB_STEP_SUMMARY, 'Two-account E2E failed before producing a result. No scenario passed.\n');

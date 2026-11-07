@@ -21,6 +21,7 @@ export function nativeObserver({ pid, run = command }) {
   let latest;
   return {
     async snapshot() {
+      latest = undefined;
       latest = terminalxResult(await run("terminalx", ["computer", "get-app-state", "--app", `pid:${pid}`, "--json"]));
       if (!latest.snapshot?.treeText || latest.snapshot.treeText.includes("withheld") || latest.snapshot.app?.pid !== pid) {
         latest = undefined;

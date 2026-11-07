@@ -24,7 +24,9 @@ than introducing another API, provider or product model. `--team-fixture` create
 the existing disposable Postgres/Redis/API/relay/worker stack. It adds account B
 and an unconsumed invite addressed to B to the one organization owned by A.
 B initially has no membership; accepting the invite through the application is
-the first required scenario. The invite seed sends no email. No migration is added.
+the first required scenario. Both disposable identities have the existing license
+entitlement; application licensing and role checks remain enabled. The invite seed
+sends no email. No migration is added.
 
 Each account gets its own loopback authorize proxy. Only the development callback
 `terminalx-dev://auth/callback`, S256 and the native local profile are allowed.
@@ -47,6 +49,9 @@ Run it from the server repository. It retains private server logs, binds proxies
 to loopback, bounds fixture lifetime to 30 minutes, refuses a remote Docker
 context and existing local-provider workspace resources, and collects workspace
 IDs from its own database before cleanup. It uses a unique runtime image tag.
+TEAM mode requires an explicit prebuilt runtime and does not invoke the automatic
+build path. The deadline begins before stack startup; SQL/readiness probes have
+bounded waits. Base and runtime images both use unique invocation-owned tags.
 Its `.closed.json` is a **fixture lifecycle result**, with zero desktop scenarios,
 not an all-scenarios result. SIGTERM/INT stops only the owned fixture processes;
 the existing process list and workspace-ID cleanup are reused. Never kill by
@@ -65,6 +70,12 @@ Both debug application binaries must correspond to recorded exact source heads.
 Record machine identifiers as run-local hashes, application PID, binary SHA-256,
 account ID, organization ID, workspace/tab IDs and exact desktop/server heads.
 Two windows or two browser profiles on the host do not satisfy this gate.
+
+Pure evaluation reports `assertionStatus` separately and never certifies a real
+pass. `finalizeRun` validates owned files/hashes and matching capture provenance
+(run, account, machine, PID, binary hash and source heads), but keeps certification
+closed while the actual native recorder is unimplemented. The posting boundary
+rechecks evidence and rejects synthetic or caller-certified passes.
 
 Use separate run-owned `TERMINALX_HOME` directories and the existing debug-only
 `RACCOON_DEV_KEYCHAIN_SERVICE=dev.terminalx.<runId>.<A|B>` override, which also

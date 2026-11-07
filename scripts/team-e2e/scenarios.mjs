@@ -1,17 +1,17 @@
 // These assertions consume observations of the application, never action acknowledgements.
 // Contract-test fixtures are deliberately kept separate from real-run evidence.
 export const scenarios = [
-  { id: "invite-accept", requires: ["invites"], breaks: "membership-created" },
+  { id: "invite-accept", requires: ["invites"], breaks: "membership-created", consequences: ["invite-consumed"] },
   { id: "share", requires: ["sharing"], breaks: "viewer-can-read" },
   { id: "viewer-read-only", requires: ["sharing", "runtime"], breaks: "send-denied" },
-  { id: "presence-appear", requires: ["presence"], breaks: "peer-appeared" },
+  { id: "presence-appear", requires: ["presence"], breaks: "peer-appeared", consequences: ["identity-visible"] },
   { id: "presence-clear", requires: ["presence"], breaks: "peer-cleared" },
-  { id: "follow", requires: ["follow"], breaks: "followed-tab" },
-  { id: "mention-notification", requires: ["mentions", "inbox"], breaks: "notification-arrived" },
+  { id: "follow", requires: ["follow"], breaks: "followed-tab", consequences: ["unfollow-stops-tracking"] },
+  { id: "mention-notification", requires: ["mentions", "inbox"], breaks: "notification-arrived", consequences: ["destination-opens", "no-duplicate-on-reconnect"] },
   { id: "reassign", requires: ["reassign"], breaks: "assignee-changed" },
-  { id: "nudge", requires: ["nudge", "inbox"], breaks: "nudge-arrived" },
+  { id: "nudge", requires: ["nudge", "inbox"], breaks: "nudge-arrived", consequences: ["destination-opens", "no-duplicate-on-reconnect"] },
   { id: "unread-sync", requires: ["read-markers"], breaks: "read-synchronized" },
-  { id: "unshare", requires: ["sharing", "runtime"], breaks: "access-revoked" },
+  { id: "unshare", requires: ["sharing", "runtime"], breaks: "access-revoked", consequences: ["existing-connection-revoked"] },
 ];
 
 const has = (rows, id) => Array.isArray(rows) && rows.includes(id);
@@ -103,7 +103,7 @@ export function assertions(id, observation, identity) {
       checks = {
         "initially-unread": positive(o.messageSeq) && Number.isSafeInteger(o.beforeReadSeq) && o.beforeReadSeq < o.messageSeq && o.beforeUnread === true,
         "read-synchronized": o.afterReadSeq === o.messageSeq && o.peerReadSeq === o.messageSeq && o.peerUnread === false,
-        "marker-monotonic": o.afterStaleReadSeq === o.messageSeq,
+        "marker-monotonic": Number.isSafeInteger(o.afterReadSeq) && o.afterReadSeq >= o.beforeReadSeq && o.afterStaleReadSeq === o.afterReadSeq,
         "other-account-independent": o.accountAReadSeqAfter === o.accountAReadSeqBefore && Number.isSafeInteger(o.accountAReadSeqBefore),
         "same-reader-second-surface": exact(o.readerId, b) && exact(o.peerReaderId, b) && o.readerSurface !== o.peerReaderSurface && typeof o.readerSurface === "string" && typeof o.peerReaderSurface === "string",
       };

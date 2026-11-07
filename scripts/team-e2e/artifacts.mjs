@@ -32,6 +32,7 @@ export async function saveJson(directory, name, value) {
 
 export async function verifyArtifacts(directory, artifacts) {
   const root = await realpath(directory);
+  const verified = new Map();
   for (const artifact of artifacts) {
     if (!artifact.path || !["screenshot", "log"].includes(artifact.kind)) throw new Error("Invalid evidence artifact");
     const path = resolve(root, artifact.path);
@@ -41,7 +42,9 @@ export async function verifyArtifacts(directory, artifacts) {
     if (bytes.length === 0 || bytes.length > 20 * 1024 * 1024) throw new Error("Evidence size invalid");
     if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new Error("Evidence hash mismatch");
     if (artifact.kind === "screenshot" && !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error("Screenshot must be PNG");
+    verified.set(artifact.path, bytes);
   }
+  return verified;
 }
 
 /** Retain only our completed run directories; unrelated and active directories are untouched. */
