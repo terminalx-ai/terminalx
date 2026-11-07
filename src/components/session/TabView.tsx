@@ -40,6 +40,7 @@ import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type Removabl
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
 import { interruptUnanswered } from "@/types/events";
+import { useProjectForge } from "@/lib/projectForge";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
@@ -67,14 +68,14 @@ export const HANDOFF_AFTER_PROMPTS = 5;
  * has merged. It is the app's own action, not a prompt: an agent is never
  * asked to remove the worktree it runs in. It does not wait for a turn.
  */
-export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: () => void): Handoff[] | undefined {
+export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: () => void, github = true): Handoff[] | undefined {
   const last = t.turns[t.turns.length - 1];
   // Early in a conversation the work is still being shaped: the steps wait until it has had some prompts.
   const prompts: Handoff[] =
     last?.completed?.status === "ok" && changed && t.turns.length >= HANDOFF_AFTER_PROMPTS
       ? [
           { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
-          { label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." },
+          ...(github ? [{ label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." }] : []),
           { label: "Run it", prompt: "Run the project's dev server or test suite in the background and report the first errors, if any." },
         ]
       : [];
@@ -118,6 +119,7 @@ export function TabView({
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
   const isGit = useSessionIsGit(session);
+  const forge = useProjectForge(local && isGit ? session.projectPath || session.cwd : null);
   const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
   const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
@@ -732,7 +734,7 @@ export function TabView({
           modelClient={backend.modelClient}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
-          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace)}
+          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace, !local || forge !== "localOnly")}
           disabled={!!gate?.blocked}
           settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
           modelLockedReason={handLock.model}

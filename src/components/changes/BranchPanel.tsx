@@ -1,12 +1,16 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { GitBranch, Loader2, Sparkles } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { api, errorMessage, git, type BranchOverview, type PullRequest } from "@/lib/api";
+import { agent, api, errorMessage, git, type BranchOverview, type PullRequest } from "@/lib/api";
 import { localGitSource } from "@/lib/gitSource";
-import { useGithubIdentity } from "@/lib/githubIdentity";
+import { useProjectForge } from "@/lib/projectForge";
+import { localMergePrompt } from "@/lib/localMerge";
+import { applyEvent } from "@/lib/agentEvents";
+import { openSettle } from "@/lib/dialogs";
+import { turnLive } from "@/lib/workspaceRemoval";
 import { setDraft } from "@/lib/drafts";
 import { showPanelTab } from "@/lib/panelTab";
-import { useSessionStore } from "@/lib/sessions";
+import { patchTab, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import type { CommitInfo } from "@/types/session";
@@ -43,7 +47,7 @@ export function BranchPanel({
   /** The pull request, placed under the next step. */
   children?: ReactNode;
 }) {
-  const [overview, setOverview] = useState<BranchOverview | null>(null);
+  const [read, setRead] = useState<{ key: string; overview: BranchOverview } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pr, setPr] = useState<PullRequest | null | undefined>(undefined);
   const [me, setMe] = useState<string | null>(null);
@@ -52,8 +56,17 @@ export function BranchPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [asked, setAsked] = useState<string | null>(null);
-  const github = useGithubIdentity(cwd)?.remoteHost === "github";
-  const session = useSessionStore().sessions.find((s) => s.id === sessionId);
+  const sessions = useSessionStore().sessions;
+  const session = sessions.find((s) => s.id === sessionId);
+  const forge = useProjectForge(session?.projectPath || cwd);
+  const github = forge !== "localOnly";
+  const localOnly = forge === "localOnly";
+  const sending = useRef(false);
+  const busy = sessions.some((s) => s.cwd === cwd && s.tabs.some((tab) => turnLive(tab.status)));
+  const readKey = JSON.stringify([cwd, from, localOnly]);
+  const overview = read?.key === readKey ? read.overview : null;
+  const activeTab = session?.tabs.find((tab) => tab.id === session.activeTab);
+  const canSend = !!activeTab && activeTab.front !== "terminal";
 
   useEffect(() => {
     if (!active) return;
@@ -61,10 +74,10 @@ export function BranchPanel({
     // An agent's turn changes the branch as it works: read again, but not on every event.
     const id = window.setTimeout(() => {
       api
-        .branchOverview(cwd, from)
+        .branchOverview(cwd, from, localOnly)
         .then((next) => {
           if (cancelled) return;
-          setOverview(next);
+          setRead({ key: readKey, overview: next });
           setError(null);
         })
         .catch((e) => !cancelled && setError(errorMessage(e)));
@@ -73,7 +86,7 @@ export function BranchPanel({
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [cwd, from, active, version, reread]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cwd, from, active, version, reread, localOnly, busy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // What others pushed shows only once fetched: on opening, then every five minutes while shown.
   useEffect(() => {
@@ -103,7 +116,7 @@ export function BranchPanel({
   const branch = overview?.branch ?? null;
   // Only whether a pull request exists: what it says, and does, is the pull request's own section.
   useEffect(() => {
-    if (!active || !branch || overview?.onBase || !overview?.hasRemote) return;
+    if (!active || !github || !branch || overview?.onBase || !overview?.hasRemote) return;
     let cancelled = false;
     const source = localGitSource(cwd);
     source
@@ -114,12 +127,12 @@ export function BranchPanel({
     return () => {
       cancelled = true;
     };
-  }, [cwd, branch, active, overview?.onBase, overview?.hasRemote, reread]);
+  }, [cwd, branch, active, overview?.onBase, overview?.hasRemote, github, reread]);
 
-  const baseName = overview?.base?.replace(/^origin\//, "") ?? "the base";
-  const step = overview ? localStep(overview, pr, baseName) : null;
+  const baseName = (localOnly ? overview?.base : overview?.base?.replace(/^origin\//, "")) ?? "the base";
+  const step = overview ? localStep(overview, pr, baseName, localOnly) : null;
   // Until the branch is read, nothing below it is the next step either.
-  const held = !overview || !!step || overview.onBase || !overview.hasRemote;
+  const held = !overview || !!step || overview.onBase || !github;
   useEffect(() => onStep?.(held), [held, onStep]);
 
   if (error && !overview) return <p className="p-4 text-xs text-destructive">{error}</p>;
@@ -133,13 +146,12 @@ export function BranchPanel({
   const who = (c: CommitInfo) => (me && c.email.toLowerCase() === me ? "You" : c.author);
   const here = branch ?? "this branch";
 
-  const run = (what: "pull" | "push" | "merge") => {
+  const run = (what: "pull" | "push") => {
     setWorking(what);
     setActionError(null);
     setDone(null);
-    (what === "pull" ? git.pull(cwd) : what === "push" ? git.push(cwd) : api.branchMergeInto(cwd, baseName))
-      .then((said) => {
-        if (what === "merge") setDone(said);
+    (what === "pull" ? git.pull(cwd) : git.push(cwd))
+      .then(() => {
         setReread((n) => n + 1);
       })
       .catch((e) => setActionError(errorMessage(e)))
@@ -157,7 +169,7 @@ export function BranchPanel({
         {asked === key ? "In your message" : label}
       </button>
     );
-  const doButton = (what: "pull" | "push" | "merge", label: string) => (
+  const doButton = (what: "pull" | "push", label: string) => (
     <button
       type="button"
       onClick={() => run(what)}
@@ -168,6 +180,25 @@ export function BranchPanel({
       {label}
     </button>
   );
+
+  const sendMerge = async () => {
+    if (sending.current || !localOnly || !canSend || busy || !session?.activeTab || !branch || !overview.base || !overview.mainCheckout || overview.inMainCheckout) return;
+    sending.current = true;
+    setWorking("merge");
+    setActionError(null);
+    setDone(null);
+    try {
+      const result = await agent.send(session.id, session.activeTab, localMergePrompt(cwd, branch, baseName, overview.mainCheckout));
+      for (const event of result.events) applyEvent(event);
+      if (!result.queued) patchTab(session.id, session.activeTab, { status: "in_progress" });
+      setDone(result.queued ? "Merge request queued in the active agent tab." : "Merge request sent to the active agent tab.");
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      sending.current = false;
+      setWorking(null);
+    }
+  };
 
   const actions =
     step?.kind === "pull" ? (
@@ -183,11 +214,6 @@ export function BranchPanel({
           Review &amp; commit
         </button>
         {askButton("commit", "Commit the changes in this worktree with a clear message.")}
-      </>
-    ) : step?.kind === "local" ? (
-      <>
-        {doButton("merge", `Merge into ${baseName}`)}
-        {askButton("publish", "Publish this project to GitHub: create a repository for it with `gh repo create`, add it as origin, and push the main branch and this one. Ask me before making it public.", "Publish")}
       </>
     ) : step?.kind === "push" ? (
       doButton("push", "Push")
@@ -207,14 +233,30 @@ export function BranchPanel({
           <h3 className="truncate font-mono text-[13px] text-foreground" title={branch ?? "Detached HEAD"} data-testid="branch-name">
             {branch ?? "Detached HEAD"}
           </h3>
-          {!overview.hasRemote && (
-            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2.5 py-0.5 text-[10.5px] text-muted-foreground" title="This repository has no remote: nothing is pushed or shared from it" data-testid="branch-local-only">
-              This computer only
+          {localOnly && (
+            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2.5 py-0.5 text-[10.5px] text-muted-foreground" title="GitHub pull requests are unavailable for this project" data-testid="branch-local-only">
+              Local merge
             </span>
           )}
         </header>
 
-        {done && !step && (
+        {localOnly && (
+          <div className="flex flex-wrap items-center gap-2" data-testid="local-git-actions">
+            <button type="button" onClick={() => showPanelTab("changes")} className={AGENT_BUTTON}>Commit</button>
+            {branch && overview.base && !overview.onBase && overview.mainCheckout && !overview.inMainCheckout && (
+              <button type="button" className={AGENT_BUTTON} disabled={!!working || busy || !canSend}
+                onClick={() => void sendMerge()}>
+                {working === "merge" && <Loader2 className="size-3 animate-spin" aria-hidden />}
+                Merge into {baseName}
+              </button>
+            )}
+            {landed && overview.merge.state === "merged" && !overview.dirty && !busy && session?.worktreeName && !session.worktreeRemoved && (
+              <button type="button" className={AGENT_BUTTON} onClick={() => openSettle(session)}>Delete workspace</button>
+            )}
+          </div>
+        )}
+        {actionError && <p role="alert" className="px-1 text-xs text-destructive">{actionError}</p>}
+        {done && (
           <p role="status" className="text-xs text-success">
             {done}
           </p>
@@ -232,15 +274,10 @@ export function BranchPanel({
                 {overview.merge.conflicted.length > 6 && <li className="text-[11px] text-faint">and {overview.merge.conflicted.length - 6} more</li>}
               </ul>
             )}
-            {actionError && (
-              <p role="alert" className="pl-3.5 text-[11px] text-destructive">
-                {actionError}
-              </p>
-            )}
           </NextLine>
         )}
 
-        {!overview.onBase && overview.hasRemote && children}
+        {!overview.onBase && overview.hasRemote && github && children}
 
         <BranchGraph overview={overview} baseName={baseName} branch={branch} who={who} github={github} landed={landed} />
 

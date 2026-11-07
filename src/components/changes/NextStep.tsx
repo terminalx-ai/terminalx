@@ -19,12 +19,12 @@ export type LocalStep = { kind: LocalStepKind; text: string; why: string; tone: 
  * uncommitted change is not in what would be pushed). Null when the branch
  * itself needs nothing and the pull request (or opening one) is the next step.
  *
- * A project with no remote has no push and no pull request: its work ends by
- * being merged here (`local`), or by publishing the project.
+ * A project without usable GitHub pull requests can land work on its local
+ * base (`local`), even when its remote is hosted elsewhere.
  *
  * `pr` is undefined while it is being read: no step is claimed from it then.
  */
-export function localStep(o: BranchOverview, pr: PullRequest | null | undefined, baseName: string): LocalStep | null {
+export function localStep(o: BranchOverview, pr: PullRequest | null | undefined, baseName: string, localOnly = !o.hasRemote): LocalStep | null {
   if (o.unpulled > 0) {
     return { kind: "pull", text: `Pull ${commits(o.unpulled)}`, why: `Someone else pushed to this branch. Pull so you are working on the latest.`, tone: "warn" };
   }
@@ -43,12 +43,12 @@ export function localStep(o: BranchOverview, pr: PullRequest | null | undefined,
     };
   }
   // Nothing of its own: unless a pull request already speaks for it (a merged one, say).
-  if (o.ahead === 0) return pr === null || !o.hasRemote ? { kind: "empty", text: "No changes yet", why: "", tone: "muted" } : null;
-  if (!o.hasRemote) {
+  if (o.ahead === 0) return pr === null || localOnly ? { kind: "empty", text: "No changes yet", why: "", tone: "muted" } : null;
+  if (localOnly) {
     return {
       kind: "local",
       text: `${commits(o.ahead)} ready for ${baseName}`,
-      why: `This project is only on this computer, so there is no pull request. Merge into ${baseName} here, or publish the project to open one.`,
+      why: `GitHub pull requests are unavailable for this project. Merge into the local ${baseName} branch here.`,
       tone: "good",
     };
   }

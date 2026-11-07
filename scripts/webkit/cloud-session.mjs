@@ -19,8 +19,8 @@
 //   window, the Notes drawer included;
 // - the permission mode at 960 px with the side panel open, and at every
 //   width from 960 to 1400 px: the More options button that holds it stays in
-//   the toolbar and wide enough to press, carries the mode's dot for an
-//   unguarded or plan mode, and its menu names the mode whole;
+//   the toolbar and wide enough to press, and its menu names the mode whole
+//   beside the mode's shield;
 // - a tab whose agent cannot sign in (PRO-110): its notice and the Agent
 //   logins button sit above the transcript, inside the window.
 //
@@ -534,15 +534,14 @@ for (const { viewport, collapsed, terminalSwitch = false } of [
 // The permission mode in a narrow composer. It used to be a picker in the
 // toolbar whose label was cut to "B" at 960 px with the side panel open; since
 // #584 it is a submenu of More options, so what must hold at every width is
-// that the button stays in the toolbar and pressable, shows the mode's dot for
-// an unguarded or plan mode, and that its menu names the mode in full.
+// that the button stays in the toolbar and pressable, and its menu names the
+// mode in full beside the shield introduced in eedb9c54.
 const permissionButton = (page) =>
   page.evaluate(() => {
     const button = document.querySelector('main [data-composer-toolbar] [data-testid="composer-options"]');
     if (!button) return null;
     const rect = button.getBoundingClientRect();
     const toolbar = button.closest("[data-composer-toolbar]").getBoundingClientRect();
-    const dot = button.querySelector('[data-testid="permission-mode-dot"]')?.getBoundingClientRect();
     const icon = button.querySelector("svg")?.getBoundingClientRect();
     const inside = (part) => !!part && part.width > 0 && part.left >= rect.left - 0.5 && part.right <= rect.right + 0.5 && part.top >= rect.top - 0.5 && part.bottom <= rect.bottom + 0.5;
     return {
@@ -550,7 +549,6 @@ const permissionButton = (page) =>
       panel: !!document.querySelector("main aside"),
       width: Math.round(rect.width * 10) / 10,
       icon: inside(icon),
-      dot: dot ? inside(dot) : null,
       inToolbar: rect.left >= toolbar.left - 1 && rect.right <= toolbar.right + 1 && rect.top >= toolbar.top - 1 && rect.bottom <= toolbar.bottom + 1,
     };
   });
@@ -560,20 +558,26 @@ const permissionMenuItem = (page) =>
     const item = document.querySelector('[role="menu"] [data-testid="permission-mode"]');
     const label = item?.querySelector('[data-testid="permission-mode-label"]');
     if (!item || !label) return null;
-    return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1 };
+    const icon = item.querySelector('[data-testid="permission-mode-icon"]');
+    const rect = item.getBoundingClientRect();
+    const shield = icon?.getBoundingClientRect();
+    return {
+      name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1,
+      iconInside: !!shield && shield.width > 0 && shield.height > 0 && shield.left >= rect.left - 0.5 && shield.right <= rect.right + 0.5 && shield.top >= rect.top - 0.5 && shield.bottom <= rect.bottom + 0.5,
+      tone: icon?.classList.contains("text-destructive") ? "danger" : icon?.classList.contains("text-info") ? "plan" : "guarded",
+    };
   });
 
-function permissionChecks(measured, mode) {
+function permissionChecks(measured) {
   if (!measured) return { "the More options button is there": false };
-  const marked = mode !== "manual";
   return {
     "the More options button is inside the composer toolbar": measured.inToolbar,
     "it keeps its icon and is wide enough to press": measured.icon && measured.width >= 20,
-    [marked ? "it carries the mode's dot" : "a guarded mode shows no dot"]: marked ? measured.dot === true : measured.dot === null,
   };
 }
 
 const MODE_LABEL = { bypassPermissions: "Bypass permissions", manual: "Ask every time", plan: "Plan" };
+const MODE_TONE = { bypassPermissions: "danger", manual: "guarded", plan: "plan" };
 for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 4, permissionMode } }, { width: 960, height: 700 });
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
@@ -591,21 +595,22 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     `permission mode (960x700, side panel open, ${permissionMode})`,
     {
       "the side panel is open": !!measured?.panel,
-      ...permissionChecks(measured, permissionMode),
+      ...permissionChecks(measured),
       "the More options menu names the mode, whole": !!item && item.label === MODE_LABEL[permissionMode] && item.whole,
+      "the menu row keeps the mode's shield visible with its expected tone": !!item && item.iconInside && item.tone === MODE_TONE[permissionMode],
       "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
     },
     { button: measured, item },
   );
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/permission-mode-960-${permissionMode}.png` });
 
-  // Every width on the way: the button never leaves the toolbar, loses its icon or dot, or gets too narrow to press.
+  // Every width on the way: the button never leaves the toolbar, loses its icon, or gets too narrow to press.
   const failures = [];
   for (let width = 960; width <= 1400; width += 10) {
     await page.setViewportSize({ width, height: 700 });
     await page.waitForTimeout(40);
     measured = await permissionButton(page);
-    const checks = permissionChecks(measured, permissionMode);
+    const checks = permissionChecks(measured);
     if (Object.values(checks).some((ok) => !ok)) failures.push(measured ?? { viewport: width, missing: true });
   }
   await page.setViewportSize({ width: 1680, height: 800 });
@@ -614,8 +619,8 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   failed += report(
     `permission mode (960 to 1400 px, side panel open, ${permissionMode})`,
     {
-      "at every width the button stays in the toolbar, pressable, with its icon and the mode's dot": failures.length === 0,
-      "with room (1680 px) the same holds": Object.values(permissionChecks(measured, permissionMode)).every(Boolean),
+      "at every width the button stays in the toolbar, pressable, with its icon": failures.length === 0,
+      "with room (1680 px) the same holds": Object.values(permissionChecks(measured)).every(Boolean),
     },
     { failures, wide: measured },
   );
