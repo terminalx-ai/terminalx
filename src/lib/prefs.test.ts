@@ -359,3 +359,17 @@ describe("sidebar choices per window (PRO-164)", () => {
     expect((await import("./prefs")).getPrefs()).toMatchObject({ sounds: false, sidebarSort: "updated", sidebarProject: null, sidebarLayout: "simple", sidebarSections: {}, sidebarFilters: {} });
   });
 });
+
+describe("dashboard preferences", () => {
+  it("restores the view, sorting and hidden columns after a restart", async () => {
+    const saved = { view: "table" as const, sort: { column: "pr" as const, direction: "asc" as const }, hiddenColumns: ["owner" as const, "branch" as const] };
+    const prefs = await import("./prefs");
+    prefs.setPrefs({ dashboard: saved });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().dashboard).toEqual(saved);
+  });
+  it("recovers from malformed dashboard preferences", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ dashboard: { view: "unknown", sort: null, hiddenColumns: ["branch", "branch", 12] } }));
+    expect((await import("./prefs")).getPrefs().dashboard).toEqual({ view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: ["branch"] });
+  });
+});

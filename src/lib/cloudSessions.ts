@@ -43,6 +43,7 @@ export interface CloudSessionTab {
 
 export interface CloudSessionRow {
   manualStatus?: import("@/types/session").ManualStatus;
+  automation?: { id: string } | null;
   key: CloudKey;
   orgId: string;
   workspaceId: string;
@@ -221,6 +222,7 @@ export function buildCloudSessions(input: {
   live?: RuntimeSession[] | null;
   agentTabs?: readonly CloudAgentTab[];
   showArchived?: boolean;
+  includeArchived?: boolean;
   selectedKey?: string | null;
 }): CloudSessionRow[] {
   const { item } = input;
@@ -290,6 +292,7 @@ export function buildCloudSessions(input: {
       pinned: session.pinned,
       manualStatus: session.manualStatus,
       archived: session.archived,
+      automation: session.automation,
       tabs: session.tabs.map((tab, index) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status }, { title: session.title, first: index === 0 })),
       activeTab: session.activeTab ?? null,
       source,
@@ -349,7 +352,7 @@ export function buildCloudSessions(input: {
   }
 
   return [...rows.values()]
-    .filter((row) => row.archived === !!input.showArchived || row.key === input.selectedKey)
+    .filter((row) => input.includeArchived || row.archived === !!input.showArchived || row.key === input.selectedKey)
     .sort((a, b) => compareMessageActivity(a, b, a.sessionId, b.sessionId));
 }
 
