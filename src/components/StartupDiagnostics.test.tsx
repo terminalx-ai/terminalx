@@ -64,3 +64,32 @@ it("canceling destination selection does not export or upload", async () => {
   expect(mocks.export).not.toHaveBeenCalled();
   expect(mocks.openUrl).not.toHaveBeenCalled();
 });
+
+it("shows a recorder owner signal separately and keeps unknown child work held", async () => {
+  mocks.status.mockResolvedValue({ ...state, incidents: [{ ...state.incidents[0], probe: {
+    id: "probe", startedAt: 130_000, observationTimedOut: true, result: null,
+    ownerExit: { finishedAt: 180_000, exitCode: null, signal: 15, failure: null, osError: null },
+  } }] });
+  await open();
+  expect(screen.getByText(/Recorder failure: signal 15/)).toBeTruthy();
+  expect(screen.getByText(/No final child result was recorded/)).toBeTruthy();
+  expect(screen.queryByText(/recorder is still pending/)).toBeNull();
+  expect(screen.getByRole("button", { name: "Run one health probe" }).hasAttribute("disabled")).toBe(true);
+});
+
+it("offers a retry only when the saved failure proves the recorder never spawned", async () => {
+  mocks.status.mockResolvedValue({ ...state, incidents: [{ ...state.incidents[0], probe: {
+    id: "probe", startedAt: 130_000, observationTimedOut: false, result: null,
+    ownerExit: { finishedAt: 130_001, exitCode: null, signal: null, failure: "spawn", osError: 2 },
+  } }] });
+  await open();
+  expect(screen.getByText(/Recorder could not start \(OS error 2\)/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Run one health probe" }).hasAttribute("disabled")).toBe(false);
+});
+
+it("keeps incomplete observation visible even when a prior health result exists", async () => {
+  mocks.status.mockResolvedValue({ ...state, censusIncomplete: true });
+  await open();
+  expect(screen.getByText(/Some owned processes could not be observed/)).toBeTruthy();
+  expect(screen.getByText("Incident incident")).toBeTruthy();
+});

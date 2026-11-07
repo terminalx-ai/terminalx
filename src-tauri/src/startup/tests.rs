@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn launch(pane: &str, phase: Phase) -> Launch {
     Launch { id: uuid::Uuid::new_v4().to_string(), pane: pane.into(), generation: "generation".into(), pid: Some(42),
         category: Category::Agent, evidence: Evidence::Readiness, phase, started_at: 0, last_progress_at: 0,
-        exit_code: None, cpu_time: None, resident_bytes: None, pid_birth: None, recorder: None, pipeline_id: None }
+        exit_code: None, cpu_time: None, resident_bytes: None, pid_birth: None, recorder: None, pipeline_id: None, recorder_owner: None, recorder_exit: None }
 }
 
 #[test]
@@ -106,6 +106,7 @@ fn export_allowlist_excludes_secrets_even_in_identifiers_and_child_output() {
     incident.blocked_pipelines = vec![secret.into()];
     let captured = probe::Captured { exit_code: Some(23), signal: None, spawn_failed: false, stdout: secret.into(), stderr: secret.into(), stdout_truncated: false, stderr_truncated: false };
     incident.probe = Some(probe::Probe { id: secret.into(), started_at: 0, observation_timed_out: true, shell: None,
+        owner: Some(RecorderIdentity { pid: 12345, birth: Some(secret.into()) }), owner_exit: Some(recorder_exit(0, 180_000)),
         result: Some(probe::ProbeResult { finished_at: 180_000, shell: captured.clone(), native: captured }) });
     let report = export(&state).unwrap();
     for word in ["token", "secret", "/Users", "alice", "private", "source", "prompt", "transcript", "history", "environment"] {
@@ -121,7 +122,7 @@ fn pending_probe_is_deduplicated_across_restarts_and_never_prevents_escalation()
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
     state.tick(120_000);
-    state.incidents[0].probe = Some(probe::Probe { id: uuid::Uuid::new_v4().to_string(), started_at: 120_000, observation_timed_out: false, result: None, shell: None });
+    state.incidents[0].probe = Some(probe::Probe { id: uuid::Uuid::new_v4().to_string(), started_at: 120_000, observation_timed_out: false, result: None, shell: None, owner: None, owner_exit: None });
     crate::store::write_json(&directory.path().join("incidents.json"), &state).unwrap();
     assert!(probe::start(directory.path()).unwrap_err().to_string().contains("pending health recorder"));
     probe::refresh(directory.path(), &mut state, 600_000).unwrap();
@@ -137,15 +138,44 @@ fn late_health_result_is_retained_but_does_not_resume_a_still_stalled_child() {
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
     state.tick(120_000);
     let id = uuid::Uuid::new_v4().to_string();
-    state.incidents[0].probe = Some(probe::Probe { id: id.clone(), started_at: 120_000, observation_timed_out: true, result: None, shell: None });
+    state.incidents[0].probe = Some(probe::Probe { id: id.clone(), started_at: 120_000, observation_timed_out: true, result: None, shell: None, owner: None, owner_exit: None });
     let path = crate::store::ensure_dir(directory.path().join(id)).unwrap();
     let shell = probe::Captured { exit_code: Some(0), signal: None, spawn_failed: false, stdout: String::new(), stderr: String::new(), stdout_truncated: false, stderr_truncated: false };
     let native = probe::Captured { stdout: "terminalx-startup-ready\n".into(), ..shell.clone() };
     crate::store::write_json(&path.join("result.json"), &probe::ProbeResult { finished_at: 500_000, shell, native }).unwrap();
+    crate::store::write_json(&path.join("owner-exit.json"), &recorder_exit(0, 500_001)).unwrap();
     probe::refresh(directory.path(), &mut state, 510_000).unwrap();
     assert!(state.active().is_some());
     assert!(export(&state).unwrap().contains("lateSuccess"));
     state.launches[0].phase = Phase::Running;
     probe::refresh(directory.path(), &mut state, 520_000).unwrap();
     assert!(state.active().is_none());
+}
+
+pub(super) fn recorder_exit(code: i32, at: i64) -> RecorderExit {
+    RecorderExit { finished_at: at, exit_code: Some(code), signal: None, failure: None, os_error: None }
+}
+
+#[test]
+fn dead_probe_owner_is_retained_after_reopen_without_recovery_or_duplicate_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = crate::store::ensure_dir(directory.path().join(&id)).unwrap();
+    state.incidents[0].probe = Some(probe::Probe { id, started_at: 120_000, observation_timed_out: false,
+        result: None, shell: None, owner: None, owner_exit: None });
+    crate::store::write_json(&directory.path().join("incidents.json"), &state).unwrap();
+    let owner = RecorderIdentity { pid: 12345, birth: Some("12345:1:2".into()) };
+    let exit = RecorderExit { exit_code: None, signal: Some(15), ..recorder_exit(0, 180_000) };
+    crate::store::write_json(&path.join("owner.json"), &owner).unwrap();
+    crate::store::write_json(&path.join("owner-exit.json"), &exit).unwrap();
+    update_at(directory.path(), |state| probe::refresh(directory.path(), state, 200_000)).unwrap();
+    let reopened: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    let probe = reopened.active().unwrap().probe.as_ref().unwrap();
+    assert_eq!(probe.owner.as_ref(), Some(&owner));
+    assert_eq!(probe.owner_exit.as_ref(), Some(&exit));
+    assert_eq!(probe::export(probe)["status"], "recorderFailure");
+    assert!(probe::start(directory.path()).unwrap_err().to_string().contains("no duplicate probe"));
+    assert!(reopened.active().is_some());
 }

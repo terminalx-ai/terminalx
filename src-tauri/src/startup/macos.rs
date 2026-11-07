@@ -17,6 +17,11 @@ pub(super) struct Child {
     threads: i32,
 }
 
+pub(super) struct Census {
+    children: Vec<Child>,
+    complete: bool,
+}
+
 fn bsd(pid: u32) -> Option<libc::proc_bsdinfo> {
     // SAFETY: proc_pidinfo writes at most the size supplied into this exact
     // SDK-defined POD type. A short/error reply is never read.
@@ -40,51 +45,61 @@ fn task(pid: u32) -> Option<libc::proc_taskinfo> {
     }
 }
 
-pub(super) fn children(terminals: &crate::pty::Terminals, state: &Snapshot) -> Vec<Child> {
-    let mut found = Vec::new();
+pub(super) fn children(terminals: &crate::pty::Terminals, state: &Snapshot) -> Census {
+    let mut census = Census { children: Vec::new(), complete: true };
     let mut seen = HashSet::new();
-    let mut roots: Vec<_> = terminals.panes().into_iter().filter(|pane| pane.running)
-        .filter(|pane| pane.pid.and_then(identity).is_some_and(|birth| state.launches.iter().any(|launch|
-            launch.evidence == Evidence::Readiness && launch.pane == pane.id && launch.pid == pane.pid && launch.pid_birth.as_deref() == Some(birth.as_str()))))
-        .collect();
-    roots.extend(state.launches.iter().filter(|launch| launch.recorder.is_some() && launch.phase != Phase::Exited)
-        .filter(|launch| launch.pid.and_then(identity).is_some_and(|birth| Some(birth) == launch.pid_birth))
-        .map(|launch| crate::pty::PaneInfo { id: launch.pane.clone(), pid: launch.pid, running: true, cwd: String::new() }));
+    let mut roots = Vec::new();
+    for pane in terminals.panes().into_iter().filter(|pane| pane.running) {
+        if pane.pid.and_then(identity).is_some_and(|birth| state.launches.iter().any(|launch|
+            launch.evidence == Evidence::Readiness && launch.pane == pane.id && launch.pid == pane.pid && launch.pid_birth.as_deref() == Some(birth.as_str()))) {
+            roots.push(pane);
+        } else { census.complete = false; }
+    }
+    for launch in state.launches.iter().filter(|launch| launch.recorder.is_some() && launch.phase != Phase::Exited) {
+        if launch.pid.and_then(identity).is_some_and(|birth| Some(birth) == launch.pid_birth) {
+            roots.push(crate::pty::PaneInfo { id: launch.pane.clone(), pid: launch.pid, running: true, cwd: String::new() });
+        } else { census.complete = false; }
+    }
     for pane in roots {
         let Some(root) = pane.pid else { continue };
         let mut pending = vec![(root, None)];
         while let Some((pid, parent)) = pending.pop() {
-            if seen.len() >= MAX_PROCESSES { return found; }
+            if seen.len() >= MAX_PROCESSES { census.complete = false; return census; }
             if !seen.insert(pid) { continue; }
-            let Some(info) = bsd(pid) else { continue };
+            let Some(info) = bsd(pid) else { census.complete = false; continue };
             // Parentage is rechecked after listing; PID reuse never transfers
             // a stranger into this owned tree. Zombies are no startup evidence.
             if parent.is_some_and(|parent| info.pbi_ppid != parent) || info.pbi_status == libc::SZOMB { continue; }
             if let Some(task) = task(pid) {
-                found.push(Child { pane: pane.id.clone(), pid,
+                census.children.push(Child { pane: pane.id.clone(), pid,
                     birth: format!("{}:{}:{}", pid, info.pbi_start_tvsec, info.pbi_start_tvusec),
                     rss: task.pti_resident_size, cpu: task.pti_total_user.saturating_add(task.pti_total_system), threads: task.pti_threadnum });
-            }
+            } else { census.complete = false; }
             let mut pids = [0i32; 256];
             // SAFETY: the fixed buffer and its length match; no strings or
             // environment values are requested. Unlike proc_listpids, this
             // wrapper returns a PID count, not the number of bytes written.
             let count = unsafe { libc::proc_listchildpids(pid as i32, pids.as_mut_ptr().cast(), std::mem::size_of_val(&pids) as i32) };
+            if count < 0 || count as usize >= pids.len() { census.complete = false; }
             for child in pids.into_iter().take((count.max(0) as usize).min(256)).filter(|child| *child > 0) {
                 pending.push((child as u32, Some(pid)));
             }
         }
     }
-    found
+    census
 }
 
-pub(super) fn observe(state: &mut Snapshot, children: Vec<Child>, permissions: &[String], at: i64) {
+pub(super) fn observe(state: &mut Snapshot, census: Census, permissions: &[String], at: i64) {
+    if !census.complete && !state.census_incomplete { state.observation_lost_at = Some(at); }
+    state.census_incomplete = !census.complete;
+    let children = census.children;
     for launch in &mut state.launches {
         if !matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt | Phase::Running) { continue; }
         if launch.evidence == Evidence::SmallUnchangingImage && !children.iter().any(|child| child.birth == launch.generation) {
             // The process vanished or became unreadable. Neither is an exit
             // status. Keep unknown distinct, and require a fresh health probe.
             launch.phase = Phase::Unobserved;
+            state.observation_lost_at = Some(at);
         }
     }
     for child in children {
@@ -93,8 +108,9 @@ pub(super) fn observe(state: &mut Snapshot, children: Vec<Child>, permissions: &
         if !small {
             // A large/active application image disproves pre-main startup
             // suspicion even when a compile has never printed a byte.
-            for launch in state.launches.iter_mut().filter(|launch| launch.pane == child.pane && launch.pid == Some(child.pid)) {
-                if matches!(launch.phase, Phase::AwaitingReady | Phase::PermissionPrompt | Phase::Running) {
+            for launch in state.launches.iter_mut().filter(|launch| launch.pane == child.pane && launch.pid == Some(child.pid)
+                && (launch.evidence != Evidence::SmallUnchangingImage || launch.generation == child.birth)) {
+                if matches!(launch.phase, Phase::AwaitingReady | Phase::PermissionPrompt | Phase::Running | Phase::Unobserved) {
                     if permission { launch.phase = Phase::PermissionPrompt; launch.last_progress_at = at; }
                     else if launch.phase != Phase::Running { launch.phase = Phase::Running; launch.last_progress_at = at; }
                 }
@@ -117,7 +133,7 @@ pub(super) fn observe(state: &mut Snapshot, children: Vec<Child>, permissions: &
             state.launches.push(Launch { id: uuid::Uuid::new_v4().to_string(), pane: child.pane, generation: child.birth, pid: Some(child.pid),
                 category: Category::OwnedChild, evidence: Evidence::SmallUnchangingImage,
                 phase: if permission { Phase::PermissionPrompt } else { Phase::AwaitingReady }, started_at: at, last_progress_at: at,
-                exit_code: None, cpu_time: Some(child.cpu), resident_bytes: Some(child.rss), pid_birth: None, recorder: None, pipeline_id: None });
+                exit_code: None, cpu_time: Some(child.cpu), resident_bytes: Some(child.rss), pid_birth: None, recorder: None, pipeline_id: None, recorder_owner: None, recorder_exit: None });
         }
     }
 }
@@ -139,6 +155,9 @@ pub(super) fn version() -> serde_json::Value {
 mod tests {
     use super::*;
     fn child(rss: u64, cpu: u64) -> Child { Child { pane: "tab:a".into(), pid: 1, birth: "1:2:3".into(), rss, cpu, threads: 1 } }
+    fn observe(state: &mut Snapshot, children: Vec<Child>, permissions: &[String], at: i64) {
+        super::observe(state, Census { children, complete: true }, permissions, at);
+    }
     #[test]
     fn unchanged_small_images_correlate_but_progress_and_large_compiles_do_not() {
         let mut state = Snapshot::default();
@@ -172,7 +191,7 @@ mod tests {
         owner.recorder = Some(uuid::Uuid::new_v4().to_string());
         let state = Snapshot { launches: vec![owner], ..Snapshot::default() };
         let observed = children(&crate::pty::Terminals::new(), &state);
-        let found = observed.iter().any(|observed| observed.pid == pid && Some(observed.birth.clone()) == identity(pid));
+        let found = observed.children.iter().any(|observed| observed.pid == pid && Some(observed.birth.clone()) == identity(pid));
         drop(child.stdin.take());
         child.wait().unwrap();
         assert!(found, "owned-child enumeration dropped a real child PID");
@@ -186,5 +205,49 @@ mod tests {
         state.tick(1_000_000);
         assert_eq!(state.launches[0].phase, Phase::PermissionPrompt);
         assert!(state.active().is_none());
+    }
+
+    #[test]
+    fn incomplete_census_cannot_recover_with_a_previously_healthy_probe() {
+        use super::super::{probe, tests::recorder_exit};
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = Snapshot::default();
+        observe(&mut state, vec![child(96 * 1024, 10)], &[], 0);
+        state.tick(120_000);
+        let incident_id = state.active().unwrap().id.clone();
+        let child_id = state.launches[0].id.clone();
+        let healthy = probe::Captured { exit_code: Some(0), signal: None, spawn_failed: false,
+            stdout: String::new(), stderr: String::new(), stdout_truncated: false, stderr_truncated: false };
+        state.incidents[0].probe = Some(probe::Probe { id: uuid::Uuid::new_v4().to_string(), started_at: 130_000,
+            observation_timed_out: false, shell: Some(healthy.clone()), owner: None, owner_exit: Some(recorder_exit(0, 140_001)),
+            result: Some(probe::ProbeResult { finished_at: 140_000, shell: healthy.clone(), native: probe::Captured { stdout: "terminalx-startup-ready\n".into(), ..healthy } }) });
+        probe::refresh(directory.path(), &mut state, 150_000).unwrap();
+        assert!(state.active().is_some(), "healthy probe cannot release a still observed stall");
+        super::observe(&mut state, Census { children: vec![], complete: false }, &[], 160_000);
+        // Restart persistence includes both incompleteness and the recovery
+        // evidence boundary; a changed in-memory enum alone is insufficient.
+        let mut state: Snapshot = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        probe::refresh(directory.path(), &mut state, 165_000).unwrap();
+        assert_eq!(state.active().unwrap().id, incident_id);
+        assert_eq!(state.launches[0].last_progress_at, 0, "losing sight is not progress");
+        assert_eq!(state.observation_lost_at, Some(160_000));
+        observe(&mut state, vec![], &[], 170_000);
+        probe::refresh(directory.path(), &mut state, 170_000).unwrap();
+        assert!(state.active().is_some(), "a complete later census cannot reuse stale probe evidence");
+        observe(&mut state, vec![child(96 * 1024, 10)], &[], 180_000);
+        state.tick(180_000);
+        assert_eq!(state.incidents.len(), 1);
+        assert_eq!(state.launches[0].id, child_id);
+        observe(&mut state, vec![], &[], 190_000);
+        let health = state.incidents[0].probe.as_mut().unwrap();
+        health.started_at = 200_000;
+        health.result.as_mut().unwrap().finished_at = 210_000;
+        health.owner_exit = Some(recorder_exit(0, 210_001));
+        super::observe(&mut state, Census { children: vec![], complete: false }, &[], 195_000);
+        probe::refresh(directory.path(), &mut state, 215_000).unwrap();
+        assert!(state.active().is_some(), "even fresh health cannot clear an incomplete census");
+        observe(&mut state, vec![], &[], 220_000);
+        probe::refresh(directory.path(), &mut state, 220_000).unwrap();
+        assert!(state.active().is_none(), "complete observation plus new health can recover");
     }
 }

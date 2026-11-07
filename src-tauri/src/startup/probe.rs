@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::{Phase, Snapshot};
+use super::{recorder, Phase, RecorderExit, RecorderIdentity, Snapshot};
 
 const OBSERVE_MS: i64 = 15_000;
 const OUTPUT_LIMIT: u64 = 8192;
@@ -22,6 +22,17 @@ pub struct Probe {
     pub result: Option<ProbeResult>,
     #[serde(default)]
     pub shell: Option<Captured>,
+    #[serde(default)]
+    pub owner: Option<RecorderIdentity>,
+    #[serde(default)]
+    pub owner_exit: Option<RecorderExit>,
+}
+
+impl Probe {
+    fn can_retry(&self) -> bool {
+        self.owner_exit.as_ref().is_some_and(|exit| exit.never_spawned()
+            || self.result.is_some() && exit.failure != Some(super::RecorderFailure::Wait))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -130,12 +141,17 @@ pub fn probe_cli() -> bool {
 }
 
 pub(super) fn start(directory: &Path) -> Result<()> {
+    let executable = std::env::current_exe()?;
     let path = super::update_at(directory, |state| {
+        refresh(directory, state, super::now())?;
         let incident = state.incidents.iter_mut().rev().find(|incident| incident.recovered_at.is_none()).context("No unresolved startup incident.")?;
-        if incident.probe.as_ref().is_some_and(|probe| probe.result.is_none()) {
+        if incident.probe.as_ref().is_some_and(|probe| !probe.can_retry()) {
+            if incident.probe.as_ref().is_some_and(|probe| probe.owner_exit.is_some()) {
+                bail!("The previous recorder failed without proving its child work complete. Its exact owner status is retained; no duplicate probe was started.");
+            }
             bail!("The incident already has a pending health recorder. Its observation timeout is not an exit; no second probe was started.");
         }
-        let probe = Probe { id: uuid::Uuid::new_v4().to_string(), started_at: super::now(), observation_timed_out: false, result: None, shell: None };
+        let probe = Probe { id: uuid::Uuid::new_v4().to_string(), started_at: super::now(), observation_timed_out: false, result: None, shell: None, owner: None, owner_exit: None };
         let path = crate::store::ensure_dir(directory.join(&probe.id))?;
         // Reserve durably BEFORE starting anything. A crash in this interval
         // remains explicitly unresolved rather than launching a duplicate.
@@ -144,15 +160,16 @@ pub(super) fn start(directory: &Path) -> Result<()> {
     })?;
     // No incident lock is held across spawn: that call itself may stall, and
     // must not prevent the monitor from persisting escalation meanwhile.
-    let mut recorder = Command::new(std::env::current_exe()?);
+    let mut recorder = Command::new(executable);
     recorder.arg("--startup-recorder").arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).env_clear();
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         recorder.process_group(0);
     }
-    let mut child = recorder.spawn().context("Could not start health recorder; the reservation remains unresolved")?;
-    std::thread::spawn(move || { let _ = child.wait(); });
+    let child = recorder.spawn().map_err(|error| { recorder::spawn_failed(&path, &error); error })
+        .context("Could not start health recorder; its spawn failure is retained")?;
+    recorder::retain_recorder(child, path);
     Ok(())
 }
 
@@ -161,6 +178,7 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result
     let Some(probe) = &mut incident.probe else { return Ok(()) };
     // Treat ids from disk as data, not a path capability.
     let id = uuid::Uuid::parse_str(&probe.id)?;
+    recorder::refresh(&directory.join(id.to_string()), &mut probe.owner, &mut probe.owner_exit)?;
     if probe.shell.is_none() { probe.shell = crate::store::read_json(&directory.join(id.to_string()).join("shell.json"))?; }
     if probe.result.is_none() {
         probe.result = crate::store::read_json(&directory.join(id.to_string()).join("result.json"))?;
@@ -169,7 +187,9 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result
     let still_stalled = state.launches.iter().any(|launch| incident.launches.contains(&launch.id)
         && matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt));
     let last_progress = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id)).map(|launch| launch.last_progress_at).max().unwrap_or(incident.detected_at);
-    if !still_stalled && probe.result.as_ref().is_some_and(|result| healthy(result) && result.finished_at >= last_progress) {
+    let fresh_observation = !state.census_incomplete && state.observation_lost_at.is_none_or(|lost| probe.started_at > lost);
+    let recorder_succeeded = probe.owner_exit.as_ref().is_some_and(|exit| !exit.failed());
+    if fresh_observation && !still_stalled && recorder_succeeded && probe.result.as_ref().is_some_and(|result| healthy(result) && result.finished_at >= last_progress) {
         incident.recovered_at = Some(at);
     }
     Ok(())
@@ -184,6 +204,8 @@ fn healthy(result: &ProbeResult) -> bool {
 
 pub(super) fn export(probe: &Probe) -> serde_json::Value {
     let status = match &probe.result {
+        _ if probe.owner_exit.as_ref().is_some_and(|exit| exit.failed() || probe.result.is_none()) => "recorderFailure",
+        Some(_) if probe.owner_exit.is_none() => "recorderPending",
         Some(result) if healthy(result) && probe.observation_timed_out => "lateSuccess",
         Some(result) if healthy(result) => "success",
         Some(_) => "applicationFailure",
@@ -193,6 +215,7 @@ pub(super) fn export(probe: &Probe) -> serde_json::Value {
     // Unknown stdout/stderr is omitted in full. Regex redaction cannot prove
     // arbitrary child output free of credentials or prompts.
     serde_json::json!({ "startedAt": probe.started_at, "observationTimedOut": probe.observation_timed_out, "status": status,
+        "ownerExit": probe.owner_exit.as_ref().map(recorder::export),
         "shellExitCode": probe.shell.as_ref().and_then(|shell| shell.exit_code),
         "result": probe.result.as_ref().map(|result| serde_json::json!({ "finishedAt": result.finished_at,
             "shellExitCode": result.shell.exit_code, "shellSignal": result.shell.signal,

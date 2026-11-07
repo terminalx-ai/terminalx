@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 mod macos;
 mod probe;
+mod recorder;
 mod validation;
+pub use recorder::{retain_recorder, RecorderExit, RecorderFailure, RecorderIdentity};
 pub use validation::{run_validation, ValidationHeld};
 pub use validation::validation_pending;
 #[cfg(feature = "desktop")]
@@ -66,6 +68,10 @@ pub struct Launch {
     pub recorder: Option<String>,
     #[serde(default)]
     pub pipeline_id: Option<String>,
+    #[serde(default)]
+    pub recorder_owner: Option<RecorderIdentity>,
+    #[serde(default)]
+    pub recorder_exit: Option<RecorderExit>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -88,6 +94,12 @@ pub struct Snapshot {
     pub policy: Policy,
     pub launches: Vec<Launch>,
     pub incidents: Vec<Incident>,
+    #[serde(default)]
+    pub census_incomplete: bool,
+    /// Losing observation is not meaningful child progress. Health evidence
+    /// from before this transition cannot establish recovery afterwards.
+    #[serde(default)]
+    pub observation_lost_at: Option<i64>,
 }
 
 pub fn now() -> i64 { chrono::Utc::now().timestamp_millis() }
@@ -194,7 +206,7 @@ impl Monitor {
             state.launches.push(Launch { id: id.clone(), pane: pane.into(), generation: generation.into(), pid,
                 category: if pane.starts_with("tab:") { Category::Agent } else { Category::Shell }, evidence: Evidence::Readiness,
                 phase: if pid.is_some() { Phase::AwaitingReady } else { Phase::Spawning }, started_at: now(), last_progress_at: now(), exit_code: None, cpu_time: None, resident_bytes: None,
-                pid_birth: process_identity(pid), recorder: None, pipeline_id: None });
+                pid_birth: process_identity(pid), recorder: None, pipeline_id: None, recorder_owner: None, recorder_exit: None });
             Ok(id)
         })?;
         Ok(Ticket { monitor: self.clone(), id })
@@ -247,11 +259,12 @@ pub fn start(manager: crate::session::SessionManager, sink: Arc<dyn crate::sink:
     let monitor = Arc::new(Monitor { directory: directory()? });
     if !handed_over {
         update_at(&monitor.directory, |state| {
+            state.observation_lost_at = Some(now());
+            state.census_incomplete = true;
             for launch in state.launches.iter_mut().filter(|launch| launch.recorder.is_none() && launch.phase != Phase::Exited) {
                 // No adopted waiter means no final status is known. Keep the
                 // incident and require new health evidence, never a fake exit.
                 launch.phase = Phase::Unobserved;
-                launch.last_progress_at = now();
             }
             Ok(())
         })?;
@@ -284,6 +297,7 @@ fn export(state: &Snapshot) -> Result<String> {
         let launches: Vec<_> = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id)).map(|launch| json!({
             "category": launch.category, "evidence": launch.evidence, "phase": launch.phase,
             "startedAt": launch.started_at, "lastProgressAt": launch.last_progress_at, "exitCode": launch.exit_code,
+            "recorderExit": launch.recorder_exit.as_ref().map(recorder::export),
         })).collect();
         let panes: std::collections::HashSet<_> = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id)).map(|launch| &launch.pane).collect();
         json!({ "incidentId": identifier(&incident.id), "detectedAt": incident.detected_at, "escalatedAt": incident.escalated_at,
@@ -292,7 +306,8 @@ fn export(state: &Snapshot) -> Result<String> {
     }).collect();
     serde_json::to_string_pretty(&json!({ "schema": 1, "kind": "localStartupDiagnostics", "appVersion": env!("CARGO_PKG_VERSION"),
         "architecture": std::env::consts::ARCH, "os": std::env::consts::OS, "osVersion": os_version(), "generatedAt": now(), "timezone": "UTC",
-        "policy": state.policy, "incidents": incidents })).map_err(Into::into)
+        "policy": state.policy, "censusIncomplete": state.census_incomplete, "observationLostAt": state.observation_lost_at,
+        "incidents": incidents })).map_err(Into::into)
 }
 
 fn os_version() -> serde_json::Value {

@@ -23,6 +23,10 @@ birth time**, with parentage rechecked after enumeration. Command lines are
 never requested. A vanished/unreadable descendant has an unknown final result,
 not exit zero. Enumeration is bounded to 2,048 processes and 256 children per
 parent per pass; it is not an exhaustive host-wide process scanner.
+An unreadable root/task or a reached enumeration bound marks the census
+incomplete. An incomplete census cannot release an incident. Losing sight of
+a child records a separate recovery boundary, without inventing progress;
+a previously successful health probe cannot later clear that unknown state.
 
 This heuristic is intentionally specific to the observed small-image failure.
 It is not proof of a dyld, security, or resource-pressure cause, and it does not
@@ -57,8 +61,13 @@ writes the shell result before starting the native step. The eventual exit
 codes, signals, truncation flags and output are kept in an owner-private UUID
 directory. Late success, nonzero application exit and an unresolved recorder
 are distinct. A process not known to have exited is never called successful.
-If the recorder itself never starts or loses its result, the incident stays
-unresolved and needs a person; automatic retries cannot prove the old one gone.
+The runtime separately saves the recorder's PID/birth identity and its exact
+owner exit code, signal or typed spawn/wait error. Reopening reads this evidence
+even when no final child-result file exists. A known failed spawn can be retried
+by the person because no child started. A dead recorder with unknown child work
+is shown as a recorder failure, with ownership still held. A lost parent wait
+handle after an app restart remains unknown; PID disappearance cannot invent
+an exit code. No automatic retry assumes surviving children are gone.
 
 Configured local validation also uses a detached recorder with bounded output.
 It records the leader's exit before waiting for output EOF, so an inherited pipe
@@ -67,10 +76,14 @@ does not kill validation. A host blocker releases the observer sooner. Checkout
 ownership remains held while that recorder is pending. Once it finishes, the
 checkout hold can clear, but its late result never certifies a potentially
 changed commit: retry the configured check on the final head.
+The complete pipeline/recorder reservation is committed in one transaction
+before spawn. A failed reservation write starts no recorder. A recorder-owner
+exit without a complete validation result retains checkout ownership.
 
-Recovery requires both probe steps to succeed, the native readiness marker,
-and no still-observed stalled launch or pending human prompt. The probe result
-must be newer than the last affected progress. An interrupted/unobserved launch
+Recovery requires both probe steps and the recorder owner to succeed, the native
+readiness marker, a complete census, and no still-observed stalled launch or
+pending human prompt. The probe must start after the latest loss of observation,
+and its result must be newer than the last affected progress. An interrupted/unobserved launch
 still has an unknown exit, even when fresh launch health permits a retry.
 Review, security, local checks and CI keep their existing gates. The monitor
 does not change a prior failed check into a pass.
@@ -90,7 +103,9 @@ what you have reviewed and agreed to share.
 
 The export allowlist is: app/macOS version and build, architecture, UTC time,
 thresholds, incident ID, counts, command category, evidence enum, launch phase,
-last progress, exact exit codes/signals and the fixed native readiness marker.
+last progress, census completeness and observation-loss time, exact exit
+codes/signals, typed recorder failures/OS error numbers and the fixed native
+readiness marker.
 It omits pane/session IDs, PIDs, identifying paths/accounts, command text,
 environment values, tokens, credentials, source, prompts/transcripts, shell
 history, arbitrary stdout/stderr and unrelated commands. Unknown or malformed
@@ -128,6 +143,9 @@ Rust tests cover simulated never-ready children, multi-session deduplication,
 bounded escalation across a serialized restart, quiet healthy compiles,
 permissions, PID generations, late exit 23 with both streams, bounded draining,
 pending probe deduplication, late health results and export secret exclusion.
+Regressions also cover failed ownership commits, pending checkout ownership
+after reopening with a dead recorder, and stale health evidence after an
+incomplete census. Recorder identity remains excluded from the export.
 Pipeline tests exercise blockers with unchanged author metadata and no PR,
 and successful CI that must not admit a host-blocked local check. UI tests
 exercise preview, consent, canceled destinations and a pending probe.
@@ -137,6 +155,9 @@ private durable result files, a leader's exact exit while a grandchild holds
 its output pipe, bounded real stdout/stderr, and signal termination. A macOS
 kernel census regression verifies that a recorded owner includes its actual
 child, rather than only testing synthetic observations.
+Production recorder-owner failures before final result publication are retained
+separately. UI regressions distinguish known owner failure from pending work
+and offer a retry only when the saved outcome proves that no recorder started.
 
 Run the four checks in `CONTRIBUTING.md` before review/merge. A launcher, build
 script or test process that has not reached test code is **not a passing test**.

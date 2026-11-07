@@ -4,7 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { errorMessage } from "@/lib/api";
-import { OPEN_STARTUP_DIAGNOSTICS, startupDiagnostics, type StartupPolicy, type StartupPreview, type StartupSnapshot } from "@/lib/startupDiagnostics";
+import { OPEN_STARTUP_DIAGNOSTICS, startupDiagnostics, type StartupPolicy, type StartupPreview, type StartupProbe, type StartupRecorderExit, type StartupSnapshot } from "@/lib/startupDiagnostics";
 
 const ISSUE = "https://github.com/terminalx-ai/terminalx/issues/813";
 
@@ -74,17 +74,17 @@ export function StartupDiagnostics() {
               <p className="break-all font-mono text-xs">Incident {incident.id}</p>
               <p>{incident.escalatedAt !== null ? "Needs attention. " : "Suspected startup stall. "}{panes} affected panes; {incident.blockedPipelines.length} pipelines held.</p>
               <p className="text-xs text-muted-foreground">Detected {new Date(incident.detectedAt).toISOString()}. A small, unchanged process image supports suspicion; it does not identify the cause. Answer visible system or agent prompts yourself.</p>
+              {state.censusIncomplete && <p role="status">Some owned processes could not be observed. The incident remains held until observation is complete and fresh launch health is demonstrated.</p>}
               <ul className="max-h-44 space-y-2 overflow-y-auto text-xs">
                 {affected.map((launch) => <li key={launch.id} className="break-all rounded border border-hairline p-2">
                   {launch.category} · PID {launch.pid ?? "not assigned"} · {launch.phase} · pane {launch.pane}<br />
                   Last startup progress: {new Date(launch.lastProgressAt).toISOString()}{launch.exitCode !== null ? ` · exit ${launch.exitCode}` : ""}
+                  {launch.recorderExit && <p>Recorder owner: {ownerStatus(launch.recorderExit)}. Its exit alone does not release validation ownership.</p>}
                 </li>)}
               </ul>
-              {incident.probe && <p role="status">{incident.probe.result
-                ? `Recorder finished: shell exit ${incident.probe.result.shell.exitCode ?? "unknown"}, native exit ${incident.probe.result.native.exitCode ?? "unknown"}.${incident.probe.observationTimedOut ? " This result arrived after observation timed out." : ""}`
-                : incident.probe.observationTimedOut ? "Observation timed out. The recorder is still pending and will retain its final result; this is not a pass." : "Observing shell and native launch health…"}</p>}
+              {incident.probe && <p role="status">{probeStatus(incident.probe)}</p>}
               {incident.probe?.shell && !incident.probe.result && <p className="text-xs">Basic-shell exit: {incident.probe.shell.exitCode ?? "unknown"}. Native launch has no final result yet.</p>}
-              <Button variant="outline" disabled={busy || Boolean(incident.probe && !incident.probe.result)} onClick={() => void run(async () => { setState(await startupDiagnostics.probe()); })}>Run one health probe</Button>
+              <Button variant="outline" disabled={busy || Boolean(incident.probe && !canRetry(incident.probe))} onClick={() => void run(async () => { setState(await startupDiagnostics.probe()); })}>Run one health probe</Button>
               <p className="text-xs text-muted-foreground">The probe runs a basic shell command and a native TerminalX readiness check. Pending probes are not repeated. No processes are killed or restarted.</p>
             </section> : <p>No unresolved startup incident. {state.incidents.length > 0 ? "Earlier incidents remain in the report." : ""}</p>}
             <Policy key={`${state.policy.suspectAfterSeconds}:${state.policy.escalateAfterSeconds}`} policy={state.policy} busy={busy} onSave={(policy) => void run(async () => { await startupDiagnostics.policy(policy); setState(await startupDiagnostics.status()); })} />
@@ -105,6 +105,25 @@ export function StartupDiagnostics() {
       </DialogContent>
     </Dialog>
   </>;
+}
+
+function canRetry(probe: StartupProbe) {
+  return probe.ownerExit?.failure === "spawn" || Boolean(probe.result && probe.ownerExit && probe.ownerExit.failure !== "wait");
+}
+
+function ownerStatus(exit: StartupRecorderExit) {
+  if (exit.failure) return `${exit.failure === "spawn" ? "could not start" : "wait failed"}${exit.osError !== null ? ` (OS error ${exit.osError})` : ""}`;
+  return exit.signal !== null ? `signal ${exit.signal}` : `exit ${exit.exitCode ?? "unknown"}`;
+}
+
+function probeStatus(probe: StartupProbe) {
+  const owner = probe.ownerExit;
+  if (owner?.failure === "spawn") return `Recorder could not start${owner.osError !== null ? ` (OS error ${owner.osError})` : ""}. No probe child started; you may try again.`;
+  if (owner && (!probe.result || owner.exitCode !== 0 || owner.signal !== null || owner.failure)) {
+    return `Recorder failure: ${ownerStatus(owner)}. ${probe.result ? "Child results are retained." : "No final child result was recorded."} Surviving child work is not ruled out; this is not a pass.`;
+  }
+  if (probe.result) return `Health steps finished: shell exit ${probe.result.shell.exitCode ?? "unknown"}, native exit ${probe.result.native.exitCode ?? "unknown"}.${!owner ? " Recorder exit is still unobserved." : ""}${probe.observationTimedOut ? " This result arrived after observation timed out." : ""}`;
+  return probe.observationTimedOut ? "Observation timed out. The recorder is still pending and will retain its final result; this is not a pass." : "Observing shell and native launch health…";
 }
 
 function Policy({ policy, busy, onSave }: { policy: StartupPolicy; busy: boolean; onSave: (policy: StartupPolicy) => void }) {

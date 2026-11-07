@@ -132,3 +132,40 @@ fn signaled_child_is_never_recorded_as_exit_zero() {
     assert_eq!(result["result"]["signal"], libc::SIGTERM);
     assert_eq!(recorder.wait_for("exit.json")["signal"], libc::SIGTERM);
 }
+
+#[test]
+fn production_recorder_owner_failure_is_retained_when_its_final_file_cannot_be_written() {
+    for validation in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join(uuid::Uuid::new_v4().to_string());
+        fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        // Both real production modes must report their own exit separately
+        // when a filesystem failure prevents a complete child result.
+        fs::create_dir(directory.join(if validation { "validation.json" } else { "shell.json" })).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_raccoon"));
+        command.env_clear().env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        if validation { command.arg("--startup-validation-recorder").arg(&directory).arg(&directory).arg("exit 0"); }
+        else { command.arg("--startup-recorder").arg(&directory); }
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        raccoon_lib::startup::retain_recorder(child, directory.clone());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let exit = loop {
+            if let Ok(bytes) = fs::read(directory.join("owner-exit.json")) {
+                break serde_json::from_slice::<raccoon_lib::startup::RecorderExit>(&bytes).unwrap();
+            }
+            if Instant::now() >= deadline {
+                panic!("owner {pid} remains unresolved; preserved {}", temporary.keep().display());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(exit.exit_code, Some(1));
+        assert_eq!(exit.signal, None);
+        assert_eq!(exit.failure, None);
+        let owner: Value = serde_json::from_slice(&fs::read(directory.join("owner.json")).unwrap()).unwrap();
+        assert_eq!(owner["pid"], pid);
+        assert!(!directory.join("result.json").exists());
+        assert_eq!(fs::metadata(directory.join("owner-exit.json")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
