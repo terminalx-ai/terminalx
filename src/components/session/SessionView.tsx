@@ -708,8 +708,9 @@ export function SessionView({
 
           {/* At the right edge whatever the width. */}
           {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
-              20px in a 40px-wide button; one beside a label (Share) stays at the label's scale. */}
-          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", !compact && "max-w-[70%]")}>
+              20px in a 40px-wide button; one beside a label (Share) stays at the label's scale.
+              A narrow cloud header uses 32px buttons so the session title keeps its first 12 characters. */}
+          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", !compact && "max-w-[70%]", cloud && "@max-[360px]/session-header:[&_button:has(>svg:only-child)]:w-8 @max-[360px]/session-header:[&_button:has(>svg:only-child)>svg]:size-4")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (

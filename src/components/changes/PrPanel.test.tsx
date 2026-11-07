@@ -4,7 +4,7 @@ import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/
 import { cloudGitSource } from "@/lib/gitSource";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PullRequest } from "@/lib/api";
+import type { PrAssociation, PullRequest } from "@/lib/api";
 import type { WorkspaceDisposition } from "@/types/session";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -162,7 +162,7 @@ const followup: PullRequest = {
   ...mergedPr, number: 63, title: "Follow-up work", url: "https://example.test/pull/63", head: "followup", state: "OPEN",
   mergeable: "MERGEABLE", checks: [{ name: "Follow-up CI", state: "pending" }],
 };
-const association = (pr: PullRequest) => ({ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd } });
+const association = (pr: PullRequest): PrAssociation => ({ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd } });
 const workStatus = (branch: string, aheadOfBase = 0) => ({ isRepo: true, dirty: false, branch, upstream: `origin/${branch}`, ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase, head: "abc123" });
 
 describe("session PR history", () => {
@@ -401,6 +401,24 @@ it("opens a PR from its header and refreshes the same identity after the checkou
   expect(mocks.invoke).toHaveBeenCalledWith("pr_details", { cwd, number: 62, url: mergedPr.url });
   expect(screen.queryByRole("button", { name: "Create pull request" })).toBeNull();
   dropEditors((e) => e.id === entry.id);
+});
+
+it.each(["panel", "inline", "centre"])("loads review threads for the selected PR URL (%s)", async (surface) => {
+  const { reviewSnapshot } = await import("@/test/reviewThreads");
+  const pr = { ...followup, url: reviewSnapshot.url, number: 1 };
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "gh_available") return true;
+    if (command === "pr_associations") return [association(pr)];
+    if (command === "work_status") return workStatus(pr.head);
+    if (command === "pr_list") return [pr];
+    if (command === "pr_details") return pr;
+    if (command === "pr_review_threads") return { ...reviewSnapshot, threads: [] };
+    throw Error(command);
+  });
+  render(<PrPanel cwd={cwd} sessionId="author" branch={pr.head} selectedPr={surface === "centre" ? association(pr) : undefined} active busy={false} inline={surface === "inline"} />);
+  fireEvent.click(await screen.findByRole("button", { name: /^▸ Review threads/ }));
+  await screen.findByText("No review threads.");
+  expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url });
 });
 
 const { mergeReadiness, checkCounts, checkSummary } = await import("./PrPanel");
