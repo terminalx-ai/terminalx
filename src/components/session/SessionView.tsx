@@ -61,6 +61,7 @@ import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { copyText } from "@/lib/clipboard";
+import { RepoMirrorControl } from "./RepoMirrorControl";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -210,6 +211,8 @@ const HEADER_CHIP_ICON = "my-1 size-3 shrink-0";
 const HEADER_CHIP_LABEL = "min-w-[2ch] grow basis-0";
 const HEADER_PROJECT_YIELDS = "min-w-0 shrink-[40]";
 const HEADER_TIGHT = "@max-[360px]/session-header:hidden";
+/** At the minimum window width, reclaim decorative spacing before taking space from the title. */
+const HEADER_COMPACT_SPACING = "@max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0";
 
 /** GitHub's mark (the Octicons `mark-github` outline, MIT), since the icon set carries no brand marks. */
 function GithubMark({ className }: { className?: string }) {
@@ -543,7 +546,7 @@ export function SessionView({
             <div className="flex min-w-0 flex-1 items-center gap-1 text-sm" data-testid="session-compact-leading">{chrome?.leading}</div>
           ) : (
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
-          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden", cloud && HEADER_COMPACT_SPACING)} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
             {githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
@@ -942,41 +945,44 @@ export function SessionView({
 /** The workspace's details, out of the title bar: the folder it lives in, the commit it started from, and a way to it. */
 function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session: SessionEntry; branch: string | null | undefined; folder: string | null; base: string | null; onContinue: (() => void) | null }) {
   return (
-    <DropdownMenu>
-      <WithTooltip label="Workspace">
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon-xs" aria-label="Workspace details" className="ml-0.5 shrink-0 text-faint hover:text-foreground">
-            <Ellipsis />
-          </Button>
-        </DropdownMenuTrigger>
-      </WithTooltip>
-      <DropdownMenuContent align="start" className="min-w-[15rem]">
-        {(folder || base) && (
-          <>
-            <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
-              {folder && <span className="flex items-center gap-1.5 text-foreground"><Folder className="size-3.5 text-faint" />{folder}</span>}
-              {base && <span className="text-[11px] text-muted-foreground">{base}</span>}
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-          </>
-        )}
-        {branch && (
-          <DropdownMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
-            <Copy /> Copy branch name
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
-          <FolderOpen /> Reveal in Finder
-        </DropdownMenuItem>
-        {onContinue && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onContinue}>
-              <SessionContinue /> Continue in New Session…
+    <>
+      <RepoMirrorControl key={session.id} session={session} />
+      <DropdownMenu>
+        <WithTooltip label="Workspace">
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-xs" aria-label="Workspace details" className="ml-0.5 shrink-0 text-faint hover:text-foreground">
+              <Ellipsis />
+            </Button>
+          </DropdownMenuTrigger>
+        </WithTooltip>
+        <DropdownMenuContent align="start" className="min-w-[15rem]">
+          {(folder || base) && (
+            <>
+              <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
+                {folder && <span className="flex items-center gap-1.5 text-foreground"><Folder className="size-3.5 text-faint" />{folder}</span>}
+                {base && <span className="text-[11px] text-muted-foreground">{base}</span>}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {branch && (
+            <DropdownMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
+              <Copy /> Copy branch name
             </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          )}
+          <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
+            <FolderOpen /> Reveal in Finder
+          </DropdownMenuItem>
+          {onContinue && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={onContinue}>
+                <SessionContinue /> Continue in New Session…
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
   );
 }

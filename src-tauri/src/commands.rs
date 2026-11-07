@@ -4821,6 +4821,34 @@ pub async fn remove_workspace(app: AppHandle, project_path: String, path: String
     }).await.map_err(err)?
 }
 
+// Local session ids are resolved here; cloud/guest paths cannot select a root.
+#[tauri::command]
+pub async fn repo_mirror_status(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::status(Path::new(&session.project_path)).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_start(session_id: String, confirmed: bool) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        if session.worktree_name.is_none() || session.worktree_removed || session.is_quick() {
+            return Err("Choose a local worktree session to mirror.".into());
+        }
+        crate::repo_mirror::start(Path::new(&session.project_path), Path::new(&session.cwd), confirmed).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_stop(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::stop(Path::new(&session.project_path)).map_err(err)
+    }).await.map_err(err)?
+}
+
 // ---- The local mirror of a cloud workspace (PRO-25) -------------------------
 //
 // The frontend reads the workspace (`mirror.manifest`, `fs.read`) and hands
