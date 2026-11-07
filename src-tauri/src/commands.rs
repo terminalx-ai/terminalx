@@ -2908,12 +2908,12 @@ pub async fn git_identity() -> CmdResult<Option<git::Identity>> {
 
 #[tauri::command]
 pub async fn git_push(cwd: String) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || git::push(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+    github_work(move || git::push(Path::new(&cwd)).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn git_pull(cwd: String) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || git::pull(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+    github_work(move || git::pull(Path::new(&cwd)).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

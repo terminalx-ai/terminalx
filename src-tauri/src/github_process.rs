@@ -76,7 +76,21 @@ pub(crate) fn output(command: Command, timeout: Duration, input: Option<Vec<u8>>
     output_admitted(command, timeout, input, ticket())
 }
 
-pub(crate) fn output_admitted(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket) -> Result<Output> {
+pub(crate) fn output_admitted(command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket) -> Result<Output> {
+    output_process(command, timeout, input, ticket, false)
+}
+
+/// Only explicitly requested Git transfers may acquire promised objects. The
+/// inspection builder's override is removed inside this admitted execution
+/// path, never by handing an unrestricted Command back to a caller. Preserve
+/// an intentional inherited Git preference, if the person supplied one.
+pub(crate) fn git_output_admitted(mut command: Command, timeout: Duration, ticket: Ticket) -> Result<Output> {
+    if let Some(value) = std::env::var_os("GIT_NO_LAZY_FETCH") { command.env("GIT_NO_LAZY_FETCH", value); }
+    else { command.env_remove("GIT_NO_LAZY_FETCH"); }
+    output_process(command, timeout, None, ticket, true)
+}
+
+fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket, git: bool) -> Result<Output> {
     let _privacy = ticket.enter()?;
     #[cfg(unix)]
     {
@@ -103,6 +117,14 @@ pub(crate) fn output_admitted(mut command: Command, timeout: Duration, input: Op
             Err(error) => break Err(error.into()),
         }
     };
+    #[cfg(unix)]
+    if git && status.is_err() {
+        // Git owns its index/ref lockfiles and cleans them on SIGTERM. Give
+        // every member of this exact group a bounded cleanup opportunity;
+        // never delete a repository lock ourselves. Admission stays held.
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM); }
+        std::thread::sleep(Duration::from_millis(250));
+    }
     // All exits, including wait errors and successful parents with surviving
     // descendants, follow the same cleanup. Never release admission first.
     #[cfg(unix)]

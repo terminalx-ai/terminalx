@@ -153,6 +153,10 @@ case "$1" in
      exec /bin/sleep 30 ;;
    esac
    if [ "$1" = fetch ] && [ -f "$TERMINALX_HOME/real-fetch" ]; then exec /usr/bin/git "$@"; fi
+   if [ -f "$TERMINALX_HOME/real-pull" ]; then
+     printf '%s\n' "$$" > "$TERMINALX_HOME/pull-owner"
+     exec /usr/bin/git "$@"
+   fi
    if [ "$1" = ls-remote ] && [ -f "$TERMINALX_HOME/create-pr" ]; then
      printf '%s\trefs/heads/main\n' "$(/usr/bin/git rev-parse HEAD)"
    fi
@@ -244,6 +248,7 @@ fn privacy_entry_points_child() {
     workspace_rpc(&root, &ssh, managed);
     panel::run(&root, &ssh, managed);
     media::run(&root, managed);
+    pull::run(&root, managed);
     let fetch = fresh_fixture(&root);
     fresh_runtime(&root, &fetch, managed);
     cleanup_keeps_revoked_branches(&root, &fetch, managed);
@@ -291,6 +296,7 @@ fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool)
     fresh_ipcs(root, fetch, managed, &runtime);
     panel::ipc_queues(root, cwd, managed, &runtime);
     media::ipc_queues(root, managed, &runtime);
+    pull::ipc_queues(root, managed, &runtime);
 }
 
 #[cfg(feature = "desktop")]
@@ -762,3 +768,6 @@ mod panel;
 
 #[path = "git_media_privacy_tests.rs"]
 mod media;
+
+#[path = "git_pull_privacy_tests.rs"]
+mod pull;

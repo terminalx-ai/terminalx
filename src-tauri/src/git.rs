@@ -1362,17 +1362,29 @@ pub fn commit_all(cwd: &Path, message: &str, paths: Option<&[String]>) -> Result
 }
 
 pub fn push(cwd: &Path) -> Result<String> {
+    let _request = crate::github_process::scope();
     let branch = current_branch(cwd).ok_or_else(|| anyhow!("detached HEAD"))?;
     let has_upstream = run_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if has_upstream {
-        run(cwd, &["push"])
+        transfer(cwd, &["push"])
     } else {
-        run(cwd, &["push", "-u", "origin", &branch])
+        transfer(cwd, &["push", "-u", "origin", &branch])
     }
 }
 
 pub fn pull(cwd: &Path) -> Result<String> {
-    run(cwd, &["pull", "--ff-only"])
+    let _request = crate::github_process::scope();
+    transfer(cwd, &["pull", "--ff-only"])
+}
+
+fn transfer(cwd: &Path, args: &[&str]) -> Result<String> {
+    let mut command = git();
+    command.current_dir(cwd).args(args);
+    let out = crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())?;
+    if !out.status.success() {
+        bail!("git {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 pub fn discard_file(cwd: &Path, path: &str) -> Result<()> {

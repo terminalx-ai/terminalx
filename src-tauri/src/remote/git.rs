@@ -223,9 +223,15 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
 
 /// Only app-owned network operations use this boundary. Local Git inspection,
 /// edits and the agent process runner keep their existing execution paths.
-fn run_network(command: Command, timeout: Duration, what: &str) -> Result<Ran, RpcError> {
+enum Network { Git, Github }
+
+fn run_network(command: Command, timeout: Duration, kind: Network) -> Result<Ran, RpcError> {
     let ticket = crate::github_process::ticket();
-    let out = match crate::github_process::output_admitted(command, timeout, None, ticket.clone()) {
+    let (what, output) = match kind {
+        Network::Git => ("git", crate::github_process::git_output_admitted(command, timeout, ticket.clone())),
+        Network::Github => ("gh", crate::github_process::output_admitted(command, timeout, None, ticket.clone())),
+    };
+    let out = match output {
         Ok(out) => out,
         Err(_) if !ticket.valid() => return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)),
         // Keep uncertain outcomes eligible for the caller's existing read-back
@@ -486,7 +492,7 @@ impl WorkspaceGit {
             command.env(key, value);
         }
         if matches!(args.first().copied(), Some("fetch" | "pull" | "push" | "ls-remote")) {
-            run_network(command, timeout, "git")
+            run_network(command, timeout, Network::Git)
         } else {
             run_bounded(command, timeout).map_err(RpcError::internal)
         }
@@ -915,7 +921,7 @@ impl WorkspaceGit {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("NO_COLOR", "1");
-        run_network(command, timeout, "gh")
+        run_network(command, timeout, Network::Github)
     }
 
     fn panel_pr(&self, repo: &Repo, pr: &mut crate::github::PullRequest) {
