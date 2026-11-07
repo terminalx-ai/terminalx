@@ -1,3 +1,4 @@
+import { SshSettings } from "./SshSettings";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "@/icons";
@@ -116,6 +117,7 @@ export function GeneralTab() {
       />
       <QuickChatSettings />
       <LocalRuntimeSettings />
+      <SshSettings />
     </div>
   );
 }

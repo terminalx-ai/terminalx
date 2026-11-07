@@ -504,6 +504,9 @@ pub fn run() {
             commands::cloud_workspace_unarchive,
             commands::cloud_workspace_disposition,
             commands::cloud_workspace_shares,
+            commands::cloud_ssh_configure,
+            commands::cloud_ssh_check_scope,
+            commands::ssh_private_key_path,
             commands::cloud_workspace_share_put,
             commands::cloud_workspace_share_revoke,
             commands::cloud_schedules,
@@ -938,3 +941,7 @@ pub fn run() {
             }
         });
 }
+
+pub mod workspace_ssh;
+
+pub mod ssh_proxy;

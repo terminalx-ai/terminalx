@@ -6191,3 +6191,5 @@ mod tests {
         assert_eq!(error.code, "cloud_schedule_needs_approval");
     }
 }
+
+pub mod ssh;

@@ -408,6 +408,13 @@ impl RelayHost {
         self.keypair.host_id()
     }
 
+    #[cfg(target_os = "linux")]
+    pub async fn enable_ssh(&self, directory: &Path) -> Result<()> {
+        let user = std::env::var("USER").context("workspace user missing")?;
+        let ssh = super::ssh::Ssh::start(directory, Path::new("/opt/terminalx/openssh/usr/sbin/sshd"), &user).await?;
+        self.rpc.ssh.set(ssh).map_err(|_| anyhow::anyhow!("SSH already started"))
+    }
+
     pub fn status(&self) -> tokio::sync::watch::Receiver<HostStatus> {
         self.status.subscribe()
     }
@@ -471,6 +478,7 @@ impl RelayHost {
     }
 
     async fn revoked(&self) {
+        if let Some(ssh) = self.rpc.ssh.get() { ssh.update(None); }
         log::warn!("relay host: the runtime credential was rejected; not serving");
         self.status.send_replace(HostStatus::Revoked);
         self.close_all_connections();

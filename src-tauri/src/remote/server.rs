@@ -366,6 +366,7 @@ pub struct WorkspaceRpc {
     peers: Mutex<HashMap<u64, Weak<Peer>>>,
     /// Streams to the workspace's own ports (PRO-28).
     pub(super) ports: Arc<super::ports::Ports>,
+    pub ssh: OnceLock<Arc<super::ssh::Ssh>>,
     tabs_changed: Arc<tokio::sync::Notify>,
     /// Raised when a session is created, updated or deleted; the list goes
     /// out as `session.sessions` to `session/2` connections.
@@ -414,6 +415,7 @@ impl WorkspaceRpc {
             agents: OnceLock::new(),
             peers: Mutex::new(HashMap::new()),
             ports: Arc::new(super::ports::Ports::default()),
+            ssh: OnceLock::new(),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
@@ -663,6 +665,7 @@ impl WorkspaceRpc {
     /// follow-ups, and rotate the content key when anyone lost access.
     /// `None` (the API did not say) changes nothing.
     pub fn set_collaboration(&self, members: Option<collab::Members>) {
+        if let Some(ssh) = self.ssh.get() { ssh.update(members.as_ref()); }
         let Some(members) = members else { return };
         // A version this runtime cannot read fails closed.
         let map = members.into_map().unwrap_or_else(|| {
@@ -940,7 +943,7 @@ impl WorkspaceRpc {
             // Escape for a running turn is driving it, as a mailbox stop is.
             "session.interrupt" => Role::Driver,
             // Bytes sent to a port are input to whatever listens there.
-            "ports.list" | "ports.open" | "ports.write" => Role::Driver,
+            "ssh.info" | "ports.list" | "ports.open" | "ports.write" => Role::Driver,
             "lease.takeOver" => Role::Manager,
             _ => Role::Viewer,
         };
@@ -956,7 +959,7 @@ impl WorkspaceRpc {
         // A port is held to the terminal's rule (PRO-28): what listens on
         // the workspace's loopback includes debuggers and notebooks, which
         // run anything as the workspace's user for whoever connects.
-        if matches!(method, "ports.list" | "ports.open" | "ports.write") && access.can_drive() && !access.can_configure() {
+        if matches!(method, "ssh.info" | "ports.list" | "ports.open" | "ports.write") && access.can_drive() && !access.can_configure() {
             return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a local port can be a debugger or a notebook that runs anything"))
                 .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
         }
@@ -992,6 +995,10 @@ impl WorkspaceRpc {
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
+        if method == "ssh.info" {
+            if !self.access(peer).can_configure() { return Err(RpcError::forbidden("SSH requires manage or approval rights")); }
+            return self.ssh.get().map(|ssh| ssh.info()).ok_or_else(|| RpcError::new("unavailable", "Workspace SSH is unavailable"));
+        }
         if method.starts_with("ports.") {
             return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;
         }

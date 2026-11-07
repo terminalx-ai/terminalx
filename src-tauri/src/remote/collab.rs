@@ -75,6 +75,10 @@ impl Access {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
+    #[serde(default)]
+    pub ssh_public_keys: Vec<String>,
+    #[serde(default)]
+    pub ssh_expires_at: Option<u64>,
     pub user_id: String,
     pub role: Role,
     #[serde(default)]

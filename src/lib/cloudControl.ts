@@ -1,3 +1,4 @@
+import { sshControl } from "@/lib/cloudSsh";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
@@ -1029,6 +1030,10 @@ export async function handleCloudControl(action: string, params: Params = {}): P
   if (action === "status") return status();
   assertAllowed();
   switch (action) {
+    case "ssh-open":
+    case "ssh-keep":
+    case "ssh-close":
+      return sshControl(action, params);
     case "projects.list":
       return projectsList(params);
     case "sessions.list":

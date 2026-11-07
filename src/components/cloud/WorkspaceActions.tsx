@@ -1,3 +1,4 @@
+import { enableSsh, removeSsh, sshAllowed } from "@/lib/cloudSsh";
 import { useState } from "react";
 import { Archive, ArchiveRestore, CalendarClock, Lock, Pause, Play, Trash2, Users } from "@/icons";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
@@ -93,6 +94,21 @@ export function WorkspaceActionItems({
         >
           <Users /> {authority.manageShares ? "Share…" : "Who has access…"}
           {sharedWith > 0 && <span className="ml-auto text-[10px] text-faint">{sharedWith}</span>}
+        </DropdownMenuItem>
+      )}
+      {present && sshAllowed(workspace.you) && (
+        <>
+          <DropdownMenuItem onSelect={() => void run(async () => { await enableSsh({ orgId: workspace.orgId, workspaceId: workspace.id }); })}>
+            Enable SSH and add SSH config…
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void run(async () => { await navigator.clipboard.writeText(`ssh ${workspace.id}.terminalx`); })}>
+            Copy SSH command
+          </DropdownMenuItem>
+        </>
+      )}
+      {present && (
+        <DropdownMenuItem onSelect={() => void run(() => removeSsh({ orgId: workspace.orgId, workspaceId: workspace.id }))}>
+          Remove SSH access and config
         </DropdownMenuItem>
       )}
       {schedules && (

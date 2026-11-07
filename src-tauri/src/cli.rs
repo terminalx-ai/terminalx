@@ -44,6 +44,7 @@ pub const SKILLS: [(&str, &str, &str); 3] = [
 const HELP: &str = r#"terminalx — control a running TerminalX app
 
 Usage:
+  terminalx ssh-proxy --organization ORG --workspace WORKSPACE --scope SCOPE
   terminalx status [--json]
   terminalx projects list [--json]
   terminalx sessions list [--project PROJECT|--quick] [--archived] [--json]
@@ -141,6 +142,7 @@ pub(crate) enum Action {
         name: &'static str,
         guide: &'static str,
     },
+    SshProxy { organization: String, workspace: String, scope: String },
     Help,
     Version,
 }
@@ -220,6 +222,10 @@ fn execute(args: &[String], out: &mut Output) -> (i32, io::Result<()>) {
         Err(error) => return (2, print_error(out, error, wants_json)),
     };
     match parsed.action {
+        Action::SshProxy { organization, workspace, scope } => match crate::ssh_proxy::run(&organization, &workspace, &scope, out.stdout) {
+            Ok(()) => (0, Ok(())),
+            Err(error) => (1, emit(out.stderr, &format!("terminalx ssh-proxy: {error}"))),
+        },
         Action::Help => {
             let help = help_text();
             let written = if parsed.json {
@@ -388,6 +394,14 @@ fn parse_with_stdin(
             } else {
                 rpc("projects.list", json!({}), &mut tokens)
             }
+        }
+        "ssh-proxy" => {
+            if json { return Err(invalid("ssh-proxy carries raw bytes; --json is not supported")); }
+            let organization = tokens.option("--organization")?.ok_or_else(|| invalid("--organization is required"))?;
+            let workspace = tokens.option("--workspace")?.ok_or_else(|| invalid("--workspace is required"))?;
+            let scope = tokens.option("--scope")?.ok_or_else(|| invalid("--scope is required"))?;
+            tokens.finish()?;
+            Ok(Action::SshProxy { organization, workspace, scope })
         }
         "cloud" => parse_cloud(&mut tokens),
         "sessions" => parse_sessions(&mut tokens),

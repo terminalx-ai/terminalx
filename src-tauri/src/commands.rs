@@ -4936,3 +4936,19 @@ pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -
 pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<String>) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account, legacy_email.as_deref()).map_err(err)).await.map_err(err)?
 }
+
+#[tauri::command]
+pub async fn cloud_ssh_configure(state: tauri::State<'_, crate::AppState>, org_id: String, workspace_id: String, user: String, host_key: String, enabled: bool) -> Result<serde_json::Value, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.ssh_configure(&org_id, &workspace_id, &user, &host_key, enabled))
+}
+
+#[tauri::command]
+pub fn ssh_private_key_path(path: Option<String>) -> Result<String, String> {
+    if let Some(path) = path { crate::cloud_workspaces::ssh::set_ssh_key_path(&path).map_err(|e| e.to_string())?; }
+    crate::cloud_workspaces::ssh::ssh_key_path().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cloud_ssh_check_scope(state: tauri::State<'_, crate::AppState>, org_id: String, workspace_id: String, scope: String) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.ssh_check_scope(&org_id, &workspace_id, &scope))
+}

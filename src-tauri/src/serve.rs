@@ -338,7 +338,7 @@ fn run(options: Options) -> Result<()> {
                 None
             }
         };
-        start_relay_host(&runtime, link, root, &data_dir, agents.clone());
+        start_relay_host(&runtime, link, root, &data_dir, agents.clone(), cloud.is_some());
     }
     // An archive asks for a final checkpoint before compute stops.
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
@@ -905,12 +905,14 @@ fn start_relay_host(
     root: &str,
     data_dir: &std::path::Path,
     agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
+    cloud_workspace: bool,
 ) {
     let sink = runtime.sink.clone();
     let terminals = runtime.terminals.clone();
     let manager = runtime.manager.clone();
     let root = PathBuf::from(root);
     let devices = data_dir.join("run").join("remote-devices.json");
+    let ssh_directory = data_dir.join("workspace-ssh");
     tokio::spawn(async move {
         let host = match crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices), agents.clone()).await {
             Ok(host) => host,
@@ -919,6 +921,12 @@ fn start_relay_host(
                 return;
             }
         };
+        #[cfg(target_os = "linux")]
+        if cloud_workspace {
+            if let Err(error) = host.enable_ssh(&ssh_directory).await { log::error!("workspace SSH unavailable: {error:#}"); }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (cloud_workspace, ssh_directory);
         let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();

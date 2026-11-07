@@ -740,3 +740,19 @@ filesystem or git-write command; worktree deletion and browser profile deletion 
 destructive operations outside the browser page itself. Cloud commands use the app's signed-in
 account over this same local socket: there is no hosted endpoint, and the organization's
 cloud-provider key is never involved.
+
+
+### Workspace SSH
+
+Choose **Enable SSH and add SSH config…** in a cloud workspace's menu, then
+**Copy SSH command**. SSH requires current manage rights or driver access with
+approval rights. Settings → General → Advanced → SSH private key path selects
+an existing Ed25519 key; blank generates a scoped identity. The setup is opt-in
+and preserves existing SSH files. Remove SSH access and config revokes that
+workspace registration and removes its Include, retaining private keys.
+
+`terminalx ssh-proxy --organization ORG --workspace WORKSPACE --scope SCOPE`
+is the generated ProxyCommand. It carries raw SSH bytes, so `--json` is refused.
+The app must be running with its existing cloud-control permission enabled.
+A stopped workspace is not resumed by connecting. Keys apply on the next
+runtime member refresh.
