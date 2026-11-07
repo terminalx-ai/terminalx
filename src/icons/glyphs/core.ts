@@ -113,6 +113,8 @@ export const GLYPHS: Record<string, Glyph> = {
   MessagesSquare: [["path", { d: "M2 3.5A1.5 1.5 0 0 1 3.5 2h5A1.5 1.5 0 0 1 10 3.5v3.5A1.5 1.5 0 0 1 8.5 8.5H5L2 11zM10 6h2.5A1.5 1.5 0 0 1 14 7.5V14l-3-2.5H7.5A1.5 1.5 0 0 1 6 10V8.5" }]],
   Terminal: [["path", { d: "M3 4l4 4-4 4M8.5 12H13" }]],
   TerminalSquare: [["rect", { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }], ["path", { d: "M5 6l2.5 2L5 10M8.5 10h2.5" }]],
+  // Continue in a new session: a session card in front of the one it came from, an arrow carrying into it.
+  SessionContinue: [["path", { d: "M5 3h7.5A1.5 1.5 0 0 1 14 4.5V10" }], ["rect", { x: 2, y: 5.5, width: 10, height: 8.5, rx: 1.5 }], ["path", { d: "M4.75 9.75h4M7.25 8.25l1.5 1.5-1.5 1.5" }]],
   SquareTerminal: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M5 6.5l2 1.5-2 1.5M8.5 9.5H11" }]],
   Play: [["path", { d: "M4.5 3.2v9.6a.5.5 0 0 0 .76.43l7.7-4.8a.5.5 0 0 0 0-.86l-7.7-4.8a.5.5 0 0 0-.76.43z" }]],
   Pause: [["path", { d: "M5 3v10M11 3v10" }]],

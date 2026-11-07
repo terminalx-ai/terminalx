@@ -1,6 +1,6 @@
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Server, SquareTerminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -711,7 +711,7 @@ export function SessionView({
             {continueTab && (
               <WithTooltip label="Continue in New Session…">
                 <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={continueTab}>
-                  <MessageSquarePlus />
+                  <SessionContinue />
                 </Button>
               </WithTooltip>
             )}
@@ -966,7 +966,7 @@ function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session:
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={onContinue}>
-              <MessageSquarePlus /> Continue in New Session…
+              <SessionContinue /> Continue in New Session…
             </DropdownMenuItem>
           </>
         )}
