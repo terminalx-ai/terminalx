@@ -524,7 +524,10 @@ on a ready workspace. It calls `POST /v1/desktop/orgs/:orgId/cloud-workspaces/
 :workspaceId/restart` with an empty body and polls the returned operation.
 “Restarted workspace” appears only after success. The app retains its connection
 leases so the existing supervisors and tab restoration follow the new runtime
-generation. The server refuses active agent work and uses its checkpoint,
+generation. A failed Restart (or failed recovery Resume) offers Resume to
+lifecycle managers, unless the runtime is unsupported or the workspace has
+been archived/deleted. This uses the existing in-place recovery endpoint.
+The server refuses active agent work and uses its checkpoint,
 in-place stop/start and fenced-runtime path; it never recreates the machine.
 
 **Copy machine ID** copies the provider resource ID returned in list metadata.

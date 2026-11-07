@@ -8,7 +8,7 @@ import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { applyCloudSnapshot, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
 import { closeCloudConnection } from "@/lib/cloudConnections";
-import { lifecycleErrorMessage, noteCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
+import { isArchived, lifecycleErrorMessage, noteCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { useSchedulesOffer } from "@/lib/cloudSchedules";
 import { errorCode } from "@/lib/cloudTerminals";
@@ -54,6 +54,14 @@ export function WorkspaceActionItems({
   const shareable = present && (authority.manageShares || (authority.viewShares && workspace.accessMode === "organization"));
   const sharedWith = workspace.sharedWith ?? 0;
   const lifecycle = authority.lifecycle;
+  // A failed restart may have stopped compute already. Resume reconciles the
+  // same machine in place, and remains available if that recovery also fails.
+  const recoverable = workspace.state === "attention-required"
+    && item.latestOperation?.state === "failed"
+    && (item.latestOperation.action === "restart" || item.latestOperation.action === "resume")
+    && item.latestOperation.errorCode !== "cloud_workspace_runtime_unsupported";
+  const resumable = !archived && !isArchived(workspace) && !workspace.deletedAt
+    && (workspace.state === "suspended" || recoverable);
   // Sharing a private workspace means making it organization-visible first,
   // which takes managing it. Against a server from before PRO-73 a creator
   // who is a plain member manages shares only: they are told so here,
@@ -101,7 +109,7 @@ export function WorkspaceActionItems({
           <CalendarClock /> Scheduled tasks…
         </DropdownMenuItem>
       )}
-      {lifecycle && workspace.state === "suspended" && !archived && (
+      {lifecycle && resumable && (
         <DropdownMenuItem disabled={busy} onSelect={() => void run(() => resumeCloudWorkspace(item))}>
           <Play /> Resume
         </DropdownMenuItem>
