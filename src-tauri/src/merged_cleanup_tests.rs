@@ -830,6 +830,28 @@ fn an_undo_is_refused_when_what_it_would_put_back_is_in_the_way() {
 }
 
 #[test]
+fn restoring_from_a_retained_session_holds_the_merged_workspace_and_rolls_back_failed_holds() {
+    let f = Fixture::new();
+    let wt = f.worktree("session-restore");
+    let session = f.session(&wt, TabStatus::Idle);
+    f.squash("session-restore", 196);
+    f.sweep(1);
+    let record = of(&f.sweep(12), &wt).record.clone().unwrap();
+    let before = serde_json::to_value(Ledger::load().unwrap()).unwrap();
+    let failed: anyhow::Result<()> = with_workspace_restore(wt.to_str().unwrap(), &record.project_path, &record.commit, || anyhow::bail!("checkout failed"));
+    assert!(failed.is_err());
+    assert_eq!(serde_json::to_value(Ledger::load().unwrap()).unwrap(), before);
+    with_workspace_restore(wt.to_str().unwrap(), &record.project_path, "another-commit", || Ok(())).unwrap();
+    assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_none());
+    let plan = crate::workspace_restore::preview(&session.id).unwrap();
+    assert_eq!(plan.commit, record.commit);
+    crate::workspace_restore::restore(&*f.events, &session.id, &plan, Some(&record.branch), &|_| Ok(())).unwrap();
+    assert_eq!(reason(of(&f.sweep(600), &wt)), (Phase::Held, ""));
+    assert!(wt.exists());
+    assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_some());
+}
+
+#[test]
 fn when_github_cannot_be_asked_nothing_is_forgotten_and_nothing_goes() {
     let f = Fixture::new();
     let wt = f.worktree("offline");

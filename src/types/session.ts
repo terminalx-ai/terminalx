@@ -96,6 +96,19 @@ export interface RemovedWorkspace {
   path: string;
   name: string;
   branch?: string | null;
+  commit?: string | null;
+  repository?: string | null;
+}
+
+export interface WorkspaceRestorePreview {
+  projectPath: string;
+  path: string;
+  branch: string | null;
+  commit: string;
+  needsBranch: string | null;
+  suggestedBranch: string;
+  legacy: boolean;
+  sessionIds: string[];
 }
 
 /**

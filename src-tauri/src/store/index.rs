@@ -363,12 +363,18 @@ pub struct AutomationRef {
 /// Provenance for a session whose checkout has been deleted. Operationally
 /// the session moves to the project checkout, but the sidebar must not imply
 /// that its existing transcript was created there.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovedWorkspace {
     pub path: String,
     pub name: String,
     pub branch: Option<String>,
+    /// HEAD immediately before deletion; absent on records from older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The repository that owned the checkout, including for guest/quick sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// The repo a chat's agent is working in: its root, and the branch checked out there.
@@ -876,6 +882,7 @@ pub fn mark_workspace_removed(session: &mut SessionEntry, project_branch: Option
             path: session.cwd.clone(),
             name,
             branch: session.branch.clone(),
+            ..Default::default()
         });
     }
     session.cwd = session.project_path.clone();
@@ -1379,6 +1386,7 @@ mod tests {
                 path: "/p/.raccoon/worktrees/feature-one".into(),
                 name: "feature-one".into(),
                 branch: Some("raccoon/feature-one".into()),
+                ..Default::default()
             })
         );
         assert!(claimed_worktree_names(&[session]).is_empty());
@@ -1398,6 +1406,7 @@ mod tests {
                 path: "/worktrees/existing-feature".into(),
                 name: "existing-feature".into(),
                 branch: Some("feature/existing".into()),
+                ..Default::default()
             })
         );
     }

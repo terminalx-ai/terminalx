@@ -596,6 +596,22 @@ it("keeps removed-workspace provenance separate from a live checkout on the same
   expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
 });
 
+it.each(["simple", "list"] as const)("offers Restore workspace for a removed conversation in the %s sidebar", async (sidebarLayout) => {
+  prefs.setPrefs({ sidebarLayout });
+  await boot([session("restore", "/repos/web", new Date().toISOString(), {
+    worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" },
+  })]);
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk restore" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Restore workspace…" }));
+  const dialogs = await import("@/lib/dialogs");
+  const Probe = () => <div data-testid="restore-request">{dialogs.useDialogs().workspaceRestore}</div>;
+  render(<Probe />);
+  expect(screen.getByTestId("restore-request").textContent).toBe("restore");
+  act(dialogs.closeWorkspaceRestore);
+});
+
 
 /** #696: "Review #590", its workspace gone on Oct 24, sat among the live work for good. */
 it("sets removed workspaces apart under a fold, which opens while it holds the open conversation", async () => {

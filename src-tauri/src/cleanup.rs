@@ -1022,7 +1022,7 @@ mod tests {
 
         // A session settled out of the worktree still resumes from the old folder.
         let mut settled = f.session(f.path(), vec![tab("claude", CONV_A)]);
-        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None });
+        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None, ..Default::default() });
         assert_eq!(f.scan(&[settled]), vec![]);
 
         // A session elsewhere that holds one of the Codex conversations keeps that one.

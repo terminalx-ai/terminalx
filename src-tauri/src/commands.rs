@@ -4816,6 +4816,20 @@ pub async fn remove_workspace(app: AppHandle, project_path: String, path: String
     }).await.map_err(err)?
 }
 
+#[tauri::command]
+pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("previewRestore", serde_json::json!({ "sessionId": session_id })).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch })).map_err(err)
+    }).await.map_err(err)?
+}
+
 // ---- The local mirror of a cloud workspace (PRO-25) -------------------------
 //
 // The frontend reads the workspace (`mirror.manifest`, `fs.read`) and hands
