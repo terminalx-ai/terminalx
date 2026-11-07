@@ -232,6 +232,7 @@ pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSessio
 }
 
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    let _request = crate::github_process::scope();
     let _naming = WORKSPACE_NAMING.lock();
     validate_session_target(&req)?;
     let project = projects::canonical_directory(&req.project_path).map_err(err)?;

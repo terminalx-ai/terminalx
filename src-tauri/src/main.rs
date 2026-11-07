@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    if let Some(code) = raccoon_lib::run_git_transport_cli() { std::process::exit(code); }
     #[cfg(windows)]
     attach_cli_console();
     // `raccoon hook <Event>` is how the agent CLIs' hooks reach a running app.

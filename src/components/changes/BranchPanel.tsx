@@ -12,6 +12,7 @@ import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import type { CommitInfo } from "@/types/session";
 import { localStep, NextLine } from "./NextStep";
+import { getDataPrivacy, useDataPrivacy } from "@/lib/dataPrivacy";
 
 /**
  * Where the reader is working, read top down: the branch, the one thing to
@@ -54,6 +55,7 @@ export function BranchPanel({
   const [done, setDone] = useState<string | null>(null);
   const [asked, setAsked] = useState<string | null>(null);
   const github = useGithubIdentity(cwd)?.remoteHost === "github";
+  const privacy = useDataPrivacy();
   const session = useSessionStore().sessions.find((s) => s.id === sessionId);
 
   useEffect(() => {
@@ -78,20 +80,23 @@ export function BranchPanel({
 
   // What others pushed shows only once fetched: on opening, then every five minutes while shown.
   useEffect(() => {
-    if (!active) return;
+    if (!active || !privacy.ready || privacy.enabled) return;
     let cancelled = false;
-    const check = () =>
-      api
+    const check = () => {
+      const current = getDataPrivacy();
+      if (cancelled || !current.ready || current.enabled) return;
+      return api
         .branchFetch(cwd)
         .then((fetched) => fetched && !cancelled && setReread((n) => n + 1))
         .catch(() => {});
+    };
     void check();
     const id = window.setInterval(check, FETCH_EVERY);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [cwd, active]);
+  }, [cwd, active, privacy.ready, privacy.enabled]);
 
   useEffect(() => {
     let cancelled = false;

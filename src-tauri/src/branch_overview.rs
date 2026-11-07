@@ -18,6 +18,7 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// `origin`; false when there is none or the fetch failed (offline, no
 /// credentials: nothing is ever asked).
 pub fn fetch(cwd: &Path) -> bool {
+    let _request = crate::github_process::scope();
     let branch = git::run(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok().map(|s| s.trim().to_string());
     let remote = branch
         .and_then(|b| git::run(cwd, &["config", "--get", &format!("branch.{b}.remote")]).ok())

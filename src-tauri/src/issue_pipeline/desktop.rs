@@ -18,7 +18,7 @@ fn off_thread(app: &AppHandle, work: impl FnOnce(&LocalHost) + Send + 'static) {
     let Ok(host) = host(app) else {
         return;
     };
-    let _ = std::thread::Builder::new().name("issue-pipeline".into()).spawn(move || work(&host));
+    let _ = std::thread::Builder::new().name("issue-pipeline".into()).spawn(crate::github_process::queued(move || work(&host)));
 }
 
 /// A turn ended. Called from the hook thread, which must get back to the

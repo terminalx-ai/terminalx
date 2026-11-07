@@ -405,7 +405,15 @@ pub fn clone_repository(id: &str, source: &str, parent: &str, on_progress: impl 
     clone_within(id, source, parent, CLONE_BUDGET, on_progress)
 }
 
+/// The desktop command's real blocking boundary; capture before the queue.
+#[cfg(feature = "desktop")]
+pub(crate) async fn clone_queued(id: String, source: String, parent: String, on_progress: impl Fn(CloneProgress) + Send + 'static) -> Result<CloneOutcome, Failure> {
+    tauri::async_runtime::spawn_blocking(crate::github_process::queued(move || clone_repository(&id, &source, &parent, on_progress)))
+        .await.map_err(|error| Failure::new(FAILED, error.to_string()))?
+}
+
 fn clone_within(id: &str, source: &str, parent: &str, within: Duration, on_progress: impl Fn(CloneProgress) + Send + 'static) -> Result<CloneOutcome, Failure> {
+    let _request = crate::github_process::scope();
     let source = parse_source(source)?;
     let parent = resolve_parent(parent)?;
     let path = parent.join(&source.name);

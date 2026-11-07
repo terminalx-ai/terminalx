@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[path = "git_ssh.rs"]
-mod ssh;
+pub(crate) mod ssh;
 
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -28,12 +28,23 @@ fn git() -> Command {
 }
 
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
+    if transfer_args(args) { return transfer(cwd, args); }
     let out = git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn transfer_args(args: &[&str]) -> bool {
+    let mut args = args.iter().copied();
+    while let Some(arg) = args.next() {
+        if matches!(arg, "-c" | "--config-env") { args.next(); continue; }
+        if arg.starts_with("-c") || arg.starts_with("--config-env=") { continue; }
+        return matches!(arg, "fetch" | "pull" | "push" | "clone" | "ls-remote");
+    }
+    false
 }
 
 /// Refresh this project's comparison branch for landed/cleanup verification.
@@ -56,7 +67,9 @@ pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Durat
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code
 /// and stdout, or `None` when git could not be started or was killed.
 pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
-    let out = git().current_dir(cwd).args(args).output().ok()?;
+    let mut command = git(); command.current_dir(cwd).args(args);
+    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket()).ok()? }
+        else { command.output().ok()? };
     Some((out.status.code()?, String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
@@ -91,77 +104,31 @@ pub fn run_within_reporting(
     stop: &dyn Fn() -> bool,
     on_line: impl Fn(&str) + Send + 'static,
 ) -> std::result::Result<(), RunError> {
-    use std::io::Read;
+    let _request = crate::github_process::scope();
     let mut command = git();
-    command.current_dir(cwd).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
-    // Read as it comes, so a full pipe never blocks git.
-    let stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let Some(mut stderr) = stderr else { return text };
-        let mut pending = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let emit = |raw: &[u8], redrawn: bool, text: &mut String| {
-            let line = String::from_utf8_lossy(raw);
-            let line = line.trim();
-            if line.is_empty() {
-                return;
-            }
-            on_line(line);
-            // A redrawn line is progress, replaced by the next one.
-            if !redrawn {
-                text.push_str(line);
-                text.push('\n');
-            }
-        };
-        loop {
-            let read = match stderr.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            };
-            for &byte in &chunk[..read] {
-                if byte == b'\r' || byte == b'\n' {
-                    emit(&pending, byte == b'\r', &mut text);
-                    pending.clear();
-                } else {
-                    pending.push(byte);
-                }
-            }
-        }
-        emit(&pending, false, &mut text);
-        text
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let outcome = loop {
-        let ended = match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if std::time::Instant::now() >= deadline => RunError::TimedOut,
-            Ok(None) if stop() => RunError::Stopped,
-            Ok(None) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                continue;
-            }
-            Err(error) => RunError::Spawn(error),
-        };
-        #[cfg(unix)]
-        // SAFETY: signals the process group this function just created.
-        unsafe {
-            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        break Err(ended);
-    };
-    let err = reader.join().unwrap_or_default();
-    match outcome? {
-        status if status.success() => Ok(()),
-        status => Err(RunError::Failed(if err.trim().is_empty() { format!("exit {status}") } else { err.trim().to_string() })),
-    }
+    command.current_dir(cwd).args(args);
+    let out = crate::github_process::git_output_reporting(command, timeout, crate::github_process::ticket(), stop, Some(Box::new(on_line)))
+        .map_err(transfer_error)?;
+    transfer_result(out).map(|_| ())
+}
+
+fn transfer_error(error: anyhow::Error) -> RunError {
+    if error.is::<crate::github_process::TimedOut>() { RunError::TimedOut }
+    else if error.is::<crate::github_process::Stopped>() { RunError::Stopped }
+    else { match error.downcast::<std::io::Error>() { Ok(error) => RunError::Spawn(error), Err(error) => RunError::Failed(error.to_string()) } }
+}
+
+fn transfer_result(out: std::process::Output) -> std::result::Result<String, RunError> {
+    if out.status.success() { return Ok(String::from_utf8_lossy(&out.stdout).into_owned()); }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(RunError::Failed(if err.trim().is_empty() { format!("exit {}", out.status) } else { err.trim().to_string() }))
+}
+
+pub(crate) fn transfer_output(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    let _request = crate::github_process::scope();
+    let mut command = git();
+    command.current_dir(cwd).args(args);
+    transfer_result(crate::github_process::git_output_admitted(command, timeout, crate::github_process::ticket()).map_err(transfer_error)?)
 }
 
 /// Run `command` to its end or to the deadline, whichever comes first, and
@@ -232,6 +199,7 @@ pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration)
 
 /// `run` with a deadline.
 pub fn run_bounded(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    if transfer_args(args) { return transfer_output(cwd, args, timeout); }
     let mut command = git();
     command.current_dir(cwd).args(args);
     output_within(command, timeout)
@@ -269,7 +237,9 @@ pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
 
 /// Run git with extra environment variables.
 pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
-    let out = git().current_dir(cwd).args(args).envs(env.iter().copied()).output().with_context(|| format!("git {}", args.join(" ")))?;
+    let mut command = git(); command.current_dir(cwd).args(args).envs(env.iter().copied());
+    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())? }
+        else { command.output().with_context(|| format!("git {}", args.join(" ")))? };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
@@ -278,6 +248,7 @@ pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String
 }
 
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
+    if transfer_args(args) { return transfer(cwd, args).is_ok(); }
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
@@ -808,6 +779,7 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
 }
 
 fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, timeout: std::time::Duration) -> Result<CreatedWorktree> {
+    let _request = crate::github_process::scope();
     if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }

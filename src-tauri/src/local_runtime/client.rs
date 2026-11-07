@@ -170,7 +170,7 @@ fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Du
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
     #[cfg(test)]
-    if command == "runtime.session.workspace" {
+    if matches!(command, "runtime.session.workspace" | "runtime.session.pipeline") {
         let hook = AFTER_WORKSPACE_WRITE.lock().unwrap().take();
         if let Some(hook) = hook { hook(); }
     }
@@ -270,6 +270,10 @@ impl Client {
     }
 
     pub(crate) fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value, origin: crate::data_privacy::Ticket) -> Result<T> {
+        self.network_call("runtime.session.workspace", operation, params, origin)
+    }
+
+    pub(crate) fn network_call<T: DeserializeOwned>(&self, command: &str, operation: &str, params: Value, origin: crate::data_privacy::Ticket) -> Result<T> {
         let authority = origin.forwarded(&self.epoch);
         let params = json!({"operation":operation,"params":params,"networkAuthority":authority,"networkAllowed":authority.is_some()});
         // The immutable owner-issued generation travels all the way through
@@ -280,7 +284,7 @@ impl Client {
             let pause = BEFORE_WORKSPACE_SEND.lock().unwrap().take();
             if let Some(pause) = pause { pause(); }
         }
-        self.call("runtime.session.workspace", params)
+        self.call(command, params)
     }
 
     pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {

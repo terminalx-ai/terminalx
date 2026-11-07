@@ -19,7 +19,7 @@ mod variants;
 #[path = "github_submodule_privacy_tests.rs"]
 mod submodules;
 
-fn service(root: &Path, endpoint: &hooks::ControlEndpoint) -> ControlService {
+pub(super) fn service(root: &Path, endpoint: &hooks::ControlEndpoint) -> ControlService {
     let lifetime = Lifetime::new(Duration::from_secs(60));
     lifetime.set_stream_socket(root.join("run/unused-events.sock"));
     let sink = Arc::new(crate::sink::BroadcastSink::new(64));
@@ -29,7 +29,7 @@ fn service(root: &Path, endpoint: &hooks::ControlEndpoint) -> ControlService {
     ControlService::headless(sink, manager, endpoint.clone(), "local".into()).with_local_lifetime(lifetime)
 }
 
-fn control(endpoint: &hooks::ControlEndpoint, token: &str, command: &str, params: Value) -> ControlResponse {
+pub(super) fn control(endpoint: &hooks::ControlEndpoint, token: &str, command: &str, params: Value) -> ControlResponse {
     let mut stream = std::os::unix::net::UnixStream::connect(&endpoint.socket).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let request = ControlRequest { id: uuid::Uuid::new_v4().to_string(), token: token.into(), command: command.into(), params };
@@ -47,7 +47,7 @@ fn preference(enabled: bool, managed: bool) {
     store::write_json(&store::root().unwrap().join("data-privacy.json"), &json!({"enabled":enabled && !managed})).unwrap();
 }
 
-fn acknowledge(endpoint: &hooks::ControlEndpoint, enabled: bool, managed: bool) {
+pub(super) fn acknowledge(endpoint: &hooks::ControlEndpoint, enabled: bool, managed: bool) {
     preference(enabled, managed);
     let response = control(endpoint, &endpoint.token, "runtime.dataPrivacy.refresh", json!({}));
     assert!(response.ok, "{response:?}");

@@ -6,6 +6,11 @@ use std::process::Command;
 
 use anyhow::Result;
 
+#[path = "git_transfer_ssh.rs"]
+mod transfer;
+pub(crate) use transfer::prepare;
+pub(crate) use transfer::run_cli;
+
 fn config(cwd: &Path, key: &str) -> Option<String> {
     super::run(cwd, &["config", "--get", key]).ok().map(|mut value| {
         // Remove Git's record terminator, not whitespace belonging to the value.

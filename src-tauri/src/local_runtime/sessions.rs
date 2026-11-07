@@ -45,7 +45,7 @@ impl Sessions {
     }
 
     pub fn pipeline<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
-        self.call("runtime.session.pipeline",json!({"operation":operation,"params":params}))
+        self.0.network_call("runtime.session.pipeline", operation, params, crate::github_process::ticket())
     }
 
     pub fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {

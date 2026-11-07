@@ -146,9 +146,20 @@ fn diff(cwd: &Path, base: &str, head: &str) -> Result<Diff> {
 /// How long a push may take before it is given up on.
 const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+#[cfg(test)]
+pub(crate) fn privacy_transfer_entry(cwd: &Path, action: &str) -> Result<()> {
+    match action {
+        "push" => push(cwd),
+        "read" => remote_head(cwd, "main").map(|_| ()),
+        "fetch" => resolution_needed(cwd, "main", "main", false).map(|_| ()),
+        _ => unreachable!(),
+    }
+}
+
 /// Push the checkout's branch, setting its upstream the first time. Never
 /// forced, and with a deadline: a push that hangs must not hold the pipeline.
 fn push(cwd: &Path) -> Result<()> {
+    let _request = crate::github_process::scope();
     let branch = crate::git::current_branch(cwd).context("the checkout is not on a branch")?;
     let has_upstream = crate::git::run(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_ok();
     let args: Vec<&str> = if has_upstream { vec!["push"] } else { vec!["push", "-u", "origin", &branch] };
@@ -161,6 +172,7 @@ fn push(cwd: &Path) -> Result<()> {
 }
 
 fn verify_resolution(cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
+    let _request = crate::github_process::scope();
         // Exactly one merge, with the two pinned inputs. An extra author or
         // human commit changes the parents and is never silently pushed.
         let parents = crate::git::run(cwd, &["show", "-s", "--format=%P", head, "--"])?;
@@ -174,10 +186,9 @@ fn verify_resolution(cwd: &Path, resolution: &super::Resolution, head: &str, bra
 }
 
 fn remote_head(cwd: &Path, branch: &str) -> Result<Option<String>> {
+    let _request = crate::github_process::scope();
     let reference = format!("refs/heads/{branch}");
-    let mut command = std::process::Command::new("git");
-    command.args(["ls-remote", "--heads", "origin", &reference]).current_dir(cwd);
-    let output = crate::git::output_within(command, std::time::Duration::from_secs(30)).map_err(|error| anyhow!("Reading the remote branch failed: {error:?}"))?;
+    let output = crate::git::transfer_output(cwd, &["ls-remote", "--heads", "origin", &reference], std::time::Duration::from_secs(30)).map_err(|error| anyhow!("Reading the remote branch failed: {error:?}"))?;
     Ok(output.lines().find_map(|line| {
         let (sha, name) = line.split_once('\t')?;
         (name == reference).then(|| sha.to_string())
@@ -188,6 +199,7 @@ fn remote_head(cwd: &Path, branch: &str) -> Result<Option<String>> {
 /// whatever `git merge-tree` says. The two can differ: with more than one
 /// merge base, git merges the bases into one first and GitHub does not.
 fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
+    let _request = crate::github_process::scope();
     crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
     let base_ref = format!("refs/remotes/origin/{base}");
     let base_commit = crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string();
@@ -305,7 +317,7 @@ impl Host for LocalHost {
     fn defer_local_check(&self, pipeline_id: &str) -> bool {
         let host = self.clone();
         let id = pipeline_id.to_string();
-        std::thread::Builder::new().name("pipeline-local-checks".into()).spawn(move || super::engine::run_local_checks(&host, &id)).is_ok()
+        std::thread::Builder::new().name("pipeline-local-checks".into()).spawn(crate::github_process::queued(move || super::engine::run_local_checks(&host, &id))).is_ok()
     }
 
     fn run_local_check(&self, cwd: &Path, command: &str) -> Result<()> {

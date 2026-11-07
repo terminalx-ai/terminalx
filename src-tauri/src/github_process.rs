@@ -23,6 +23,13 @@ impl std::fmt::Display for TimedOut {
 }
 impl std::error::Error for TimedOut {}
 
+#[derive(Debug)]
+pub(crate) struct Stopped;
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Git transfer was cancelled") }
+}
+impl std::error::Error for Stopped {}
+
 thread_local! {
     static CURRENT: RefCell<Option<Ticket>> = const { RefCell::new(None) };
 }
@@ -77,21 +84,63 @@ pub(crate) fn output(command: Command, timeout: Duration, input: Option<Vec<u8>>
 }
 
 pub(crate) fn output_admitted(command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket) -> Result<Output> {
-    output_process(command, timeout, input, ticket, false)
+    output_process(command, timeout, input, ticket, Execution { git: false, stop: &|| false, progress: None })
 }
 
 /// Only explicitly requested Git transfers may acquire promised objects. The
 /// inspection builder's override is removed inside this admitted execution
 /// path, never by handing an unrestricted Command back to a caller. Preserve
 /// an intentional inherited Git preference, if the person supplied one.
-pub(crate) fn git_output_admitted(mut command: Command, timeout: Duration, ticket: Ticket) -> Result<Output> {
-    if let Some(value) = std::env::var_os("GIT_NO_LAZY_FETCH") { command.env("GIT_NO_LAZY_FETCH", value); }
-    else { command.env_remove("GIT_NO_LAZY_FETCH"); }
-    output_process(command, timeout, None, ticket, true)
+pub(crate) fn git_output_admitted(command: Command, timeout: Duration, ticket: Ticket) -> Result<Output> {
+    git_output_reporting(command, timeout, ticket, &|| false, None)
 }
 
-fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket, git: bool) -> Result<Output> {
+type Progress = Box<dyn Fn(&str) + Send>;
+
+pub(crate) fn git_output_reporting(mut command: Command, timeout: Duration, ticket: Ticket, stop: &dyn Fn() -> bool, progress: Option<Progress>) -> Result<Output> {
+    if let Some(value) = std::env::var_os("GIT_NO_LAZY_FETCH") { command.env("GIT_NO_LAZY_FETCH", value); }
+    else { command.env_remove("GIT_NO_LAZY_FETCH"); }
+    output_process(command, timeout, None, ticket, Execution { git: true, stop, progress })
+}
+
+fn read_progress(pipe: impl Read + Send + 'static, progress: Progress) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut result = Vec::new();
+        let mut pending = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut emit = |pending: &mut Vec<u8>, redrawn: bool| {
+            let text = String::from_utf8_lossy(pending);
+            let line = text.trim();
+            if !line.is_empty() {
+                progress(line);
+                if !redrawn { result.extend_from_slice(line.as_bytes()); result.push(b'\n'); }
+            }
+            pending.clear();
+        };
+        loop {
+            let count = match pipe.read(&mut chunk) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if count == 0 { break; }
+            for &byte in &chunk[..count] {
+                if byte == b'\r' || byte == b'\n' { emit(&mut pending, byte == b'\r'); }
+                else { pending.push(byte); }
+            }
+        }
+        emit(&mut pending, false);
+        Ok(result)
+    })
+}
+
+struct Execution<'a> { git: bool, stop: &'a dyn Fn() -> bool, progress: Option<Progress> }
+
+fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket, execution: Execution<'_>) -> Result<Output> {
+    let Execution { git, stop, progress } = execution;
     let _privacy = ticket.enter()?;
+    if stop() { return Err(Stopped.into()); }
+    let _transport = if git { Some(crate::git::ssh::prepare(&mut command)?) } else { None };
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -100,7 +149,8 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
     let mut child = command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let stdout = read_all(child.stdout.take().expect("piped stdout"));
-    let stderr = read_all(child.stderr.take().expect("piped stderr"));
+    let pipe = child.stderr.take().expect("piped stderr");
+    let stderr = match progress { Some(progress) => read_progress(pipe, progress), None => read_all(pipe) };
     // A provider that stops reading its request body must not prevent privacy
     // activation. Poll cancellation independently of every pipe operation.
     let stdin = input.map(|bytes| {
@@ -110,6 +160,7 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
     let deadline = Instant::now() + timeout;
     let status = loop {
         if !ticket.valid() { break Err(anyhow::anyhow!(crate::data_privacy::MESSAGE)); }
+        if stop() { break Err(Stopped.into()); }
         if Instant::now() >= deadline { break Err(TimedOut(timeout).into()); }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),

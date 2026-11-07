@@ -385,6 +385,7 @@ struct Step<'a> {
 /// Run one step on a pipeline. A stopped pipeline takes no step unless a
 /// person's own action asks for one.
 fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, action: impl FnOnce(&mut Step<'_>) -> Result<()>) -> Result<Pipeline> {
+    let _request = crate::github_process::scope();
     // Track stage work separately from read-only requests and timer passes.
     let _running = (on_error == OnError::NeedsYou).then(Running::start);
     let lock = step_lock(id);

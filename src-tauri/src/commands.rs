@@ -1727,13 +1727,9 @@ pub async fn github_repositories() -> CmdResult<crate::project_start::GithubRepo
 /// was already there); `id` names it for progress events and for canceling.
 #[tauri::command]
 pub async fn project_clone(app: AppHandle, id: String, source: String, parent: String) -> StartResult<crate::project_start::CloneOutcome> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::project_start::clone_repository(&id, &source, &parent, move |progress| {
-            let _ = app.emit(PROJECT_CLONE_PROGRESS_EVENT, &progress);
-        })
-    })
-    .await
-    .map_err(start_failure)?
+    crate::project_start::clone_queued(id, source, parent, move |progress| {
+        let _ = app.emit(PROJECT_CLONE_PROGRESS_EVENT, &progress);
+    }).await
 }
 
 #[tauri::command]
@@ -1876,7 +1872,7 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// deletable.
 #[tauri::command]
 pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         crate::session_ops::prefer_native_codex_session(&mut req);
         create_session_blocking(&app, req)
     })
@@ -2254,7 +2250,7 @@ pub async fn branch_merge_into(cwd: String, into: String) -> CmdResult<String> {
 /// Brings the remote's branches up to date for the Branch tab; false when it could not.
 #[tauri::command]
 pub async fn branch_fetch(cwd: String) -> CmdResult<bool> {
-    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::fetch(Path::new(&cwd))).await.map_err(err)
+    github_work(move || crate::branch_overview::fetch(Path::new(&cwd))).await.map_err(err)
 }
 
 #[tauri::command]
@@ -2307,7 +2303,7 @@ pub async fn relocate_session(app: AppHandle, session_id: String) -> CmdResult<S
 /// provider conversation forked on the first send.
 #[tauri::command]
 pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<SessionEntry> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let src = index::get(&session_id).map_err(err)?;
         let tab = src.tab(&tab_id).cloned().ok_or("no such tab")?;
         let project_path = Path::new(&src.project_path);
@@ -3624,31 +3620,31 @@ pub fn issue_pipelines_list() -> CmdResult<Vec<crate::issue_pipeline::Pipeline>>
 #[tauri::command]
 pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: String, auto_merge: Option<bool>) -> CmdResult<StartedIssuePipeline> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("start", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"autoMerge":auto_merge})).map_err(err)).await.map_err(err)?
+    github_work(move || sessions.pipeline("start", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"autoMerge":auto_merge})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_continue(app: AppHandle, session_id: String, tab_id: String, options: crate::issue_pipeline::LaunchOptions) -> CmdResult<Option<StartedIssuePipeline>> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("continue", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"options":options})).map_err(err)).await.map_err(err)?
+    github_work(move || sessions.pipeline("continue", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"options":options})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_set_auto_merge(app: AppHandle, id: String, value: bool) -> CmdResult<crate::issue_pipeline::Pipeline> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("autoMerge", serde_json::json!({"id":id,"value":value})).map_err(err)).await.map_err(err)?
+    github_work(move || sessions.pipeline("autoMerge", serde_json::json!({"id":id,"value":value})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_set_resolve_conflicts(app: AppHandle, id: String, value: bool) -> CmdResult<crate::issue_pipeline::Pipeline> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("resolveConflicts", serde_json::json!({"id":id,"value":value})).map_err(err)).await.map_err(err)?
+    github_work(move || sessions.pipeline("resolveConflicts", serde_json::json!({"id":id,"value":value})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_act(app: AppHandle, id: String, action: crate::issue_pipeline::engine::Action) -> CmdResult<crate::issue_pipeline::Pipeline> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("act", serde_json::json!({"id":id,"action":action})).map_err(err)).await.map_err(err)?
+    github_work(move || sessions.pipeline("act", serde_json::json!({"id":id,"action":action})).map_err(err)).await.map_err(err)?
 }
 
 /// Move a cloud workspace's Linear issue to its team's review state with the

@@ -424,7 +424,7 @@ impl ControlService {
                 if let Some(method) = command.strip_prefix("runtime.sharing.") {
                     return crate::local_sharing::owner::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }
-                if command == "runtime.session.workspace" {
+                if matches!(command, "runtime.session.workspace" | "runtime.session.pipeline") {
                     // Missing/expired origin stamps still permit local facts,
                     // but never acquire today's authority after socket queues
                     // or a listener handover. Authentication preceded this.

@@ -1151,6 +1151,7 @@ fn report_issue_run(
     run_id: &str,
     failed: bool,
 ) -> Result<()> {
+    let _request = crate::github_process::scope();
     let automation = automation_store::get(automation_id)?;
     let trigger = automation
         .issue_trigger
@@ -1274,13 +1275,13 @@ fn spawn_issue_report(
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("automation-issue-report".into())
-        .spawn(move || {
+        .spawn(crate::github_process::queued(move || {
             if let Err(error) =
                 report_issue_run(&app, entry.as_ref(), &automation_id, &run_id, failed)
             {
                 log::warn!("automation issue report: {error:#}");
             }
-        });
+        }));
 }
 
 pub fn complete_from_hook(

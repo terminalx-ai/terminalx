@@ -73,6 +73,23 @@ app-owned network processes before acknowledging that runtime’s policy. Local 
 metadata and checkout issue templates remain
 available. Identity headers refresh when privacy is disabled, without signing in
 again. Agent-owned subprocesses retain their network access.
+
+App-owned Git transfers also share this boundary: branch refresh, worktree-base
+refresh, project cloning, desktop/workspace pull and push, and pipeline transfer
+and reconciliation. Authority is captured before blocking queues and forwarded
+to the runtime with its owner-issued generation. Branch polling pauses while
+privacy is enabled. Cached branch facts remain available; worktree creation can
+use cached refs and records an unfetched warning. Clone progress, deadlines and
+explicit cancellation remain active.
+
+Explicit transfers use a private stdio SSH adapter before any app/runtime
+services start. Each invocation reads the current repository's SSH configuration,
+including recursive submodules, and retains the original environment and command
+config precedence. OpenSSH runs without a control socket, preventing shared
+master reuse or persistence. Other transport variants keep their argument grammar;
+capability probes share the original transfer's process group and admission.
+The app never terminates someone else's SSH master. Local Git inspection still
+disables lazy object fetching, and agent executables are not intercepted.
 Update checks and downloads use native admission too: an already admitted
 transfer drains, with a 60-second limit, before privacy activation is acknowledged.
 Its result is then discarded. Cached updates and deferred install choices are

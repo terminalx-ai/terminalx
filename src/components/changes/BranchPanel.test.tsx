@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BranchOverview } from "@/lib/api";
 import { getDraft } from "@/lib/drafts";
 
@@ -17,6 +17,14 @@ vi.mock("@/lib/sessions", () => ({
 
 const { BranchPanel, FETCH_EVERY, avatarUrl, graphRows } = await import("./BranchPanel");
 const { localStep } = await import("./NextStep");
+
+const { refreshDataPrivacy } = await import("@/lib/dataPrivacy");
+let policy = { enabled: false, managed: false };
+beforeEach(async () => {
+  policy = { enabled: false, managed: false };
+  invoke.mockResolvedValueOnce(policy);
+  await refreshDataPrivacy();
+});
 
 const commit = (sha: string, subject: string, author: string, email = `${author.toLowerCase()}@x.io`) => ({ sha, shortSha: sha.slice(0, 7), subject, body: "", author, email, date: "2026-10-01T00:00:00Z", parent: null, tree: "" });
 const overview = (patch: Partial<BranchOverview> = {}): BranchOverview => ({
@@ -50,6 +58,7 @@ afterEach(() => {
 function answer(next: BranchOverview, prs: unknown[] = []) {
   let pulled = false;
   invoke.mockImplementation(async (command: string) => {
+    if (command === "data_privacy_status") return policy;
     if (command === "branch_overview") return pulled ? { ...next, unpulled: 0, incoming: [] } : next;
     if (command === "branch_fetch") return true;
     if (command === "gh_available") return true;
@@ -224,6 +233,27 @@ describe("the Branch tab", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each([false, true])("keeps local branch facts but stops automatic transfers under privacy (managed=%s)", async (managed) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      answer(overview());
+      policy = { enabled: true, managed };
+      await act(() => refreshDataPrivacy());
+      render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
+      expect((await screen.findByTestId("branch-name", {}, WAIT)).textContent).toBe("dc/login");
+      await vi.advanceTimersByTimeAsync(FETCH_EVERY);
+      expect(invoke.mock.calls.filter(([c]) => c === "branch_fetch")).toHaveLength(0);
+      policy = { enabled: false, managed: false };
+      await act(() => refreshDataPrivacy());
+      await vi.waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === "branch_fetch")).toHaveLength(1));
+      policy = { enabled: true, managed };
+      await act(() => refreshDataPrivacy());
+      await vi.advanceTimersByTimeAsync(FETCH_EVERY * 2);
+      expect(invoke.mock.calls.filter(([c]) => c === "branch_fetch")).toHaveLength(1);
+      expect(screen.getByTestId("branch-name").textContent).toBe("dc/login");
+    } finally { vi.useRealTimers(); }
   });
 
   it("finds a GitHub face from a GitHub address, and looks others up only on a GitHub project", () => {

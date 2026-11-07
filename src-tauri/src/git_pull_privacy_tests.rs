@@ -107,11 +107,11 @@ impl Fixture {
         // including a pipe-owning child that ignores SIGTERM, to require the
         // runner's hard group cleanup before privacy can acknowledge.
         std::fs::write(&ssh, format!(r#"#!/bin/sh
-[ "$#" = 3 ] && [ "$1" = --fixture-key ] && [ "$2" = privacy-pull ] || exit 92
+[ "$#" = 3 ] && [ "$1" = --fixture-key ] || exit 92
+case "$2" in privacy-pull|git@github.com) ;; *) exit 92 ;; esac
 printf '%s %s %s\n' "$$" "${{GIT_NO_LAZY_FETCH:-unset}}" "$*" >> {transfers}
 case "$3" in
- git-receive-pack*) exec /usr/bin/git receive-pack {origin} ;;
- git-upload-pack*) ;;
+ git-receive-pack*|git-upload-pack*) ;;
  *) exit 93 ;;
 esac
 if [ ! -f {first} ]; then
@@ -124,7 +124,10 @@ elif [ -f {hold} ]; then
  wait "$child"
  exit 94
 fi
-exec /usr/bin/git upload-pack {origin}
+case "$3" in
+ git-receive-pack*) exec /usr/bin/git receive-pack {origin} ;;
+ *) exec /usr/bin/git upload-pack {origin} ;;
+esac
 "#, transfers=quote(&transfers), origin=quote(&origin), first=quote(&first), hold=quote(&hold), held=quote(&held))).unwrap();
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
         git(&cwd, &["config", "core.sshCommand", &format!("{} --fixture-key", quote(&ssh))]);
@@ -264,6 +267,8 @@ pub(super) fn run(root: &Path, managed: bool) {
     push.workspace("git.push").unwrap();
     assert_eq!(git(&push.origin, &["rev-parse", "main"]), commit);
     assert!(push.transfers() > before);
+    transfers::run(root, managed);
+    openssh::run(root, managed, None);
 }
 
 #[cfg(feature = "desktop")]
@@ -271,6 +276,8 @@ pub(super) fn ipc_queues(root: &Path, managed: bool, runtime: &tokio::runtime::R
     use std::future::Future;
     use std::task::{Context, Waker};
     let _environment = Environment::new(root);
+    transfers::ipc(root, managed, runtime);
+    openssh::run(root, managed, Some(runtime));
     // Covers normal/denied/active cancellation using the actual async command.
     exercise(root, managed, "ipc", |f| runtime.block_on(f.ipc("git.pull")));
     for operation in ["git.pull", "git.push"] {
@@ -305,3 +312,8 @@ pub(super) fn ipc_queues(root: &Path, managed: bool, runtime: &tokio::runtime::R
         assert!(fixture.transfers() > before);
     }
 }
+
+#[path = "git_app_transfer_privacy_tests.rs"]
+mod transfers;
+#[path = "git_openssh_privacy_tests.rs"]
+mod openssh;
