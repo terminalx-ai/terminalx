@@ -41,7 +41,10 @@ mod tests {
     fn version_is_encoded_as_one_public_query_parameter() {
         let url = endpoint("https://login.terminalx.ai", "0.2.25-beta.1+build&x=1").unwrap();
         assert_eq!(url.path(), "/announcements/current");
-        assert_eq!(url.query_pairs().collect::<Vec<_>>(), vec![("appVersion".into(), "0.2.25-beta.1+build&x=1".into())]);
+        let pairs: Vec<_> = url.query_pairs().collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "appVersion");
+        assert_eq!(pairs[0].1, "0.2.25-beta.1+build&x=1");
         assert!(endpoint("https://login.terminalx.ai", "").is_err());
         assert!(endpoint("https://login.terminalx.ai", &"1".repeat(129)).is_err());
     }
