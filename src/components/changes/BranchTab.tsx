@@ -38,7 +38,7 @@ export function BranchTab({ branch, pr, focusPr = 0 }: {
       ) : (
         <>
           {/* A cloud workspace's pipeline is shown here, but started from its own session. */}
-          <div className="px-4 pt-3 empty:hidden"><BranchAutopilot sessionId={pr.sessionId} offer={false} /></div>
+          <div className="px-6 pt-4 empty:hidden"><BranchAutopilot sessionId={pr.sessionId} offer={false} /></div>
           {section}
         </>
       )}

@@ -198,9 +198,9 @@ export function BranchPanel({
 
   return (
     <div className={inline ? undefined : "h-full overflow-y-auto scrollbar-thin"} data-testid="branch-panel">
-      {/* One left edge for the tab, 16px from the panel: the branch icon, each box's own edge, the graph's dots and every row
+      {/* One left edge for the tab, 24px from the panel: the branch icon, each box's own edge, the graph's dots and every row
           start on it. Only what is inside a box is indented. */}
-      <div className="flex flex-col gap-3 px-4 py-3">
+      <div className="flex flex-col gap-3 px-6 py-4">
         <header className="flex min-h-6 min-w-0 items-center gap-2">
           {/* The glyph's drawing starts 3px into its box: pulled left by that, its ink lines up with the text and dots below. */}
           <GitBranch className="-ml-[3px] size-4 shrink-0 text-accent" aria-hidden />
