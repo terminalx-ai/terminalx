@@ -4,12 +4,13 @@ import type { Project } from "@/types/session";
 
 const mocks = vi.hoisted(() => ({
   projects: [] as Project[],
+  updateProject: vi.fn(),
   environmentList: vi.fn(async (_project: string | null) => []),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock("@/lib/sessions", async (original) => {
   const actual = await original<typeof import("@/lib/sessions")>();
-  return { ...actual, useSessionStore: () => ({ ...actual.useSessionStore(), projects: mocks.projects }) };
+  return { ...actual, updateProject: mocks.updateProject, useSessionStore: () => ({ ...actual.useSessionStore(), projects: mocks.projects }) };
 });
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
@@ -28,6 +29,7 @@ vi.mock("@/lib/localEnvironment", async (original) => {
 const { SettingsPage } = await import("./SettingsPage");
 
 beforeEach(() => {
+  mocks.updateProject.mockReset().mockResolvedValue(undefined);
   mocks.environmentList.mockClear();
   mocks.projects = [
     { path: "/repos/one", name: "One", kind: "git" },
@@ -39,6 +41,20 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("registry navigation", () => {
+  it("opens and saves Scripts for the chosen repository on its one page, with its cleanup controls", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    const group = within(screen.getByRole("group", { name: "Repositories" }));
+    // One row a repository opens one page: its workspace cleanup, then its scripts.
+    fireEvent.click(group.getByRole("button", { name: "Two" }));
+    expect(group.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "Delete merged workspaces of Two" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Archive script"), { target: { value: "docker compose down" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save scripts" }));
+    await screen.findByText("Scripts saved.");
+    expect(mocks.updateProject).toHaveBeenCalledWith("/repos/two", { scripts: { setup: "", archive: "docker compose down" } });
+  });
+
   it("opens Environment from its group, keeps repository overrides, and resolves its row link", async () => {
     const view = render(<SettingsPage onBack={vi.fn()} />);
     const group = within(screen.getByRole("group", { name: "Agents & environment" }));
@@ -101,4 +117,13 @@ it("lists folder projects and explains why Git cleanup does not apply to them", 
   expect(screen.getByRole("heading", { name: "Notes" })).toBeTruthy();
   expect(screen.getByText("Workspace cleanup is available for Git repositories. This project is a folder.")).toBeTruthy();
   expect(screen.queryByRole("radiogroup", { name: "Delete merged workspaces of Notes" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Scripts" })).toBeNull();
+});
+
+it("opens a Scripts row link on its repository's page and focuses its registered editor", () => {
+  const view = render(<SettingsPage initialTab="repositories.scripts" initialProjectPath="/repos/two" onBack={vi.fn()} />);
+  const row = view.container.querySelector('[data-setting-id="repositories.scripts"]');
+  expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
+  expect(document.activeElement).toBe(row);
+  expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
 });

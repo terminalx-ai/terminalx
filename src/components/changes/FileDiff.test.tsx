@@ -103,3 +103,14 @@ it("does not copy a truncation marker as file contents", async () => {
   expect((await screen.findByRole("alert")).textContent).toContain("exceeds the text preview limit");
   expect(screen.queryByRole("button", { name: "Copy file" })).toBeNull();
 });
+
+
+it.each(["file.ts", "image.png"])("keeps Discard in the %s diff header alongside its viewer", async (path) => {
+  vi.mocked(source.mediaContentAt!).mockResolvedValue({ data: btoa("image"), mime: "image/png" });
+  const onDiscard = vi.fn();
+  render(<FileDiff {...props} path={path} onDiscard={onDiscard} />);
+  if (path.endsWith(".ts")) await screen.findByRole("button", { name: "Copy file" });
+  else await screen.findByRole("region", { name: "After" });
+  fireEvent.click(screen.getByRole("button", { name: `Discard changes to ${path}` }));
+  expect(onDiscard).toHaveBeenCalledTimes(1);
+});

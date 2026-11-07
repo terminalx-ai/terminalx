@@ -1,3 +1,5 @@
+import { SettingsFileRow } from "./SettingsFile";
+import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "@/icons";
@@ -52,6 +54,7 @@ export function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
+      <SettingsFileRow />
       <RegisteredSetting setting="general.websiteLinks" control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <RegisteredSetting setting="general.linkActions" control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
       {/* PRO-40: unless the app ships the in-window confirmation alone. */}
@@ -427,15 +430,18 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
 
 /** Trackers the issues view can read. Keys live in the app's own settings file. */
 export function IntegrationsTab() {
+  const { revision } = useSettingsFile();
   const [linear, setLinear] = useState<LinearStatus | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   useEffect(() => {
-    issues.linearStatus().then(setLinear).catch(() => setLinear({ connected: false }));
-    gh.available().then(setGhOk).catch(() => setGhOk(false));
-  }, []);
+    let live = true;
+    issues.linearStatus().then((value) => live && setLinear(value)).catch(() => live && setLinear({ connected: false }));
+    gh.available().then((value) => live && setGhOk(value)).catch(() => live && setGhOk(false));
+    return () => { live = false; };
+  }, [revision]);
   const save = async (value: string) => {
     setBusy(true);
     setError(null);

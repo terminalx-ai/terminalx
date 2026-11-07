@@ -313,6 +313,7 @@ export type MergedPhase = "scheduled" | "kept" | "held" | "removed";
 
 /** Where one workspace whose pull request merged stands after a pass. */
 export interface MergedStatus {
+  archiveBlocked?: boolean;
   projectPath: string;
   path: string;
   name: string;
@@ -385,7 +386,17 @@ export interface CleanupProject {
   candidates: CleanupCandidate[];
 }
 
+export interface ArchiveFailure {
+  log?: string | null;
+  sessionsStopped?: boolean;
+  token: string;
+  pane: string;
+  code: number | null;
+  timedOut: boolean;
+}
+
 export interface CleanupRemoveItem {
+  archiveFailure?: string;
   projectPath: string;
   path: string;
   token: string;
@@ -398,6 +409,7 @@ export interface CleanupRemoveItem {
 }
 
 export interface CleanupResult {
+  archiveFailure?: ArchiveFailure;
   projectPath: string;
   path: string;
   outcome: "removed" | "alreadyRemoved" | "skipped" | "failed";
@@ -411,7 +423,7 @@ export interface CleanupResult {
 }
 
 /** What a removal is doing to the worktree it is on. */
-export type CleanupStep = "measuring" | "checking" | "removing" | "sessions";
+export type CleanupStep = "measuring" | "checking" | "archiving" | "removing" | "sessions";
 
 /**
  * How far one removal call is, as its host reports it while it runs

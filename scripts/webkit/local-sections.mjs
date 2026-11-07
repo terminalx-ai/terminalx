@@ -71,10 +71,12 @@ try {
     await page.getByRole("dialog").waitFor({ state: "detached" });
     assert.equal(await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the section heading");
     assert.equal(await page.getByTestId("conversation-list").evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the sidebar");
-    // The sidebar has no standing New section row: a section is made from a chat's menu.
-    await page.getByText("Prepare release notes", { exact: true }).click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Move to section", exact: true }).hover();
-    await page.getByRole("menuitem", { name: "New section…", exact: true }).click();
+    // Since #840 the sidebar has no standing New section row: a section is made from the
+    // command palette (or a chat's Move to section menu).
+    assert.equal(await page.getByRole("button", { name: "New section…", exact: true }).count(), 0, "no standing New section row");
+    await page.getByRole("button", { name: /^Search/ }).click();
+    await page.getByLabel("Command palette search").fill("New local section");
+    await page.locator('[role="option"][id="command:local-section:create"]').click();
     await page.getByLabel("Section name", { exact: true }).fill("Refactor");
     await page.getByRole("button", { name: "Create", exact: true }).click();
     await section("Refactor").waitFor();

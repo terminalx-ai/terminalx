@@ -42,3 +42,20 @@ it("does not resurrect a transcript whose history finishes loading after it clos
   await loading;
   expect(events.getTabLog("s1", "t1").loaded).toBe(false);
 });
+
+it("replaces reset history and rejects a read started before the reset", async () => {
+  const store = await import("./agentEvents");
+  await store.subscribeAgentEvents();
+  let finish!: (value: unknown[]) => void;
+  mocks.loadEvents.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+  const loading = store.loadTab("s1", "t1");
+  const first = { id: "first", sessionId: "s1", tabId: "t1", harness: "claude", seq: 1, ts: "now", payload: { type: "assistant_text" as const, text: "retained" } };
+  const later = { ...first, id: "later", seq: 2, payload: { type: "assistant_text" as const, text: "removed" } };
+  store.mergeTabEvents("s1", "t1", [first, later]);
+  mocks.loadEvents.mockResolvedValueOnce([first]);
+  mocks.handlers.get("tab_history_reset")!({ payload: { sessionId: "s1", tabId: "t1" } });
+  await vi.waitFor(() => expect(store.getTabLog("s1", "t1").events).toEqual([first]));
+  finish([first, later]);
+  await loading;
+  expect(store.getTabLog("s1", "t1").events).toEqual([first]);
+});
