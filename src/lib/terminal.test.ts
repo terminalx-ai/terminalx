@@ -26,6 +26,13 @@ beforeEach(() => {
 });
 
 describe("session shell tabs", () => {
+  it("leaves workspace setup to its dedicated dock tab when listing shells", async () => {
+    const terminal = await loadTerminalStore();
+    await terminal.subscribeTerminals();
+    const opened = listen.mock.calls.find(([name]) => name === "pty_opened")![1];
+    opened({ payload: { id: "s1:workspace-setup-run", sessionId: "s1", cwd: "/repo/worktree", title: null, created: "", exited: false } });
+    expect(terminal.getTerminalState().panes).toEqual([]);
+  });
   it("activates the most recently used shell and creates one only when absent", async () => {
     const terminal = await loadTerminalStore();
 

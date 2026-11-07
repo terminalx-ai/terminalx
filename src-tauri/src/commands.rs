@@ -11,7 +11,6 @@ use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
 pub use crate::session_ops::{NewSession, NewTab};
-pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{available_worktree_name, rename_workspace_entries};
 
 type CmdResult<T> = Result<T, String>;
@@ -1875,13 +1874,20 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 #[tauri::command]
-pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
+pub async fn create_session(state: State<'_, AppState>, mut req: NewSession) -> CmdResult<SessionEntry> {
+    let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex_session(&mut req);
-        create_session_blocking(&app, req)
+        sessions.create(&req).map_err(err)
     })
         .await
         .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn workspace_setup(state: State<'_, AppState>, operation: String, session_id: Option<String>, pane_id: Option<String>) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.workspace_setup(&operation, session_id.as_deref(), pane_id.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 /// Tell every window what a session is now. The window that made a change
@@ -2962,7 +2968,7 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 
 #[tauri::command]
 pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github::PullRequest>> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2972,7 +2978,7 @@ pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
 
 #[tauri::command]
 pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdResult<crate::github::PullRequest> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::associated_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

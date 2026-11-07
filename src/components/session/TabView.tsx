@@ -40,6 +40,7 @@ import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type Removabl
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
 import { interruptUnanswered } from "@/types/events";
+import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
@@ -56,6 +57,9 @@ export function terminalViewRefusal(message: string): string {
 /**
  * One tab: its event log, the transcript built from it, and the composer.
  */
+/** How many prompts a conversation has had before its next steps (Commit, Create PR, Run it) are offered. */
+export const HANDOFF_AFTER_PROMPTS = 5;
+
 /**
  * After a turn that touched files, the obvious next steps as one-click
  * prompts. They only fill the composer; the reader still sends.
@@ -66,8 +70,9 @@ export function terminalViewRefusal(message: string): string {
  */
 export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: () => void): Handoff[] | undefined {
   const last = t.turns[t.turns.length - 1];
+  // Early in a conversation the work is still being shaped: the steps wait until it has had some prompts.
   const prompts: Handoff[] =
-    last?.completed?.status === "ok" && changed
+    last?.completed?.status === "ok" && changed && t.turns.length >= HANDOFF_AFTER_PROMPTS
       ? [
           { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
           { label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." },
@@ -113,6 +118,7 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
+  const setup = useWorkspaceSetup(local ? session.id : null);
   const isGit = useSessionIsGit(session);
   const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
@@ -686,6 +692,7 @@ export function TabView({
           </div>
         )}
         <Composer
+          setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           sendScope={sendScope}
           tab={tab}
           cwd={local ? session.cwd : undefined}
