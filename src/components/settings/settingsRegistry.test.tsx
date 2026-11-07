@@ -56,7 +56,6 @@ describe("settings registry", () => {
 });
 
 it("keeps standard settings rows in the registry; organization internals register as sections", () => {
-  // Action dialog fields edit a draft item; they are not addressable settings rows.
-  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
+  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });
