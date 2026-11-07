@@ -3013,8 +3013,10 @@ impl SessionManager {
                 _ => Vec::new(),
             }
         } else { Vec::new() };
-        drop(rt);
         drop(frame);
+        // Publish the idle writer only once its frame is available to the
+        // next control; otherwise a concurrent control can fail try_lock.
+        drop(rt);
         // The activation acknowledgement follows partial-frame cleanup.
         drop(lease);
         for (action, ticket) in deferred {

@@ -105,6 +105,15 @@ fn blocked_pipe_child() {
     std::fs::write(rig._dir.path().join("block-read"), b"").unwrap();
     let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
     rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
+    let other_dir = rig._dir.path().join("other-provider");
+    std::fs::create_dir(&other_dir).unwrap();
+    let other_program = other_dir.join("acp-server");
+    executable(&other_program, SERVER);
+    let mut other_tab = tab.clone();
+    other_tab.id = "other-tab".into();
+    index::update_session(SESSION, |session| { session.tabs.push(other_tab.clone()); Ok(()) }).unwrap();
+    let other_runtime = rig.manager.runtime(SESSION, &other_tab.id).unwrap();
+    rig.manager.start_acp(&mut other_runtime.lock().unwrap(), &other_runtime, &other_tab, other_dir.to_str().unwrap(), other_program.to_str().unwrap()).unwrap();
     let (observed, full_pipe) = mpsc::channel();
     *ACP_FULL_PIPE.lock().unwrap() = Some(observed);
     let text = "x".repeat(2 * 1024 * 1024);
@@ -122,13 +131,24 @@ fn blocked_pipe_child() {
     }
     let (released, available) = mpsc::channel();
     let runtime = rig.rt.clone();
+    let manager = rig.manager.clone();
+    let other = other_runtime.clone();
     let probing = std::thread::spawn(move || {
-        let _admission = crate::issue_pipeline::admission::lock_for("other-session", "other-tab");
-        let _runtime = runtime.lock().unwrap();
+        {
+            let _admission = crate::issue_pipeline::admission::lock_for("other-session", "other-tab");
+            let _runtime = runtime.lock().unwrap();
+        }
+        manager.send(SESSION, "other-tab", "The other tab remains usable".into(), vec![]).unwrap();
+        wait_for("another real ACP tab completes its prompt", || {
+            store::read_lines::<serde_json::Value>(&other_dir.join("requests")).unwrap_or_default().iter().any(|request| request["method"] == "session/prompt")
+                && !other.lock().unwrap().turn_open
+        });
         released.send(()).unwrap();
     });
-    available.recv_timeout(Duration::from_secs(2)).expect("unrelated admission and runtime stay available while the provider never reads");
+    available.recv_timeout(Duration::from_secs(2)).expect("another real tab remains usable while the first provider never reads");
     probing.join().unwrap();
+    assert!(rig.rt.lock().unwrap().turn_open, "the other tab completes before the blocked prompt times out");
+    rig.manager.stop(SESSION, "other-tab").unwrap();
     store::write_json(&coordination.join("ready.json"), &json!({"socket":endpoint.socket,"token":endpoint.token,"root":store::root().unwrap()})).unwrap();
     wait_for("parent privacy acknowledgement", || coordination.join("release").exists());
     if case == "pipe-model-off" {
