@@ -124,6 +124,7 @@ export const MessagesSquare = icon("MessagesSquare", GLYPHS.MessagesSquare!);
 export const Terminal = icon("Terminal", GLYPHS.Terminal!);
 export const TerminalSquare = icon("TerminalSquare", GLYPHS.TerminalSquare!);
 export const SquareTerminal = icon("SquareTerminal", GLYPHS.SquareTerminal!);
+export const SessionContinue = icon("SessionContinue", GLYPHS.SessionContinue!);
 export const Play = icon("Play", GLYPHS.Play!);
 export const Pause = icon("Pause", GLYPHS.Pause!);
 export const Square = icon("Square", GLYPHS.Square!);
