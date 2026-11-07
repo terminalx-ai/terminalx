@@ -17,6 +17,7 @@ const { orderConversations } = await import("./SessionSidebar");
 const store = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
 const selection = await import("@/lib/rowSelection");
+const privacy = await import("@/lib/dataPrivacy");
 
 const chatsPath = "/store/Chats";
 const projects: Project[] = [{ path: "/repos/web", name: "web", kind: "git" }];
@@ -31,6 +32,7 @@ beforeEach(async () => {
   // Folds are remembered; each test starts from the defaults.
   prefs.setPrefs({ sidebarLayout: "simple", sidebarSections: {}, branchSessions: "sidebar" });
   mocks.invoke.mockReset().mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "data_privacy_status") return { enabled: false, managed: false };
     if (command === "list_projects") return { projects, lastSelected: null };
     if (command === "list_sessions") return sessions;
     // As the backend answers: the sessions as they are now, archived or back.
@@ -44,6 +46,8 @@ beforeEach(async () => {
     if (command === "list_workspaces") return [{ path: "/repos/web", name: "web", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 }];
     return undefined;
   });
+  // AppShell normally loads native policy before mounting these components.
+  await privacy.refreshDataPrivacy();
 });
 afterEach(cleanup);
 
@@ -104,8 +108,8 @@ describe("a project's picture", () => {
     const avatar = await within(web).findByTestId("project-avatar");
     expect(avatar.getAttribute("src")).toBe("https://github.com/acme-inc.png?size=32");
     expect(avatar.getAttribute("title")).toBe("On GitHub as acme-inc/web");
-    // Asked for the project's folder, not a chat's.
-    expect(mocks.invoke.mock.calls.filter(([command]) => command === "github_identity").map(([, args]) => args)).toEqual([{ projectPath: "/repos/web", refresh: false }]);
+    // The project's first lookup refreshes native metadata for this policy generation.
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "github_identity").map(([, args]) => args)).toEqual([{ projectPath: "/repos/web", refresh: true }]);
   });
 });
 
