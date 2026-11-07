@@ -53,6 +53,18 @@ pub struct ReviewThreads {
     pub threads: Vec<ReviewThread>,
 }
 
+/// A GitHub PR patch, read only while the PR still matches the thread snapshot.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub head_oid: String,
+    pub base_oid: String,
+    /// GitHub omits patches for binary/oversized files. Never invent coordinates.
+    pub patch: Option<String>,
+}
+
 const COMMENTS: &str = "nodes { id author { login } body url createdAt diffHunk } pageInfo { hasNextPage endCursor }";
 const THREAD: &str = "id path line originalLine startLine originalStartLine diffSide startDiffSide isOutdated isResolved viewerCanResolve viewerCanUnresolve viewerCanReply";
 const THREAD_OWNER: &str = "query($id:ID!) { node(id:$id) { ... on PullRequestReviewThread { id pullRequest { url } } } }";
@@ -146,6 +158,42 @@ fn list_with(url: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Resu
         if cursor.is_none() { break; }
     }
     result.context("GitHub did not return review threads")
+}
+
+pub fn file(url: &str, path: &str, head: &str, base: &str) -> Result<ReviewFile> {
+    file_with(url, path, head, base, &mut run)
+}
+
+fn file_with(url: &str, path: &str, head: &str, base: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<ReviewFile> {
+    let target = Target::new(url)?;
+    if path.is_empty() || head.is_empty() || base.is_empty() { bail!("A file and PR revisions are required"); }
+    let check = |run: &mut dyn FnMut(&[&str]) -> Result<String>| -> Result<()> {
+        let pr: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "url,headRefOid,baseRefOid"])?)?;
+        if pr["headRefOid"].as_str() != Some(head) || pr["baseRefOid"].as_str() != Some(base)
+            || crate::pr_associations::identity(pr["url"].as_str().context("Missing PR identity")?)? != target.url {
+            bail!("The pull request changed. Refresh threads to load its latest diff.");
+        }
+        Ok(())
+    };
+    check(run)?;
+    let endpoint = format!("repos/{}/{}/pulls/{}/files?per_page=100", target.owner, target.name, target.number);
+    let pages: Value = serde_json::from_str(&run(&["api", "--hostname", &target.host, &endpoint, "--paginate", "--slurp"])?)?;
+    let mut found = None;
+    for page in pages.as_array().context("GitHub did not return PR file pages")? {
+        for entry in page.as_array().context("GitHub did not return PR files")? {
+            if entry["filename"].as_str() == Some(path) || (found.is_none() && entry["previous_filename"].as_str() == Some(path)) {
+                found = Some(entry);
+            }
+        }
+    }
+    // A push during pagination would mix revisions. Leave the old diff unanchored instead.
+    check(run)?;
+    Ok(ReviewFile {
+        path: found.and_then(|v| v["filename"].as_str()).unwrap_or(path).into(),
+        old_path: found.and_then(|v| v["previous_filename"].as_str()).map(String::from),
+        head_oid: head.into(), base_oid: base.into(),
+        patch: found.and_then(|v| v["patch"].as_str()).map(String::from),
+    })
 }
 
 fn check_thread(target: &Target, id: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<()> {

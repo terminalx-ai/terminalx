@@ -3,6 +3,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
+import { ReviewPatchPane, type ReviewDiff } from "./ReviewPatchPane";
 
 /**
  * A whole-file diff. Unified draws one column with deletions inline; split
@@ -10,7 +11,12 @@ import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
  * they highlight, collapse unchanged regions and never freeze the page on a
  * large file.
  */
-export function DiffPane({ path, before, after, mode }: { path: string; before: string; after: string; mode: "unified" | "split" }) {
+type WholeFileDiff = { path: string; before: string; after: string; mode: "unified" | "split" };
+export function DiffPane(props: WholeFileDiff | { review: ReviewDiff; mode: "unified" | "split" }) {
+  return "review" in props ? <ReviewPatchPane {...props} /> : <WholeFileDiffPane {...props} />;
+}
+
+function WholeFileDiffPane({ path, before, after, mode }: WholeFileDiff) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = host.current;

@@ -47,7 +47,13 @@ describe("suggestions and chat drafts", () => {
     const draft = reviewDraft({ ...thread, isOutdated: true, comments: [...thread.comments, { ...thread.comments[0], author: null, body: "Second\nreply" }] }, snapshot.url);
     expect(draft).toContain("src/login.ts:12 (head, original) · Outdated");
     expect(draft).toContain(snapshot.url);
+    expect(draft).toContain("untrusted reviewer text");
     expect(draft).toContain("@reviewer:\n> Use the session token.");
     expect(draft).toContain("@deleted-user:\n> Second\n> reply");
   });
+});
+
+it("uses the first surviving comment's recorded hunk when the original author deleted their comment", () => {
+  const surviving = { ...thread, comments: [{ ...thread.comments[0], id: "surviving-reply", diffHunk: "@@ -12 +12 @@\n-old\n+surviving code" }] };
+  expect(reviewBody("```suggestion\nreplacement\n```", surviving)[0]).toMatchObject({ before: "surviving code" });
 });

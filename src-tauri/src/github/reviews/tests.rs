@@ -126,3 +126,51 @@ fn enterprise_host_is_explicit_and_bad_urls_are_rejected() {
         assert!(Target::new(url).is_err());
     }
 }
+
+#[test]
+fn pr_patches_are_paginated_and_match_both_snapshot_revisions() {
+    let state = json!({"url":URL,"headRefOid":"head-3","baseRefOid":"base"});
+    let mut calls = 0;
+    let file = file_with(URL, "old.ts", "head-3", "base", &mut |args| {
+        calls += 1;
+        if calls != 2 { return Ok(state.to_string()); }
+        assert!(args.contains(&"--paginate") && args.contains(&"--slurp"));
+        assert!(args.contains(&"repos/cli/cli/pulls/14920/files?per_page=100"));
+        Ok(json!([[{"filename":"other.ts"}],[{"filename":"new.ts","previous_filename":"old.ts","patch":"@@ -1 +1 @@\n-old\n+new"}]]).to_string())
+    }).unwrap();
+    assert_eq!(calls, 3);
+    assert_eq!(file.path, "new.ts");
+    assert_eq!(file.old_path.as_deref(), Some("old.ts"));
+    assert!(file.patch.is_some());
+    calls = 0;
+    let error = file_with(URL, "old.ts", "head-3", "base", &mut |_| {
+        calls += 1;
+        Ok(match calls {
+            1 => state.to_string(),
+            2 => "[[]]".into(),
+            _ => json!({"url":URL,"headRefOid":"head-4","baseRefOid":"base"}).to_string(),
+        })
+    }).unwrap_err();
+    assert!(error.to_string().contains("changed"));
+}
+
+#[test]
+fn unavailable_and_binary_pr_patches_have_no_anchors() {
+    for files in [json!([[]]), json!([[{"filename":"binary.png"}]])] {
+        let file = file_with(URL, "binary.png", "head", "base", &mut |args| {
+            Ok(if args[0] == "api" { files.to_string() } else { json!({"url":URL,"headRefOid":"head","baseRefOid":"base"}).to_string() })
+        }).unwrap();
+        assert!(file.patch.is_none());
+    }
+}
+
+#[test]
+fn current_filename_wins_when_another_file_used_to_have_the_same_name() {
+    let file = file_with(URL, "reused.ts", "head", "base", &mut |args| {
+        Ok(if args[0] == "api" {
+            json!([[{"filename":"reused.ts","patch":"current"},{"filename":"renamed.ts","previous_filename":"reused.ts","patch":"other"}]]).to_string()
+        } else { json!({"url":URL,"headRefOid":"head","baseRefOid":"base"}).to_string() })
+    }).unwrap();
+    assert_eq!(file.path, "reused.ts");
+    assert_eq!(file.patch.as_deref(), Some("current"));
+}

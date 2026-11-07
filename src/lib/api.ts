@@ -2132,6 +2132,7 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  reviewFile: (url: string, path: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile>("pr_review_file", { url, path, head, base }),
   reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
   resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),
   replyReview: (url: string, threadId: string, body: string) => invoke<void>("pr_review_reply", { url, threadId, body }),

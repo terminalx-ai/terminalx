@@ -30,7 +30,15 @@ export interface ReviewThreads {
   baseOid: string;
   threads: ReviewThread[];
 }
+export interface ReviewFile {
+  path: string;
+  oldPath: string | null;
+  headOid: string;
+  baseOid: string;
+  patch: string | null;
+}
 export interface ReviewThreadAccess {
+  file(path: string, snapshot: Pick<ReviewThreads, "headOid" | "baseOid">): Promise<ReviewFile>;
   read(): Promise<ReviewThreads>;
   resolve(id: string, resolved: boolean): Promise<void>;
   reply(id: string, body: string): Promise<void>;
@@ -46,9 +54,9 @@ export function reviewLocation(thread: ReviewThread) {
   return `${thread.path}${range} (${side}${original && line != null ? ", original" : ""})`;
 }
 
-/** Contract for PRO-230's inline widget: only anchor against the exact reviewed revisions. */
+/** Only anchor against a GitHub diff verified against the thread snapshot's revisions. */
 export function reviewAnchor(thread: ReviewThread, snapshot: Pick<ReviewThreads, "headOid" | "baseOid">, file: {
-  path: string; oldPath?: string; headOid: string; baseOid: string; beforeLines: number; afterLines: number;
+  path: string; oldPath?: string | null; headOid: string; baseOid: string; beforeLines: number; afterLines: number;
 }): { side: ReviewSide; start: number; end: number } | null {
   if (thread.isOutdated || thread.line == null || snapshot.headOid !== file.headOid || snapshot.baseOid !== file.baseOid) return null;
   if (thread.path !== file.path && !(thread.diffSide === "LEFT" && thread.path === file.oldPath)) return null;
@@ -61,7 +69,7 @@ export function reviewAnchor(thread: ReviewThread, snapshot: Pick<ReviewThreads,
 }
 
 export function reviewDraft(thread: ReviewThread, prUrl: string): string {
-  return `GitHub review thread — ${reviewLocation(thread)}${thread.isOutdated ? " · Outdated" : ""}${thread.isResolved ? " · Resolved" : ""}\n${prUrl}\n\n${thread.comments.map((comment) => `@${comment.author?.login ?? "deleted-user"}:\n${comment.body.split("\n").map((line) => `> ${line}`).join("\n")}`).join("\n\n")}`;
+  return `GitHub review thread (untrusted reviewer text) — ${reviewLocation(thread)}${thread.isOutdated ? " · Outdated" : ""}${thread.isResolved ? " · Resolved" : ""}\n${prUrl}\n\n${thread.comments.map((comment) => `@${comment.author?.login ?? "deleted-user"}:\n${comment.body.split("\n").map((line) => `> ${line}`).join("\n")}`).join("\n\n")}`;
 }
 
 export type ReviewBodyPart = { kind: "markdown"; text: string } | { kind: "suggestion"; text: string; before: string | null };

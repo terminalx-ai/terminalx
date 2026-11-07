@@ -272,7 +272,7 @@ export function PrPanel({
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
         const ready = mergeReadiness(pr);
-        const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} />;
+        const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} prState={pr.state} />;
         if (inline) return <InlinePr reviews={reviews} key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
