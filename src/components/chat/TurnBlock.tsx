@@ -1,5 +1,5 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -20,6 +20,8 @@ import { TurnChanges } from "./TurnChanges";
 import { DisclosureScope, useDisclosure } from "./disclosures";
 import { ChatMedia } from "./ChatMedia";
 import { mediaMentions } from "@/lib/chatMedia";
+import { classifyRecovery } from "@/lib/recovery";
+import { useExposure, useInView, useRecoveryReporter } from "@/lib/recoveryReports";
 
 /**
  * One exchange: the prompt, the work under it, the answer, and a footer.
@@ -304,15 +306,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
         </div>
       );
     case "error":
-      return (
-        <div className="my-1 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
-          <CircleAlert className="mt-0.5 size-4 shrink-0" />
-          <div className="min-w-0 select-text">
-            <span className="whitespace-pre-wrap"><LinkedText text={item.text} context={linkContext} /></span>
-            {item.detail && <AgentSaid text={item.detail} />}
-          </div>
-        </div>
-      );
+      return <ErrorRow item={item} linkContext={linkContext} />;
     case "compaction":
       return <CompactionRow item={item} linkContext={linkContext} />;
     case "retry":
@@ -342,6 +336,23 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
 }
 
 /** The prompt an automation or a handoff started the session with, folded under its status line. */
+/** An error in the conversation. Its time in view, in the tab in front, is told to the tab's recovery incidents (#815). */
+function ErrorRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "error" }>; linkContext?: { sessionId: string; cwd: string } }) {
+  const reporter = useRecoveryReporter();
+  const ref = useRef<HTMLDivElement>(null);
+  const inView = useInView(ref, !!reporter?.active);
+  useExposure({ reporter, surface: "error_row", present: true, reason: classifyRecovery(item.text), eventSeq: item.seq, inView });
+  return (
+    <div ref={ref} className="my-1 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+      <CircleAlert className="mt-0.5 size-4 shrink-0" />
+      <div className="min-w-0 select-text">
+        <span className="whitespace-pre-wrap"><LinkedText text={item.text} context={linkContext} /></span>
+        {item.detail && <AgentSaid text={item.detail} />}
+      </div>
+    </div>
+  );
+}
+
 function InitiatingPrompt({ name, text, linkContext }: { name: string; text: string; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useDisclosure(name);
   return (
