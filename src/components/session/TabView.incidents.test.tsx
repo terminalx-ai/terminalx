@@ -22,7 +22,7 @@ vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
 
 import { TabView } from "./TabView";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { upsertSession, useSessionStore } from "@/lib/sessions";
+import { getSessionStore, upsertSession, useSessionStore } from "@/lib/sessions";
 import { applyEvent, setTabStatus } from "@/lib/agentEvents";
 import { BUSY_NOTICE } from "@/lib/recovery";
 import type { UiReport } from "@/lib/recoveryReports";
@@ -43,12 +43,13 @@ function Tab({ active = true }: { active?: boolean }) {
 
 const field = () => document.querySelector("textarea") as HTMLTextAreaElement;
 const tab = () => session.tabs[0].id;
-const status = () => useSessionStore().sessions.find((s) => s.id === session.id)!.tabs[0].status;
+const status = () => getSessionStore().sessions.find((s) => s.id === session.id)!.tabs[0].status;
 const event = (payload: Payload): AgentEvent => ({ id: `e${++seq}`, seq, sessionId: session.id, tabId: tab(), harness: "codex", ts: new Date().toISOString(), payload });
 const emit = (payload: Payload) => act(() => applyEvent(event(payload)));
 const showStatus = (next: TabStatus) => act(() => setTabStatus(session.id, tab(), next));
 const banner = () => screen.queryByRole("status", { name: "Session recovery" });
-const of = (surface: UiReport["surface"]) => reports.filter((report) => report.surface === surface);
+/** What was shown on `surface`: its exposures, not the actions pressed there. */
+const of = (surface: UiReport["surface"]) => reports.filter((report) => report.kind === "exposure" && report.surface === surface);
 const send = (text: string) => {
   fireEvent.change(field(), { target: { value: text } });
   fireEvent.keyDown(field(), { key: "Enter" });
@@ -155,7 +156,8 @@ describe("what of a warning was seen, and what was pressed (#815)", () => {
     view.rerender(<Tab active />);
     await waitFor(() => expect(of("banner")).toHaveLength(3));
     expect(of("banner").map((r) => [r.phase, r.hideReason, r.reason, r.activeTab])).toEqual([
-      ["shown", undefined, "failed", true], ["hidden", "tab_hidden", "failed", true], ["resurfaced", undefined, "failed", true],
+      // Hidden by the tab going behind another: said as the tab is then, not in front.
+      ["shown", undefined, "failed", true], ["hidden", "tab_hidden", "failed", false], ["resurfaced", undefined, "failed", true],
     ]);
     expect(of("banner")[1].durationMs).toBeGreaterThanOrEqual(0);
     view.unmount();
