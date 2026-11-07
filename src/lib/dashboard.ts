@@ -3,6 +3,12 @@ import type { Buckets as PortableBuckets } from "@terminalx/portable/dashboard";
 
 export {
   bucketSessions,
+  DASHBOARD_STATES,
+  filterSessions,
+  TABLE_COLUMNS,
+  toggleTableColumn,
+  nextDashboardSort,
+  sortDashboardRows,
   COLUMNS,
   DONE_PAGE,
   hasFilters,
@@ -17,6 +23,10 @@ export {
 export type {
   BucketOptions,
   ColumnId,
+  DashboardState,
+  DashboardSort,
+  DashboardTableRow,
+  TableColumnId,
   DashboardFilters,
   DashboardSession,
   DashboardTab,

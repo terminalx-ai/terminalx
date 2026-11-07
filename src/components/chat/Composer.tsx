@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, AtSign, ChevronDown, FileText, Settings2, SlashSquare, Square } from "@/icons";
+import { ArrowUp, AtSign, ChevronDown, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -574,8 +574,6 @@ export function Composer({
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
-                {/* An alias and the same version pinned read alike otherwise: a tag on the name, not a word after it. */}
-                {model?.alias ? <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[11px] leading-4 text-faint">latest</span> : null}
                 {/* The effort is a setting of its own: set apart from the model, a step brighter than the tag. */}
                 {effortName ? <><span aria-hidden className="h-3 w-px shrink-0 bg-hairline-strong" /><span className="min-w-0 truncate text-muted-foreground">{effortName}</span></> : null}
                 <ChevronDown className="size-3 text-faint" />
@@ -724,19 +722,22 @@ interface PermissionChoice {
   onChoose: (mode: string) => void;
 }
 
-const TONE_DOT = { danger: "bg-destructive", plan: "bg-info" } as const;
+/** The permission row's icon: a shield, open to warning in a mode that asks nothing, and tinted for plan. */
+function PermissionIcon({ tone }: { tone: PermissionChoice["tone"] }) {
+  if (tone === "danger") return <ShieldAlert className="text-destructive" data-testid="permission-mode-icon" />;
+  if (tone === "plan") return <Shield className="text-info" data-testid="permission-mode-icon" />;
+  return <ShieldCheck data-testid="permission-mode-icon" />;
+}
 
 /**
  * The composer's less used controls, behind one button so the toolbar keeps
  * to what most turns touch: the permission mode, mentioning a file (typing
- * `@` does the same) and the microphone dictation records from. A mode that
- * asks nothing, or plan mode, marks the button with its dot, so it is never
- * in force unseen.
+ * `@` does the same) and the microphone dictation records from. The mode in
+ * force is named in the button's tooltip.
  */
 function ComposerOptions({ onMention, microphone, permissions, onOpen }: { onMention: (() => void) | null; microphone: boolean; permissions: PermissionChoice; onOpen: (open: boolean) => void }) {
   // A mention goes on in the text box: the menu must not hand focus back to its button as it closes.
   const mentioning = useRef(false);
-  const { tone } = permissions;
   // Opens on a click and an accessibility press too, like the model picker.
   const menu = useRowMenu({ onOpenChange: onOpen });
   return (
@@ -745,7 +746,6 @@ function ComposerOptions({ onMention, microphone, permissions, onOpen }: { onMen
         <DropdownMenuTrigger asChild {...menu.trigger}>
           <Button variant="ghost" size="icon-sm" className="relative shrink-0" aria-label="More options" data-testid="composer-options">
             <Settings2 />
-            {tone && <span className={cn("absolute right-1 top-1 size-1.5 rounded-full ring-2 ring-card", TONE_DOT[tone])} data-testid="permission-mode-dot" />}
           </Button>
         </DropdownMenuTrigger>
       </WithTooltip>
@@ -775,7 +775,7 @@ function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger disabled={!!p.lock} title={p.lock ?? `Permission mode: ${p.label}`} aria-label={`Permission mode: ${p.lock ?? p.label}`} data-testid="permission-mode">
-        <span className={cn("size-2 shrink-0 rounded-full", p.tone ? TONE_DOT[p.tone] : "bg-add")} />
+        <PermissionIcon tone={p.tone} />
         Permissions
         <span className="ml-auto max-w-48 truncate pl-3 text-faint" data-testid="permission-mode-label">
           {p.label}

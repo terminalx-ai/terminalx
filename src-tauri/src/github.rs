@@ -90,16 +90,40 @@ pub struct PullRequest {
     pub deletions: u64,
     /// MERGEABLE | CONFLICTING | UNKNOWN
     pub mergeable: String,
+    #[serde(default)]
+    pub merge_state: String,
+    #[serde(default)]
+    pub head_sha: String,
+    #[serde(default)]
+    pub merge_queue_enabled: Option<bool>,
+    #[serde(default)]
+    pub merge_queue_entry: Option<MergeQueueEntry>,
+    #[serde(default)]
+    pub auto_merge_enabled: bool,
+    /// None means unread; an empty list means no checks are required.
+    #[serde(default)]
+    pub required_checks: Option<Vec<String>>,
+    #[serde(default)]
+    pub deployments: Vec<PrCheck>,
+    #[serde(default)]
+    pub details_error: Option<String>,
     pub review_decision: Option<String>,
     pub checks: Vec<PrCheck>,
     pub body: String,
     pub author: String,
 }
 
-pub(crate) const FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,additions,deletions,mergeable,reviewDecision,statusCheckRollup,body,author";
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeQueueEntry {
+    pub position: u64,
+    pub state: String,
+}
+
+pub(crate) const FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,author";
 
 pub(crate) fn parse_pr(v: &Value) -> PullRequest {
-    let checks = v["statusCheckRollup"]
+    let checks: Vec<PrCheck> = v["statusCheckRollup"]
         .as_array()
         .map(|a| {
             a.iter()
@@ -126,11 +150,99 @@ pub(crate) fn parse_pr(v: &Value) -> PullRequest {
         additions: v["additions"].as_u64().unwrap_or(0),
         deletions: v["deletions"].as_u64().unwrap_or(0),
         mergeable: v["mergeable"].as_str().unwrap_or("UNKNOWN").into(),
+        merge_state: v["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
+        head_sha: v["headRefOid"].as_str().unwrap_or_default().into(),
+        merge_queue_enabled: None,
+        merge_queue_entry: None,
+        auto_merge_enabled: false,
+        required_checks: None,
+        deployments: v["statusCheckRollup"].as_array().into_iter().flatten().zip(&checks)
+            .filter(|(value, check)| value["__typename"] == "StatusContext" && is_deployment(&check.name))
+            .map(|(_, check)| check.clone()).collect(),
+        details_error: None,
         review_decision: v["reviewDecision"].as_str().filter(|s| !s.is_empty()).map(String::from),
         checks,
         body: v["body"].as_str().unwrap_or("").into(),
         author: v["author"]["login"].as_str().unwrap_or("").into(),
     }
+}
+
+/// Commit statuses have no deployment type. Recognize deployment contexts,
+/// retaining them in the checks list too (and therefore in its summary).
+fn is_deployment(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["deploy", "vercel", "netlify", "heroku", "cloudflare pages"].iter().any(|part| name.contains(part))
+}
+
+pub(crate) fn queue_query(url: &str) -> Result<(String, String)> {
+    let identity = crate::pr_associations::identity(url)?;
+    let parts: Vec<_> = identity.trim_start_matches("https://").split('/').collect();
+    let [host, owner, repo, "pull", number] = parts.as_slice() else { bail!("Invalid pull request URL"); };
+    let query = format!("query={{repository(owner:{},name:{}){{pullRequest(number:{number}){{state headRefOid mergeStateStatus isMergeQueueEnabled autoMergeRequest{{enabledAt}} mergeQueueEntry{{position state}}}}}}}}", serde_json::json!(owner), serde_json::json!(repo));
+    Ok((host.to_string(), query))
+}
+
+pub(crate) fn parse_queue_response(out: &str) -> Result<Value> {
+    let value: Value = serde_json::from_str(out)?;
+    if let Some(errors) = value.get("errors").and_then(Value::as_array).filter(|errors| !errors.is_empty()) {
+        bail!("GitHub: {}", errors.iter().filter_map(|error| error["message"].as_str()).collect::<Vec<_>>().join("; "));
+    }
+    let pr = &value["data"]["repository"]["pullRequest"];
+    if !pr.is_object() { bail!("GitHub did not return the pull request's merge queue state"); }
+    Ok(pr.clone())
+}
+
+fn apply_queue_response(pr: &mut PullRequest, value: &Value) -> Result<()> {
+    let state = value["state"].as_str().context("GitHub omitted pull request state")?;
+    // Terminal states always discard queue information, even if a response
+    // still contains the old entry. A null entry also clears it on removal.
+    pr.state = state.into();
+    pr.merge_queue_entry = None;
+    pr.auto_merge_enabled = state == "OPEN" && value["autoMergeRequest"].is_object();
+    pr.merge_queue_enabled = Some(value["isMergeQueueEnabled"].as_bool().context("GitHub omitted merge queue availability")?);
+    if state != "OPEN" { return Ok(()); }
+    if value["headRefOid"].as_str() != Some(pr.head_sha.as_str()) {
+        bail!("The pull request changed while its checks were read. Refresh to try again.");
+    }
+    pr.merge_state = value["mergeStateStatus"].as_str().context("GitHub omitted merge state")?.into();
+    if !value["mergeQueueEntry"].is_null() {
+        pr.merge_queue_entry = Some(serde_json::from_value(value["mergeQueueEntry"].clone())?);
+    }
+    Ok(())
+}
+
+/// Panel-only details. Discovery used by cleanup and the pipeline remains a
+/// lightweight read. Failed details never erase a PR or imply it can merge.
+pub(crate) fn enrich_panel_pr(pr: &mut PullRequest, mut run: impl FnMut(&[&str]) -> Result<GhOutput>) {
+    pr.details_error = None;
+    pr.required_checks = None;
+    pr.merge_queue_entry = None;
+    pr.merge_queue_enabled = None;
+    pr.auto_merge_enabled = false;
+    if pr.state != "OPEN" { return; }
+    let result = (|| -> Result<()> {
+        let required = run(&["pr", "checks", &pr.url, "--required", "--json", "name"])?;
+        let names = parse_required_checks(&required)?.unwrap_or_default();
+        let (host, query) = queue_query(&pr.url)?;
+        let out = run(&["api", "graphql", "--hostname", &host, "-f", &query])?;
+        if !out.success { bail!("{}", out.stderr); }
+        apply_queue_response(pr, &parse_queue_response(&out.stdout)?)?;
+        pr.required_checks = Some(names);
+        Ok(())
+    })();
+    if let Err(error) = result { pr.details_error = Some(format!("{error:#}")); }
+}
+
+pub fn panel_prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
+    let mut prs = prs_for_branch(cwd, branch)?;
+    for pr in &mut prs { enrich_panel_pr(pr, |args| run_output(&outside_checkouts(), args)); }
+    Ok(prs)
+}
+
+pub fn panel_pr_details(cwd: &Path, number: u64, url: Option<&str>) -> Result<PullRequest> {
+    let mut pr = associated_pr_details(cwd, number, url)?;
+    enrich_panel_pr(&mut pr, |args| run_output(&outside_checkouts(), args));
+    Ok(pr)
 }
 
 /// `gh pr list` with the given flags (a `--json` among them), as its records.
@@ -724,7 +836,19 @@ pub fn merge_pr(cwd: &Path, number: u64, method: &str) -> Result<()> {
 }
 
 fn merge_pr_target(cwd: &Path, target: &str, method: &str) -> Result<()> {
-    let flag = merge_flag(method);
+    let flag = if method == "queue" {
+        let out = run(cwd, &["pr", "view", target, "--json", "url"])?;
+        let value: Value = serde_json::from_str(&out)?;
+        let (host, query) = queue_query(value["url"].as_str().context("GitHub omitted PR URL")?)?;
+        let queue = parse_queue_response(&run(cwd, &["api", "graphql", "--hostname", &host, "-f", &query])?)?;
+        ensure_queue_enabled(&queue)?;
+        "--auto"
+    } else {
+        match method {
+            "merge" | "squash" | "rebase" => merge_flag(method),
+            _ => bail!("Unknown merge method"),
+        }
+    };
     let result = run(cwd, &["pr", "merge", target, flag]);
     if result.is_err() {
         // `gh pr merge` can fail with the merge already through; ask again.
@@ -735,6 +859,13 @@ fn merge_pr_target(cwd: &Path, target: &str, method: &str) -> Result<()> {
         }
     }
     result.map(|_| ())
+}
+
+pub(crate) fn ensure_queue_enabled(queue: &Value) -> Result<()> {
+    if queue["state"] != "OPEN" || queue["isMergeQueueEnabled"] != true {
+        bail!("This open pull request's base must have a merge queue enabled. Refresh and try again.");
+    }
+    Ok(())
 }
 
 pub fn mark_ready(cwd: &Path, number: u64) -> Result<()> {
@@ -1003,6 +1134,100 @@ pub fn enable_head_branch_deletion(cwd: &Path) -> Result<HeadBranchSetting> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn panel_fixture() -> Value {
+        serde_json::from_str(include_str!("fixtures/github_pr_panel.json")).unwrap()
+    }
+
+    #[test]
+    fn recorded_panel_json_preserves_merge_states_queue_states_and_check_requirements() {
+        let fixture = panel_fixture();
+        for case in fixture["cases"].as_array().unwrap() {
+            let mut value = fixture["pr"].clone();
+            value["mergeStateStatus"] = case["mergeState"].clone();
+            let mut pr = parse_pr(&value);
+            assert_eq!(pr.merge_state, case["mergeState"].as_str().unwrap());
+            let mut queue = fixture["queue"].clone();
+            let details = &mut queue["data"]["repository"]["pullRequest"];
+            details["mergeStateStatus"] = case["mergeState"].clone();
+            details["mergeQueueEntry"] = case["entry"].clone();
+            details["isMergeQueueEnabled"] = Value::Bool(!case["entry"].is_null());
+            let mut calls = 0;
+            enrich_panel_pr(&mut pr, |args| {
+                calls += 1;
+                if args[0] == "pr" {
+                    assert_eq!(args, ["pr", "checks", &pr_url(), "--required", "--json", "name"]);
+                    // Failing checks still return useful JSON with nonzero exit.
+                    Ok(GhOutput { success: false, stdout: fixture["required"].to_string(), stderr: String::new() })
+                } else {
+                    assert_eq!(&args[..5], ["api", "graphql", "--hostname", "github.com", "-f"]);
+                    assert!(args[5].contains("pullRequest(number:7)"));
+                    Ok(GhOutput { success: true, stdout: queue.to_string(), stderr: String::new() })
+                }
+            });
+            assert_eq!(calls, 2);
+            assert!(pr.details_error.is_none(), "{:?}", pr.details_error);
+            assert_eq!(pr.required_checks, Some(vec!["build".into()]));
+            assert_eq!(pr.checks.iter().map(|check| check.state.as_str()).collect::<Vec<_>>(), ["success", "failure", "in_progress", "skipped", "failure", "success"]);
+            assert_eq!(pr.deployments.len(), 1);
+            assert_eq!(pr.deployments[0].url.as_deref(), Some("https://preview.example.test"));
+            assert_eq!(serde_json::to_value(pr.merge_queue_entry).unwrap(), case["entry"]);
+        }
+    }
+
+    fn pr_url() -> String { "https://github.com/acme/widgets/pull/7".into() }
+
+    #[test]
+    fn queue_removal_and_terminal_states_clear_even_a_retained_entry() {
+        let fixture = panel_fixture();
+        let mut pr = parse_pr(&fixture["pr"]);
+        let mut details = fixture["queue"]["data"]["repository"]["pullRequest"].clone();
+        details["mergeQueueEntry"] = serde_json::json!({ "position": 3, "state": "AWAITING_CHECKS" });
+        apply_queue_response(&mut pr, &details).unwrap();
+        assert_eq!(pr.merge_queue_entry.as_ref().unwrap().position, 3);
+        details["mergeQueueEntry"] = Value::Null;
+        apply_queue_response(&mut pr, &details).unwrap();
+        assert!(pr.merge_queue_entry.is_none());
+        for state in ["MERGED", "CLOSED"] {
+            details["state"] = state.into();
+            details["mergeQueueEntry"] = serde_json::json!({ "position": 3, "state": "QUEUED" });
+            details["autoMergeRequest"] = serde_json::json!({ "enabledAt": "2026-11-07T00:00:00Z" });
+            apply_queue_response(&mut pr, &details).unwrap();
+            assert_eq!(pr.state, state);
+            assert!(pr.merge_queue_entry.is_none());
+            assert!(!pr.auto_merge_enabled);
+        }
+    }
+
+    #[test]
+    fn unread_or_inconsistent_panel_details_do_not_claim_requirements_or_queue_membership() {
+        let fixture = panel_fixture();
+        for message in ["HTTP 403: no access", "error connecting to api.github.com", "GitHub did not answer within 120 seconds."] {
+            let mut pr = parse_pr(&fixture["pr"]);
+            enrich_panel_pr(&mut pr, |_| bail!("{message}"));
+            assert_eq!(pr.details_error.as_deref(), Some(message));
+            assert!(pr.required_checks.is_none());
+            assert!(pr.merge_queue_enabled.is_none());
+        }
+        let mut pr = parse_pr(&fixture["pr"]);
+        let mut details = fixture["queue"]["data"]["repository"]["pullRequest"].clone();
+        details["headRefOid"] = "new-head".into();
+        assert!(apply_queue_response(&mut pr, &details).is_err());
+        assert!(parse_queue_response(r#"{"data":{"repository":null}}"#).is_err());
+        assert!(parse_queue_response(r#"{"errors":[{"message":"no access"}]}"#).is_err());
+    }
+
+    #[test]
+    fn queue_action_requires_an_open_pr_on_a_queue_base_and_keeps_host_identity() {
+        assert!(ensure_queue_enabled(&serde_json::json!({ "state": "OPEN", "isMergeQueueEnabled": true })).is_ok());
+        for value in [serde_json::json!({"state":"OPEN","isMergeQueueEnabled":false}), serde_json::json!({"state":"MERGED","isMergeQueueEnabled":true}), Value::Null] {
+            assert!(ensure_queue_enabled(&value).is_err());
+        }
+        let (host, query) = queue_query("https://github.example.test/acme/widgets/pull/7").unwrap();
+        assert_eq!(host, "github.example.test");
+        assert!(query.contains("owner:\"acme\",name:\"widgets\""));
+        assert!(queue_query("--repo=unrelated").is_err());
+    }
 
     #[test]
     fn branch_discovery_keeps_same_branch_followups_but_not_an_unrelated_fork() {

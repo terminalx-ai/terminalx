@@ -2103,6 +2103,14 @@ export interface PullRequest {
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Absent on older workspace runtimes. */
+  mergeState?: string;
+  mergeQueueEnabled?: boolean | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  autoMergeEnabled?: boolean;
+  requiredChecks?: string[] | null;
+  deployments?: { name: string; state: string; url?: string | null }[];
+  detailsError?: string | null;
   reviewDecision: string | null;
   checks: PrCheck[];
   body: string;
@@ -2137,12 +2145,13 @@ export const gh = {
   attach: (cwd: string, number: number) => invoke<string>("pr_attach", { cwd, number }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
+  associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
   list: (cwd: string, branch: string) => invoke<PullRequest[]>("pr_list", { cwd, branch }),
   details: (cwd: string, number: number, url?: string) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
-  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
+  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
   ready: (cwd: string, number: number, url?: string) => invoke<void>("pr_ready", { cwd, number, ...(url ? { url } : {}) }),
 };
 
@@ -2556,6 +2565,36 @@ export const experimental = {
     }
   },
 };
+
+/** Settings → Storage: what is kept about the warnings tabs raise (#815). */
+export interface DiagnosticsSettings {
+  /** Record when a tab's warning was raised, shown, acted on and cleared: labels, counts and times only. */
+  recoveryIncidents: boolean;
+}
+
+/**
+ * The runtime's log of recovery incidents (#815, `recovery_log.rs`). A
+ * window reports what it showed and what was pressed; every field is a label
+ * or a number, refused otherwise at the boundary. Reports are best effort.
+ */
+export const recoveryIncidents = {
+  report: (sessionId: string, tabId: string, report: import("@/lib/recoveryReports").UiReport) => invoke<void>("report_recovery_ui", { sessionId, tabId, report }),
+  settings: () => invoke<DiagnosticsSettings>("diagnostics_settings"),
+  setEnabled: (enabled: boolean) => invoke<DiagnosticsSettings>("set_recovery_incidents", { enabled }),
+  summary: () => invoke<RecoveryIncidentSummary>("recovery_incidents_summary"),
+  export: (path: string) => invoke<void>("recovery_incidents_export", { path }),
+  clear: () => invoke<void>("clear_recovery_incidents"),
+};
+
+/** What `recovery_log::summarize` says, as far as the settings row reads it. */
+export interface RecoveryIncidentSummary {
+  lines: number;
+  lines_lost: number;
+  incidents: number;
+  busy_refusals_while_turn_open: number;
+  suspected_false_positives: { incident: string; reason: string; why: string }[];
+  groups: { reason: string; runtime: string; transport: string; incidents: number; occurrences: number }[];
+}
 
 export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;
