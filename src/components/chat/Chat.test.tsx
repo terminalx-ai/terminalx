@@ -7,6 +7,8 @@ import type { StreamBlock } from "@/lib/agentEvents";
 import type { AgentEvent } from "@/types/events";
 import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { registerShortcut } from "@/lib/hotkeys";
+import { setPrefs } from "@/lib/prefs";
 
 // jsdom lays nothing out, so this models the one box that matters: a scroller
 // of fixed height over content whose children stack at known heights. Like a
@@ -104,7 +106,7 @@ function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
   const stream = (): StreamBlock[] => [
     { ref: { messageId: "m-live", index: 0 }, kind: "text", text: `streamed delta ${++seq}`, partialJson: "", done: false },
   ];
-  const view = render(<Chat {...props} stream={stream()} />);
+  const view = render(<Chat {...props} stream={stream()} />, { wrapper: TooltipProvider });
   mountScrollModel(view.container);
   setTop(maxTop());
   frame();
@@ -399,6 +401,86 @@ describe("chat scroll follow", () => {
     frame();
     expect(content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top).toBe(0);
     expect(latestShown()).toBe(true);
+  });
+
+  it("finds and highlights a far-off Markdown phrase without mounting the full transcript", async () => {
+    const highlights = new Map<string, Set<Range>>();
+    vi.stubGlobal("Highlight", class extends Set<Range> { priority = 0; constructor(...ranges: Range[]) { super(ranges); } });
+    vi.stubGlobal("CSS", { escape: CSS.escape.bind(CSS), highlights });
+    const log = syntheticLog(2000, true);
+    const answer = log.filter((event) => event.payload.type === "assistant_text")[3];
+    answer.payload = { type: "assistant_text", text: "The **elusive** [file](https://example.test) is here. Another elusive file." };
+    const { transcript, view } = setup(2000, log);
+    const far = transcript.turns[3].key;
+    expect(content.querySelector(`[data-turn="${far}"]`)).toBeNull();
+    const region = scroller.closest<HTMLElement>('[data-find-scope="chat"]')!;
+    fireEvent.pointerDown(content);
+    expect(document.activeElement).toBe(region);
+    fireEvent.keyDown(region, { key: "f", ctrlKey: true });
+    const field = screen.getByRole("textbox", { name: "Find in chat" });
+    fireEvent.change(field, { target: { value: "elusive file" } });
+    expect(screen.getByRole("status").textContent).toBe("1 of 2");
+    expect(content.querySelector(`[data-turn="${far}"]`)).not.toBeNull();
+    expect(content.querySelectorAll("[data-turn]").length).toBeLessThan(25);
+    const shownTop = content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top;
+    expect(shownTop).toBeGreaterThanOrEqual(0);
+    expect(shownTop).toBeLessThan(VIEWPORT);
+    await act(async () => {}); // MutationObserver paints the newly mounted row.
+    const selected = () => [...highlights.entries()].find(([name]) => name.endsWith("-active"))![1];
+    expect([...selected()].map((range) => range.toString())).toEqual(["elusive file"]);
+    fireEvent.keyDown(field, { key: "g", ctrlKey: true });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    fireEvent.keyDown(field, { key: "g", ctrlKey: true, shiftKey: true });
+    expect(screen.getByRole("status").textContent).toBe("1 of 2");
+    fireEvent.keyDown(field, { key: "Enter", shiftKey: true });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229 });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    const updated = { ...transcript, turns: [...transcript.turns, { ...transcript.turns.at(-1)!, key: "new", work: [], prompt: { seq: 99999, ts: "", text: "A new prompt" } }] };
+    view.rerender(<Chat sessionId="s" transcript={updated} stream={[]} live answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} />);
+    frame();
+    expect(content.querySelector(`[data-turn="${far}"]`)).not.toBeNull();
+    expect(latestShown()).toBe(true);
+    const interrupt = vi.fn();
+    const unbind = registerShortcut("session.interrupt", interrupt, { global: true });
+    try {
+      fireEvent.keyDown(field, { key: "Escape" });
+      expect(screen.queryByRole("search", { name: "Find in chat" })).toBeNull();
+      expect(interrupt).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(region);
+      expect(highlights.size).toBe(0);
+    } finally { unbind(); }
+  });
+
+  it("reveals folded reasoning and grouped Read output beyond its preview, then restores folds", () => {
+    setPrefs({ foldToolCalls: true });
+    const { transcript, view } = setup(4);
+    const first = transcript.turns[0];
+    const updated = { ...transcript, turns: [{ ...first, completed: { status: "ok", ts: "" }, work: [
+      { kind: "reasoning" as const, key: "thought", seq: 1, text: "Consider the hidden clue" },
+      { kind: "tool_group" as const, key: "group", name: "Read", calls: [
+        { callId: "one", seq: 2, name: "Read", toolType: "file_read", input: {}, result: { isError: false, text: "x".repeat(21000) + "hidden clue" } },
+        { callId: "two", seq: 3, name: "Read", toolType: "file_read", input: {}, result: { isError: false, text: "other" } },
+      ] },
+      { kind: "text" as const, key: "answer", seq: 4, text: "Finished." },
+    ] }, ...transcript.turns.slice(1)] };
+    view.rerender(<Chat sessionId="s" transcript={updated} stream={[]} live={false} answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={<textarea aria-label="Composer" />} />);
+    const composer = screen.getByRole("textbox", { name: "Composer" });
+    composer.focus();
+    fireEvent.keyDown(composer, { key: "f", ctrlKey: true });
+    const field = screen.getByRole("textbox", { name: "Find in chat" });
+    fireEvent.change(field, { target: { value: "hidden clue" } });
+    expect(screen.getByRole("status").textContent).toBe("1 of 2");
+    expect(screen.getByText("Consider the hidden clue")).toBeTruthy();
+    fireEvent.keyDown(field, { key: "g", ctrlKey: true });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    expect(screen.getByText("x".repeat(21000) + "hidden clue")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Include tool output" }));
+    expect(screen.getByRole("status").textContent).toBe("1 of 1");
+    expect(screen.queryByText("x".repeat(21000) + "hidden clue")).toBeNull();
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.queryByText("Consider the hidden clue")).toBeNull();
+    expect(document.activeElement).toBe(composer);
   });
 });
 

@@ -9,7 +9,8 @@ import { PermissionCard, QuestionCard } from "./AskCards";
 import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
 import { READER_SCROLL_EVENT, scrollToInOwnScroller } from "@/lib/shellScroll";
 import { elementWithId, SEEK_ANCHOR_EVENT } from "@/lib/chatLinks";
-import { DisclosureMemory, type Disclosures } from "./disclosures";
+import { DisclosureMemory, SearchDisclosures, type Disclosures } from "./disclosures";
+import { useChatFind } from "./ChatFind";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
 import { turnDivider } from "@/lib/turnDivider";
@@ -126,6 +127,7 @@ export function Chat({
   onSendAgain?: (seq: number) => void;
   onReset?: (endSeq: number) => void;
 }) {
+  const root = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -143,8 +145,11 @@ export function Chat({
   /** The turns this render drew from, for working `tops` out again between renders. */
   const turnList = useRef(turns);
   const [disclosures] = useState<Disclosures>(() => new Map());
-  /** The id a link asked for that no drawn turn holds: every turn is drawn until it has been looked for. */
-  const [seeking, setSeeking] = useState<string | null>(null);
+  /** An off-screen anchor. Search names its turn; ordinary links may need every turn drawn to locate it. */
+  const [seeking, setSeeking] = useState<{ id: string; turnKey?: string } | null>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
+  const [footerHeight, setFooterHeight] = useState(0);
+  const find = useChatFind({ root, scroller, transcript, footerHeight });
 
   const follow = useCallback((on: boolean) => {
     pinned.current = on;
@@ -172,10 +177,13 @@ export function Chat({
   // so is the reader's own message while it is being sent.
   const lastPrompt = `${turns[turns.length - 1]?.prompt?.seq ?? ""}:${sending?.pressedAt ?? ""}`;
   const followedPrompt = useRef(lastPrompt);
-  const tail = pinned.current || followedPrompt.current !== lastPrompt;
+  const tail = pinned.current || (!find.hasMatch && followedPrompt.current !== lastPrompt);
   // Off the bottom, the band the view last asked for; one not worked out yet (or for a list since cut short) is the tail's.
   const known = band.end > band.start && band.end <= turns.length;
-  const { start, end } = seeking != null ? { start: 0, end: turns.length } : tail || !known ? visibleTurns(turnTops, 0, band.height, true) : band;
+  const soughtTurn = seeking?.turnKey ? turns.findIndex((turn) => turn.key === seeking.turnKey) : -1;
+  const { start, end } = seeking != null
+    ? soughtTurn >= 0 ? { start: soughtTurn, end: soughtTurn + 1 } : { start: 0, end: turns.length }
+    : tail || !known ? visibleTurns(turnTops, 0, band.height, true) : band;
 
   /** Which turns the view needs drawn, from where it is over the list now. */
   const readView = useCallback(() => {
@@ -248,7 +256,11 @@ export function Chat({
       if (up && el.scrollTop > 0) follow(false);
     };
     const onReaderScroll = () => follow(false);
-    const onSeek = (e: Event) => setSeeking((e as CustomEvent<string>).detail);
+    const onSeek = (e: Event) => {
+      const detail = (e as CustomEvent<string | { id: string; turnKey: string }>).detail;
+      follow(false);
+      setSeeking(typeof detail === "string" ? { id: detail } : detail);
+    };
     const onPointerDown = () => {
       dragging = true;
     };
@@ -308,21 +320,22 @@ export function Chat({
   });
 
   useLayoutEffect(() => {
+    if (followedPrompt.current === lastPrompt) return;
     followedPrompt.current = lastPrompt;
+    if (find.hasMatch) return;
     follow(true);
     pinToBottom();
-  }, [lastPrompt, follow, pinToBottom]);
+  }, [lastPrompt, follow, pinToBottom, find.hasMatch]);
 
-  // Every turn is drawn and measured now (the effects above ran first, and
-  // measuring worked the tops out again): the place a link asked for is
-  // brought to the top if a turn holds it, and the band is worked out around
-  // it on heights that are all real.
+  // The requested turn(s) are drawn and measured now. Bring the anchor to the
+  // top, then work out the band around it using the updated measurements.
   useLayoutEffect(() => {
     if (seeking == null) return;
     const el = scroller.current;
-    const target = el && elementWithId(el, seeking);
+    const target = el && elementWithId(el, seeking.id);
     if (el && target) {
-      scrollToInOwnScroller(target);
+      if (seeking.turnKey) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+      else scrollToInOwnScroller(target);
       lastTop.current = el.scrollTop;
       readView();
     }
@@ -374,8 +387,6 @@ export function Chat({
   const { promptMap } = usePrefs();
 
   // The footer floats over the transcript's foot; the transcript ends in a spacer as tall as it.
-  const footerRef = useRef<HTMLDivElement>(null);
-  const [footerHeight, setFooterHeight] = useState(0);
   useLayoutEffect(() => {
     const el = footerRef.current;
     if (!el) return;
@@ -390,11 +401,21 @@ export function Chat({
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={root} data-find-scope="chat" tabIndex={-1} className="relative flex min-h-0 flex-1 flex-col outline-none"
+      onPointerDown={(event) => {
+        // Plain transcript text is not focusable. Clicking it gives this region Cmd+F,
+        // while links, controls and the composer retain their normal focus behavior.
+        if (event.target instanceof Element) {
+          const control = event.target.closest('a, button, input, textarea, select, [contenteditable], [tabindex]');
+          if (!control || control === root.current) root.current?.focus({ preventScroll: true });
+        }
+      }}>
+      {find.bar}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           <DisclosureMemory value={disclosures}>
+          <SearchDisclosures value={find.disclosures}>
           {!turns.length && !live && !sending && loading && (
             // Loading is a label alone; the scene is for a conversation that really is empty.
             <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
@@ -450,6 +471,7 @@ export function Chat({
           ))}
           {/* Room to scroll the last of the transcript out from under the footer. Inside the content, so growing it re-pins. */}
           <div aria-hidden style={{ height: footerHeight }} />
+          </SearchDisclosures>
           </DisclosureMemory>
         </div>
       </div>
