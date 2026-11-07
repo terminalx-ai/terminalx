@@ -2703,6 +2703,7 @@ impl SessionManager {
 
     /// Send one prompt to the agent while publishing a different, user-facing
     /// representation to the transcript.
+    #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
@@ -2779,6 +2780,7 @@ impl SessionManager {
     /// Every send, from wherever it came, passes here. One the tab took is a
     /// message its agent now has, which an issue pipeline stopped on its
     /// answer is waiting for (#725).
+    #[allow(clippy::too_many_arguments)]
     fn send_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, prompt: PromptText,
         images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>, origin: crate::recovery_log::Origin,
