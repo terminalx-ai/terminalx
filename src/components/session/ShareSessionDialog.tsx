@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Copy, Eye, Link2, Plus, QrCode, Share2, Terminal, Users } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { CollaborationScene } from "./CollaborationScene";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   changeShare,
@@ -280,10 +281,14 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
     >
       {/* Signed out it is a short card with one thing to do; signed in it widens for the link form. */}
       <DialogContent width={signedIn ? "max-w-[40rem]" : "max-w-[26rem]"} className="max-h-[90vh] overflow-y-auto p-6">
+        {/* Signed out, a picture of what sharing is before the words: people at one conversation, together. */}
+        {!signedIn && <CollaborationScene className="mb-5 mt-6" />}
         <DialogHeader className={cn("mb-5 gap-0", signedIn ? "flex-row items-center gap-3 pr-8" : "items-center text-center")}>
-          <span className={cn("flex shrink-0 items-center justify-center rounded-xl bg-veil-raised text-foreground/80 hairline", signedIn ? "size-9" : "mb-3 size-11")} aria-hidden>
-            <Users className={signedIn ? "size-4" : "size-5"} />
-          </span>
+          {signedIn && (
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-veil-raised text-foreground/80 hairline" aria-hidden>
+              <Users className="size-4" />
+            </span>
+          )}
           <span className="flex min-w-0 flex-col gap-1">
             <DialogTitle className="text-[15px] font-medium text-foreground">Share this session</DialogTitle>
             <DialogDescription className="text-[13px] leading-relaxed text-muted-foreground">
