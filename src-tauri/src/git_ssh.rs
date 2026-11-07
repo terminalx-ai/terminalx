@@ -64,6 +64,7 @@ fn variant(explicit: Option<&OsStr>, executable: Option<&OsStr>) -> Variant {
     }
 }
 
+/// Prepare only the non-recursive verification fetch for this repository.
 /// Keep the returned directory alive until the admitted Git group is drained.
 /// Known variants need no probe. For an unknown basename, Git itself supplies
 /// the -G probe, host, port and protocol arguments, and selects ssh or simple.
@@ -127,8 +128,8 @@ exec /bin/sh -c ");
             source.extend_from_slice(b" \"$@\"\n");
             std::fs::write(&script, source)?;
             // exec keeps PPID equal to the invoking Git process in both the
-            // probe and transfer. Separate recursive Git children have separate
-            // state. Nothing is reused by a later request or privacy generation.
+            // probe and transfer. Nothing is reused by a later request or
+            // privacy generation. The verification fetch never enters submodules.
             let mut proxy = OsString::from("exec /bin/sh ");
             proxy.push(quote(script.as_os_str()));
             command.env("GIT_SSH_COMMAND", proxy).env("GIT_SSH_VARIANT", "auto");

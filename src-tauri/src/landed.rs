@@ -547,7 +547,9 @@ pub fn state_in_list(context: &ListContext, path: &Path, branch: Option<&str>, h
 
 /// What a project's branches are compared with: `(base, not_verified,
 /// fresh)`. `not_verified` says why the comparison is not certain, when it
-/// is not; `fresh` is whether the remote default branch was fetched for it.
+/// is not; `fresh` is whether this project's remote default branch was fetched
+/// for it. This does not fetch or verify submodules; `check` refuses to mark a
+/// checkout containing them safe even when this comparison branch is fresh.
 pub(crate) fn base_for(project: &Path, fetch: Fetch) -> (Option<String>, Option<String>, bool) {
     let _request = crate::github_process::scope();
     let Some(default) = known_default_branch(project) else {

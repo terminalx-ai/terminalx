@@ -10,10 +10,14 @@ pub(super) fn run(root: &Path, fixture: &FetchFixture, managed: bool) {
     forwarding(root, fixture, managed);
     configured_ssh(root, fixture, managed);
     variants::run(root, fixture, managed);
+    submodules::run(root, managed);
 }
 
 #[path = "github_ssh_variant_privacy_tests.rs"]
 mod variants;
+
+#[path = "github_submodule_privacy_tests.rs"]
+mod submodules;
 
 fn service(root: &Path, endpoint: &hooks::ControlEndpoint) -> ControlService {
     let lifetime = Lifetime::new(Duration::from_secs(60));

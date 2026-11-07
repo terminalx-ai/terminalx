@@ -32,12 +32,15 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// App-owned remote read. Local metadata and agent processes use their own
-/// runners; this one retains the caller's admission until the group is drained.
+/// Refresh this project's comparison branch for landed/cleanup verification.
+/// Submodules are outside that check (and prevent a verified safe deletion).
+/// Never recurse: our repository-specific SSH environment must not override a
+/// child's own transport. Ordinary fetches and agent processes keep their own
+/// runners; this one retains admission until the whole group is drained.
 pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Duration) -> Result<()> {
     let _request = crate::github_process::scope();
     let mut command = git();
-    command.current_dir(cwd).args(["fetch", "--quiet", "origin", branch]);
+    command.current_dir(cwd).args(["fetch", "--quiet", "--no-recurse-submodules", "origin", branch]);
     let _transport = ssh::contain(cwd, &mut command)?;
     let output = crate::github_process::output(command, timeout, None)?;
     if !output.status.success() {
