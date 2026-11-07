@@ -88,6 +88,8 @@ it("keeps Share choices through offline/error, confirms discard and clears them 
   view.rerender(<TeamSurfaceExample {...props} state="no-access" />);
   expect(screen.queryByRole("combobox")).toBeNull();
   view.rerender(<TeamSurfaceExample {...props} state="ready" />);
+  expect(screen.queryByRole("combobox", { name: "Access level" })).toBeNull();
+  fireEvent.change(screen.getByRole("combobox", { name: "Person to share with" }), { target: { value: data.people[0].id } });
   expect((screen.getByRole("combobox", { name: "Access level" }) as HTMLSelectElement).value).toBe("viewer");
 });
 
@@ -189,4 +191,29 @@ it("opens automation actions with the keyboard and returns focus on Escape", asy
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   expect(document.activeElement).toBe(trigger);
   expect(onAction).not.toHaveBeenCalled();
+});
+
+it("keeps Share bound to its recipient across reorder and clears permissions when that person disappears", () => {
+  const second = { id: "second-member", name: "Second review member", presence: "unknown" as const };
+  const props = { surface: "share" as const, data: { ...data, people: [...data.people, second] }, state: "ready" as const, canAct: true, onAction: vi.fn() };
+  const view = render(<TeamSurfaceExample {...props} />);
+  openSurface("share");
+  fireEvent.change(screen.getByRole("combobox", { name: "Access level" }), { target: { value: "driver" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: /Can approve/ }));
+  view.rerender(<TeamSurfaceExample {...props} data={{ ...data, people: [second, ...data.people] }} />);
+  expect((screen.getByRole("combobox", { name: "Person to share with" }) as HTMLSelectElement).value).toBe(data.people[0].id);
+  expect((screen.getByRole("combobox", { name: "Access level" }) as HTMLSelectElement).value).toBe("driver");
+  fireEvent.click(screen.getByRole("button", { name: "Review access changes" }));
+  view.rerender(<TeamSurfaceExample {...props} data={{ ...data, people: [second] }} />);
+  expect(screen.queryByRole("combobox", { name: "Access level" })).toBeNull();
+  expect(screen.queryByText(/Review member: Can send/)).toBeNull();
+  expect((screen.getByRole("combobox", { name: "Person to share with" }) as HTMLSelectElement).value).toBe("");
+  fireEvent.change(screen.getByRole("combobox", { name: "Person to share with" }), { target: { value: second.id } });
+  expect((screen.getByRole("combobox", { name: "Access level" }) as HTMLSelectElement).value).toBe("viewer");
+  expect((screen.getByRole("checkbox", { name: /Can approve/ }) as HTMLInputElement).checked).toBe(false);
+  fireEvent.change(screen.getByRole("combobox", { name: "Access level" }), { target: { value: "driver" } });
+  view.rerender(<TeamSurfaceExample {...props} state="loading" data={{ ...data, people: [] }} />);
+  view.rerender(<TeamSurfaceExample {...props} data={data} />);
+  expect(screen.queryByRole("combobox", { name: "Access level" })).toBeNull();
+  expect((screen.getByRole("combobox", { name: "Person to share with" }) as HTMLSelectElement).value).toBe("");
 });

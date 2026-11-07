@@ -20,7 +20,7 @@ function TeamDesign() {
   const [lastAction, setLastAction] = useState("No preview action yet.");
   const port = Number(values.port);
   const remotePort = Number(values.remotePort);
-  const data: TeamPreviewData = { ...values, forwardState, remotePort: Number.isInteger(remotePort) && remotePort >= 1 && remotePort <= 65535 ? remotePort : null, profile: { email: details.email, role: details.role, joined: details.joined }, billing: { seats: details.seats, payer: details.payer, nextCharge: details.nextCharge }, schedule: { trigger: details.trigger, runs: details.runs, lastRun: details.lastRun, nextRun: details.nextRun, created: details.created }, people: names.split("\n").map((name) => name.trim()).filter(Boolean).map((name, i) => ({ id: String(i), name, presence })), port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null };
+  const data: TeamPreviewData = { ...values, forwardState, remotePort: Number.isInteger(remotePort) && remotePort >= 1 && remotePort <= 65535 ? remotePort : null, profile: { email: details.email, role: details.role, joined: details.joined }, billing: { seats: details.seats, payer: details.payer, nextCharge: details.nextCharge }, schedule: { trigger: details.trigger, runs: details.runs, lastRun: details.lastRun, nextRun: details.nextRun, created: details.created }, people: names.split("\n").map((name) => name.trim()).filter(Boolean).map((name, i) => ({ id: `${i}:${name}`, name, presence })), port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null };
   return (
     <main className="h-full overflow-auto bg-background p-4 text-foreground sm:p-6">
       <div className="mx-auto max-w-6xl space-y-6">

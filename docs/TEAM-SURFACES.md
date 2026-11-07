@@ -34,7 +34,9 @@ Expand “Optional returned details” to supply profile, billing and automation
 Supply distinct workspace/local ports and choose the returned forward state. The
 automation filter/menu and workspace tab shell are interactive local designs.
 Share keeps local choices through offline/error, disables writes while disconnected,
-confirms dirty dismissal, and clears choices on scope/access loss.
+confirms dirty dismissal, and clears choices on scope/access loss. Its draft stays
+bound to the selected recipient across roster reordering; removal clears the draft
+and requires an explicit new selection instead of transferring rights to another row.
 Enable “Caller allows preview actions” to inspect enabled controls. Every action
 reports “Preview action”; it performs no copy, navigation, billing or access mutation.
 The desktop viewport is an explicitly labelled integration slot, not a fake desktop.

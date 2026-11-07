@@ -86,34 +86,39 @@ function DesktopExample({ canAct, onAction }: Pick<TeamExampleProps, "canAct" | 
   </Tabs.Content></Tabs.Root>;
 }
 
-const initialShareDraft = { level: "viewer", approve: false };
+const initialShareDraft = { recipientId: null as string | null, level: "viewer", approve: false };
 
 function ShareDialogExample({ data, state, canAct, onAction }: TeamExampleProps) {
   const prefix = useId();
   const [open, setOpen] = useState(false);
   const [seenReady, setSeenReady] = useState(false);
-  const [draft, setDraft] = useState(initialShareDraft);
+  const [draft, setDraft] = useState<typeof initialShareDraft>(() => ({ ...initialShareDraft, recipientId: data.people[0]?.id ?? null }));
   const dialogContent = useRef<HTMLDivElement>(null);
   const keepEditing = useRef<HTMLButtonElement>(null);
   const [discarding, setDiscarding] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const recipient = data.people.find((person) => person.id === draft.recipientId);
   const dirty = draft.level !== initialShareDraft.level || draft.approve !== initialShareDraft.approve;
   useEffect(() => { if (discarding) keepEditing.current?.focus(); }, [discarding]);
   // Offline/error preserve choices; a revoked scope cannot keep a sensitive draft.
   useEffect(() => { if (state === "ready") setSeenReady(true); if (state === "no-access") { setSeenReady(false); setDraft(initialShareDraft); setDiscarding(false); setReviewing(false); dialogContent.current?.querySelector<HTMLButtonElement>('[aria-label="Close"]')?.focus(); } }, [state]);
+  useEffect(() => { if (state === "ready" && draft.recipientId && !recipient) { setDraft(initialShareDraft); setReviewing(false); } }, [state, draft.recipientId, recipient]);
   const requestOpen = (next: boolean) => { if (!next && dirty && state !== "no-access") setDiscarding(true); else setOpen(next); };
-  const closeDiscarding = () => { setDraft(initialShareDraft); setDiscarding(false); setReviewing(false); setOpen(false); };
+  const closeDiscarding = () => { setDraft({ ...initialShareDraft, recipientId: recipient?.id ?? null }); setDiscarding(false); setReviewing(false); setOpen(false); };
   const message = state !== "ready" ? <SurfaceState {...surfaceMessage("share", state)} action={state === "error" ? { label: "Try again", onAction: () => onAction("Retry share") } : undefined} /> : null;
-  const choices = data.people[0] ? <div className="space-y-4">
-      <p className="break-words text-sm">{data.workspace}</p><div className={row}><span className="min-w-0 break-words">{data.people[0].name}</span><label className="flex flex-col gap-1 text-xs" htmlFor={`${prefix}-level`}>Access level<select id={`${prefix}-level`} className={field} disabled={!canAct || state !== "ready"} value={draft.level} onChange={(event) => setDraft({ ...draft, level: event.target.value })}><option value="viewer">View only</option><option value="driver">Can send</option><option disabled>Admin — pending PRO-167</option></select></label></div>
+  const choices = <div className="space-y-4">
+      <label className="flex flex-col gap-1 text-xs" htmlFor={`${prefix}-recipient`}>Person to share with<select id={`${prefix}-recipient`} className={field} disabled={!canAct || state !== "ready"} value={recipient?.id ?? ""} onChange={(event) => { setDraft({ ...initialShareDraft, recipientId: event.target.value || null }); setReviewing(false); }}><option value="">Choose a person</option>{data.people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>
+      {recipient ? <>
+      <p className="break-words text-sm">{data.workspace}</p><div className={row}><span className="min-w-0 break-words">{recipient.name}</span><label className="flex flex-col gap-1 text-xs" htmlFor={`${prefix}-level`}>Access level<select id={`${prefix}-level`} className={field} disabled={!canAct || state !== "ready"} value={draft.level} onChange={(event) => setDraft({ ...draft, level: event.target.value })}><option value="viewer">View only</option><option value="driver">Can send</option><option disabled>Admin — pending PRO-167</option></select></label></div>
       <label className="flex items-start gap-2 text-xs"><input type="checkbox" disabled={!canAct || state !== "ready"} checked={draft.approve} onChange={(event) => setDraft({ ...draft, approve: event.target.checked })} />Can approve permissions (separate from sending)</label>
       <label className="flex flex-col gap-1 text-xs" htmlFor={`${prefix}-general`}>General access<select id={`${prefix}-general`} className={field} disabled defaultValue="invited"><option value="invited">Only people invited</option><option value="everyone">Everyone at the organization — pending PRO-167</option></select></label>
       <p className="text-xs text-muted-foreground">Organization visibility alone does not grant content access. General access awaits PRO-167; review every access change before saving.</p><DialogFooter><Button variant="outline" size="sm" disabled={!canAct || state !== "ready"} onClick={() => setReviewing(true)}>Review access changes</Button></DialogFooter>
-    </div> : null;
+      </> : <p className="text-xs text-muted-foreground">Choose a person before reviewing access. An unavailable recipient is never replaced automatically.</p>}
+    </div>;
   const retaining = seenReady && (state === "offline" || state === "error");
   return <Dialog open={open} onOpenChange={requestOpen}><DialogTrigger asChild><Button variant="outline">Review Share dialog</Button></DialogTrigger><DialogContent ref={dialogContent} showClose={!discarding} className="motion-reduce:animate-none" onEscapeKeyDown={(event) => { if (discarding) { event.preventDefault(); setDiscarding(false); } }}>
     <DialogHeader><DialogTitle>{discarding ? "Discard access choices?" : "Share workspace"}</DialogTitle><DialogDescription>Design review only. No access changes are sent.</DialogDescription></DialogHeader>
-    {discarding ? <><p className="text-sm">Your unsaved access choices will be discarded.</p><DialogFooter><Button ref={keepEditing} variant="outline" onClick={() => setDiscarding(false)}>Keep editing</Button><Button variant="destructive" onClick={closeDiscarding}>Discard choices</Button></DialogFooter></> : message ? <>{message}{retaining && choices}</> : (reviewing ? <div className="space-y-3"><h3 className="text-sm font-medium">Review access choices</h3><p className="break-words text-xs">{data.people[0]?.name}: {draft.level === "viewer" ? "View only" : "Can send"}; {draft.approve ? "can approve permissions" : "cannot approve permissions"}.</p><p className="text-xs text-muted-foreground">This preview cannot save access. PRO-171 owns the actual draft diff and confirmed save.</p><DialogFooter><Button variant="outline" onClick={() => setReviewing(false)}>Back to choices</Button><Button disabled={!canAct} onClick={() => onAction("Review access choices")}>Report preview choice</Button></DialogFooter></div> : choices)}
+    {discarding ? <><p className="text-sm">Your unsaved access choices will be discarded.</p><DialogFooter><Button ref={keepEditing} variant="outline" onClick={() => setDiscarding(false)}>Keep editing</Button><Button variant="destructive" onClick={closeDiscarding}>Discard choices</Button></DialogFooter></> : message ? <>{message}{retaining && choices}</> : (reviewing && recipient ? <div className="space-y-3"><h3 className="text-sm font-medium">Review access choices</h3><p className="break-words text-xs">{recipient.name}: {draft.level === "viewer" ? "View only" : "Can send"}; {draft.approve ? "can approve permissions" : "cannot approve permissions"}.</p><p className="text-xs text-muted-foreground">This preview cannot save access. PRO-171 owns the actual draft diff and confirmed save.</p><DialogFooter><Button variant="outline" onClick={() => setReviewing(false)}>Back to choices</Button><Button disabled={!canAct} onClick={() => onAction("Review access choices")}>Report preview choice</Button></DialogFooter></div> : choices)}
   </DialogContent></Dialog>;
 }
 
@@ -136,7 +141,7 @@ export function TeamSurfaceExample({ surface, ...props }: TeamExampleProps & { s
   return (
     <SurfaceSection title={title} description={contract}>
       {surface === "profile" || surface === "ports" ? <Popover open={open} onOpenChange={setOpen}><PopoverTrigger asChild><Button variant="outline">{surface === "profile" ? "Open profile" : "Forward ports"}</Button></PopoverTrigger><PopoverContent label={title}>{content}</PopoverContent></Popover>
-        : surface === "share" ? <ShareDialogExample key={`${props.data.organization}\0${props.data.workspace}`} {...props} state={effectiveState} />
+        : surface === "share" ? <ShareDialogExample key={JSON.stringify([props.data.organization, props.data.workspace])} {...props} state={effectiveState} />
           : content}
     </SurfaceSection>
   );
