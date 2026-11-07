@@ -704,8 +704,9 @@ export function SessionView({
           )}
 
           {/* At the right edge whatever the width. */}
-          {/* The header's actions draw their icons at 20px, and an icon-only button grows to 32px to hold one. */}
-          <div className={cn("ml-auto flex shrink-0 items-center gap-0.5 [&_button>svg]:size-5 [&_button:has(>svg:only-child)]:size-8", !compact && "max-w-[70%]")}>
+          {/* The header's actions fill the bar's height, square, so their hover is a full band; icons are 20px and an
+              icon-only button is 40px wide. */}
+          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", !compact && "max-w-[70%]")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
