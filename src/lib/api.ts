@@ -466,6 +466,8 @@ export const api = {
   /** Pause every active scheduled task of the organization. */
   cloudSchedulesPauseAll: (orgId?: string | null) => invoke<{ paused: number }>("cloud_schedules_pause_all", { orgId: orgId ?? null }),
   /** Who the workspace is shared with, and what the caller may do (PRO-30, docs/CLOUD-SHARING.md). */
+  cloudOrganizationGroups: (orgId?: string | null) => invoke<{ groups: OrganizationGroup[] }>("cloud_organization_groups", { orgId: orgId ?? null }),
+  cloudWorkspaceGroupShareSet: (workspaceId: string, groupId: string, role: CloudShareRole | null, canApprove: boolean, orgId?: string | null) => invoke<{ groupId: string }>("cloud_workspace_group_share_set", { workspaceId, groupId, role, canApprove, orgId: orgId ?? null }),
   cloudWorkspaceShares: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId, orgId: orgId ?? null }),
   /** Grant or change a member's share; only managers and the workspace's creator may. */
@@ -1332,7 +1334,10 @@ export interface CloudScheduleCreateInput extends CloudScheduleEstimateInput {
   missedRunPolicy: "skip" | "run-once";
 }
 
+export interface OrganizationGroup { id: string; name: string; memberCount: number }
+export interface CloudWorkspaceGroupShare { groupId: string; name: string; memberCount: number; role: CloudShareRole; canApprove: boolean }
 export interface CloudWorkspaceShares {
+  groups?: CloudWorkspaceGroupShare[];
   shares: CloudWorkspaceShare[];
   you: { role: CloudCollaborationRole; canApprove: boolean; canManageShares: boolean };
 }

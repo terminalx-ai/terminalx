@@ -1507,6 +1507,48 @@ pub async fn cloud_workspace_share_revoke(
         .share_revoke(org_id.as_deref(), &workspace_id, &user_id))
 }
 
+#[tauri::command]
+pub async fn cloud_organization_groups(
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<
+    crate::cloud_workspaces::OrganizationGroups,
+    crate::cloud_workspaces::CloudWorkspaceClientError,
+> {
+    cloud_command!(
+        state,
+        crate::cloud_workspaces::RequestRisk::Read,
+        move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+            .groups(org_id.as_deref())
+    )
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_group_share_set(
+    workspace_id: String,
+    group_id: String,
+    role: Option<crate::cloud_workspaces::ShareRole>,
+    can_approve: bool,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<
+    crate::cloud_workspaces::CloudWorkspaceGroupShareChange,
+    crate::cloud_workspaces::CloudWorkspaceClientError,
+> {
+    cloud_command!(
+        state,
+        crate::cloud_workspaces::RequestRisk::Mutation,
+        move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+            .group_share_set(
+                org_id.as_deref(),
+                &workspace_id,
+                &group_id,
+                role,
+                can_approve
+            )
+    )
+}
+
 /// The organization's scheduled cloud tasks, or one workspace's (PRO-37).
 #[tauri::command]
 pub async fn cloud_schedules(

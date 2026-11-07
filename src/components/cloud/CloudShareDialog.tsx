@@ -1,12 +1,40 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Loader2, Lock, UserPlus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useAccount } from "@/lib/account";
-import { api, type CloudShareRole, type CloudWorkspaceShare, type CloudWorkspaceShares } from "@/lib/api";
-import { VISIBILITY_ADMIN_REASON, notifyAccessChanged } from "@/lib/cloudCollab";
+import {
+  api,
+  type CloudShareRole,
+  type CloudWorkspaceShares,
+  type OrganizationGroup,
+} from "@/lib/api";
+import {
+  VISIBILITY_ADMIN_REASON,
+  notifyAccessChanged,
+} from "@/lib/cloudCollab";
 import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
+import {
+  applyShareDraftChanges,
+  shareDraft,
+  shareDraftDirty,
+  shareRowKey,
+  type ShareDraft,
+  type ShareDraftRow,
+} from "@/lib/cloudShareDraft";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 
 /**
@@ -25,13 +53,18 @@ export function yourAccessText(
   const approves = you.canApprove ? ", can approve permissions" : "";
   switch (you.role) {
     case "manager":
-      if (orgRole === "owner") return "Owner (the organization's owner: manages this workspace and who it is shared with)";
-      if (orgRole === "admin") return "Admin (an organization admin: manages this workspace and who it is shared with)";
+      if (orgRole === "owner")
+        return "Owner (the organization's owner: manages this workspace and who it is shared with)";
+      if (orgRole === "admin")
+        return "Admin (an organization admin: manages this workspace and who it is shared with)";
       return "Owner or admin of the organization (manages this workspace and who it is shared with)";
     case "driver":
-      if (you.canManageShares || creator) return "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)";
+      if (you.canManageShares || creator)
+        return "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)";
       // Typing in a terminal (a shell, or an agent's own) needs the approval right too (PRO-88).
-      return you.canApprove ? `Driver (can send to agents and type in terminals)${approves}` : "Driver (can send to agents; typing in terminals also needs the right to approve permissions)";
+      return you.canApprove
+        ? `Driver (can send to agents and type in terminals)${approves}`
+        : "Driver (can send to agents; typing in terminals also needs the right to approve permissions)";
     case "viewer":
       return `Viewer (can read everything, not send)${approves}`;
     case "none":
@@ -42,12 +75,20 @@ export function yourAccessText(
 }
 
 /** Owners, admins and the workspace's creator see it without a share; the server refuses one for them. */
-export function alwaysHasAccess(member: { userId: string; role: string }, createdBy: string | null): boolean {
-  return member.role === "owner" || member.role === "admin" || (!!createdBy && member.userId === createdBy);
+export function alwaysHasAccess(
+  member: { userId: string; role: string },
+  createdBy: string | null,
+): boolean {
+  return (
+    member.role === "owner" ||
+    member.role === "admin" ||
+    (!!createdBy && member.userId === createdBy)
+  );
 }
 
 function codeOf(error: unknown): string {
-  if (error && typeof error === "object" && "code" in error) return String((error as { code: unknown }).code);
+  if (error && typeof error === "object" && "code" in error)
+    return String((error as { code: unknown }).code);
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -63,6 +104,10 @@ export function shareErrorMessage(error: unknown, who?: string): string {
       return "This workspace was handed its creator's own model credential (Settings → Organizations → Your model access) since it last started, and its sessions may still hold it, so it can't be opened to the organization or shared with Can send yet. Share as view only, or the creator switches that agent to the organization login or a credential helper and then stops and resumes the workspace.";
     case "cloud_workspace_share_requires_organization_access":
       return "Make the workspace visible to the organization first.";
+    case "cloud_workspace_group_member_limit":
+      return "This group would exceed the workspace runtime’s member limit. Remove members or another group first.";
+    case "organization_group_not_found":
+      return `${who ?? "This group"} no longer exists in this organization.`;
     case "cloud_workspace_share_limit":
       return "This workspace is already shared with the maximum number of people (64). Revoke someone first.";
     case "cloud_workspace_share_forbidden":
@@ -85,32 +130,12 @@ export function shareErrorMessage(error: unknown, who?: string): string {
 }
 
 type AccessMode = "private" | "organization";
-/** `unknown`: a visibility change got no answer and the workspace could not be read back. */
-type Access = AccessMode | "unknown";
-type Confirming = { kind: "share" } | { kind: "private" } | null;
-type Person = { userId: string; role: CloudShareRole; canApprove: boolean };
 
-const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";
-
-/**
- * Who a cloud workspace is shared with; managers and the creator can change it
- * (PRO-30). `orgId` is the workspace's organization: every organization is
- * live (CS-18), and the share routes are authorized by membership in it.
- *
- * A workspace starts private (only its creator sees it). Sharing it with the
- * first person makes it visible in the organization's sidebar, after the
- * person confirms that here; "Make private again" hides it and revokes every
- * share. Both go through the API's `/access` route, which is for whoever
- * manages the workspace: its creator, or an organization owner or admin
- * (PRO-73). Against a server from before that rule a creator who is a plain
- * member only manages the shares of a workspace that is already
- * organization-visible, and is told who can change its visibility.
- */
 export function CloudShareDialog({
   orgId = null,
   workspaceId,
   name,
-  accessMode: initialAccess = "organization",
+  accessMode = "organization",
   createdBy = null,
   canManage: manageHint,
   onClose,
@@ -118,456 +143,588 @@ export function CloudShareDialog({
   orgId?: string | null;
   workspaceId: string;
   name: string;
-  /** What the workspace list says; the dialog follows its own changes after that. */
   accessMode?: AccessMode;
-  /** The workspace's creator, to say who still sees it once private. */
   createdBy?: string | null;
-  /** What the list says about managing shares, for the title before the share list has loaded. */
   canManage?: boolean;
   onClose: () => void;
 }) {
   const { status } = useAccount();
-  // The default organization's roster comes with the account; another
-  // organization's (every one is live, PRO-71) is read by its own id.
-  const defaultOrg = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
-  const [listed, setListed] = useState<CloudWorkspaceShares | null>(null);
-  const [members, setMembers] = useState<OrganizationMember[]>([]);
-  /** Why the organization's members could not be read; nobody can be added then. */
-  const [rosterError, setRosterError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [adding, setAdding] = useState<Person>({ userId: "", role: "viewer", canApprove: false });
-  const [access, setAccess] = useState<Access>(initialAccess);
-  const [confirming, setConfirming] = useState<Confirming>(null);
-  /** The workspace was made organization-visible, but the share that was the reason for it did not go through. */
-  const [unshared, setUnshared] = useState<{ person: Person; why: string } | null>(null);
   const org = orgId ?? status.identity?.organizationId;
-
-  const reload = useCallback(async () => {
+  const context = `${status.identity?.email ?? ""}:${org ?? ""}:${workspaceId}`;
+  const generation = useRef(0);
+  const saving = useRef(false);
+  const [listed, setListed] = useState<CloudWorkspaceShares | null>(null);
+  const [base, setBase] = useState<ShareDraft>({
+    access: accessMode,
+    rows: [],
+  });
+  const [draft, setDraft] = useState<ShareDraft>({
+    access: accessMode,
+    rows: [],
+  });
+  const [members, setMembers] = useState<OrganizationMember[]>([]);
+  const [groups, setGroups] = useState<OrganizationGroup[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [rosterError, setRosterError] = useState<string | null>(null);
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState<
+    "share" | "private" | "discard" | null
+  >(null);
+  const [unknownAccess, setUnknownAccess] = useState(false);
+  const [adding, setAdding] = useState({
+    id: "",
+    role: "viewer" as CloudShareRole,
+    canApprove: false,
+  });
+  const defaultOrg = !orgId || status.identity?.organizationId === orgId;
+  const readRoster = useCallback(async () => {
+    const current = generation.current;
     try {
-      const next = await api.cloudWorkspaceShares(workspaceId, orgId);
-      rememberPeople(next.shares);
-      setListed(next);
-      setLoadError(null);
-      return true;
-    } catch (e) {
-      setLoadError(codeOf(e));
-      return false;
+      const next = defaultOrg
+        ? await loadRoster({ fresh: true })
+        : await loadRosterIn(orgId!, { fresh: true });
+      if (current === generation.current) {
+        setMembers(next);
+        setRosterError(null);
+      }
+    } catch (error) {
+      if (current === generation.current) setRosterError(codeOf(error));
     }
-  }, [workspaceId, orgId]);
-
-  // Read again on every open, not once per session: someone removed from the organization since is not offered (#501).
-  // Only the newest read is shown: an older answer that arrives late never replaces it.
-  const membersRead = useRef(0);
-  const loadMembers = useCallback(() => {
-    const read = ++membersRead.current;
-    const latest = () => read === membersRead.current;
-    setRosterError(null);
-    if (defaultOrg) return void loadRoster({ fresh: true }).then((next) => latest() && setMembers(next));
-    void loadRosterIn(orgId!, { fresh: true }).then(
-      (next) => latest() && setMembers(next),
-      (e: unknown) => latest() && setRosterError(codeOf(e)),
-    );
   }, [defaultOrg, orgId]);
-
-  /** A refusal that says the person left the organization: what is shown of them is out of date, so both lists are read again. */
-  const leftOrganization = (e: unknown, userId: string) => {
-    if (codeOf(e) !== "organization_member_not_found") return;
-    setAdding((before) => (before.userId === userId ? { userId: "", role: "viewer", canApprove: false } : before));
-    loadMembers();
-    void reload();
-  };
-
   useEffect(() => {
-    void reload();
-    loadMembers();
-  }, [reload, loadMembers]);
+    const current = ++generation.current;
+    saving.current = false;
+    setBusy(false);
+    setListed(null);
+    setLoadError(null);
+    setMembers([]);
+    setGroups([]);
+    setGroupError(null);
+    setErrors([]);
+    setConfirming(null);
+    setUnknownAccess(false);
+    setBase({ access: accessMode, rows: [] });
+    setDraft({ access: accessMode, rows: [] });
+    void api.cloudWorkspaceShares(workspaceId, orgId).then(
+      (next) => {
+        if (current !== generation.current) return;
+        rememberPeople(next.shares);
+        setListed(next);
+        setBase(shareDraft(next, accessMode));
+        setDraft(shareDraft(next, accessMode));
+      },
+      (error: unknown) => {
+        if (current === generation.current) setLoadError(codeOf(error));
+      },
+    );
+    void readRoster();
+    void api.cloudOrganizationGroups(orgId).then(
+      (next) => {
+        if (current === generation.current) setGroups(next.groups);
+      },
+      (error: unknown) => {
+        if (current === generation.current) setGroupError(codeOf(error));
+      },
+    );
+    return () => {
+      generation.current++;
+    };
+  }, [context, workspaceId, orgId, accessMode, readRoster]);
 
   const manage = listed?.you.canManageShares ?? false;
-  // Private or organization-visible is the API's owner-or-admin switch; the list says who this is up front.
   const mayChangeVisibility = listed?.you.role === "manager";
-  const isPrivate = access === "private";
-  const shared = useMemo(() => new Set(listed?.shares.map((share) => share.userId) ?? []), [listed]);
-  // Owners, admins and the creator always have access; offering them would only be refused.
-  const candidates = members.filter((member) => !shared.has(member.userId) && !alwaysHasAccess(member, createdBy));
-  const nameOf = (userId: string) => {
-    const member = members.find((m) => m.userId === userId);
-    return member?.displayName || member?.email || listed?.shares.find((s) => s.userId === userId)?.name || "This person";
-  };
-  // Private means its creator alone: an admin who did not create it stops seeing it too.
-  const me = members.find((member) => member.email === status.identity?.email)?.userId ?? null;
+  const dirty = shareDraftDirty(base, draft);
+  const me = members.find(
+    (member) => member.email === status.identity?.email,
+  )?.userId;
   const creator = createdBy && me ? createdBy === me : null;
-  // Owner or admin: the account's own word for this organization, else the roster's.
-  const orgRole = status.organizations?.find((candidate) => candidate.id === org)?.role ?? members.find((member) => member.email === status.identity?.email)?.role ?? null;
-
-  /** What the server says the workspace's visibility is now; null when that cannot be read. */
-  const readAccess = async (): Promise<AccessMode | null> => {
-    try {
-      const list = await api.cloudWorkspaces(orgId);
-      return list.workspaces.find((item) => item.workspace.id === workspaceId)?.workspace.accessMode ?? null;
-    } catch {
-      return null;
-    }
-  };
-
-  /**
-   * Switch the visibility. A lost answer says nothing about whether it
-   * changed, so the workspace is read back before anything is shown: true
-   * when it is now `mode`, false (with the reason shown) when it is not or
-   * cannot be told.
-   */
-  const switchAccess = async (mode: AccessMode): Promise<boolean> => {
-    try {
-      const workspace = await api.cloudWorkspaceSetAccess(workspaceId, mode, orgId);
-      setAccess(workspace.accessMode);
-      notifyAccessChanged(org);
-      return workspace.accessMode === mode;
-    } catch (e) {
-      if (codeOf(e) !== OUTCOME_UNKNOWN) {
-        setError(shareErrorMessage(e, name));
-        return false;
-      }
-      const now = await readAccess();
-      notifyAccessChanged(org);
-      if (now === null) {
-        // Private and unlisted look the same to someone who is not its creator; say only what is known.
-        setAccess("unknown");
-        setError("The server did not answer, and the workspace could not be read back, so it is unknown whether its visibility changed. Check again before sharing.");
-        return false;
-      }
-      setAccess(now);
-      if (now !== mode) setError(`The server did not answer, and the workspace is still ${now === "private" ? "private" : "visible to the organization"}. Try again.`);
-      return now === mode;
-    }
-  };
-
-  const change = async (key: string, who: string, run: () => Promise<unknown>, userId?: string) => {
-    setBusy(key);
-    setError(null);
-    try {
-      await run();
-      await reload();
-      // The sidebar's rows, chips and share counts follow at once.
-      notifyAccessChanged(org);
-      return true;
-    } catch (e) {
-      setError(shareErrorMessage(e, who));
-      if (userId) leftOrganization(e, userId);
-      return false;
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const put = (share: Pick<CloudWorkspaceShare, "userId" | "role" | "canApprove">) =>
-    change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
-
-  /** Grant the share that a visibility change was made for; a refusal leaves the workspace visible but unshared, and says so. */
-  const shareAfterVisible = async (person: Person) => {
-    try {
-      await api.cloudWorkspaceSharePut(workspaceId, person.userId, person.role, person.canApprove, orgId);
-      setUnshared(null);
-      setAdding({ userId: "", role: "viewer", canApprove: false });
-    } catch (e) {
-      setUnshared({ person, why: shareErrorMessage(e, nameOf(person.userId)) });
-      leftOrganization(e, person.userId);
-    }
-    await reload();
-    notifyAccessChanged(org);
-  };
-
-  const add = async () => {
-    if (!adding.userId) return;
-    if (!isPrivate) {
-      if (await put(adding)) setAdding({ userId: "", role: "viewer", canApprove: false });
+  const orgRole =
+    status.organizations?.find((candidate) => candidate.id === org)?.role ??
+    members.find((member) => member.userId === me)?.role ??
+    null;
+  const candidates: ShareDraftRow[] = [
+    ...members
+      .filter((member) => !alwaysHasAccess(member, createdBy))
+      .map(
+        (member): ShareDraftRow => ({
+          kind: "person",
+          id: member.userId,
+          name: member.displayName || member.email,
+          role: adding.role,
+          canApprove: adding.canApprove,
+        }),
+      ),
+    ...groups.map(
+      (group): ShareDraftRow => ({
+        kind: "group",
+        id: group.id,
+        name: group.name,
+        memberCount: group.memberCount,
+        role: adding.role,
+        canApprove: adding.canApprove,
+      }),
+    ),
+  ].filter(
+    (row) =>
+      !draft.rows.some(
+        (existing) => shareRowKey(existing) === shareRowKey(row),
+      ),
+  );
+  const update = (row: ShareDraftRow) =>
+    setDraft((before) => ({
+      ...before,
+      rows: before.rows.map((item) =>
+        shareRowKey(item) === shareRowKey(row) ? row : item,
+      ),
+    }));
+  const stageAdd = () => {
+    const row = candidates.find((item) => shareRowKey(item) === adding.id);
+    if (!row) return;
+    if (draft.access === "private" && confirming !== "share") {
+      setConfirming("share");
       return;
     }
-    // Sharing a private workspace changes who can see it: ask first.
-    if (confirming?.kind !== "share") {
-      setError(null);
-      setConfirming({ kind: "share" });
-      return;
-    }
+    setDraft((before) => ({
+      access: "organization",
+      rows: [...before.rows, row],
+    }));
+    setAdding({ id: "", role: "viewer", canApprove: false });
     setConfirming(null);
-    const person = adding;
-    setBusy(`put:${person.userId}`);
-    setError(null);
+  };
+  const requestClose = () => {
+    if (saving.current) return;
+    if (dirty) setConfirming("discard");
+    else onClose();
+  };
+  const readAccess = async () =>
+    (await api.cloudWorkspaces(orgId)).workspaces.find(
+      (item) => item.workspace.id === workspaceId,
+    )?.workspace.accessMode;
+  const save = async () => {
+    if (saving.current || !manage || !dirty || unknownAccess) return;
+    saving.current = true;
+    setBusy(true);
+    setErrors([]);
+    const current = generation.current;
+    const valid = () => current === generation.current;
+    let saved = base;
+    const failures: string[] = [];
     try {
-      if (await switchAccess("organization")) await shareAfterVisible(person);
+      if (saved.access !== draft.access) {
+        try {
+          const next = await api.cloudWorkspaceSetAccess(
+            workspaceId,
+            draft.access,
+            orgId,
+          );
+          if (next.accessMode !== draft.access)
+            throw new Error("Visibility did not change");
+        } catch (error) {
+          if (codeOf(error) !== "cloud_workspace_request_outcome_unknown")
+            throw error;
+          const actual = await readAccess().catch(() => undefined);
+          if (!valid()) return;
+          if (!actual) {
+            setUnknownAccess(true);
+            throw error;
+          }
+          saved = { ...saved, access: actual };
+          if (actual !== draft.access) throw error;
+        }
+        saved = {
+          ...saved,
+          access: draft.access,
+          rows: draft.access === "private" ? [] : saved.rows,
+        };
+        if (valid()) setBase(saved);
+        if (draft.access === "private") {
+          if (valid()) {
+            setDraft(saved);
+            notifyAccessChanged(org);
+            if (creator === false) onClose();
+          }
+          return;
+        }
+      }
+      const result = await applyShareDraftChanges(
+        saved,
+        draft,
+        async (change) => {
+          if (!valid()) throw new Error("Account or organization changed");
+          const row = change.after ?? change.before!;
+          if (row.kind === "group")
+            return api.cloudWorkspaceGroupShareSet(
+              workspaceId,
+              row.id,
+              change.after?.role ?? null,
+              change.after?.canApprove ?? false,
+              orgId,
+            );
+          if (change.after)
+            return api.cloudWorkspaceSharePut(
+              workspaceId,
+              row.id,
+              row.role,
+              row.canApprove,
+              orgId,
+            );
+          try {
+            return await api.cloudWorkspaceShareRevoke(
+              workspaceId,
+              row.id,
+              orgId,
+            );
+          } catch (error) {
+            if (codeOf(error) !== "cloud_workspace_share_not_found")
+              throw error;
+          }
+        },
+        (error) => shareErrorMessage(error),
+      );
+      saved = result.saved;
+      failures.push(...result.failures);
+    } catch (error) {
+      failures.push(`Workspace visibility: ${shareErrorMessage(error)}`);
     } finally {
-      setBusy(null);
+      if (valid()) {
+        setBase(saved);
+        setErrors(failures);
+        setBusy(false);
+        notifyAccessChanged(org);
+      }
+      if (valid()) saving.current = false;
     }
   };
-
-  const retryShare = async () => {
-    if (!unshared) return;
-    setBusy(`put:${unshared.person.userId}`);
-    setError(null);
+  const recheck = async () => {
+    const current = generation.current;
+    setBusy(true);
     try {
-      await shareAfterVisible(unshared.person);
+      const actual = await readAccess();
+      if (current !== generation.current) return;
+      if (!actual) throw new Error("Workspace could not be read");
+      setBase((before) => ({
+        ...before,
+        access: actual,
+        rows: actual === "private" ? [] : before.rows,
+      }));
+      setUnknownAccess(false);
+      setErrors([]);
+    } catch (error) {
+      if (current === generation.current) setErrors([shareErrorMessage(error)]);
     } finally {
-      setBusy(null);
+      if (current === generation.current) setBusy(false);
     }
   };
-
-  const makePrivate = async () => {
-    setConfirming(null);
-    setBusy("private");
-    setError(null);
-    try {
-      // The server revokes every share and closes their connections in the same transaction.
-      if (!(await switchAccess("private"))) return;
-      setUnshared(null);
-      // Private is its creator's alone: anyone else has nothing left to read here.
-      if (creator === false || !(await reload())) onClose();
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const recheckAccess = async () => {
-    setBusy("access");
-    setError(null);
-    try {
-      const now = await readAccess();
-      if (now === null) setError("The workspace still could not be read. It may be private to its creator now, or the server is not answering.");
-      else setAccess(now);
-      await reload();
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const manages = listed ? manage : !!manageHint;
-  const sharedCount = listed?.shares.length ?? 0;
-  // A private workspace cannot be shared by someone who may not make it visible.
-  const addBlocked = isPrivate && !mayChangeVisibility;
-
-  const select = "rounded-md border border-hairline bg-transparent px-2 py-1 text-xs";
-
+  const select =
+    "rounded-md border border-hairline bg-transparent px-2 py-1 text-xs";
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent width="max-w-[36rem]" data-testid="cloud-share-dialog">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) requestClose();
+      }}
+    >
+      <DialogContent
+        width="max-w-[36rem]"
+        data-testid="cloud-share-dialog"
+        onEscapeKeyDown={(event) => {
+          if (busy) event.preventDefault();
+        }}
+        onInteractOutside={(event) => {
+          if (busy) event.preventDefault();
+        }}
+      >
         <DialogHeader>
-          <DialogTitle>{manages ? `Share ${name}` : "Who has access"}</DialogTitle>
+          <DialogTitle>
+            {(listed ? manage : manageHint)
+              ? `Share ${name}`
+              : "Who has access"}
+          </DialogTitle>
           <DialogDescription>
-            {manages
-              ? "People you share with see this workspace's agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions."
-              : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions.`}
+            People with access to {name} see its agent tabs, terminals, files
+            and Git. Drivers can also send to agents, and type in terminals if
+            they can approve permissions. Access changes apply when you save.
           </DialogDescription>
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}
-        {loadError && <p className="text-xs text-destructive">Could not load who this workspace is shared with ({loadError}).</p>}
+        {loadError && <p role="alert">Could not load access ({loadError}).</p>}
         {listed && (
           <div className="flex flex-col gap-3 text-xs">
-            <p className="text-muted-foreground" data-testid="cloud-share-you">
+            <p data-testid="cloud-share-you">
               Your access: {yourAccessText(listed.you, orgRole, creator)}.
             </p>
-            {manage && isPrivate && (
-              <p className="flex items-start gap-2 rounded-md border border-hairline bg-well/40 px-3 py-2 text-muted-foreground" data-testid="cloud-share-private">
-                <Lock className="mt-0.5 size-3.5 shrink-0" />
-                <span>
-                  This workspace is private: only you can see it. Sharing it makes it visible in the organization's sidebar. The people you add here and
-                  organization admins can open it; other members see only that it exists.
-                  {!mayChangeVisibility && ` ${VISIBILITY_ADMIN_REASON}: ask one to make it visible, then share it from here.`}
-                </span>
+            {draft.access === "private" && (
+              <p data-testid="cloud-share-private">
+                This workspace is private: only its creator can see it. Sharing
+                makes it visible in the organization's sidebar. The people and
+                groups you add and organization admins can open it; other
+                members see only that it exists.
+                {!mayChangeVisibility && ` ${VISIBILITY_ADMIN_REASON}.`}
               </p>
             )}
-            {access === "unknown" && (
-              <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2" role="alert" data-testid="cloud-share-access-unknown">
-                <span className="min-w-0 flex-1">It is not known whether this workspace is private or visible to the organization right now.</span>
-                <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void recheckAccess()}>
+            {unknownAccess && (
+              <div role="alert" data-testid="cloud-share-access-unknown">
+                The server did not answer. Check visibility before saving again.
+                <Button disabled={busy} onClick={() => void recheck()}>
                   Check again
                 </Button>
               </div>
             )}
-            {unshared && (
-              <div className="flex flex-col gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2" role="alert" data-testid="cloud-share-unshared">
-                <p>
-                  {name} is now visible to the organization, but it is not shared with {nameOf(unshared.person.userId)} yet. {unshared.why}
-                </p>
-                <div className="flex justify-end gap-2">
-                  <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => (setError(null), setConfirming({ kind: "private" }))}>
-                    Make private again
-                  </Button>
-                  <Button size="sm" disabled={busy !== null} onClick={() => void retryShare()}>
-                    Retry sharing
-                  </Button>
-                </div>
-              </div>
-            )}
-            {listed.shares.length === 0 ? (
-              <p className="text-muted-foreground">
-                {isPrivate ? "Not shared with anyone." : "Not shared with anyone yet. Organization admins and the creator always have access."}
+            {!draft.rows.length && (
+              <p>
+                Not shared with anyone. Organization admins and the creator have
+                access when visible to the organization.
               </p>
-            ) : (
-              <ul className="flex flex-col divide-y divide-hairline rounded-md border border-hairline" aria-label="People with access">
-                {listed.shares.map((share) => (
-                  <li key={share.userId} className="flex items-center gap-2 px-3 py-2" data-testid="cloud-share-row">
-                    <div className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate text-sm">{share.name || share.email}</span>
-                      {share.name && <span className="truncate text-muted-foreground">{share.email}</span>}
-                    </div>
-                    {manage ? (
-                      <>
-                        <select
-                          aria-label={`Role for ${share.name || share.email}`}
-                          className={select}
-                          value={share.role}
-                          disabled={busy !== null}
-                          onChange={(e) => void put({ ...share, role: e.target.value as CloudShareRole })}
-                        >
-                          <option value="viewer">Viewer</option>
-                          <option value="driver">Driver</option>
-                        </select>
-                        <label className="flex items-center gap-1.5 text-muted-foreground">
-                          <Switch
-                            size="sm"
-                            aria-label={`Can approve permissions: ${share.name || share.email}`}
-                            checked={share.canApprove}
-                            disabled={busy !== null}
-                            onCheckedChange={(checked) => void put({ ...share, canApprove: checked })}
-                          />
-                          Can approve permissions
-                        </label>
-                        <Button
-                          size="icon-xs"
-                          variant="ghost"
-                          aria-label={`Revoke ${share.name || share.email}`}
-                          disabled={busy !== null}
-                          onClick={() => void change(`revoke:${share.userId}`, share.name || share.email, () => api.cloudWorkspaceShareRevoke(workspaceId, share.userId, orgId))}
-                        >
-                          <X />
-                        </Button>
-                      </>
-                    ) : (
-                      <span className="text-muted-foreground">
-                        {share.role === "driver" ? "Driver" : "Viewer"}
-                        {share.canApprove ? " · can approve" : ""}
+            )}
+            <ul
+              aria-label="People and groups with access"
+              className="flex flex-col divide-y divide-hairline rounded-md border border-hairline"
+            >
+              {draft.rows.map((row) => (
+                <li
+                  key={shareRowKey(row)}
+                  className="flex flex-wrap items-center gap-2 px-3 py-2"
+                  data-testid="cloud-share-row"
+                >
+                  <div className="min-w-0 flex-1">
+                    <span>{row.name}</span>
+                    {row.kind === "group" && (
+                      <span className="ml-2 text-muted-foreground">
+                        Group · {row.memberCount} members
                       </span>
                     )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {manage && rosterError && (
-              <p className="flex items-center gap-2 text-muted-foreground" data-testid="cloud-share-roster-error">
-                <span className="min-w-0 flex-1">
-                  {rosterError === "cloud_organization_unavailable"
-                    ? "This organization's members can only be read while it is your default organization (Settings). You can still change or revoke the shares above."
-                    : `Could not load this organization's members (${rosterError}), so nobody can be added right now. You can still change or revoke the shares above.`}
-                </span>
-                <Button size="sm" variant="outline" onClick={loadMembers}>
-                  Retry
-                </Button>
+                  </div>
+                  {manage ? (
+                    <>
+                      <select
+                        aria-label={`Role for ${row.name}`}
+                        className={select}
+                        value={row.role}
+                        disabled={busy}
+                        onChange={(event) =>
+                          update({
+                            ...row,
+                            role: event.target.value as CloudShareRole,
+                          })
+                        }
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="driver">Driver</option>
+                      </select>
+                      <label>
+                        <Switch
+                          size="sm"
+                          aria-label={`Can approve permissions: ${row.name}`}
+                          checked={row.canApprove}
+                          disabled={busy}
+                          onCheckedChange={(checked) =>
+                            update({ ...row, canApprove: checked })
+                          }
+                        />{" "}
+                        Can approve permissions
+                      </label>
+                      <Button
+                        size="icon-xs"
+                        variant="ghost"
+                        aria-label={`Revoke ${row.name}`}
+                        disabled={busy}
+                        onClick={() =>
+                          setDraft((before) => ({
+                            ...before,
+                            rows: before.rows.filter(
+                              (item) => shareRowKey(item) !== shareRowKey(row),
+                            ),
+                          }))
+                        }
+                      >
+                        <X />
+                      </Button>
+                    </>
+                  ) : (
+                    <span>
+                      {row.role === "driver" ? "Driver" : "Viewer"}
+                      {row.canApprove ? " · can approve" : ""}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {rosterError && (
+              <p role="alert" data-testid="cloud-share-roster-error">
+                Could not load this organization's members ({rosterError}).{" "}
+                <Button onClick={() => void readRoster()}>Retry</Button>
               </p>
             )}
-            {manage && !rosterError && access !== "unknown" && !unshared && (
-              <div className="flex flex-wrap items-center gap-2" data-testid="cloud-share-add">
+            {groupError && (
+              <p role="alert">
+                Could not load groups ({groupError}). Existing shares can still
+                be changed.
+              </p>
+            )}
+            {manage && (
+              <div
+                className="flex flex-wrap items-center gap-2"
+                data-testid="cloud-share-add"
+              >
                 <select
-                  aria-label="Add person"
+                  aria-label="Add person or group"
                   className={`${select} min-w-0 flex-1`}
-                  value={adding.userId}
-                  onChange={(e) => setAdding((current) => ({ ...current, userId: e.target.value }))}
+                  value={adding.id}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setAdding((before) => ({
+                      ...before,
+                      id: event.target.value,
+                    }))
+                  }
                 >
-                  <option value="">Add person…</option>
-                  {candidates.map((member) => (
-                    <option key={member.userId} value={member.userId}>
-                      {member.displayName ? `${member.displayName} (${member.email})` : member.email}
+                  <option value="">Add person or group…</option>
+                  {candidates.map((row) => (
+                    <option key={shareRowKey(row)} value={shareRowKey(row)}>
+                      {row.name}
+                      {row.kind === "group"
+                        ? ` (Group · ${row.memberCount} members)`
+                        : ""}
                     </option>
                   ))}
                 </select>
                 <select
-                  aria-label="New person's role"
+                  aria-label="New share role"
                   className={select}
                   value={adding.role}
-                  onChange={(e) => setAdding((current) => ({ ...current, role: e.target.value as CloudShareRole }))}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setAdding((before) => ({
+                      ...before,
+                      role: event.target.value as CloudShareRole,
+                    }))
+                  }
                 >
                   <option value="viewer">Viewer</option>
                   <option value="driver">Driver</option>
                 </select>
-                <label className="flex items-center gap-1.5 text-muted-foreground">
+                <label>
                   <Switch
                     size="sm"
-                    aria-label="New person can approve permissions"
+                    aria-label="New share can approve permissions"
                     checked={adding.canApprove}
-                    onCheckedChange={(checked) => setAdding((current) => ({ ...current, canApprove: checked }))}
-                  />
+                    disabled={busy}
+                    onCheckedChange={(checked) =>
+                      setAdding((before) => ({
+                        ...before,
+                        canApprove: checked,
+                      }))
+                    }
+                  />{" "}
                   Can approve permissions
                 </label>
                 <Button
                   size="sm"
-                  disabled={!adding.userId || busy !== null || confirming !== null || addBlocked}
-                  title={addBlocked ? VISIBILITY_ADMIN_REASON : undefined}
-                  aria-description={addBlocked ? VISIBILITY_ADMIN_REASON : undefined}
-                  onClick={() => void add()}
+                  disabled={
+                    !adding.id ||
+                    busy ||
+                    unknownAccess ||
+                    (draft.access === "private" && !mayChangeVisibility)
+                  }
+                  onClick={stageAdd}
                 >
-                  <UserPlus className="size-3.5" /> Share
+                  <UserPlus /> Add
                 </Button>
               </div>
             )}
-            {confirming?.kind === "share" && (
-              <div className="flex flex-col gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2" role="alertdialog" aria-label="Make this workspace visible to the organization" data-testid="cloud-share-confirm">
-                <p>
-                  Share with {nameOf(adding.userId)} and make {name} visible to the organization? It will appear in every member's sidebar. Only{" "}
-                  {nameOf(adding.userId)} and organization admins will be able to open it.
-                </p>
-                <div className="flex justify-end gap-2">
-                  <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
-                    Cancel
-                  </Button>
-                  <Button size="sm" disabled={busy !== null} onClick={() => void add()}>
-                    Make visible and share
-                  </Button>
-                </div>
-              </div>
-            )}
-            {manage && access === "organization" && confirming?.kind !== "private" && !unshared && (
-              <div className="flex items-center gap-2 border-t border-hairline pt-3 text-muted-foreground">
-                <span className="min-w-0 flex-1" data-testid="cloud-share-visibility">
-                  Visible in the organization's sidebar.{!mayChangeVisibility && ` ${VISIBILITY_ADMIN_REASON}.`}
+            {manage && draft.access === "organization" && (
+              <div className="flex items-center gap-2">
+                <span>
+                  Visible in the organization's sidebar.
+                  {!mayChangeVisibility && ` ${VISIBILITY_ADMIN_REASON}.`}
                 </span>
                 <Button
-                  size="sm"
                   variant="outline"
-                  disabled={busy !== null || !mayChangeVisibility}
-                  title={mayChangeVisibility ? undefined : VISIBILITY_ADMIN_REASON}
-                  aria-description={mayChangeVisibility ? undefined : VISIBILITY_ADMIN_REASON}
-                  onClick={() => (setError(null), setConfirming({ kind: "private" }))}
+                  disabled={busy || !mayChangeVisibility}
+                  onClick={() => setConfirming("private")}
                 >
-                  <Lock className="size-3.5" /> Make private again
+                  <Lock /> Make private again
                 </Button>
               </div>
             )}
-            {confirming?.kind === "private" && (
-              <div className="flex flex-col gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2" role="alertdialog" aria-label="Make this workspace private again" data-testid="cloud-private-confirm">
+            {confirming === "share" && (
+              <div
+                role="alertdialog"
+                aria-label="Make visible and share"
+                data-testid="cloud-share-confirm"
+              >
                 <p>
-                  Make {name} private again?{" "}
-                  {sharedCount > 0
-                    ? `${sharedCount === 1 ? "The 1 person" : `All ${sharedCount} people`} it is shared with ${sharedCount === 1 ? "loses" : "lose"} access now and their open sessions close. `
-                    : ""}
-                  It disappears from everyone else's sidebar, organization admins included.{" "}
-                  {creator === false
-                    ? "You did not create it, so you will stop seeing it too: only its creator will."
-                    : creator === null
-                      ? "Only its creator will still see it."
-                      : "Only you will still see it."}
+                  Make {name} visible to the organization and share it when you
+                  save?
                 </p>
-                <div className="flex justify-end gap-2">
-                  <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
-                    Cancel
-                  </Button>
-                  <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => void makePrivate()}>
-                    {sharedCount > 0 ? "Revoke all and make private" : "Make private"}
-                  </Button>
-                </div>
+                <Button variant="ghost" onClick={() => setConfirming(null)}>
+                  Cancel
+                </Button>
+                <Button onClick={stageAdd}>Make visible and share</Button>
               </div>
             )}
-            {error && (
-              <p className="text-destructive" role="alert" data-testid="cloud-share-error">
-                {error}
-              </p>
+            {confirming === "private" && (
+              <div
+                role="alertdialog"
+                aria-label="Make this workspace private again"
+                data-testid="cloud-private-confirm"
+              >
+                <p>
+                  Make {name} private again? All direct and group shares will be
+                  revoked when you save. Everyone else's open sessions close,
+                  including admins.
+                  {creator === false
+                    ? " You did not create it, so you will stop seeing it too."
+                    : " Only its creator will still see it."}
+                </p>
+                <Button variant="ghost" onClick={() => setConfirming(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    setDraft({ access: "private", rows: [] });
+                    setConfirming(null);
+                  }}
+                >
+                  Revoke all and make private
+                </Button>
+              </div>
+            )}
+            {confirming === "discard" && (
+              <div role="alertdialog" aria-label="Discard access changes?">
+                <p>Discard access changes?</p>
+                <Button onClick={() => setConfirming(null)}>
+                  Keep editing
+                </Button>
+                <Button variant="destructive" onClick={onClose}>
+                  Discard
+                </Button>
+              </div>
+            )}
+            {errors.length > 0 && (
+              <ul role="alert" data-testid="cloud-share-error">
+                {errors.map((error, index) => (
+                  <li key={index}>{error}</li>
+                ))}
+              </ul>
+            )}
+            {manage && (
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" disabled={busy} onClick={requestClose}>
+                  Cancel
+                </Button>
+                <Button
+                  disabled={
+                    busy || !dirty || unknownAccess || confirming !== null
+                  }
+                  onClick={() => void save()}
+                >
+                  {busy ? "Saving…" : "Save"}
+                </Button>
+              </div>
             )}
           </div>
         )}
@@ -575,7 +732,6 @@ export function CloudShareDialog({
     </Dialog>
   );
 }
-
 
 /** The workspace whose share dialog is open, wherever it was opened from (sidebar row or session header). */
 export interface ShareTarget {

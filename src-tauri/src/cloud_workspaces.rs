@@ -1387,7 +1387,38 @@ pub struct ShareViewer {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationGroup {
+    pub id: String,
+    pub name: String,
+    pub member_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OrganizationGroups {
+    pub groups: Vec<OrganizationGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceGroupShare {
+    pub group_id: String,
+    pub name: String,
+    pub member_count: u32,
+    pub role: ShareRole,
+    pub can_approve: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceGroupShareChange {
+    pub group_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CloudWorkspaceShares {
+    #[serde(default)]
+    pub groups: Vec<CloudWorkspaceGroupShare>,
     pub shares: Vec<CloudWorkspaceShare>,
     pub you: ShareViewer,
 }
@@ -2794,8 +2825,57 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Read,
             )?;
-            if result.shares.iter().any(|share| !valid_resource_id(&share.user_id)) {
+            if result.shares.iter().any(|share| !valid_resource_id(&share.user_id)) || result.groups.iter().any(|group| !valid_resource_id(&group.group_id)) {
                 return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    pub fn groups(
+        &self,
+        org: Option<&str>,
+    ) -> Result<OrganizationGroups, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: OrganizationGroups =
+                client.request(context, &["groups"], None, None, None, RequestRisk::Read)?;
+            if result
+                .groups
+                .iter()
+                .any(|group| !valid_resource_id(&group.id))
+            {
+                return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    pub fn group_share_set(
+        &self,
+        org: Option<&str>,
+        workspace_id: &str,
+        group_id: &str,
+        role: Option<ShareRole>,
+        can_approve: bool,
+    ) -> Result<CloudWorkspaceGroupShareChange, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) || !valid_resource_id(group_id) {
+            return Err(CloudWorkspaceClientError::local(
+                "cloud_workspace_request_invalid",
+                false,
+            ));
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudWorkspaceGroupShareChange = client.request_as(
+                if role.is_some() { "PUT" } else { "DELETE" },
+                context,
+                &["cloud-workspaces", workspace_id, "group-shares", group_id],
+                None,
+                role.map(|role| json!({ "v": 1, "role": role, "canApprove": can_approve })),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            if result.group_id != group_id {
+                return Err(post_send_error(RequestRisk::Mutation));
             }
             Ok(result)
         })
@@ -3202,6 +3282,8 @@ fn known_error_code(code: &str) -> bool {
             | "github_installation_suspended"
             | "github_installation_revoked"
             | "organization_member_not_found"
+            | "cloud_workspace_group_member_limit"
+            | "organization_group_not_found"
             | "cloud_workspace_share_not_found"
             | "cloud_workspace_share_redundant"
             | "cloud_workspace_share_requires_organization_access"
@@ -5772,6 +5854,68 @@ mod tests {
             "userId": user_id, "email": format!("{user_id}@example.com"), "name": "Alice",
             "role": role, "canApprove": false, "createdBy": "user-1", "createdAt": 1, "updatedAt": 2
         })
+    }
+
+    #[test]
+    fn groups_and_group_shares_use_scoped_validated_routes() {
+        let (base, _, request) = serve_once(
+            response(
+                "200 OK",
+                r#"{"groups":[{"id":"group-1","name":"Engineering","memberCount":3}]}"#,
+                "",
+            ),
+            Duration::ZERO,
+        );
+        let (_, service) = test_service(&base);
+        assert_eq!(service.groups(None).unwrap().groups[0].member_count, 3);
+        assert!(request
+            .join()
+            .unwrap()
+            .text
+            .starts_with("GET /v1/desktop/orgs/org-1/groups HTTP/1.1"));
+        let (base, _, request) = serve_once(
+            response("200 OK", r#"{"groupId":"group-1"}"#, ""),
+            Duration::ZERO,
+        );
+        let (_, service) = test_service(&base);
+        service
+            .group_share_set(
+                None,
+                "workspace-1",
+                "group-1",
+                Some(ShareRole::Driver),
+                true,
+            )
+            .unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(
+            "PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/group-shares/group-1 HTTP/1.1"
+        ));
+        assert!(captured.text.contains(r#""canApprove":true"#));
+        assert_eq!(
+            service
+                .group_share_set(None, "workspace-1", "bad/id", None, false)
+                .unwrap_err()
+                .code,
+            "cloud_workspace_request_invalid"
+        );
+    }
+
+    #[test]
+    fn group_share_response_for_another_group_is_an_unknown_mutation() {
+        let (base, _, request) = serve_once(
+            response("200 OK", r#"{"groupId":"other-group"}"#, ""),
+            Duration::ZERO,
+        );
+        let (_, service) = test_service(&base);
+        assert_eq!(
+            service
+                .group_share_set(None, "workspace-1", "group-1", None, false)
+                .unwrap_err()
+                .code,
+            "cloud_workspace_request_outcome_unknown"
+        );
+        request.join().unwrap();
     }
 
     #[test]

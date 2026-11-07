@@ -51,6 +51,7 @@ vi.mock("./CloudAgents", () => ({
 vi.mock("@/lib/api", () => ({
   api: {
     cloudWorkspaceShares: vi.fn(),
+    cloudOrganizationGroups: vi.fn().mockResolvedValue({ groups: [] }),
   },
   pty: {},
   closeWorkspaceConnection: vi.fn(),
