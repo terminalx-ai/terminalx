@@ -503,6 +503,7 @@ export function LocalShareButton({ sessionId }: { sessionId: string }) {
     <Button
       variant="ghost"
       size="sm"
+      className="gap-1.5 px-3 [&>svg]:size-4"
       aria-label="Share session…"
       title={detail || "Share session"}
       onClick={() => openSessionShare(sessionId)}
