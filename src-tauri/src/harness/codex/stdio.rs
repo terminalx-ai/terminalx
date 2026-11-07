@@ -76,6 +76,7 @@ pub struct Stdio {
     /// Each piece is only a preview; an item is committed once, whole, when
     /// it completes or, failing that, when its turn ends.
     streams: Vec<Stream>,
+    usage: crate::harness::metrics::TurnUsage,
     /// Items of this turn already committed: a late piece or a repeated
     /// completion adds nothing.
     committed: HashSet<String>,
@@ -117,6 +118,7 @@ impl Stdio {
 
     pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
         Self { launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
+            usage: Default::default(),
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
             streams: Vec::new(), committed: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }
     }
@@ -325,6 +327,7 @@ impl Stdio {
                 self.turn = Some(required(&p["turn"], "id")?);
                 self.streams.clear();
                 self.committed.clear();
+                self.usage.record(&json!({"type":"turn_context", "payload":{"model": self.model}}), Some(crate::harness::tui::TurnMark::Opened), &mut Vec::new());
                 if !self.manual_compact {
                     out.extend(self.accepted());
                     out.push(Action::Emit(Payload::TurnStarted { model: None, provider_session_id: self.thread.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }));
@@ -390,8 +393,18 @@ impl Stdio {
                 }
             }
             "thread/tokenUsage/updated" => {
+                if self.turn.is_none() || self.manual_compact || p["turnId"].as_str().is_some_and(|id| Some(id) != self.turn.as_deref()) { return Ok(out); }
                 let usage = &p["tokenUsage"];
-                out.push(Action::Emit(Payload::UsageUpdate(Usage { input_tokens: usage["total"]["inputTokens"].as_u64(), output_tokens: usage["total"]["outputTokens"].as_u64(), context_used: usage["last"]["totalTokens"].as_u64(), context_max: usage["modelContextWindow"].as_u64(), ..Default::default() })));
+                let counts = |value: &Value| if value.is_object() { json!({
+                    "input_tokens": value["inputTokens"], "cached_input_tokens": value["cachedInputTokens"],
+                    "output_tokens": value["outputTokens"], "reasoning_output_tokens": value["reasoningOutputTokens"], "total_tokens": value["totalTokens"],
+                }) } else { Value::Null };
+                let record = json!({"type":"event_msg", "payload":{"type":"token_count", "info":{
+                    "total_token_usage": counts(&usage["total"]), "last_token_usage": counts(&usage["last"]),
+                }}});
+                let mut mapped = vec![Payload::UsageUpdate(Usage { context_used: usage["last"]["totalTokens"].as_u64(), context_max: usage["modelContextWindow"].as_u64(), ..Default::default() })];
+                self.usage.record(&record, None, &mut mapped);
+                out.extend(mapped.into_iter().map(Action::Emit));
             }
             "serverRequest/resolved" => {
                 let key = p["requestId"].to_string();

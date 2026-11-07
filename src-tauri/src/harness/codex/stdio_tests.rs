@@ -404,3 +404,24 @@ fn a_reply_cut_off_by_the_connection_is_handed_over_once() {
     assert!(matches!(&left[..], [Payload::AssistantText { block: Some(block), text }] if *block == super::block("msg_2") && text == "Cut off"), "{left:?}");
     assert!(client.unfinished().is_empty());
 }
+
+#[test]
+fn turn_usage_normalizes_cached_input_and_ignores_late_or_repeated_counters() {
+    let (mut client, _) = ready("hello");
+    client.model = "gpt-6-astra".into();
+    turn(&mut client);
+    let reading = |turn: &str, input, cached, output| json!({"method":"thread/tokenUsage/updated","params":{
+        "threadId":"thread","turnId":turn,"tokenUsage":{
+            "total":{"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output,"totalTokens":input + output},
+            "last":{"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output,"totalTokens":input + output},
+            "modelContextWindow":200000
+        }
+    }}).to_string();
+    let mapped = emitted(client.handle(&reading("turn", 100u64, 80u64, 20u64)).unwrap());
+    assert!(matches!(&mapped[..], [Payload::UsageUpdate(Usage { input_tokens: Some(20), output_tokens: Some(20), cache_read_tokens: Some(80), cache_write_tokens: Some(0), cost_usd: Some(_), .. })]));
+    let repeated = emitted(client.handle(&reading("turn", 100, 80, 20)).unwrap());
+    assert!(matches!(&repeated[..], [Payload::UsageUpdate(Usage { input_tokens: Some(20), output_tokens: Some(20), cache_read_tokens: Some(80), .. })]));
+    assert!(emitted(client.handle(&reading("old-turn", 900, 800, 200)).unwrap()).is_empty());
+    client.handle(&ended("completed")).unwrap();
+    assert!(emitted(client.handle(&reading("turn", 100, 80, 20)).unwrap()).is_empty());
+}

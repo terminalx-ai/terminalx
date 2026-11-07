@@ -766,6 +766,10 @@ function CloudAgentPane({
                   onSetEffort={(effort) => configure({ effort })}
                   onSetMode={(mode) => configure({ mode })}
                   reportedModel={transcript.model}
+                  turns={transcript.turns}
+                  compacting={transcript.compacting}
+                  contextUsed={transcript.contextUsed}
+                  contextMax={transcript.contextMax}
                   modelsAreLocal={false}
                   modelClient={sleeping || !connected ? null : client}
                   disabled={!!blocked}

@@ -596,6 +596,7 @@ pub type Marker = fn(&str, &HashSet<String>, &mut Vec<Payload>) -> Option<TurnMa
 /// therefore in the middle of a multi-byte character, so nothing is decoded
 /// until its newline has arrived.
 pub struct Streamer {
+    usage: super::metrics::TurnUsage,
     offset: u64,
     /// Where it started reading this file: what came before is not this
     /// CLI's, or is history.
@@ -621,6 +622,7 @@ impl Streamer {
         Self {
             offset,
             began: offset,
+            usage: super::metrics::TurnUsage::default(),
             partial: Vec::new(),
             decode,
             skip,
@@ -696,6 +698,7 @@ impl Streamer {
                     };
                     if !out.is_empty() || mark.is_some() {
                         let record = serde_json::from_str::<serde_json::Value>(line).ok();
+                        if let (Some(record), Some(_)) = (&record, self.marker) { self.usage.record(record, mark, &mut out); }
                         // Both supported transcript formats use an RFC3339 timestamp.
                         // Missing historical time stays unknown, never the import time.
                         let ts = record
@@ -796,6 +799,15 @@ impl Tail {
         let path = self.path.lock().unwrap().clone();
         let stream = self.stream.lock().unwrap();
         (path, stream.offset - stream.partial.len() as u64, stream.began, stream.skip.clone())
+    }
+
+    pub(crate) fn usage(&self) -> super::metrics::TurnUsage {
+        self.stream.lock().unwrap().usage.clone()
+    }
+
+    pub(crate) fn with_usage(mut self, usage: super::metrics::TurnUsage) -> Self {
+        self.stream.get_mut().unwrap().usage = usage;
+        self
     }
 
     /// Follow on from where a handover left a tail (`position`).

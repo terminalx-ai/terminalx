@@ -884,3 +884,23 @@ describe("a message that never went, or went with others", () => {
     expect(t.turns[0].prompt).toMatchObject({ seq: first.seq, sent: "also lint\n\nand run the tests" });
   });
 });
+
+it("preserves completed usage and the turn's model across later model changes and replay", () => {
+  const usage = { inputTokens: 100, outputTokens: 80, cacheReadTokens: 900, cacheWriteTokens: 20, costUsd: 0.04, model: "claude-sonnet-4-6" };
+  const events = [
+    ev({ type: "user_message", text: "work", queued: false }),
+    ev({ type: "usage_update", contextUsed: 90000, contextMax: 100000, model: usage.model }),
+    ev({ type: "context_compacted", preTokens: 90000, postTokens: 12000 }),
+    ev({ type: "turn_completed", status: "ok", authFailed: false, durationMs: 2000, usage }),
+    ev({ type: "usage_update", model: "claude-opus-4-6" }),
+  ];
+  const transcript = buildTranscript(events, false);
+  expect(transcript.contextUsed).toBe(12000);
+  expect(transcript.turns[0].usage).toEqual(usage);
+  expect(transcript.turns[0].model).toBe(usage.model);
+  expect(transcript.turns[0].agent).toBe(events[0].harness);
+  const replay = buildTranscript(events.filter((event) => event.payload.type !== "usage_update"), false);
+  expect(replay.turns[0].usage).toEqual(usage);
+  expect(replay.turns[0].model).toBe(usage.model);
+  expect(replay.model).toBe(usage.model);
+});

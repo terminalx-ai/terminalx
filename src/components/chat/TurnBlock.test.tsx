@@ -158,13 +158,13 @@ describe("a finished turn with a call an agent's safety check held", () => {
   it("says on its summary line which check held the call, or how many were held", () => {
     setPrefs({ foldToolCalls: true });
     render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check"])} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("2 tool calls · Approved past Claude's dangerous-removal check");
+    expect(screen.getByRole("button", { expanded: false, name: /tool calls?/ }).textContent).toBe("2 tool calls · Approved past Claude's dangerous-removal check");
     cleanup();
     render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check", "Stopped at Claude's safety check"])} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("3 tool calls · 2 held by a safety check");
+    expect(screen.getByRole("button", { expanded: false, name: /tool calls?/ }).textContent).toBe("3 tool calls · 2 held by a safety check");
     cleanup();
     render(<TurnBlock turn={held([])} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("1 tool call");
+    expect(screen.getByRole("button", { expanded: false, name: /tool calls?/ }).textContent).toBe("1 tool call");
   });
 });
 

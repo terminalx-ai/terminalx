@@ -158,6 +158,14 @@ pub struct Usage {
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// Cache reads and writes are separate from uncached input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Recorded duration used when committing a turn; not a second wire clock.
+    #[serde(skip)]
+    pub duration_ms: Option<u64>,
     /// Occupancy of the context window after this reading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used: Option<u64>,

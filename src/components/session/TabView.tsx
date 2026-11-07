@@ -728,6 +728,8 @@ export function TabView({
             void backend.setPermissionMode(tab.id, m).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           reportedModel={transcript.model}
+          turns={transcript.turns}
+          compacting={transcript.compacting}
           modelsAreLocal={local}
           modelClient={backend.modelClient}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}

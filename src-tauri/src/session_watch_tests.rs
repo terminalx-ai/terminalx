@@ -253,6 +253,7 @@ impl Rig {
             compact_completed: false,
             compact_boundary_at: None,
             turn_started_at: None,
+            turn_usage: Default::default(),
             turn_by_command: false,
             signed_out_in_turn: false,
             last_activity: now,

@@ -1,3 +1,4 @@
+import { TurnDetailsPopover } from "./UsagePopovers";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -211,17 +212,17 @@ function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) 
     return () => window.clearTimeout(id);
   }, [copied]);
   const quiet = outcome?.tone === "ok";
-  if (!messageTime(ts) && !outcome && !text) return null;
+  if (!messageTime(ts) && !outcome && !text && !turn.completed) return null;
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
       <MessageTime ts={ts} inline />
-      {outcome && (
-        <span className={cn("flex items-center gap-1.5", outcome.tone === "failed" && "text-destructive")}>
+      {turn.completed && !turn.live && <TurnDetailsPopover turn={turn}>
+        {outcome ? <>
           {!quiet && <OutcomeIcon tone={outcome.tone} />}
-          <span>{outcome.word}</span>
+          <span className={cn(outcome.tone === "failed" && "text-destructive")}>{outcome.word}</span>
           {outcome.duration && <span className="-ml-1">{outcome.duration}</span>}
-        </span>
-      )}
+        </> : <span>Details</span>}
+      </TurnDetailsPopover>}
       {text && (
           <button
             type="button"
