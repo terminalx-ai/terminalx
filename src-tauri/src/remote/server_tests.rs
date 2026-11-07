@@ -1984,7 +1984,7 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
         .unwrap();
     let stored = index::get(&session.id).unwrap();
     assert!(stored.archived && stored.pinned && stored.title == "Fix the login");
-    assert_eq!(stored.manual_status, index::ManualStatus::InReview);
+    assert_eq!(stored.manual_status, Some(index::ManualStatus::InReview));
     for (params, expected) in [
         (json!({ "sessionId": session.id, "clientRequestId": "request-upd-3" }), "invalid_params"),
         (json!({ "sessionId": session.id, "manualStatus": "invalid", "clientRequestId": "request-status-invalid" }), "invalid_params"),

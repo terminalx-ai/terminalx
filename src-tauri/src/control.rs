@@ -2075,7 +2075,7 @@ mod tests {
             let event = events.try_recv().unwrap();
             assert_eq!(&*event.event, "session_updated");
             assert_eq!(serde_json::from_str::<Value>(&event.payload).unwrap()["manualStatus"], status);
-            assert_eq!(index::get(&second.id).unwrap().manual_status, index::ManualStatus::Backlog);
+            assert_eq!(index::get(&second.id).unwrap().manual_status, None);
         }
         for status in [Value::Null, json!("working"), json!(42)] {
             assert_eq!(service.execute("sessions.status", json!({"session": first.id, "status": status}), "invalid").unwrap_err().code, "invalid_arguments");

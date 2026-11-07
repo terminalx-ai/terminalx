@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { canonicalProject, sidebarProjectOf } from "@/lib/sidebarView";
@@ -160,6 +160,8 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
 /** Project names and paths are searchable; looking at cloud projects never starts them. */
 function ProjectFilterMenu() {
   const [query, setQuery] = useState("");
+  const search = useRef<HTMLInputElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   const { sidebarProject } = usePrefs();
   const store = useSessionStore();
   const cloud = useCloudProjectChoices();
@@ -177,12 +179,28 @@ function ProjectFilterMenu() {
   }
   if (sidebarProject && !choices.has(sidebarProject)) choices.set(sidebarProject, sidebarProject.split("/").pop() || sidebarProject);
   const matching = [...choices].filter(([path, name]) => `${name} ${path}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).sort((a, b) => a[1].localeCompare(b[1]));
-  return <DropdownMenuSub onOpenChange={() => setQuery("")}>
+  return <DropdownMenuSub onOpenChange={(open) => {
+    setQuery("");
+    // Radix's submenu autofocus runs during mount; focus the editable field afterwards.
+    if (open) window.setTimeout(() => search.current?.focus(), 0);
+  }}>
     <DropdownMenuSubTrigger><Search /> Filter by project{sidebarProject && <Check className="ml-auto" />}</DropdownMenuSubTrigger>
-    <DropdownMenuSubContent className="w-64">
-      <input aria-label="Search projects" placeholder="Search projects…" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
-        // Let Escape, Tab and vertical arrows reach Radix; typing must stay in the search field.
-        if (!["Escape", "Tab", "ArrowDown", "ArrowUp"].includes(event.key)) event.stopPropagation();
+    <DropdownMenuSubContent ref={content} className="w-64" onPointerMoveCapture={(event) => {
+      // Hover must not take the input away while somebody types. Clicking a result still selects it.
+      if (document.activeElement === search.current) event.preventDefault();
+    }} onKeyDown={(event) => {
+      if (event.key === "ArrowUp" && event.target === content.current?.querySelector('[role="menuitemradio"]')) {
+        event.preventDefault(); search.current?.focus();
+      }
+    }}>
+      <input ref={search} aria-label="Search projects" placeholder="Search projects…" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+        if (event.key === "Escape") return;
+        event.stopPropagation();
+        if (event.key === "ArrowDown" || event.key === "Tab") {
+          event.preventDefault();
+          const items = content.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]');
+          items?.[event.shiftKey ? items.length - 1 : 0]?.focus();
+        }
       }} className="mb-1 w-full rounded-md bg-well px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-ring" />
       <DropdownMenuItem role="menuitemradio" aria-checked={!sidebarProject} onSelect={() => setPrefs({ sidebarProject: null })}>
         {!sidebarProject ? <Check /> : <span className="size-4" />}All projects

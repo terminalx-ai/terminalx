@@ -1,7 +1,7 @@
 import { ManualStatusIcon, ManualStatusMenu } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { StatusGroups } from "../StatusGroups";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -504,6 +504,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
  * and deletes it, as a local conversation's does.
  */
 function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
+  const statusDescriptionId = useId();
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(row.title);
@@ -580,10 +581,11 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
           <button
             type="button"
             onClick={() => selectCloudSession(row.key)}
+            aria-describedby={statusDescriptionId}
             aria-current={selected ? "true" : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <span title={manualStatusLabel(row.manualStatus)}><ManualStatusIcon status={row.manualStatus} /></span>
+            <span title={manualStatusLabel(row.manualStatus)}><ManualStatusIcon status={row.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(row.manualStatus)}</span></span>
             {row.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint")}>{row.title}</span>
             <StatusMark status={status} />

@@ -188,6 +188,24 @@ const KEY = "raccoon.prefs";
 // Window layout choices have their own record; another window cannot overwrite them.
 const WINDOW_KEYS = ["sidebarLayout", "sidebarSort", "sidebarProject", "sidebarShowArchived", "sidebarFilters", "sidebarSections"] as const;
 const windowKey = () => `${KEY}.sidebar.${appWindow()}`;
+/** Independent chat labels are never reused. Keep only records for windows that still exist. */
+export function sidebarChatWindowLabels(): string[] {
+  try {
+    const prefix = `${KEY}.sidebar.`;
+    return Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? "")
+      .filter((key) => key.startsWith(`${prefix}chat-`)).map((key) => key.slice(prefix.length));
+  } catch { return []; }
+}
+
+export function forgetSidebarWindow(label: string) {
+  if (!label.startsWith("chat-")) return;
+  try { localStorage.removeItem(`${KEY}.sidebar.${label}`); } catch { /* Storage may be unavailable. */ }
+}
+
+export function pruneSidebarWindows(active: readonly string[], candidates: readonly string[]) {
+  for (const label of candidates) if (!active.includes(label)) forgetSidebarWindow(label);
+}
+
 function windowChoices(value: unknown): Partial<Prefs> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const prefs = value as Partial<Prefs>;

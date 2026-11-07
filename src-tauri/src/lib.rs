@@ -147,7 +147,7 @@ mod worktree_control;
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(feature = "desktop")]
 pub struct AppState {
@@ -868,6 +868,9 @@ pub fn run() {
                 }
             }
             if let tauri::WindowEvent::Destroyed = event {
+                if chat_windows::is_chat_window(window.label()) {
+                    let _ = window.app_handle().emit_to("main", "chat_window_closed", window.label());
+                }
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {

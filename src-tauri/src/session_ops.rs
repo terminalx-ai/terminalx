@@ -1076,7 +1076,7 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
             s.pinned = pinned;
         }
         if let Some(status) = patch.manual_status {
-            s.manual_status = status;
+            s.manual_status = Some(status);
         }
         // A person's archive, as every other way in or out marks it (#718).
         if let Some(archived) = patch.archived {

@@ -1710,7 +1710,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let before = session_summaries().unwrap();
-        assert_eq!(before["sessions"][0]["manualStatus"], "backlog");
+        assert!(before["sessions"][0]["manualStatus"].is_null());
         let patch = crate::session_ops::SessionPatch { manual_status: Some(index::ManualStatus::InReview), ..Default::default() };
         let updated = crate::session_ops::update_session_meta("manual", &patch).unwrap();
         sink.emit("session_updated", &updated);

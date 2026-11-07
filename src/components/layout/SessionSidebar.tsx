@@ -1,4 +1,4 @@
-import { Fragment, createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { Fragment, createContext, useContext, useId, useMemo, useState, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -1043,6 +1043,7 @@ function ConversationRow({
   /** Drawn under an Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
+  const statusDescriptionId = useId();
   const title = named === "branch" && peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
   const ids = peers.map((peer) => peer.id);
@@ -1081,10 +1082,11 @@ function ConversationRow({
             onDoubleClick={picking ? undefined : (rename ?? undefined)}
             aria-current={selected ? "true" : undefined}
             aria-pressed={picking ? picked : undefined}
+            aria-describedby={statusDescriptionId}
             aria-label={named === "branch" ? `${branchName ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /></span>
+            <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             {named === "branch" ? (
               <>

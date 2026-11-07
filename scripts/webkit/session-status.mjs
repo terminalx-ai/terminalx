@@ -30,7 +30,8 @@ try {
   await rail.getByRole("button", { name: "Menu for Chat 0", exact: true }).click();
   await page.getByRole("menuitem", { name: "Set status", exact: true }).hover();
   await page.getByRole("menuitemradio", { name: "In review", exact: true }).click();
-  await page.keyboard.press("Escape");
+  await page.getByRole("menu").waitFor({ state: "hidden" });
+  assert.equal(await rail.getByRole("button", { name: "Chat 0", exact: true }).evaluate((row) => document.getElementById(row.getAttribute("aria-describedby"))?.textContent), "Status: In review");
   await rail.getByRole("button", { name: "In review 2", exact: true }).waitFor();
   await rail.getByRole("button", { name: "Backlog 1", exact: true }).waitFor();
 
@@ -38,10 +39,21 @@ try {
   await page.getByRole("menuitem", { name: "Sort by: Updated", exact: true }).hover();
   await page.getByRole("menuitemradio", { name: "Created", exact: true }).click();
   await rail.getByTestId("sidebar-filter").click();
-  await page.getByRole("menuitem", { name: "Filter by project", exact: true }).hover();
-  await page.getByRole("textbox", { name: "Search projects" }).fill("local-0");
+  await page.getByRole("menuitem", { name: "Filter by project", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  const search = page.getByRole("textbox", { name: "Search projects" });
+  await search.waitFor();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Search projects");
+  await page.keyboard.type("local-0");
   assert.equal(await page.getByRole("menuitemradio", { name: "local-1", exact: true }).count(), 0);
-  await page.getByRole("menuitemradio", { name: "local-0", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "local-0", exact: true }).hover();
+  assert.equal(await search.evaluate((input) => input === document.activeElement), true);
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await search.evaluate((input) => input === document.activeElement), true);
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
   await rail.getByRole("button", { name: "In review 2", exact: true }).waitFor();
   assert.equal(await rail.locator("[data-status-group]").count(), 2);
   await rail.getByRole("button", { name: "In review 2", exact: true }).click();

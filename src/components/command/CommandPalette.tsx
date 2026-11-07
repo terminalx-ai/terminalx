@@ -1,4 +1,4 @@
-import { MANUAL_STATUSES, manualStatusLabel, type ManualStatus } from "@terminalx/portable/manualStatus";
+import { MANUAL_STATUSES, manualStatusLabel, normalizeManualStatus, type ManualStatus } from "@terminalx/portable/manualStatus";
 import { ManualStatusIcon } from "@/components/session/ManualStatus";
 import {
   useCallback,
@@ -618,7 +618,7 @@ export function CommandPalette({
         .filter((status) => manualStatusLabel(status).toLocaleLowerCase().includes(deferredQuery.toLocaleLowerCase()))
         .map((status) => ({
           id: `status:${status}`, kind: "command", primary: manualStatusLabel(status),
-          secondary: status === (session?.manualStatus ?? "backlog") ? "Current status" : "", primaryRanges: [], secondaryRanges: [], manualStatus: status,
+          secondary: status === normalizeManualStatus(session?.manualStatus) ? "Current status" : "", primaryRanges: [], secondaryRanges: [], manualStatus: status,
           closeBefore: false,
           run: async () => {
             if (settingStatus) return;

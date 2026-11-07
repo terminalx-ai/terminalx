@@ -59,6 +59,12 @@ async function boot(list: SessionEntry[]) {
 }
 
 describe("new-chat entry points", () => {
+  it("announces manual status alongside the branch row's accessible name", async () => {
+    await boot([session("here", "/repos/web", new Date().toISOString(), { manualStatus: "in_review" })]);
+    mount();
+    expect(screen.getByRole("button", { name: "main, Talk here", description: "Status: In review" })).toBeTruthy();
+  });
+
   it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
     mount();

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Project, SessionEntry } from "@/types/session";
@@ -268,6 +268,7 @@ describe("status grouping and view controls (PRO-164)", () => {
   it("groups each session independently, updates counts and remembers collapsed headers", async () => {
     await boot([session("one", "/repos/web", at(1), { manualStatus: "in_review" }), session("two", "/repos/web", at(2), { manualStatus: "in_review" }), session("three", chatsPath, at(3))]);
     mount();
+    expect(screen.getByRole("button", { name: "Talk one", description: "Status: In review" })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole("button", { name: "View" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitemradio", { name: "Group by status" }));
     const header = screen.getByRole("button", { name: "In review 2" });
@@ -308,16 +309,40 @@ describe("status grouping and view controls (PRO-164)", () => {
     expect(screen.queryByRole("button", { name: "Talk hidden-archive" })).toBeNull();
   });
 
-  it("searches project choices in the View menu", async () => {
+  it("keeps the selected session visible when its project does not match", async () => {
+    await boot([session("web", "/repos/web", at(1)), session("other", "/repos/other", at(2)), session("hidden", "/repos/other", at(3))]);
+    act(() => { store.selectSession("other"); prefs.setPrefs({ sidebarProject: "/repos/web", sidebarFilters: { local: "needs" } }); });
+    mount();
+    expect(screen.getByRole("button", { name: "Talk other" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Talk hidden" })).toBeNull();
+    act(() => prefs.setPrefs({ sidebarFilters: {} }));
+    expect(screen.getByRole("button", { name: "Talk web" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Talk other" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Talk hidden" })).toBeNull();
+  });
+
+  it("searches project choices with the keyboard without hover stealing focus", async () => {
     await boot([session("web", "/repos/web", at(1)), session("other", "/repos/other", at(2))]);
+    act(() => store.selectSession(null));
     mount();
     fireEvent.keyDown(screen.getByRole("button", { name: "View" }), { key: "ArrowDown" });
     const trigger = await screen.findByRole("menuitem", { name: "Filter by project" });
     fireEvent.keyDown(trigger, { key: "ArrowRight" });
     const search = await screen.findByRole("textbox", { name: "Search projects" });
+    await waitFor(() => expect(document.activeElement).toBe(search));
     fireEvent.change(search, { target: { value: "web" } });
     expect(screen.queryByRole("menuitemradio", { name: "other" })).toBeNull();
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "web" }));
+    fireEvent.pointerMove(screen.getByRole("menuitemradio", { name: "web" }), { pointerType: "mouse" });
+    expect(document.activeElement).toBe(search);
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    const all = screen.getByRole("menuitemradio", { name: "All projects" });
+    expect(document.activeElement).toBe(all);
+    fireEvent.keyDown(all, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search);
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    fireEvent.keyDown(all, { key: "ArrowDown" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "web" })));
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
     expect(prefs.getPrefs().sidebarProject).toBe("/repos/web");
     expect(screen.queryByRole("button", { name: "Talk other" })).toBeNull();
   });

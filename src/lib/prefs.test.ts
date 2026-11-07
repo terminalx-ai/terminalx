@@ -308,6 +308,20 @@ describe("cloud pipeline switches saved by a newer version", () => {
 
 
 describe("sidebar choices per window (PRO-164)", () => {
+  it("removes closed chat records, retaining live, newly opened and persistent windows", async () => {
+    for (const label of ["main", "floating", "chat-live", "chat-closed"]) localStorage.setItem(`raccoon.prefs.sidebar.${label}`, "{}");
+    const prefs = await import("./prefs");
+    const candidates = prefs.sidebarChatWindowLabels();
+    localStorage.setItem("raccoon.prefs.sidebar.chat-new", "{}");
+    prefs.pruneSidebarWindows(["main", "floating", "chat-live"], candidates);
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-closed")).toBeNull();
+    for (const label of ["main", "floating", "chat-live", "chat-new"]) expect(localStorage.getItem(`raccoon.prefs.sidebar.${label}`)).not.toBeNull();
+    prefs.forgetSidebarWindow("chat-live");
+    prefs.forgetSidebarWindow("main");
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-live")).toBeNull();
+    expect(localStorage.getItem("raccoon.prefs.sidebar.main")).not.toBeNull();
+  });
+
   it("preserves inherited views when another window saves its first choices", async () => {
     const legacy = { sidebarLayout: "list", sidebarFilters: { local: "unread" }, sidebarSections: { chats: "collapsed" } };
     localStorage.setItem("raccoon.prefs", JSON.stringify(legacy));

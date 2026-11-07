@@ -9,6 +9,13 @@ const session = (id: string, extra: Partial<SessionEntry> = {}): SessionEntry =>
 });
 
 describe("sidebar view choices", () => {
+  it("keeps unknown, null and absent runtime statuses in Backlog", () => {
+    const rows = [{ id: "future", manualStatus: "triage" }, { id: "null", manualStatus: null }, { id: "absent" }, { id: "known", manualStatus: "done" }];
+    expect(groupSessionsByStatus(rows).map((group) => [group.status, group.sessions.map((row) => row.id)])).toEqual([
+      ["backlog", ["future", "null", "absent"]], ["done", ["known"]],
+    ]);
+  });
+
   it("orders statuses, omits empty groups and treats legacy sessions as Backlog", () => {
     const rows = [session("done", { manualStatus: "done" }), session("legacy"), session("review", { manualStatus: "in_review" }), session("backlog", { manualStatus: "backlog" })];
     expect(groupSessionsByStatus(rows).map((group) => [group.status, group.sessions.map((entry) => entry.id)])).toEqual([

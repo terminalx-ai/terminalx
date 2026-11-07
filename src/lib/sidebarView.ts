@@ -1,4 +1,4 @@
-import { MANUAL_STATUSES, type ManualStatus } from "@terminalx/portable/manualStatus";
+import { MANUAL_STATUSES, normalizeManualStatus, type ManualStatus } from "@terminalx/portable/manualStatus";
 import { compareMessageActivity } from "@/lib/messageActivity";
 import type { SessionEntry } from "@/types/session";
 
@@ -22,7 +22,7 @@ export function compareSidebarSessions(a: SessionEntry, b: SessionEntry, sort: S
 }
 
 /** Input is already filtered and sorted; buckets retain that order and omit empty statuses. */
-export function groupSessionsByStatus<T extends { manualStatus?: ManualStatus }>(sessions: readonly T[]): { status: ManualStatus; sessions: T[] }[] {
-  return MANUAL_STATUSES.map((status) => ({ status, sessions: sessions.filter((session) => (session.manualStatus ?? "backlog") === status) }))
+export function groupSessionsByStatus<T extends { manualStatus?: unknown }>(sessions: readonly T[]): { status: ManualStatus; sessions: T[] }[] {
+  return MANUAL_STATUSES.map((status) => ({ status, sessions: sessions.filter((session) => normalizeManualStatus(session.manualStatus) === status) }))
     .filter((group) => group.sessions.length > 0);
 }

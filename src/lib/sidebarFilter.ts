@@ -9,7 +9,7 @@ import { isArchived } from "@/lib/cloudLifecycle";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
-import { cloudProjectKey, cloudWorkspaceKey } from "@/types/target";
+import { cloudProjectKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
 /**
  * The sidebar's session filter (PRO-23): everything, only sessions with an
@@ -113,12 +113,34 @@ export function useSidebarFilter(): SidebarFilterState {
     let count = 0;
     for (const session of [...store.sessions, ...cloud.filter((session) => visibleIds.has(session.orgId))] as DashboardSession[]) {
       const projectPath = sidebarProjectOf(session, store.chatsPath);
-      if (project && projectPath !== project) continue;
-      const passes = sessionPassesFilter(filter, session);
+      const passes = (!project || projectPath === project) && sessionPassesFilter(filter, session);
       if (passes && (!session.archived || store.showArchived)) count++;
       if (!passes && session.id !== selected) continue;
       sessions.add(session.id);
       if (projectPath) projects.add(projectPath);
+    }
+    // The dashboard omits archived sessions. A selected archived session in
+    // an active workspace must still survive both filters in the sidebar.
+    const selectedCloud = selected && parseCloudWorkspaceKey(selected);
+    if (selectedCloud && selectedCloud.sessionId && visibleIds.has(selectedCloud.orgId)) {
+      const item = catalog.orgs[selectedCloud.orgId]?.workspaces.find(({ workspace }) => workspace.id === selectedCloud.workspaceId);
+      if (item && !isArchived(item.workspace)) {
+        const repository = repositoryOf(item, catalog.createMemory);
+        sessions.add(selected);
+        projects.add(cloudProjectKey(selectedCloud.orgId, repository?.identity ?? blankIdentity(item.workspace.name)));
+      }
+    }
+    if (filter === "all" && project) {
+      for (const orgId of liveCloudOrgIds(status).filter((id) => visibleIds.has(id))) {
+        for (const item of catalog.orgs[orgId]?.workspaces ?? []) {
+          const repository = repositoryOf(item, catalog.createMemory);
+          if (cloudProjectKey(orgId, repository?.identity ?? blankIdentity(item.workspace.name)) !== project) continue;
+          workspaces.add(cloudWorkspaceKey(orgId, item.workspace.id));
+          if (store.showArchived && !isArchived(item.workspace)) {
+            count += catalog.orgs[orgId]?.sessions[item.workspace.id]?.sessions.filter((session) => session.archived).length ?? 0;
+          }
+        }
+      }
     }
     if (filter === "needs") {
       for (const { workspaceKey, projectKey } of workspacesNeedingYou(catalog, liveCloudOrgIds(status).filter((id) => visibleIds.has(id)))) {
@@ -130,9 +152,13 @@ export function useSidebarFilter(): SidebarFilterState {
     return {
       filter,
       active: true,
-      shows: (sessionId) => sessions.has(sessionId),
-      showsProject: (projectKey) => (!project || canonicalProject(projectKey) === project) && (filter === "all" || projects.has(canonicalProject(projectKey))),
-      showsWorkspace: (workspaceKey) => filter === "all" || workspaces.has(workspaceKey),
+      shows: (sessionId) => {
+        if (sessions.has(sessionId)) return true;
+        const cloudSession = filter === "all" && parseCloudWorkspaceKey(sessionId);
+        return !!cloudSession && !!cloudSession.sessionId && workspaces.has(cloudWorkspaceKey(cloudSession.orgId, cloudSession.workspaceId));
+      },
+      showsProject: (projectKey) => projects.has(canonicalProject(projectKey)) || (filter === "all" && (!project || canonicalProject(projectKey) === project)),
+      showsWorkspace: (workspaceKey) => (filter === "all" && !project) || workspaces.has(workspaceKey),
       count,
       empty: SIDEBAR_FILTERS.find((entry) => entry.id === filter)?.empty || "No sessions in this project.",
     };

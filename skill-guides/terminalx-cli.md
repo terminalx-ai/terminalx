@@ -92,11 +92,14 @@ working in, or another agent's.
 terminalx sessions status <session> --status backlog|in_progress|in_review|done|canceled --json
 ```
 
-This sets the session’s workflow status, independent of its agent’s activity. New and
-older sessions start in Backlog. The change is stored in the session index and reaches
+This sets the session’s workflow status, independent of its agent’s activity. Unset or
+unrecognized stored values display in Backlog. The change is stored in the session index and reaches
 all windows and paired phones. Sessions sharing a branch keep their own statuses.
 Done and Canceled do not archive the session or stop its agent. The result includes
-`session.manualStatus`; `sessions list` and `sessions show` include it too.
+`session.manualStatus`; `sessions list` and `sessions show` include it when set.
+Manual status does not exempt a session from idle archiving or reset its last-message
+clock. In progress and In review sessions still follow the configured idle limit;
+Show archived brings archived sessions back into view.
 
 ### Start a session
 

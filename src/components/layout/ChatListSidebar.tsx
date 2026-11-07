@@ -1,7 +1,7 @@
 import { StatusGroups } from "./StatusGroups";
 import { ManualStatusIcon } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Ellipsis, GitBranch, Pin, Settings, SquarePen } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -190,6 +190,7 @@ function ChatRow({
   const pickedNow = usePickedSessions();
   const picking = pickedNow.length > 0;
   const picked = isPicked(ids, pickedNow);
+  const statusDescriptionId = useId();
   const status = sessionStatus(session);
   const { animations } = usePrefs();
   const summary = summaries.get(session.id);
@@ -220,12 +221,13 @@ function ChatRow({
             aria-current={selected ? "true" : undefined}
             aria-pressed={picking ? picked : undefined}
             aria-label={title}
+            aria-describedby={statusDescriptionId}
             className="flex min-w-0 flex-1 items-center gap-3 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
             <ChatMark session={session} project={link?.project ?? null} agent={agent} live={status === "in_progress" && animations} />
             <span className="flex min-w-0 flex-1 flex-col">
               <span className="flex items-center gap-1.5">
-                <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /></span>
+                <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>
                 {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
                 <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{title}</span>
                 {session.worktreeRemoved && <span className="shrink-0 text-[10px] text-faint">removed</span>}

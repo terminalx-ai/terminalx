@@ -150,6 +150,15 @@ beforeEach(() => {
 });
 
 describe("one session, two windows", () => {
+  it("removes a closed chat window's sidebar preferences when the main window hears its destruction", async () => {
+    await openWindow("main");
+    localStorage.setItem("raccoon.prefs.sidebar.chat-test", "{}");
+    localStorage.setItem("raccoon.prefs.sidebar.main", "{}");
+    emit("chat_window_closed", "chat-test");
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-test")).toBeNull();
+    expect(localStorage.getItem("raccoon.prefs.sidebar.main")).toBe("{}");
+  });
+
   it("shows a session renamed or pinned in one window the same way in the other", async () => {
     const main = await openWindow("main");
     const floating = await openWindow("floating");
