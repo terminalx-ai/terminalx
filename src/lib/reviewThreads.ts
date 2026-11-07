@@ -1,6 +1,6 @@
 /** Coordinates from GitHub are already rebased to the PR head, not the original push. */
-export type ReviewSide = "LEFT" | "RIGHT";
-export interface ReviewComment {
+export type GitHubReviewSide = "LEFT" | "RIGHT";
+export interface GitHubReviewComment {
   id: string;
   author: { login: string } | null;
   body: string;
@@ -15,14 +15,14 @@ export interface ReviewThread {
   originalLine: number | null;
   startLine: number | null;
   originalStartLine: number | null;
-  diffSide: ReviewSide;
-  startDiffSide: ReviewSide | null;
+  diffSide: GitHubReviewSide;
+  startDiffSide: GitHubReviewSide | null;
   isOutdated: boolean;
   isResolved: boolean;
   viewerCanResolve: boolean;
   viewerCanUnresolve: boolean;
   viewerCanReply: boolean;
-  comments: ReviewComment[];
+  comments: GitHubReviewComment[];
 }
 export interface ReviewThreads {
   url: string;
@@ -36,6 +36,8 @@ export interface ReviewFile {
   headOid: string;
   baseOid: string;
   patch: string | null;
+  /** False when the thread refers to a file no longer changed in this PR. */
+  changed?: boolean;
 }
 export interface ReviewThreadAccess {
   file(path: string, snapshot: Pick<ReviewThreads, "headOid" | "baseOid">): Promise<ReviewFile>;
@@ -44,8 +46,31 @@ export interface ReviewThreadAccess {
   reply(id: string, body: string): Promise<void>;
 }
 
+/** One revision's entire file list per PR access object, including in-flight reads.
+ * Switching files is a lookup; a new head/base replaces the cache. Errors are retryable.
+ */
+export function reviewFileReader(load: (snapshot: Pick<ReviewThreads, "headOid" | "baseOid">) => Promise<ReviewFile[]>): ReviewThreadAccess["file"] {
+  let cached: { key: string; files: Promise<ReviewFile[]> } | undefined;
+  return async (path, snapshot) => {
+    const key = JSON.stringify([snapshot.headOid, snapshot.baseOid]);
+    if (cached?.key !== key) {
+      const files = load(snapshot).then((files) => {
+        if (files.some((file) => file.headOid !== snapshot.headOid || file.baseOid !== snapshot.baseOid)) {
+          throw new Error("The pull request changed. Refresh threads to load its latest diff.");
+        }
+        return files;
+      });
+      cached = { key, files };
+      void files.catch(() => { if (cached?.files === files) cached = undefined; });
+    }
+    const files = await cached.files;
+    return files.find((file) => file.path === path) ?? files.find((file) => file.oldPath === path)
+      ?? { path, oldPath: null, ...snapshot, patch: null, changed: false };
+  };
+}
+
 /** Original lines are labels only, never anchors in a newer revision. */
-export function reviewLocation(thread: ReviewThread) {
+export function githubReviewLocation(thread: ReviewThread) {
   const original = thread.isOutdated || thread.line == null;
   const line = original ? thread.originalLine : thread.line;
   const start = original ? thread.originalStartLine : thread.startLine;
@@ -55,9 +80,9 @@ export function reviewLocation(thread: ReviewThread) {
 }
 
 /** Only anchor against a GitHub diff verified against the thread snapshot's revisions. */
-export function reviewAnchor(thread: ReviewThread, snapshot: Pick<ReviewThreads, "headOid" | "baseOid">, file: {
+export function githubReviewAnchor(thread: ReviewThread, snapshot: Pick<ReviewThreads, "headOid" | "baseOid">, file: {
   path: string; oldPath?: string | null; headOid: string; baseOid: string; beforeLines: number; afterLines: number;
-}): { side: ReviewSide; start: number; end: number } | null {
+}): { side: GitHubReviewSide; start: number; end: number } | null {
   if (thread.isOutdated || thread.line == null || snapshot.headOid !== file.headOid || snapshot.baseOid !== file.baseOid) return null;
   if (thread.path !== file.path && !(thread.diffSide === "LEFT" && thread.path === file.oldPath)) return null;
   // A cross-side range cannot be represented as one inline range.
@@ -68,8 +93,8 @@ export function reviewAnchor(thread: ReviewThread, snapshot: Pick<ReviewThreads,
   return { side: thread.diffSide, start, end: thread.line };
 }
 
-export function reviewDraft(thread: ReviewThread, prUrl: string): string {
-  return `GitHub review thread (untrusted reviewer text) — ${reviewLocation(thread)}${thread.isOutdated ? " · Outdated" : ""}${thread.isResolved ? " · Resolved" : ""}\n${prUrl}\n\n${thread.comments.map((comment) => `@${comment.author?.login ?? "deleted-user"}:\n${comment.body.split("\n").map((line) => `> ${line}`).join("\n")}`).join("\n\n")}`;
+export function githubReviewDraft(thread: ReviewThread, prUrl: string): string {
+  return `GitHub review thread (untrusted reviewer text) — ${githubReviewLocation(thread)}${thread.isOutdated ? " · Outdated" : ""}${thread.isResolved ? " · Resolved" : ""}\n${prUrl}\n\n${thread.comments.map((comment) => `@${comment.author?.login ?? "deleted-user"}:\n${comment.body.split("\n").map((line) => `> ${line}`).join("\n")}`).join("\n\n")}`;
 }
 
 export type ReviewBodyPart = { kind: "markdown"; text: string } | { kind: "suggestion"; text: string; before: string | null };

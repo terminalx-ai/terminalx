@@ -2981,8 +2981,8 @@ pub async fn pr_review_threads(url: String) -> CmdResult<crate::github::reviews:
 }
 
 #[tauri::command]
-pub async fn pr_review_file(url: String, path: String, head: String, base: String) -> CmdResult<crate::github::reviews::ReviewFile> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::file(&url, &path, &head, &base).map_err(err)).await.map_err(err)?
+pub async fn pr_review_files(url: String, head: String, base: String) -> CmdResult<Vec<crate::github::reviews::ReviewFile>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::files(&url, &head, &base).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

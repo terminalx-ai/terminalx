@@ -1,15 +1,15 @@
 import type { ReactNode } from "react";
-import { reviewAnchor, type ReviewFile, type ReviewThread, type ReviewThreads } from "@/lib/reviewThreads";
+import { githubReviewAnchor, type ReviewFile, type ReviewThread, type ReviewThreads } from "@/lib/reviewThreads";
 import { reviewPatch, splitReviewRows, type ReviewPatchRow } from "@/lib/reviewPatch";
 
-export interface ReviewDiff {
+export interface GitHubReviewDiff {
   file: ReviewFile;
   snapshot: ReviewThreads;
   renderThread(thread: ReviewThread): ReactNode;
 }
 
 /** PR hunks come from GitHub, not an uncommitted or differently based local tree. */
-export function ReviewPatchPane({ review, mode }: { review: ReviewDiff; mode: "split" | "unified" }) {
+export function GitHubReviewPatchPane({ review, mode }: { review: GitHubReviewDiff; mode: "split" | "unified" }) {
   const { file, snapshot, renderThread } = review;
   const { rows, complete } = reviewPatch(file.patch ?? "");
   const positions = new Set<string>();
@@ -21,7 +21,7 @@ export function ReviewPatchPane({ review, mode }: { review: ReviewDiff; mode: "s
   const placed = new Map<string, ReviewThread[]>();
   const unplaced: ReviewThread[] = [];
   for (const thread of snapshot.threads.filter((thread) => thread.path === file.path || thread.path === file.oldPath)) {
-    const anchor = complete ? reviewAnchor(thread, snapshot, { ...file, beforeLines, afterLines }) : null;
+    const anchor = complete ? githubReviewAnchor(thread, snapshot, { ...file, beforeLines, afterLines }) : null;
     const key = anchor && `${anchor.side}:${anchor.end}`;
     if (key && positions.has(key)) placed.set(key, [...(placed.get(key) ?? []), thread]);
     else unplaced.push(thread);
@@ -32,7 +32,7 @@ export function ReviewPatchPane({ review, mode }: { review: ReviewDiff; mode: "s
     <pre className="min-w-0 flex-1 overflow-x-auto px-2">{row.kind === "del" ? "−" : row.kind === "add" ? "+" : " "}{row.text || " "}</pre>
   </div>;
   return <div className="diff-pane min-w-0 overflow-auto scrollbar-thin select-text" aria-label="PR file diff">
-    {file.patch == null && <p className="p-2 text-xs text-muted-foreground">GitHub has no text diff for this file at the current PR head.</p>}
+    {file.patch == null && <p className="p-2 text-xs text-muted-foreground">{file.changed === false ? "This file is no longer changed in the PR." : "GitHub has no text diff for this file at the current PR head."}</p>}
     {file.patch != null && !complete && <p role="alert" className="p-2 text-xs text-muted-foreground">GitHub returned an incomplete diff. Threads are shown below without line placement.</p>}
     {mode === "split" ? <table className="w-full table-fixed border-collapse" aria-label="Split PR diff">
       <thead><tr className="text-xs text-muted-foreground"><th>Base</th><th>Head</th></tr></thead>

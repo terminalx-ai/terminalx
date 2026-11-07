@@ -682,7 +682,7 @@ pub fn run() {
             commands::pr_associations,
             commands::pr_details,
             commands::pr_review_threads,
-            commands::pr_review_file,
+            commands::pr_review_files,
             commands::pr_review_resolve,
             commands::pr_review_reply,
             commands::pr_landed,

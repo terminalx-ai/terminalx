@@ -160,13 +160,13 @@ fn list_with(url: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Resu
     result.context("GitHub did not return review threads")
 }
 
-pub fn file(url: &str, path: &str, head: &str, base: &str) -> Result<ReviewFile> {
-    file_with(url, path, head, base, &mut run)
+pub fn files(url: &str, head: &str, base: &str) -> Result<Vec<ReviewFile>> {
+    files_with(url, head, base, &mut run)
 }
 
-fn file_with(url: &str, path: &str, head: &str, base: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<ReviewFile> {
+fn files_with(url: &str, head: &str, base: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<Vec<ReviewFile>> {
     let target = Target::new(url)?;
-    if path.is_empty() || head.is_empty() || base.is_empty() { bail!("A file and PR revisions are required"); }
+    if head.is_empty() || base.is_empty() { bail!("PR revisions are required"); }
     let check = |run: &mut dyn FnMut(&[&str]) -> Result<String>| -> Result<()> {
         let pr: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "url,headRefOid,baseRefOid"])?)?;
         if pr["headRefOid"].as_str() != Some(head) || pr["baseRefOid"].as_str() != Some(base)
@@ -178,22 +178,20 @@ fn file_with(url: &str, path: &str, head: &str, base: &str, run: &mut impl FnMut
     check(run)?;
     let endpoint = format!("repos/{}/{}/pulls/{}/files?per_page=100", target.owner, target.name, target.number);
     let pages: Value = serde_json::from_str(&run(&["api", "--hostname", &target.host, &endpoint, "--paginate", "--slurp"])?)?;
-    let mut found = None;
+    let mut files = Vec::new();
     for page in pages.as_array().context("GitHub did not return PR file pages")? {
         for entry in page.as_array().context("GitHub did not return PR files")? {
-            if entry["filename"].as_str() == Some(path) || (found.is_none() && entry["previous_filename"].as_str() == Some(path)) {
-                found = Some(entry);
-            }
+            files.push(ReviewFile {
+                path: entry["filename"].as_str().context("GitHub omitted a PR file path")?.into(),
+                old_path: entry["previous_filename"].as_str().map(String::from),
+                head_oid: head.into(), base_oid: base.into(),
+                patch: entry["patch"].as_str().map(String::from),
+            });
         }
     }
-    // A push during pagination would mix revisions. Leave the old diff unanchored instead.
+    // A push during pagination would mix revisions. Never cache an unverified list.
     check(run)?;
-    Ok(ReviewFile {
-        path: found.and_then(|v| v["filename"].as_str()).unwrap_or(path).into(),
-        old_path: found.and_then(|v| v["previous_filename"].as_str()).map(String::from),
-        head_oid: head.into(), base_oid: base.into(),
-        patch: found.and_then(|v| v["patch"].as_str()).map(String::from),
-    })
+    Ok(files)
 }
 
 fn check_thread(target: &Target, id: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<()> {

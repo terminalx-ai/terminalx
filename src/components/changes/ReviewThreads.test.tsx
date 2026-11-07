@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ReviewThreads, ReviewThreadCard, REVIEW_REFRESH_MS } from "./ReviewThreads";
 import { reviewSnapshot as snapshot, reviewThread as thread, reviewFile } from "@/test/reviewThreads";
 import type { GitSource } from "@/lib/gitSource";
-import type { ReviewThreads as Snapshot } from "@/lib/reviewThreads";
+import { reviewFileReader, type ReviewThreads as Snapshot } from "@/lib/reviewThreads";
 import { getDraft, setDraft } from "@/lib/drafts";
 
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
@@ -190,8 +190,9 @@ it.each(["CLOSED", "MERGED"] as const)("keeps %s PRs read-only and leaves the un
 it("retains a reply draft when switching diff layouts and files", async () => {
   const other = { ...thread, id: "other", path: "other.ts" };
   read.mockResolvedValue({ ...snapshot, threads: [thread, other] });
-  file.mockImplementation(async (path) => ({ ...reviewFile, path }));
-  render(<ReviewThreads {...props} />);
+  const pages = vi.fn().mockResolvedValue([reviewFile, { ...reviewFile, path: other.path }]);
+  const cachedSource = { ...source, reviewThreads: () => ({ read, file: reviewFileReader(pages), resolve, reply }) };
+  render(<ReviewThreads {...props} source={cachedSource} />);
   expand();
   fireEvent.click(await screen.findByRole("button", { name: "Reply" }));
   fireEvent.change(screen.getByLabelText("Reply to review thread"), { target: { value: "Keep my draft" } });
@@ -201,6 +202,9 @@ it("retains a reply draft when switching diff layouts and files", async () => {
   await screen.findByRole("button", { name: "Reply" });
   fireEvent.change(screen.getByLabelText("Review file"), { target: { value: thread.path } });
   expect((await screen.findByLabelText("Reply to review thread") as HTMLTextAreaElement).value).toBe("Keep my draft");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh threads" }));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  expect(pages).toHaveBeenCalledTimes(1);
 });
 
 it("ignores a prior head's file response when a push changes the thread snapshot", async () => {

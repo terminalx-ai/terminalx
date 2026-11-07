@@ -3,9 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/chat/Markdown";
 import { getDraft, setDraft } from "@/lib/drafts";
 import { useSessionStore } from "@/lib/sessions";
-import { reviewBody, reviewDraft, reviewLocation, type ReviewFile, type ReviewThread, type ReviewThreads as ThreadSnapshot } from "@/lib/reviewThreads";
+import { reviewBody, githubReviewDraft, githubReviewLocation, type ReviewFile, type ReviewThread, type ReviewThreads as ThreadSnapshot } from "@/lib/reviewThreads";
 import type { GitSource } from "@/lib/gitSource";
-import { DiffPane } from "./DiffPane";
+import { GitHubReviewPatchPane } from "./GitHubReviewPatchPane";
 
 export const REVIEW_REFRESH_MS = 3 * 60_000;
 
@@ -148,7 +148,7 @@ function ThreadList({ source, url, sessionId, active, prState }: Props) {
         {!shownFile && <p role="status">Loading PR file diff…</p>}
         {shownFile?.error && <div role="alert">Could not load PR file diff: {shownFile.error} <Button variant="ghost" size="xs" onClick={() => { setFileResult(null); setFileTick((tick) => tick + 1); }}>Retry file diff</Button></div>}
         {shownFile?.file
-          ? <DiffPane mode={mode} review={{ file: shownFile.file, snapshot, renderThread }} />
+          ? <GitHubReviewPatchPane mode={mode} review={{ file: shownFile.file, snapshot, renderThread }} />
           : shownFile?.error ? snapshot.threads.filter((thread) => thread.path === path).map(renderThread) : null}
       </>}
     </div>
@@ -175,9 +175,9 @@ export function ReviewThreadCard({ thread, prUrl, tabId, disabled, onResolve, on
       else await onResolve();
     } catch (error) { setError({ reply, message: `${errorMessage(error)}${reply ? " Refresh threads before retrying to check whether the reply was posted." : ""}` }); }
   };
-  return <article aria-label={`Review thread ${reviewLocation(thread)}`} className="rounded-md border border-hairline bg-well/40 p-2 select-text">
+  return <article aria-label={`Review thread ${githubReviewLocation(thread)}`} className="rounded-md border border-hairline bg-well/40 p-2 select-text">
     <div className="mb-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-      <span className="break-all font-mono">{reviewLocation(thread)}</span>
+      <span className="break-all font-mono">{githubReviewLocation(thread)}</span>
       {thread.isOutdated && <span>Outdated</span>}
       {thread.isResolved && <span>Resolved</span>}
     </div>
@@ -192,7 +192,7 @@ export function ReviewThreadCard({ thread, prUrl, tabId, disabled, onResolve, on
       {thread.viewerCanReply && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => setReplyOpen(!replyOpen)}>Reply</Button>}
       {tabId && <Button size="xs" variant="ghost" onClick={() => {
         const draft = getDraft(tabId);
-        setDraft(tabId, `${draft}${draft ? "\n\n" : ""}${reviewDraft(thread, prUrl)}`);
+        setDraft(tabId, `${draft}${draft ? "\n\n" : ""}${githubReviewDraft(thread, prUrl)}`);
         setSentTo(tabId);
       }}>Send to agent</Button>}
       {tabId && sentTo === tabId && <span role="status" className="text-muted-foreground">Added to chat draft</span>}

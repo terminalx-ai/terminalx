@@ -1,3 +1,4 @@
+import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
@@ -92,7 +93,7 @@ export function localGitSource(cwd: string): GitSource {
     prs: (branch) => gh.list(cwd, branch),
     reviewThreads: (url) => ({
       read: () => gh.reviewThreads(url),
-      file: (path, snapshot) => gh.reviewFile(url, path, snapshot.headOid, snapshot.baseOid),
+      file: reviewFileReader((snapshot) => gh.reviewFiles(url, snapshot.headOid, snapshot.baseOid)),
       resolve: (id, resolved) => gh.resolveReview(url, id, resolved),
       reply: (id, body) => gh.replyReview(url, id, body),
     }),
