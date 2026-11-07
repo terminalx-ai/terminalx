@@ -273,3 +273,34 @@ fn a_runtime_handover_keeps_the_incident() {
     note(&mut fresh, true, |t, c| t.adopt(c, None));
     assert_eq!(read_all().unwrap().len(), lines.len());
 }
+
+/// #820 review: a model or harness configured as a file is never kept as
+/// its location, in a line, in a window's report or in an export of lines
+/// an earlier build wrote. Ids with a provider or host in front are names.
+#[test]
+fn a_name_that_is_a_file_location_is_never_kept() {
+    for path in ["/Users/alice/models/x.gguf", "~/models/x.gguf", "./x.gguf", "../models/x", "models/x.gguf", "x.safetensors", "C:\\Users\\alice\\m.bin",
+        "c:/models/m", "a/b/c/d", "models//x", "/opt/llm", "home/alice/models/q"] {
+        assert_eq!(name(path), PATH, "{path}");
+    }
+    for id in ["gpt-6-astra", "openai/gpt-6-astra", "anthropic/claude-3.5-sonnet", "hf.co/org/model", "llama3:8b", "xhigh", "codex_stdio", "0.2.25"] {
+        assert_eq!(name(id), id, "{id}");
+    }
+    assert_eq!(Agent::new("codex", "codex_stdio", Some("/Users/alice/models/x.gguf"), None).model.as_deref(), Some(PATH));
+
+    let _home = crate::store::temp_home();
+    let mut t = Tracker::default();
+    t.set_agent(Agent::new("opencode", "pty", Some("/Users/alice/models/x.gguf"), Some("high")));
+    note(&mut t, true, |t, c| t.raised(c, RecoveryKind::Timeout, Source::Watcher, 1));
+    let shown = report(json!({ "kind": "exposure", "phase": "shown", "reason": "timeout" })).unwrap().bounded("/Users/alice/build/0.2.25");
+    note(&mut t, true, |t, c| t.ui(c, &shown));
+    let kept = std::fs::read_to_string(dir().unwrap().join(FILE)).unwrap();
+    assert!(!kept.contains("alice") && !kept.contains("gguf"), "{kept}");
+    assert!(kept.contains(PATH));
+
+    // A line an earlier build wrote with a location in it is exported without it.
+    let older = vec![json!({ "v": 1, "kind": "recovery_raised", "session": "s", "tab": "t", "runtime": "0.2.25",
+        "agent": { "harness": "opencode", "transport": "pty", "model": "/Users/alice/models/x.gguf" }, "appBuild": "~/builds/app" })];
+    let exported = serde_json::to_string(&pseudonymized(older, "salt")).unwrap();
+    assert!(!exported.contains("alice") && !exported.contains("gguf") && !exported.contains("builds"), "{exported}");
+}
