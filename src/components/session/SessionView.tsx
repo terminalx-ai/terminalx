@@ -198,6 +198,8 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  *    placeholder ("not available here") is left out. A switch that works
  *    stays, and the location chip is left out instead: the sidebar row says
  *    where the session runs and has the same workspace menu.
+ *    The action buttons narrow to 32px and the chips share a 4px gap, so the
+ *    larger header buttons still leave room for the title and its ellipsis.
  *
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
@@ -542,7 +544,7 @@ export function SessionView({
             <div className="flex min-w-0 flex-1 items-center gap-1 text-sm" data-testid="session-compact-leading">{chrome?.leading}</div>
           ) : (
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
-          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden @max-[360px]/session-header:gap-1 @max-[360px]/session-header:[&>*]:ml-0")} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
             {githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
@@ -705,9 +707,9 @@ export function SessionView({
           )}
 
           {/* At the right edge whatever the width. */}
-          {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
-              20px in a 40px-wide button; one beside a label (Share) stays at the label's scale. */}
-          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", !compact && "max-w-[70%]")}>
+          {/* The header's actions fill the bar's height, so their hover is a full band. An icon on its own is
+              20px in a 40px-wide button (32px in a tight cloud header); one beside a label (Share) stays at the label's scale. */}
+          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", !compact && "max-w-[70%]", cloud && "@max-[360px]/session-header:[&_button:has(>svg:only-child)]:w-8")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
