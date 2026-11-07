@@ -25,11 +25,11 @@ export const DialogContent = React.forwardRef<
   }
 >(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", ...props }, ref) => (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay data-dialog-overlay className="fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-fade-in" />
+    <DialogPrimitive.Overlay data-dialog-overlay className="fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-overlay-in data-[state=closed]:animate-overlay-out" />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-1/2 top-1/2 z-(--z-dialog) w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-popover glass p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in",
+        "fixed left-1/2 top-1/2 z-(--z-dialog) w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-popover glass p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
         // Should the header and footer alone be taller than the window, the dialog still scrolls as a whole.
         "max-h-[calc(100dvh-2rem)] overflow-y-auto scrollbar-thin",
         layout === "pinned" && "flex flex-col",
