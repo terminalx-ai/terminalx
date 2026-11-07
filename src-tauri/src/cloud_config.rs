@@ -583,10 +583,18 @@ impl ConfigStore {
     /// The configuration for a new agent session of `harness`, recorded under
     /// `launch` for restart tracking. Empty before the first fetch.
     pub fn launch_config(&self, harness: &str, launch: &str, now: Instant) -> LaunchConfig {
+        self.launch_config_checked(harness, launch, now, |_| Ok(()))
+            .expect("unconditional workspace admission")
+    }
+
+    /// Admit the SAME environment snapshot before writing an MCP file or
+    /// recording a launch. Never check one revision and launch another.
+    pub fn launch_config_checked(&self, harness: &str, launch: &str, now: Instant, admit: impl FnOnce(&[(String, String)]) -> Result<()>) -> Result<LaunchConfig> {
         let mut state = self.state();
         let Some(config) = state.config.clone() else {
+            admit(&[])?;
             state.launches.remove(launch);
-            return LaunchConfig::default();
+            return Ok(LaunchConfig::default());
         };
         let mut env: Vec<(String, String)> = config.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
         for (name, secret) in &config.secret_env {
@@ -594,6 +602,7 @@ impl ConfigStore {
                 env.push((name.clone(), value.to_string()));
             }
         }
+        admit(&env)?;
         let prompt = config.prompts.join("\n\n");
         let mut args = String::new();
         match harness {
@@ -639,7 +648,7 @@ impl ConfigStore {
         // Whatever path a name took, the runtime's own never leave here.
         env.retain(|(name, _)| is_injectable_name(name) || name.starts_with("MCP_HEADER_SECRET_"));
         state.launches.insert(launch.to_string(), config.revision.clone());
-        LaunchConfig { env, args }
+        Ok(LaunchConfig { env, args })
     }
 
     pub fn forget_launch(&self, launch: &str) {
@@ -725,6 +734,35 @@ pub fn install(store: Arc<ConfigStore>) {
 /// Configuration for a new agent session; empty outside a cloud workspace.
 pub fn launch_config(harness: &str, launch: &str) -> LaunchConfig {
     STORE.get().map(|store| store.launch_config(harness, launch, Instant::now())).unwrap_or_default()
+}
+
+pub fn launch_config_checked(harness: &str, launch: &str, admit: impl FnOnce(&[(String, String)]) -> Result<()>) -> Result<LaunchConfig> {
+    #[cfg(test)]
+    if let Some(store) = test_support::STORE.with(|slot| slot.borrow().clone()) {
+        return store.launch_config_checked(harness, launch, Instant::now(), admit);
+    }
+    match STORE.get() {
+        Some(store) => store.launch_config_checked(harness, launch, Instant::now(), admit),
+        None => { admit(&[])?; Ok(LaunchConfig::default()) }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    thread_local! {
+        pub(super) static STORE: std::cell::RefCell<Option<Arc<ConfigStore>>> = const { std::cell::RefCell::new(None) };
+    }
+    pub fn with_env<T>(env: Vec<(String, String)>, run: impl FnOnce() -> T) -> T {
+        let store = Arc::new(ConfigStore::new(Arc::new(crate::cloud_grants::test_support::grant_store("configuration-admission", None))));
+        store.state().config = Some(Resolved { env: env.into_iter().filter(|(name, _)| is_injectable_name(name)).collect(), ..Default::default() });
+        struct Restore(Option<Arc<ConfigStore>>);
+        impl Drop for Restore {
+            fn drop(&mut self) { STORE.with(|slot| *slot.borrow_mut() = self.0.take()); }
+        }
+        let _restore = Restore(STORE.with(|slot| slot.replace(Some(store))));
+        run()
+    }
 }
 
 /// The names of the variables the workspace configuration gives a new agent
@@ -875,6 +913,28 @@ mod tests {
         }
         store.forget_launch("pane-1");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn checked_launch_refuses_a_bound_selector_before_mcp_writes_or_launch_tracking() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, grants) = store("ws-selector", Some(root.path().to_path_buf()));
+        let inner = grants.clone();
+        let api = fake(&grants, move |thumbprint| {
+            let mut body = response(&inner, thumbprint, "rev-selector", json!({}), Some(json!({"NPM_TOKEN": SECRET, "SEARCH_TOKEN": OTHER_SECRET})));
+            body["secretEnv"] = json!([{"envName": "CLAUDE_CODE_CUSTOM_OAUTH_URL", "secretName": "NPM_TOKEN"}]);
+            Ok(body)
+        });
+        store.sync(&api, &api, Instant::now(), 0).unwrap();
+        let identity = crate::harness::claude::configuration::Identity::new(PathBuf::from("/synthetic/home"), None);
+        let error = store.launch_config_checked("claude", "refused", Instant::now(), |env| {
+            assert!(env.iter().any(|(name, _)| name == "CLAUDE_CODE_CUSTOM_OAUTH_URL"));
+            identity.admit_contribution(env.iter().map(|(name, value)| (name.as_str(), value.as_str())))
+        }).unwrap_err();
+        assert!(!error.to_string().contains(SECRET));
+        assert!(store.state().launches.is_empty());
+        assert!(store.state().files.is_empty());
+        assert!(!root.path().join(MCP_DIR).exists());
     }
 
     #[test]

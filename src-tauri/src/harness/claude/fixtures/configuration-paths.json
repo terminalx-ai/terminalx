@@ -1,0 +1,130 @@
+[
+  {
+    "name": "default",
+    "home": "/synthetic/cloud-home",
+    "overrideDir": null,
+    "globalFile": "/synthetic/cloud-home/.claude.json",
+    "userDir": "/synthetic/cloud-home/.claude",
+    "admitted": true
+  },
+  {
+    "name": "custom",
+    "home": "/synthetic/cloud-home",
+    "overrideDir": "/synthetic/custom config",
+    "globalFile": "/synthetic/custom config/.claude.json",
+    "userDir": "/synthetic/custom config",
+    "admitted": true
+  },
+  {
+    "name": "NFC home",
+    "home": "/synthetic/café",
+    "overrideDir": null,
+    "globalFile": "/synthetic/café/.claude.json",
+    "userDir": "/synthetic/café/.claude",
+    "admitted": true
+  },
+  {
+    "name": "NFC custom",
+    "home": "/synthetic/home",
+    "overrideDir": "/synthetic/café",
+    "globalFile": "/synthetic/café/.claude.json",
+    "userDir": "/synthetic/café",
+    "admitted": true
+  },
+  {
+    "name": "root custom",
+    "home": "/synthetic/home",
+    "overrideDir": "/",
+    "globalFile": "/.claude.json",
+    "userDir": "/",
+    "admitted": true
+  },
+  {
+    "name": "decomposed custom",
+    "home": "/synthetic/home",
+    "overrideDir": "/synthetic/café",
+    "globalFile": "/synthetic/café/.claude.json",
+    "userDir": "/synthetic/café",
+    "admitted": false
+  },
+  {
+    "name": "decomposed home",
+    "home": "/synthetic/café",
+    "overrideDir": null,
+    "globalFile": "/synthetic/café/.claude.json",
+    "userDir": "/synthetic/café/.claude",
+    "admitted": false
+  },
+  {
+    "name": "decomposed home with custom root",
+    "home": "/synthetic/café",
+    "overrideDir": "/synthetic/custom",
+    "globalFile": "/synthetic/custom/.claude.json",
+    "userDir": "/synthetic/custom",
+    "admitted": false
+  },
+  {
+    "name": "parent custom",
+    "home": "/synthetic/home",
+    "overrideDir": "/synthetic/link/../custom",
+    "globalFile": "/synthetic/custom/.claude.json",
+    "userDir": "/synthetic/link/../custom",
+    "admitted": false
+  },
+  {
+    "name": "parent home",
+    "home": "/synthetic/link/../home",
+    "overrideDir": null,
+    "globalFile": "/synthetic/home/.claude.json",
+    "userDir": "/synthetic/home/.claude",
+    "admitted": false
+  },
+  {
+    "name": "dot custom",
+    "home": "/synthetic/home",
+    "overrideDir": "/synthetic/./custom",
+    "globalFile": "/synthetic/custom/.claude.json",
+    "userDir": "/synthetic/./custom",
+    "admitted": false
+  },
+  {
+    "name": "dot home",
+    "home": "/synthetic/./home",
+    "overrideDir": null,
+    "globalFile": "/synthetic/home/.claude.json",
+    "userDir": "/synthetic/home/.claude",
+    "admitted": false
+  },
+  {
+    "name": "repeated separator custom",
+    "home": "/synthetic/home",
+    "overrideDir": "/synthetic//custom",
+    "globalFile": "/synthetic/custom/.claude.json",
+    "userDir": "/synthetic//custom",
+    "admitted": false
+  },
+  {
+    "name": "trailing separator custom",
+    "home": "/synthetic/home",
+    "overrideDir": "/synthetic/custom/",
+    "globalFile": "/synthetic/custom/.claude.json",
+    "userDir": "/synthetic/custom/",
+    "admitted": false
+  },
+  {
+    "name": "empty custom",
+    "home": "/synthetic/home",
+    "overrideDir": "",
+    "globalFile": "/synthetic/home/.claude.json",
+    "userDir": "",
+    "admitted": false
+  },
+  {
+    "name": "relative custom",
+    "home": "/synthetic/home",
+    "overrideDir": "./custom",
+    "globalFile": "custom/.claude.json",
+    "userDir": "./custom",
+    "admitted": false
+  }
+]

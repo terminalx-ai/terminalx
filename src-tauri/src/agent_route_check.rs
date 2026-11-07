@@ -146,6 +146,11 @@ pub fn bedrock_endpoint(region: &str) -> Option<String> {
     valid_bedrock_region(region).then(|| format!("https://bedrock-runtime.{region}.amazonaws.com{}", if region.starts_with("cn-") { ".cn" } else { "" }))
 }
 
+/// The Bedrock control plane resolves inference profiles separately from invocation.
+pub fn bedrock_control_endpoint(region: &str) -> Option<String> {
+    valid_bedrock_region(region).then(|| format!("https://bedrock.{region}.amazonaws.com{}", if region.starts_with("cn-") { ".cn" } else { "" }))
+}
+
 /// A model id as the server accepts one: one token, no traversal.
 pub fn valid_model_id(value: &str) -> bool {
     let mut chars = value.chars();
@@ -570,6 +575,9 @@ mod bedrock_tests {
     fn bedrock_regions_cannot_redirect_credentials() {
         assert_eq!(bedrock_endpoint("us-east-1").as_deref(), Some("https://bedrock-runtime.us-east-1.amazonaws.com"));
         assert_eq!(bedrock_endpoint("cn-north-1").as_deref(), Some("https://bedrock-runtime.cn-north-1.amazonaws.com.cn"));
+        assert_eq!(bedrock_control_endpoint("us-east-1").as_deref(), Some("https://bedrock.us-east-1.amazonaws.com"));
+        assert_eq!(bedrock_control_endpoint("cn-north-1").as_deref(), Some("https://bedrock.cn-north-1.amazonaws.com.cn"));
+        assert!(bedrock_control_endpoint("us-east-1.evil.example").is_none());
         for bad in ["", "us-east-1.evil.example", "us-east-1/", "https://example.com", "us--1"] { assert!(bedrock_endpoint(bad).is_none(), "{bad}"); }
     }
 }

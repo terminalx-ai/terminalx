@@ -1,0 +1,108 @@
+{
+  "publicEnv": {
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "CLAUDE_CODE_USE_VERTEX": "0",
+    "CLAUDE_CODE_USE_FOUNDRY": "0",
+    "CLAUDE_CODE_USE_MANTLE": "0",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "0",
+    "AWS_REGION": "us-east-1",
+    "AWS_DEFAULT_REGION": "us-east-1",
+    "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION": "us-east-1",
+    "AWS_CONFIG_FILE": "/dev/null",
+    "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+    "AWS_EC2_METADATA_DISABLED": "true",
+    "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true",
+    "AWS_USE_FIPS_ENDPOINT": "false",
+    "AWS_USE_DUALSTACK_ENDPOINT": "false",
+    "AWS_ENDPOINT_URL_BEDROCK": "https://bedrock.us-east-1.amazonaws.com",
+    "AWS_ENDPOINT_URL_BEDROCK_RUNTIME": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "ANTHROPIC_BEDROCK_BASE_URL": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "AWS_DEFAULT_PROFILE": "",
+    "AWS_SECURITY_TOKEN": "",
+    "AWS_ROLE_SESSION_NAME": "",
+    "AWS_LOGIN_SESSION": ""
+  },
+  "clearedEnv": [
+    "AWS_PROFILE",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_STS",
+    "AWS_ENDPOINT_URL_SSO",
+    "AWS_ENDPOINT_URL_SSO_OIDC",
+    "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+    "CLAUDE_CODE_SKIP_MANTLE_AUTH",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_GATEWAY",
+    "ANTHROPIC_UNIX_SOCKET",
+    "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+    "CLAUDE_CODE_HOST_CREDS_FILE",
+    "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH"
+  ],
+  "schemes": [
+    {
+      "name": "bedrock-api-key",
+      "credential": {
+        "apiKey": "synthetic-bedrock-key"
+      },
+      "env": {
+        "AWS_BEARER_TOKEN_BEDROCK": "synthetic-bedrock-key",
+        "AWS_ACCESS_KEY_ID": null,
+        "AWS_SECRET_ACCESS_KEY": null,
+        "AWS_SESSION_TOKEN": null,
+        "AWS_AUTH_SCHEME_PREFERENCE": "httpBearerAuth"
+      }
+    },
+    {
+      "name": "aws-keys",
+      "credential": {
+        "accessKeyId": "AKIASYNTHETIC",
+        "secretAccessKey": "synthetic-secret"
+      },
+      "env": {
+        "AWS_BEARER_TOKEN_BEDROCK": null,
+        "AWS_ACCESS_KEY_ID": "AKIASYNTHETIC",
+        "AWS_SECRET_ACCESS_KEY": "synthetic-secret",
+        "AWS_SESSION_TOKEN": null,
+        "AWS_AUTH_SCHEME_PREFERENCE": "sigv4"
+      }
+    },
+    {
+      "name": "aws-session",
+      "credential": {
+        "accessKeyId": "ASIASYNTHETIC",
+        "secretAccessKey": "synthetic-secret",
+        "sessionToken": "synthetic-session"
+      },
+      "env": {
+        "AWS_BEARER_TOKEN_BEDROCK": null,
+        "AWS_ACCESS_KEY_ID": "ASIASYNTHETIC",
+        "AWS_SECRET_ACCESS_KEY": "synthetic-secret",
+        "AWS_SESSION_TOKEN": "synthetic-session",
+        "AWS_AUTH_SCHEME_PREFERENCE": "sigv4"
+      }
+    }
+  ],
+  "settingsSources": [
+    "userSettings",
+    "projectSettings",
+    "localSettings",
+    "flagSettings"
+  ]
+}

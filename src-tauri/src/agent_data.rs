@@ -31,14 +31,7 @@ use crate::store::index::SessionEntry;
 /// `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`. Under test this is never the real home: it resolves
 /// inside the temporary `TERMINALX_HOME`, or nowhere when none is set.
 pub(crate) fn claude_projects_root() -> Option<PathBuf> {
-    #[cfg(not(test))]
-    {
-        crate::harness::claude::transcript::projects_root()
-    }
-    #[cfg(test)]
-    {
-        crate::store::state_home_env().map(|home| PathBuf::from(home).join("test-user-home").join(".claude").join("projects"))
-    }
+    crate::harness::claude::configuration::current().ok().map(|identity| identity.projects())
 }
 
 /// Raccoon's managed Codex home, without creating it.

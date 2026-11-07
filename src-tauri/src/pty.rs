@@ -621,7 +621,7 @@ impl Terminals {
     /// grandchild of this shell — which tab it belongs to.
     pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         let printed = self.retained.lock().unwrap().get(id).map(|history| history.data.clone()).unwrap_or_default();
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, true, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
@@ -635,12 +635,21 @@ impl Terminals {
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
             pane.group.terminate();
         }
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, true, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
 
-    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>) -> Result<()> {
+    /// A host-owned credential environment must reach the CLI unchanged by
+    /// login profiles. Normal panes keep their existing login-shell behavior.
+    pub fn spawn_without_profile(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, environment: crate::store::environment::Launch) -> Result<()> {
+        let printed = self.retained.lock().unwrap().get(id).map(|history| history.data.clone()).unwrap_or_default();
+        let result = self.spawn_after(sink, id, spec, printed, false, Some(environment));
+        if result.is_ok() { self.retained.lock().unwrap().remove(id); }
+        result
+    }
+
+    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>, login: bool, environment: Option<crate::store::environment::Launch>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
@@ -657,16 +666,16 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        let environment = crate::store::environment::launch(cwd);
+        let environment = environment.unwrap_or_else(|| crate::store::environment::launch(cwd));
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
-        let sh = shell();
+        let sh = if login { shell() } else { "/bin/sh".to_string() };
         let mut cmd = CommandBuilder::new(&sh);
         // A login shell so PATH and prompts match the reader's own terminal.
         let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
         match command {
             Some(c) if known_shell => {
-                cmd.arg("-l");
+                if login { cmd.arg("-l"); }
                 cmd.arg("-c");
                 cmd.arg(format!("exec {c}"));
             }
@@ -695,6 +704,13 @@ impl Terminals {
         }
         for (k, v) in env {
             cmd.env(k, v);
+        }
+        if !login {
+            // Noninteractive /bin/sh does not read login files. Also remove
+            // shell startup-file controls rather than letting inherited env
+            // select one in a platform's sh implementation.
+            cmd.env_remove("ENV");
+            cmd.env_remove("BASH_ENV");
         }
         let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
         drop(pair.slave);
@@ -1529,6 +1545,39 @@ impl Terminals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn host_owned_launch_does_not_source_shell_profiles_or_startup_env() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().to_str().unwrap();
+        let poison = "export AWS_ACCESS_KEY_ID=synthetic-other; export CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=0; touch profile-read\n";
+        for name in [".profile", ".bash_profile", ".zprofile", "startup.sh"] {
+            std::fs::write(home.path().join(name), poison).unwrap();
+        }
+        let env = vec![
+            ("HOME".into(), path.into()), ("ZDOTDIR".into(), path.into()),
+            ("BASH_ENV".into(), home.path().join("startup.sh").to_string_lossy().into_owned()),
+            ("ENV".into(), home.path().join("startup.sh").to_string_lossy().into_owned()),
+            ("AWS_ACCESS_KEY_ID".into(), "synthetic-selected".into()),
+            ("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST".into(), "1".into()),
+        ];
+        // Never print environment values: even a broken launch prints only
+        // this fixed success marker, with no inherited/user credentials.
+        let command = r#"/bin/sh -c 'test "$AWS_ACCESS_KEY_ID" = synthetic-selected && test "$CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST" = 1 && test -z "$BASH_ENV" && test -z "$ENV" && printf preserved'"#;
+        let terminals = Terminals::new();
+        terminals.spawn_without_profile(Arc::new(crate::sink::BroadcastSink::new(64)), "host-owned", PaneSpec {
+            cwd: path, cols: 80, rows: 24, command: Some(command), env: &env,
+        }, crate::store::environment::launch(path)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !String::from_utf8_lossy(&terminals.read_output("host-owned")).contains("preserved") {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let preserved = String::from_utf8_lossy(&terminals.read_output("host-owned")).contains("preserved");
+        terminals.kill_all();
+        assert!(preserved, "host environment was not preserved");
+        assert!(!home.path().join("profile-read").exists());
+    }
 
     #[test]
     fn mobile_input_permit_cannot_target_a_replacement_terminal_process() {

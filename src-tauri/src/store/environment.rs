@@ -542,6 +542,16 @@ pub fn launch(_cwd: &str) -> Launch {
         })
 }
 
+#[cfg(test)]
+pub(crate) fn with_launch<T>(launch: Launch, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Launch>);
+    impl Drop for Restore {
+        fn drop(&mut self) { TEST_LAUNCH.with(|slot| *slot.borrow_mut() = self.0.take()); }
+    }
+    let _restore = Restore(TEST_LAUNCH.with(|slot| slot.replace(Some(launch))));
+    run()
+}
+
 fn wait_until_ready(mut ready: impl FnMut() -> bool, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {

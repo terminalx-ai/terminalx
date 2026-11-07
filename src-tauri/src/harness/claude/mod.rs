@@ -4,8 +4,10 @@
 //! command listing sends to a short-lived headless child (`commands.rs`).
 
 pub mod background;
+pub mod bedrock;
 pub mod by_hand;
 pub mod commands;
+pub mod configuration;
 pub mod mapper;
 pub mod models;
 pub mod pty;

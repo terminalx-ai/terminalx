@@ -131,14 +131,24 @@ impl Drop for TestProgram {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_program() -> Option<std::path::PathBuf> {
+    TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// The shell command line the pane runs. `Terminals::spawn` execs it from a
 /// login shell, so it is one string rather than an argv.
 pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
     #[cfg(test)]
-    let pinned = TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let pinned = test_program();
     #[cfg(not(test))]
     let pinned = None;
     let program = pinned.or_else(|| crate::binpath::resolve("claude"))?;
+    Some(launch_command_for(&program, opts))
+}
+
+/// Use the same executable whose provider contract was admitted for this launch.
+pub fn launch_command_for(program: &Path, opts: LaunchOptions<'_>) -> String {
     let mut c = quote(&program.to_string_lossy());
     match (opts.fork_from, opts.resume) {
         (Some(parent), _) => c.push_str(&format!(" --resume {} --fork-session --session-id {}", quote(parent), quote(opts.provider_session_id))),
@@ -174,7 +184,7 @@ pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
         }
     }
     c.push_str(&format!(" --settings {}", quote(&settings.to_string())));
-    Some(c)
+    c
 }
 
 /// The full-screen questions the CLI can open on before its composer, each

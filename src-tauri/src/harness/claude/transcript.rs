@@ -167,8 +167,9 @@ pub fn projects_root_from(config_dir: Option<&str>, home: Option<&Path>) -> Opti
 
 /// Every record uuid in a session's transcript. A fork copies those records
 /// into its own file, so this is what the copy will look like.
-pub fn record_uuids(cwd: &str, session_id: &str) -> Option<HashSet<String>> {
-    let path = locate(cwd, session_id)?;
+/// A launch uses its admitted root even if the parent environment changes.
+pub fn record_uuids_in(projects: &Path, cwd: &str, session_id: &str) -> Option<HashSet<String>> {
+    let path = locate_in(projects, cwd, session_id);
     let text = std::fs::read_to_string(path).ok()?;
     Some(uuids_in(&text))
 }

@@ -150,6 +150,8 @@ fn wait_for_decision(rx: std::sync::mpsc::Receiver<Decision>, wait: std::time::D
 /// transcript to follow, and the conversation id if the app minted one.
 struct CliLaunch {
     command: String,
+    /// The exact admitted Bedrock identity, carried from preparation to spawn.
+    claude_config: Option<claude::configuration::Identity>,
     /// The model the CLI was started on, when that is not the one asked for
     /// (Codex, on an account that cannot run it).
     model: Option<String>,
@@ -4272,9 +4274,34 @@ impl SessionManager {
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
         }
-        let launch = match kind {
-            CliKind::Claude => self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref())?,
-            CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env, &grant)?,
+        let bedrock = grant.route.as_ref().is_some_and(|route| route.bedrock);
+        let bedrock_environment = bedrock.then(|| crate::store::environment::launch(&entry.cwd));
+        let mut admitted_config = None;
+        let mut admitted_launch = None;
+        if bedrock {
+            anyhow::ensure!(kind == CliKind::Claude, "Amazon Bedrock requires Claude Code.");
+            let mut identity = claude::configuration::current()?;
+            let local = bedrock_environment.as_ref().context("missing Bedrock environment snapshot")?;
+            identity.admit_local_environment(&local.values)?;
+            identity.capture_contribution(grant.env.iter().filter_map(|(name, value)| value.as_deref().map(|value| (name.as_str(), value))))?;
+            if let Some(route) = &grant.route {
+                identity.capture_contribution(route.claude_settings_env.iter().map(|(name, value)| (name.as_str(), value.as_str())))?;
+            }
+            admitted_config = Some(crate::cloud_config::launch_config_checked(&tab.harness, &pane, |env| {
+                identity.capture_contribution(env.iter().map(|(name, value)| (name.as_str(), value.as_str())))?;
+                // The callback sees the resolved workspace snapshot before
+                // MCP writes. All contributors are checked before admission
+                // can prepare trust, and a refused launch leaves no MCP file.
+                admitted_launch = Some(self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref(), Some(identity.clone()))?);
+                Ok(())
+            })?);
+        }
+        let launch = match admitted_launch {
+            Some(launch) => launch,
+            None => match kind {
+                CliKind::Claude => self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref(), None)?,
+                CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env, &grant)?,
+            },
         };
         // The reader has been told about a substitution already.
         let launched_for = launched_for.map(|asked| Settings { model: launch.model.clone().unwrap_or(asked.model), ..asked });
@@ -4282,7 +4309,7 @@ impl SessionManager {
         // A cloud workspace's configuration (`cloud_config`): variables,
         // bound secrets, prompts and MCP servers. Before the grants, so an
         // agent credential always wins.
-        let config = crate::cloud_config::launch_config(&tab.harness, &pane);
+        let config = admitted_config.unwrap_or_else(|| crate::cloud_config::launch_config(&tab.harness, &pane));
         env.extend(config.env);
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
@@ -4294,17 +4321,33 @@ impl SessionManager {
                 None => unset.push(name),
             }
         }
+        if let Some(identity) = &launch.claude_config {
+            for (name, value) in identity.launch_env() {
+                env.retain(|(key, _)| key != &name);
+                unset.retain(|key| key != &name);
+                match value {
+                    Some(value) => env.push((name, value)),
+                    None => unset.push(name),
+                }
+            }
+        }
         // The Local VM's driver, while the reader has it on (`local_vm.rs`).
         let computer = crate::local_vm::launch_args(&tab.harness, config.args.contains("--append-system-prompt"));
         let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}", launch.command, config.args, computer), &unset);
-        let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
+        let usage_account = (kind == CliKind::Claude && !bedrock).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,
         // from where it stands now: what a CLI before this one left running
         // went with it.
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
-        self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
+        if bedrock {
+            // A login profile must not replace the host's selected AWS identity
+            // or disable host filtering before Claude reads its settings.
+            self.terminals.spawn_without_profile(self.sink.clone(), &pane, spec, bedrock_environment.context("missing admitted Bedrock environment")?)
+        } else {
+            self.terminals.spawn(self.sink.clone(), &pane, spec)
+        }.context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             usage_account,
@@ -4370,8 +4413,15 @@ impl SessionManager {
     /// conversation with no file is refused ("No conversation found") and
     /// the CLI exits on the spot, so one that never started — or whose file
     /// has gone — is started again under the same id (#663).
-    fn claude_launch(&self, rt: &TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>) -> Result<CliLaunch> {
-        let projects = crate::agent_data::claude_projects_root().ok_or_else(|| anyhow!("no home directory"))?;
+    fn claude_launch(&self, rt: &TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>, identity: Option<claude::configuration::Identity>) -> Result<CliLaunch> {
+        let identity = match identity { Some(identity) => identity, None => claude::configuration::current()? };
+        let bedrock = route.is_some_and(|route| route.bedrock);
+        // Admit the exact configuration identity before even locating a
+        // transcript: Claude's NFC/lexical path rules can name another root.
+        let bedrock_program = if bedrock {
+            Some(claude::bedrock::resolve(&identity)?)
+        } else { None };
+        let projects = identity.projects();
         let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // Where the conversation's file is, not where a conversation started
         // in this folder would be: a resumed one is still written where it
@@ -4397,21 +4447,18 @@ impl SessionManager {
         if let Some(helper) = route.and_then(|route| route.api_key_helper.clone()) {
             settings["apiKeyHelper"] = serde_json::Value::String(helper);
         }
-        if route.is_some_and(|route| route.bedrock) {
-            // The explicit route owns its AWS credential set; a checkout's helper
-            // must not replace it or turn an expired session into another identity.
-            settings["awsAuthRefresh"] = serde_json::Value::String(String::new());
-            settings["awsCredentialExport"] = serde_json::Value::String(String::new());
-            settings["apiKeyHelper"] = serde_json::Value::String(String::new());
-        }
-        // A route's endpoint, at the level above the checkout's own settings.
-        if let Some(env) = route.map(|route| &route.claude_settings_env).filter(|env| !env.is_empty()) {
-            settings["env"] = env.iter().map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone()))).collect::<serde_json::Map<_, _>>().into();
+        if let Some(route) = route {
+            if route.bedrock {
+                claude::bedrock::apply_settings(&mut settings, &route.claude_settings_env);
+                identity.pin_settings(&mut settings);
+            } else if !route.claude_settings_env.is_empty() {
+                settings["env"] = route.claude_settings_env.iter().map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone()))).collect::<serde_json::Map<_, _>>().into();
+            }
         }
         // A route that names its model runs on it: the endpoint may serve no
         // model of the tab's name.
         let route_model = route.and_then(|route| route.model.clone());
-        let command = claude::pty::launch_command(claude::pty::LaunchOptions {
+        let options = claude::pty::LaunchOptions {
             provider_session_id: &provider_id,
             resume,
             fork_from: fork_from.as_deref(),
@@ -4420,14 +4467,19 @@ impl SessionManager {
             permission_mode: &tab.permission_mode,
             title: tab.title.as_deref(),
             settings: &settings,
-        })
+        };
+        let command = match bedrock_program {
+            Some(program) => Some(claude::pty::launch_command_for(&program, options)),
+            None => claude::pty::launch_command(options),
+        }
         .ok_or_else(|| anyhow!("Claude Code is not installed. Install it and log in, then try again."))?;
 
         // The CLI's first-run screens — onboarding's theme picker on a fresh
         // machine, the trust dialog for a folder it has not seen — would take
         // the first prompt instead of the composer. The reader adopted this
         // checkout when they made the session.
-        if let Err(e) = claude::trust::prepare(&entry.cwd) {
+        if let Err(e) = claude::trust::prepare_for(&identity, &entry.cwd) {
+            if bedrock { return Err(anyhow!("Could not prepare the admitted Claude configuration for this Bedrock launch.")); }
             log::warn!("prepare the Claude Code config for {}: {e:#}", entry.cwd);
         }
         let derived = claude::transcript::transcript_in(&projects, &entry.cwd, &provider_id);
@@ -4437,7 +4489,7 @@ impl SessionManager {
         // allowed: which of the two a `/clear` opens its new file in is the
         // CLI's business.
         let transcript_root = derived.parent().context("the transcript path has no directory")?.to_path_buf();
-        let mut conversation = crate::hooks::ConversationFile::new(projects, format!("{provider_id}.jsonl"));
+        let mut conversation = crate::hooks::ConversationFile::new(projects.clone(), format!("{provider_id}.jsonl"));
         if path != derived {
             conversation.adopt(&path);
         }
@@ -4445,9 +4497,10 @@ impl SessionManager {
         // into its new file when the first turn lands. The app already has all
         // of it, and the copy keeps each record's original uuid, so those are
         // the ones to drop.
-        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
+        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids_in(&projects, &entry.cwd, parent)).unwrap_or_default();
         Ok(CliLaunch {
             command,
+            claude_config: bedrock.then_some(identity),
             model: route_model.filter(|model| *model != tab.model),
             tail: tui::Tail::opening(path, claude::transcript::decode_line, carried).marking(claude::transcript::decode_marked),
             minted: tab.provider_session_id.is_none().then_some(provider_id),
@@ -4537,6 +4590,7 @@ impl SessionManager {
         let command = format!("{command}{}", route.map(|route| route.codex_args.as_str()).unwrap_or_default());
         Ok(CliLaunch {
             command,
+            claude_config: None,
             model: (model != tab.model).then_some(model),
             tail: match rollout {
                 Some(path) => tui::Tail::opening(path, codex::rollout::decode_line, Default::default()).marking(codex::rollout::decode_marked),
@@ -6624,6 +6678,10 @@ impl Sink for TabSink {
         self.manager.on_exit(&self.rt, pid, code);
     }
 }
+
+#[cfg(test)]
+#[path = "session_bedrock_config_tests.rs"]
+mod bedrock_config_tests;
 
 #[cfg(test)]
 #[path = "session_watch_tests.rs"]

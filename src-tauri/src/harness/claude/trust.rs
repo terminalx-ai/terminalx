@@ -24,33 +24,19 @@
 //! Every key above was read out of the installed CLI (2.1.285) and probed in
 //! a PTY against an empty config dir. Nothing else in the file is touched.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 /// The CLI's config file, and the directory it keeps timestamped backups of
 /// that file in.
+#[cfg(test)]
 fn config_paths() -> Option<(PathBuf, PathBuf)> {
-    #[cfg(test)]
-    {
-        // Never inspect or rewrite the developer's config, even when
-        // CLAUDE_CONFIG_DIR points outside the test's temporary home.
-        crate::store::state_home_env().map(|home| {
-            let home = PathBuf::from(home).join("test-user-home");
-            (home.join(".claude.json"), home.join(".claude").join("backups"))
-        })
-    }
-    #[cfg(not(test))]
-    {
-        match std::env::var("CLAUDE_CONFIG_DIR") {
-            Ok(dir) if !dir.is_empty() => {
-                let dir = PathBuf::from(dir);
-                Some((dir.join(".claude.json"), dir.join("backups")))
-            }
-            _ => dirs::home_dir().map(|h| (h.join(".claude.json"), h.join(".claude").join("backups"))),
-        }
-    }
+    let identity = super::configuration::current().ok()?;
+    Some((identity.global_file(), identity.backups()))
 }
 
 /// Whether the CLI has a backup it would offer to restore a missing config
@@ -100,9 +86,16 @@ fn prepared(mut config: Value, cwd: &str) -> Option<Value> {
 /// Answer the CLI's first-run screens for a launch in `cwd`: onboarding done,
 /// `cwd` trusted.
 /// Creates the config when the CLI has never run on this machine.
+#[cfg(test)]
 pub fn prepare(cwd: &str) -> Result<()> {
     let Some((path, backups)) = config_paths() else { return Ok(()) };
     prepare_at(&path, &backups, cwd)
+}
+
+/// Prepare the exact identity already admitted for this launch, rather than
+/// resolving the ambient environment again after the child identity is chosen.
+pub fn prepare_for(identity: &super::configuration::Identity, cwd: &str) -> Result<()> {
+    prepare_at(&identity.global_file(), &identity.backups(), cwd)
 }
 
 fn prepare_at(path: &Path, backups: &Path, cwd: &str) -> Result<()> {

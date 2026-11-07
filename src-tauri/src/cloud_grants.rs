@@ -1822,8 +1822,15 @@ impl Drop for GrantStore {
 /// somewhere other than the route's endpoint.
 const BEDROCK_ENV: &[&str] = &[
     "AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "AWS_EC2_METADATA_SERVICE_ENDPOINT", "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
     "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "ANTHROPIC_BEDROCK_BASE_URL", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+    "AWS_ENDPOINT_URL_STS", "AWS_ENDPOINT_URL_SSO", "AWS_ENDPOINT_URL_SSO_OIDC", "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+    "AWS_USE_FIPS_ENDPOINT", "AWS_USE_DUALSTACK_ENDPOINT", "AWS_AUTH_SCHEME_PREFERENCE", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "AWS_ROLE_SESSION_NAME", "AWS_LOGIN_SESSION",
+    "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_SKIP_MANTLE_AUTH",
+    "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
+    "ANTHROPIC_UNIX_SOCKET", "CLAUDE_CODE_HOST_AUTH_ENV_VAR", "CLAUDE_CODE_HOST_CREDS_FILE", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
 ];
 const CLAUDE_PROVIDER_SWITCHES: [&str; 3] = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
 
@@ -1831,8 +1838,9 @@ const CLAUDE_PROVIDER_SWITCHES: [&str; 3] = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_
 /// credential, with every other variable that could sign the agent in (or
 /// send it elsewhere) unset, so nothing app-managed, configured or left in a
 /// profile overrides what the member chose. A checkout's own Claude Code
-/// settings would still beat these, so Claude Code's endpoint is pinned in
-/// `--settings` as well ([`claude_settings_env`]). A route this runtime does
+/// settings would still beat these: Bedrock uses the documented host-owned
+/// provider boundary, plus nonsecret `--settings` pins for residual SDK
+/// options ([`claude_settings_env`]). A route this runtime does
 /// not apply sets nothing and still unsets them.
 fn route_env(provider: Provider, route: &Route) -> Vec<(String, Option<String>)> {
     let set = |name: &str, value: &str| (name.to_string(), Some(value.to_string()));
@@ -1848,16 +1856,7 @@ fn route_env(provider: Provider, route: &Route) -> Vec<(String, Option<String>)>
     };
     match route.kind {
         Some(RouteKind::ClaudeBedrock) => {
-            if let Some(region) = &route.region {
-                put("CLAUDE_CODE_USE_BEDROCK", "1");
-                put("AWS_REGION", region);
-                put("AWS_DEFAULT_REGION", region);
-                put("AWS_EC2_METADATA_DISABLED", "true");
-                put("AWS_SHARED_CREDENTIALS_FILE", "/dev/null");
-                put("AWS_CONFIG_FILE", "/dev/null");
-                put("CLAUDE_CODE_SKIP_BEDROCK_AUTH", "0");
-                if let Some(endpoint) = crate::agent_route_check::bedrock_endpoint(region) { put("ANTHROPIC_BEDROCK_BASE_URL", &endpoint); }
-            }
+            for (name, value) in claude_settings_env(route) { put(&name, &value); }
             env.push(unset(CLAUDE_BASE_URL_ENV));
             env.push(unset(CLAUDE_GATEWAY_DISCOVERY_ENV));
             if let Some(credential) = route.credential.as_deref().zip(route.auth_scheme.as_deref()).and_then(|(raw, scheme)| crate::agent_route_check::BedrockCredential::parse(raw, scheme)) {
@@ -1986,10 +1985,25 @@ fn claude_settings_env(route: &Route) -> Vec<(String, String)> {
         let mut env: Vec<_> = CLAUDE_PROVIDER_SWITCHES.iter().map(|name| (name.to_string(), if *name == "CLAUDE_CODE_USE_BEDROCK" { "1" } else { "0" }.to_string())).collect();
         env.extend([
             ("AWS_REGION".into(), region.clone()), ("AWS_DEFAULT_REGION".into(), region.clone()),
+            ("ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION".into(), region.clone()),
             ("ANTHROPIC_BEDROCK_BASE_URL".into(), crate::agent_route_check::bedrock_endpoint(&region).unwrap_or_default()),
-            ("CLAUDE_CODE_SKIP_BEDROCK_AUTH".into(), "0".into()),
-            ("AWS_PROFILE".into(), "".into()), ("AWS_SHARED_CREDENTIALS_FILE".into(), "/dev/null".into()), ("AWS_CONFIG_FILE".into(), "/dev/null".into()),
+            ("AWS_ENDPOINT_URL_BEDROCK_RUNTIME".into(), crate::agent_route_check::bedrock_endpoint(&region).unwrap_or_default()),
+            ("AWS_ENDPOINT_URL_BEDROCK".into(), crate::agent_route_check::bedrock_control_endpoint(&region).unwrap_or_default()),
+            ("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS".into(), "true".into()),
+            ("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST".into(), "1".into()),
+            // Host mode removes Claude's automatic Bedrock telemetry opt-out.
+            ("DISABLE_TELEMETRY".into(), "1".into()), ("DISABLE_ERROR_REPORTING".into(), "1".into()),
+            ("AWS_AUTH_SCHEME_PREFERENCE".into(), if route.auth_scheme.as_deref() == Some("bedrock-api-key") { "httpBearerAuth" } else { "sigv4" }.into()),
+            ("AWS_USE_FIPS_ENDPOINT".into(), "false".into()), ("AWS_USE_DUALSTACK_ENDPOINT".into(), "false".into()),
+            ("CLAUDE_CODE_SKIP_BEDROCK_AUTH".into(), "0".into()), ("CLAUDE_CODE_USE_MANTLE".into(), "0".into()),
+            ("AWS_SHARED_CREDENTIALS_FILE".into(), "/dev/null".into()), ("AWS_CONFIG_FILE".into(), "/dev/null".into()),
             ("AWS_EC2_METADATA_DISABLED".into(), "true".into()),
+            // These legacy/noncredential selectors are outside the CLI's host
+            // filter. CLI settings win over user/project/local settings, also
+            // on refresh. Never blank the bearer variable: AWS selects bearer
+            // auth by presence, even when its value is the empty string.
+            ("AWS_DEFAULT_PROFILE".into(), "".into()), ("AWS_SECURITY_TOKEN".into(), "".into()),
+            ("AWS_ROLE_SESSION_NAME".into(), "".into()), ("AWS_LOGIN_SESSION".into(), "".into()),
         ]);
         return env;
     }
@@ -2416,6 +2430,8 @@ pub fn agent_env_for_launch(harness: &str, launch: &str) -> Vec<(String, Option<
 /// is checked. Empty outside a cloud workspace; recorded with
 /// [`record_launch`] once the session starts.
 pub fn launch_grant(harness: &str, cwd: &Path) -> LaunchGrant {
+    #[cfg(test)]
+    if let Some(grant) = test_support::NEXT_LAUNCH.with(|slot| slot.borrow_mut().take()) { return grant; }
     let (Some(store), Some(provider)) = (installed(), provider_of_harness(harness)) else { return LaunchGrant::default() };
     if !store.wait_first_sync(FIRST_SYNC_WAIT) {
         log::warn!("the first agent grant sync has not finished; starting {} without a cloud credential", provider.label());
@@ -2570,6 +2586,21 @@ pub fn unset_prefix(command: &str, unset: &[String]) -> String {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+
+    thread_local! {
+        pub(super) static NEXT_LAUNCH: std::cell::RefCell<Option<LaunchGrant>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Inject only the account-service boundary; session preparation and PTY
+    /// spawn still run through start_cli with the real grant snapshot shape.
+    pub fn with_launch_grant<T>(grant: LaunchGrant, run: impl FnOnce() -> T) -> T {
+        struct Restore(Option<LaunchGrant>);
+        impl Drop for Restore {
+            fn drop(&mut self) { NEXT_LAUNCH.with(|slot| *slot.borrow_mut() = self.0.take()); }
+        }
+        let _restore = Restore(NEXT_LAUNCH.with(|slot| slot.replace(Some(grant))));
+        run()
+    }
 
     pub fn grant_store(workspace: &str, root: Option<PathBuf>) -> GrantStore {
         GrantStore::new(workspace.into(), GrantKey::generate(), root)
@@ -3615,6 +3646,52 @@ mod tests {
             assert!(!format!("{launch:?}").contains("synthetic-"));
             assert!(!store.status(now).to_string().contains("synthetic-"));
             assert!(store.due_route_checks(None, now, ROUTE_RECHECK_AFTER).is_empty());
+        }
+    }
+
+    #[test]
+    fn bedrock_launch_contract_keeps_secrets_in_child_env_and_preserves_settings_sources() {
+        let fixture: Value = serde_json::from_str(include_str!("harness/claude/fixtures/bedrock-launch.json")).unwrap();
+        for scheme in fixture["schemes"].as_array().unwrap() {
+            let server = FakeServer::new();
+            let credential = scheme["credential"].to_string();
+            routed(&server, "claude", route("claude-bedrock", 1, json!({
+                "region": "us-east-1", "authScheme": scheme["name"],
+                "model": "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/test"
+            }), Some(&credential), 1, "claude"));
+            let store = store(None);
+            let now = Instant::now();
+            store.sync(&server, now, NOW).unwrap();
+            let env = store.agent_env(Provider::Claude, now);
+            let launch = store.route_launch(Provider::Claude, Path::new("/work"), now).unwrap();
+            let public: serde_json::Map<String, Value> = launch.claude_settings_env.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            for (key, value) in fixture["publicEnv"].as_object().unwrap() {
+                assert_eq!(sets(&env, key), value.as_str(), "{key}");
+                assert_eq!(public.get(key), Some(value), "{key}");
+            }
+            for (key, value) in scheme["env"].as_object().unwrap() {
+                if value.is_null() { assert!(unsets(&env, key), "{key} must be absent, not empty"); }
+                else { assert_eq!(sets(&env, key), value.as_str(), "{key}"); }
+                if key != "AWS_AUTH_SCHEME_PREFERENCE" { assert!(!public.contains_key(key), "secret/absent credential in argv: {key}"); }
+            }
+            for key in fixture["clearedEnv"].as_array().unwrap() { assert!(unsets(&env, key.as_str().unwrap()), "{key}"); }
+            let mut settings = json!({ "permissions": { "deny": ["Read(.env)"] } });
+            crate::harness::claude::bedrock::apply_settings(&mut settings, &launch.claude_settings_env);
+            assert_eq!(settings["permissions"]["deny"][0], "Read(.env)");
+            assert_eq!(settings["awsCredentialExport"], "");
+            assert_eq!(settings["awsAuthRefresh"], "");
+            let command = crate::harness::claude::pty::launch_command_for(Path::new("/claude"), crate::harness::claude::pty::LaunchOptions {
+                provider_session_id: "synthetic-id", resume: true, fork_from: None,
+                model: launch.model.as_deref().unwrap(), effort: None, permission_mode: "default", title: None, settings: &settings,
+            });
+            assert!(!command.contains("--setting-sources"), "retain normal user/project/local settings and instructions");
+            assert!(command.contains("--resume"));
+            for value in scheme["credential"].as_object().unwrap().values() {
+                let secret = value.as_str().unwrap();
+                assert!(!command.contains(secret));
+                assert!(!format!("{launch:?}").contains(secret));
+                assert!(!store.status(now).to_string().contains(secret));
+            }
         }
     }
 
