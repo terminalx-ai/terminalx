@@ -201,7 +201,8 @@ export function BranchPanel({
       {/* One rule for the tab: a box's edge 16px from the panel, and every row's content at 28px, where a box's own content starts. */}
       <div className="flex flex-col gap-3 px-4 py-3">
         <header className="flex min-h-6 min-w-0 items-center gap-2 px-3">
-          <GitBranch className="size-4 shrink-0 text-accent" aria-hidden />
+          {/* The glyph's drawing starts 3px into its box: pulled left by that, its ink lines up with the text and dots below. */}
+          <GitBranch className="-ml-[3px] size-4 shrink-0 text-accent" aria-hidden />
           <h3 className="truncate font-mono text-[13px] text-foreground" title={branch ?? "Detached HEAD"} data-testid="branch-name">
             {branch ?? "Detached HEAD"}
           </h3>
@@ -267,9 +268,12 @@ const AGENT_BUTTON = "flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-
 /** Commits of the base drawn on its line; older ones are counted above them. */
 const BASE_SHOWN = 12;
 const ROW = 30;
-/** The base's line, then the branch's, from the panel's left edge. */
-const BASE_X = 9;
-const BRANCH_X = 33;
+/**
+ * The base's line, then the branch's, from where the tab's content starts. The base's dots are 10px wide, so
+ * at 5 their left edge is that start: in line with the branch icon above and every row's text.
+ */
+const BASE_X = 5;
+const BRANCH_X = 29;
 
 function count(n: number): string {
   return `${n} ${n === 1 ? "commit" : "commits"}`;
