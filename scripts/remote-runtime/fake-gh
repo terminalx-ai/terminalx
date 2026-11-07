@@ -27,6 +27,7 @@ pull request for the same head, as GitHub does.
 
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -87,6 +88,21 @@ def main(args):
         fail("HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login")
     if flag("offline"):
         fail("error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com")
+    prs = load_all()
+    if args[:2] == ["api", "graphql"]:
+        query = option(args, "-f", "")
+        match = re.search(r"pullRequest\(number:(\d+)\)", query)
+        pr = next((pr for pr in prs if match and pr["number"] == int(match[1])), None)
+        if flag("queue-offline"):
+            fail("error connecting to api.github.com")
+        print(json.dumps({"data": {"repository": {"pullRequest": None if pr is None else {
+            "state": pr["state"], "headRefOid": pr.get("headRefOid", "fake-head"),
+            "mergeStateStatus": pr.get("mergeStateStatus", "CLEAN"),
+            "isMergeQueueEnabled": flag("merge-queue"),
+            "mergeQueueEntry": pr.get("mergeQueueEntry"),
+            "autoMergeRequest": pr.get("autoMergeRequest"),
+        }}}}))
+        return
     if args[:1] != ["pr"] or len(args) < 2:
         fail("fake-gh: unsupported call: %s" % " ".join(args), 2)
     command, rest = args[1], args[2:]
@@ -122,6 +138,8 @@ def main(args):
             "additions": 1,
             "deletions": 0,
             "mergeable": mergeable,
+            "headRefOid": "fake-head",
+            "mergeStateStatus": "DIRTY" if mergeable == "CONFLICTING" else "CLEAN",
             "reviewDecision": "",
             "statusCheckRollup": checks,
             "author": {"login": "octocat"},
@@ -133,19 +151,25 @@ def main(args):
             fail("Post \"https://api.github.com/graphql\": read tcp 10.0.0.2:51234->140.82.112.6:443: read: connection reset by peer")
         print(pr["url"])
         return
-    number = int(rest[0]) if rest and rest[0].isdigit() else None
+    target = rest[0].rstrip("/").split("/")[-1] if rest else ""
+    number = int(target) if target.isdigit() else None
     pr = next((pr for pr in prs if pr["number"] == number), None)
     if pr is None:
         fail("GraphQL: Could not resolve to a PullRequest with the number of %s." % (rest[0] if rest else ""))
     if command == "view":
         print(json.dumps(fields(pr, option(rest, "--json"))))
+    elif command == "checks":
+        print(json.dumps([{"name": name} for name in pr.get("requiredChecks", [])]))
     elif command == "ready":
         pr["isDraft"] = False
         save(pr)
     elif command == "merge":
         if pr["mergeable"] == "CONFLICTING":
             fail("Pull request #%d is not mergeable: the merge commit cannot be cleanly created." % number)
-        pr["state"] = "MERGED"
+        if "--auto" in rest and flag("merge-queue"):
+            pr["mergeQueueEntry"] = {"position": 2, "state": "QUEUED"}
+        else:
+            pr["state"] = "MERGED"
         save(pr)
     else:
         fail("fake-gh: unsupported call: %s" % " ".join(args), 2)

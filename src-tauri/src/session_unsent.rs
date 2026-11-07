@@ -165,7 +165,7 @@ impl SessionManager {
             // Said when the CLI was last started, or when the tab was opened
             // (`load_events`), and still standing.
             Restart::Unsent(_) if rt.recovery == Some(RecoveryKind::Unsent) => {}
-            Restart::Unsent(_) => self.needs_recovery(rt, RecoveryKind::Unsent),
+            Restart::Unsent(_) => self.needs_recovery(rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent),
         }
     }
 
