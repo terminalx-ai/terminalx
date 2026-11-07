@@ -7,6 +7,7 @@ import type { HostConnection } from "../transport/connection";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
   id: string;
   title: string;
   project: string;

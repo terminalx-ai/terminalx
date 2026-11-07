@@ -42,6 +42,7 @@ export interface CloudSessionTab {
 }
 
 export interface CloudSessionRow {
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
   key: CloudKey;
   orgId: string;
   workspaceId: string;
@@ -161,10 +162,22 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => voi
     .listAgentTabs()
     .then((tabs) => open && applyLiveTabs(scope, tabs))
     .catch(() => undefined);
+  let readingStatus = false;
+  const statusTimer = setInterval(() => {
+    if (readingStatus || document.hidden) return;
+    readingStatus = true;
+    void client.listSessions().then((sessions) => {
+      if (open && JSON.stringify(sessions) !== JSON.stringify(live.get(key)?.sessions)) takeLive(target, sessions, capabilities, manage);
+    }).catch(() => {
+      const known = live.get(key);
+      if (open && known?.sessions.some((session) => session.rowStatus)) takeLive(target, known.sessions.map((session) => ({ ...session, rowStatus: undefined })), capabilities, manage);
+    }).finally(() => { readingStatus = false; });
+  }, 2_000);
   const stopTabs = watchLiveTabs(scope, client);
   const stopSessions = client.onSessions((sessions) => open && takeLive(target, sessions, capabilities, manage));
   return () => {
     open = false;
+    clearInterval(statusTimer);
     stopTabs();
     stopSessions();
     if (connected.get(key)?.client === client) connected.delete(key);
@@ -280,6 +293,7 @@ export function buildCloudSessions(input: {
       workspaceId,
       sessionId: session.id,
       title: session.title || name,
+      rowStatus: source === "live" ? session.rowStatus : undefined,
       branch: session.branch ?? null,
       worktreeName: session.worktreeName ?? null,
       created: session.created,

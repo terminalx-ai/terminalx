@@ -116,7 +116,7 @@ impl Fixture {
     fn pr(&self, name: &str, number: u64, state: &str) {
         let branch = Self::branch(name);
         let head = sh(&self.alpha(), &["rev-parse", &format!("refs/heads/{branch}")]);
-        let pr = BranchPr { number, title: format!("Pull request for {name}"), url: format!("https://github.com/o/r/pull/{number}"), state: state.into(), head, base: "main".into() };
+        let pr = BranchPr { number, title: format!("Pull request for {name}"), url: format!("https://github.com/o/r/pull/{number}"), state: state.into(), head, base: "main".into(), ..Default::default() };
         self.prs.lock().unwrap().as_mut().unwrap().insert(branch, pr);
     }
 
@@ -594,7 +594,7 @@ fn only_a_merged_pull_request_counts_and_only_for_a_worktree_terminalx_made() {
     // GitHub would even say the default branch has a merged pull request.
     let mut answers = f.prs.lock().unwrap().clone().unwrap();
     for (branch, head) in [("by-hand", head), ("main", sh(&alpha, &["rev-parse", "main"]))] {
-        answers.insert(branch.into(), BranchPr { number: 9, title: "T".into(), url: "u".into(), state: "MERGED".into(), head, base: "main".into() });
+        answers.insert(branch.into(), BranchPr { number: 9, title: "T".into(), url: "u".into(), state: "MERGED".into(), head, base: "main".into(), ..Default::default() });
     }
     *f.prs.lock().unwrap() = Ok(answers);
     f.session(&alpha, TabStatus::Idle);

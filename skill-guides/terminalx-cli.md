@@ -65,6 +65,14 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
 
+`sessions list` and `sessions show` include `detailedStatus` (id, label, icon,
+colour token and tooltip) and `rowStatus` (the live facts behind it). Agent
+attention takes precedence over the branch's PR. PR facts are shared by sessions
+on that branch; they do not establish which session created the PR. Visible
+projects refresh at most once every 30 seconds, with rate-limit backoff. A first
+read can return agent status while the PR query is in flight; read again to see
+the result. The existing tab `status` remains the agent's lifecycle state.
+
 ### Archive sessions
 
 ```text

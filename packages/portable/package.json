@@ -19,7 +19,8 @@
     "./workspaceCollab": "./src/workspaceCollab.ts",
     "./workspaceFiles": "./src/workspaceFiles.ts",
     "./workspaceGit": "./src/workspaceGit.ts",
-    "./workspaceMirror": "./src/workspaceMirror.ts"
+    "./workspaceMirror": "./src/workspaceMirror.ts",
+    "./sessionStatus": "./src/sessionStatus.ts"
   },
   "dependencies": {
     "linkify-it": "5.0.2"

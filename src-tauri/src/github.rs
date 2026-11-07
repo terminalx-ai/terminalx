@@ -794,7 +794,8 @@ fn repo_ref(cwd: &Path) -> Result<RepoRef> {
 }
 
 /// The pull request a branch is on, with the commit its head was at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct BranchPr {
     pub number: u64,
     pub title: String,
@@ -804,6 +805,11 @@ pub struct BranchPr {
     /// The commit its head is at; for a merged one, the commit that was merged.
     pub head: String,
     pub base: String,
+    pub draft: bool,
+    pub mergeable: String,
+    pub merge_state_status: String,
+    pub checks: Option<String>,
+    pub in_merge_queue: bool,
 }
 
 /// How many branches one request asks about.
@@ -813,9 +819,12 @@ const BRANCHES_PER_REQUEST: usize = 40;
 /// variables, never inside the query text.
 fn branch_prs_query(count: usize) -> String {
     let variables: String = (0..count).map(|i| format!(",$b{i}:String!")).collect();
-    let fields: String = (0..count)
-        .map(|i| format!("b{i}:pullRequests(headRefName:$b{i},first:20,orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{number title url state isCrossRepository headRefOid baseRefName}}}}"))
-        .collect();
+    let fields = "number title url state isCrossRepository headRefOid baseRefName isDraft mergeable mergeStateStatus mergeQueueEntry{id} commits(last:1){nodes{commit{statusCheckRollup{state}}}}";
+    // Ask for the open PR separately: many closed attempts must not hide an
+    // older, still-open PR. Two connections, still one request per project.
+    let fields: String = (0..count).map(|i| format!(
+        "b{i}:pullRequests(headRefName:$b{i},first:20,states:[OPEN],orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{{fields}}}}} r{i}:pullRequests(headRefName:$b{i},first:20,states:[MERGED,CLOSED],orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{{fields}}}}}"
+    )).collect();
     format!("query($owner:String!,$name:String!{variables}){{repository(owner:$owner,name:$name){{{fields}}}}}")
 }
 
@@ -832,11 +841,21 @@ fn pick_pr(nodes: &[Value]) -> Option<BranchPr> {
         state: pr["state"].as_str()?.into(),
         head: pr["headRefOid"].as_str().filter(|head| !head.is_empty())?.into(),
         base: pr["baseRefName"].as_str().unwrap_or("").into(),
+        draft: pr["isDraft"].as_bool().unwrap_or(false),
+        mergeable: pr["mergeable"].as_str().unwrap_or("UNKNOWN").into(),
+        merge_state_status: pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
+        checks: match pr["commits"]["nodes"].as_array().and_then(|nodes| nodes.last()).and_then(|node| node["commit"].get("statusCheckRollup")) {
+            Some(Value::Null) => None,
+            Some(rollup) => Some(rollup["state"].as_str().unwrap_or("UNKNOWN").into()),
+            None => Some("UNKNOWN".into()),
+        },
+        in_merge_queue: pr["mergeQueueEntry"].is_object(),
     })
 }
 
 fn parse_branch_prs(out: &str, branches: &[String]) -> Result<std::collections::HashMap<String, BranchPr>> {
     let value: Value = serde_json::from_str(out)?;
+    if value["errors"].as_array().is_some_and(|errors| !errors.is_empty()) { bail!("GitHub returned a partial PR response"); }
     let repository = &value["data"]["repository"];
     if !repository.is_object() {
         bail!("GitHub did not return the repository (no access, or it was renamed)");
@@ -844,8 +863,12 @@ fn parse_branch_prs(out: &str, branches: &[String]) -> Result<std::collections::
     let mut found = std::collections::HashMap::new();
     for (i, branch) in branches.iter().enumerate() {
         let nodes = repository[format!("b{i}")]["nodes"].as_array().with_context(|| format!("GitHub did not answer for the branch {branch}"))?;
-        if let Some(pr) = pick_pr(nodes) {
+        let recent = repository[format!("r{i}")]["nodes"].as_array().context("GitHub did not return recent pull requests")?;
+        let nodes: Vec<_> = nodes.iter().chain(recent).cloned().collect();
+        if let Some(pr) = pick_pr(&nodes) {
             found.insert(branch.clone(), pr);
+        } else if nodes.iter().any(|pr| pr["isCrossRepository"].as_bool() != Some(true)) {
+            bail!("GitHub returned an incomplete pull request");
         }
     }
     Ok(found)
@@ -1414,6 +1437,7 @@ mod tests {
             "b2": { "nodes": [pr(12, "MERGED", false), pr(11, "OPEN", false)] },
             // A fork's branch of the same name is not this branch.
             "b3": { "nodes": [pr(20, "MERGED", true)] },
+            "r0": { "nodes": [] }, "r1": { "nodes": [] }, "r2": { "nodes": [] }, "r3": { "nodes": [] },
         } } })
         .to_string();
         let found = parse_branch_prs(&out, &branches).unwrap();
@@ -1587,3 +1611,6 @@ mod star_tests {
         assert!(!star_repository_with(Command::new("/nonexistent/gh")).await);
     }
 }
+
+#[path = "github_row_status.rs"]
+pub(crate) mod rows;

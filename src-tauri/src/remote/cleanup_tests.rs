@@ -282,7 +282,7 @@ fn merge_session(f: &Fixture, merged: &mut Merged, session: &crate::store::index
     git(&f.root, &["merge", "-q", "--no-ff", "-m", "merge", &branch]);
     git(&f.root, &["push", "-q", "origin", "main"]);
     let head = crate::git::head_commit(worktree).unwrap();
-    let pr = crate::github::BranchPr { number, title: "Done".into(), url: format!("https://github.com/o/r/pull/{number}"), state: "MERGED".into(), head, base: "main".into() };
+    let pr = crate::github::BranchPr { number, title: "Done".into(), url: format!("https://github.com/o/r/pull/{number}"), state: "MERGED".into(), head, base: "main".into(), ..Default::default() };
     merged.insert(branch.clone(), pr);
     crate::github::stand_in::set(&f.root, Ok(merged.clone()));
     branch

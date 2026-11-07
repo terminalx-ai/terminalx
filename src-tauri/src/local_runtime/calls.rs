@@ -116,6 +116,11 @@ fn setup_panes(terminals: &crate::pty::Terminals, harness: &str) -> Vec<String> 
 }
 
 pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> Result<Value> {
+    if method == "rowStatuses" {
+        let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
+        let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| ids.contains(&s.id)).collect();
+        return Ok(serde_json::to_value(manager.row_statuses(&sessions))?);
+    }
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {

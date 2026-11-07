@@ -602,8 +602,9 @@ impl ControlService {
             "sessions.list" => self.sessions_list(params),
             "sessions.show" => {
                 let selector = required_string(&params, "session")?;
-                Ok(serde_json::to_value(resolve_session(&selector)?)
-                    .map_err(ControlError::internal)?)
+                let mut session = resolve_session(&selector)?;
+                self.manager.annotate_row_statuses(std::slice::from_mut(&mut session));
+                Ok(serde_json::to_value(session).map_err(ControlError::internal)?)
             }
             "sessions.create" => self.sessions_create(params),
             // The floating window is the desktop app's; the request is handed
@@ -730,7 +731,8 @@ impl ControlService {
                 return Err(ControlError::invalid("--worktree lists every session in the worktree, quick chats and archived ones included; it cannot be combined with --quick or --archived."));
             }
             let (project, worktree) = resolve_worktree(&params)?;
-            let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            self.manager.annotate_row_statuses(&mut held);
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
         }
         if let Some(selector) = optional_string(&params, "project") {
@@ -746,6 +748,7 @@ impl ControlService {
             sessions.retain(SessionEntry::is_quick);
         }
         sessions.retain(|session| session.archived == archived);
+        self.manager.annotate_row_statuses(&mut sessions);
         Ok(json!({"sessions": sessions}))
     }
 

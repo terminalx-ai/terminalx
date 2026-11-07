@@ -9,10 +9,10 @@ import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/R
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
 import { AgentMark } from "@/components/AgentMark";
-import { StatusMark } from "@/components/ui/StatusMark";
+import { SessionStatus } from "@/components/ui/SessionStatus";
 import { cn } from "@/lib/cn";
-import { errorMessage } from "@/lib/api";
 import { isUnread } from "@/lib/dashboard";
+import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
 import { addProject, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
@@ -232,8 +232,9 @@ function ChatRow({
                   {preview.tone === "place" && link?.branch && <GitBranch className="size-3 shrink-0" />}
                   <span className="truncate">{preview.text}</span>
                 </span>
-                {/* One sign: waiting on you first, then still working, then an answer nobody has read. */}
-                <StatusMark status={status} unread={isUnread(session)} className={yieldsToRowActions} />
+                {/* Status is shared across views; unread remains a separate reading indicator. */}
+                <SessionStatus session={session} className={cn("max-w-[60%]", yieldsToRowActions)} />
+                {isUnread(session) && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
               </span>
             </span>
           </button>

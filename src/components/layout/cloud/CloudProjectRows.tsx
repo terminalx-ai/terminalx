@@ -15,7 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { StatusMark } from "@/components/ui/StatusMark";
+import { StatusBadge } from "@/components/ui/SessionStatus";
+import { sessionStatus as detailedStatus } from "@terminalx/portable/sessionStatus";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { archiveLine, deletionLine } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { archivingText, describeWorkspace } from "@/components/cloud/CloudWorkspaceView";
@@ -581,7 +582,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
           >
             {row.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint")}>{row.title}</span>
-            <StatusMark status={status} />
+            <StatusBadge status={detailedStatus(row.rowStatus ?? { tabs: [{ status }] })} className="max-w-[48%]" />
             {status === "in_progress" ? null : row.branch ? (
               <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
                 <GitBranch className="size-3 shrink-0" />
