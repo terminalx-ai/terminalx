@@ -26,11 +26,12 @@ import {
   VISIBILITY_ADMIN_REASON,
   notifyAccessChanged,
 } from "@/lib/cloudCollab";
-import { loadRoster, loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
+import { loadRosterIn, rememberPeople } from "@/lib/cloudPeople";
 import {
   applyShareDraftChanges,
   shareDraft,
   shareDraftDirty,
+  reconcileShareDraft,
   shareRowKey,
   type ShareDraft,
   type ShareDraftRow,
@@ -153,6 +154,8 @@ export function CloudShareDialog({
   const context = `${status.identity?.email ?? ""}:${org ?? ""}:${workspaceId}`;
   const generation = useRef(0);
   const saving = useRef(false);
+  const rosterRequest = useRef(0);
+  const groupRequest = useRef(0);
   const [listed, setListed] = useState<CloudWorkspaceShares | null>(null);
   const [base, setBase] = useState<ShareDraft>({
     access: accessMode,
@@ -178,21 +181,39 @@ export function CloudShareDialog({
     role: "viewer" as CloudShareRole,
     canApprove: false,
   });
-  const defaultOrg = !orgId || status.identity?.organizationId === orgId;
   const readRoster = useCallback(async () => {
     const current = generation.current;
+    const request = ++rosterRequest.current;
     try {
-      const next = defaultOrg
-        ? await loadRoster({ fresh: true })
-        : await loadRosterIn(orgId!, { fresh: true });
-      if (current === generation.current) {
+      if (!org) return undefined;
+      const next = await loadRosterIn(org, { fresh: true });
+      if (current === generation.current && request === rosterRequest.current) {
         setMembers(next);
         setRosterError(null);
+        return next;
       }
     } catch (error) {
-      if (current === generation.current) setRosterError(codeOf(error));
+      if (current === generation.current && request === rosterRequest.current)
+        setRosterError(codeOf(error));
     }
-  }, [defaultOrg, orgId]);
+    return undefined;
+  }, [org]);
+  const readGroups = useCallback(async () => {
+    const current = generation.current;
+    const request = ++groupRequest.current;
+    try {
+      const next = await api.cloudOrganizationGroups(orgId);
+      if (current === generation.current && request === groupRequest.current) {
+        setGroups(next.groups);
+        setGroupError(null);
+        return next.groups;
+      }
+    } catch (error) {
+      if (current === generation.current && request === groupRequest.current)
+        setGroupError(codeOf(error));
+    }
+    return undefined;
+  }, [orgId]);
   useEffect(() => {
     const current = ++generation.current;
     saving.current = false;
@@ -220,22 +241,16 @@ export function CloudShareDialog({
       },
     );
     void readRoster();
-    void api.cloudOrganizationGroups(orgId).then(
-      (next) => {
-        if (current === generation.current) setGroups(next.groups);
-      },
-      (error: unknown) => {
-        if (current === generation.current) setGroupError(codeOf(error));
-      },
-    );
+    void readGroups();
     return () => {
       generation.current++;
     };
-  }, [context, workspaceId, orgId, accessMode, readRoster]);
+  }, [context, workspaceId, orgId, accessMode, readRoster, readGroups]);
 
   const manage = listed?.you.canManageShares ?? false;
   const mayChangeVisibility = listed?.you.role === "manager";
-  const dirty = shareDraftDirty(base, draft);
+  const unknownShares = !!base.unresolved?.length;
+  const dirty = unknownAccess || shareDraftDirty(base, draft);
   const me = members.find(
     (member) => member.email === status.identity?.email,
   )?.userId;
@@ -302,8 +317,43 @@ export function CloudShareDialog({
     (await api.cloudWorkspaces(orgId)).workspaces.find(
       (item) => item.workspace.id === workspaceId,
     )?.workspace.accessMode;
+  const reconcile = async (
+    saved: ShareDraft,
+    intended: ShareDraft,
+    lifecycle = false,
+  ) => {
+    const current = generation.current;
+    const [actual, roster, latestGroups] = await Promise.all([
+      api.cloudWorkspaceShares(workspaceId, orgId),
+      lifecycle ? readRoster() : Promise.resolve(undefined),
+      lifecycle ? readGroups() : Promise.resolve(undefined),
+    ]);
+    if (current !== generation.current) return undefined;
+    const absent = new Set(
+      intended.rows
+        .filter((row) =>
+          row.kind === "person"
+            ? roster !== undefined &&
+              !roster.some((member) => member.userId === row.id)
+            : latestGroups !== undefined &&
+              !latestGroups.some((group) => group.id === row.id),
+        )
+        .map(shareRowKey),
+    );
+    const result = reconcileShareDraft(
+      saved,
+      intended,
+      shareDraft(actual, saved.access),
+      absent,
+    );
+    rememberPeople(actual.shares);
+    setListed(actual);
+    setDraft(result.draft);
+    return result.saved;
+  };
   const save = async () => {
-    if (saving.current || !manage || !dirty || unknownAccess) return;
+    if (saving.current || !manage || !dirty || unknownAccess || unknownShares)
+      return;
     saving.current = true;
     setBusy(true);
     setErrors([]);
@@ -383,8 +433,24 @@ export function CloudShareDialog({
         },
         (error) => shareErrorMessage(error),
       );
+      if (!valid()) return;
       saved = result.saved;
       failures.push(...result.failures);
+      const lifecycle = result.failedChanges.some(({ error }) =>
+        [
+          "organization_member_not_found",
+          "organization_group_not_found",
+        ].includes(codeOf(error)),
+      );
+      if (saved.unresolved?.length || lifecycle) {
+        try {
+          saved = (await reconcile(saved, draft, lifecycle)) ?? saved;
+        } catch (error) {
+          failures.push(
+            `Could not refresh access: ${shareErrorMessage(error)}`,
+          );
+        }
+      }
     } catch (error) {
       failures.push(`Workspace visibility: ${shareErrorMessage(error)}`);
     } finally {
@@ -395,6 +461,26 @@ export function CloudShareDialog({
         notifyAccessChanged(org);
       }
       if (valid()) saving.current = false;
+    }
+  };
+  const recheckShares = async () => {
+    if (saving.current) return;
+    const current = generation.current;
+    saving.current = true;
+    setBusy(true);
+    try {
+      const next = await reconcile(base, draft, true);
+      if (next) {
+        setBase(next);
+        setErrors([]);
+      }
+    } catch (error) {
+      if (current === generation.current) setErrors([shareErrorMessage(error)]);
+    } finally {
+      if (current === generation.current) {
+        saving.current = false;
+        setBusy(false);
+      }
     }
   };
   const recheck = async () => {
@@ -469,6 +555,15 @@ export function CloudShareDialog({
                 The server did not answer. Check visibility before saving again.
                 <Button disabled={busy} onClick={() => void recheck()}>
                   Check again
+                </Button>
+              </div>
+            )}
+            {unknownShares && (
+              <div role="alert" data-testid="cloud-share-rows-unknown">
+                Some access changes could not be confirmed. Check access before
+                saving again.
+                <Button disabled={busy} onClick={() => void recheckShares()}>
+                  Check access
                 </Button>
               </div>
             )}
@@ -718,7 +813,11 @@ export function CloudShareDialog({
                 </Button>
                 <Button
                   disabled={
-                    busy || !dirty || unknownAccess || confirming !== null
+                    busy ||
+                    !dirty ||
+                    unknownAccess ||
+                    unknownShares ||
+                    confirming !== null
                   }
                   onClick={() => void save()}
                 >

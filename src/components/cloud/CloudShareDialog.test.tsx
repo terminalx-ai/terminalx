@@ -99,16 +99,20 @@ beforeEach(() => {
       },
     ],
   });
-  mocks.membersIn.mockResolvedValue({
-    members: [
-      {
-        userId: "dana",
-        email: "dana@example.com",
-        displayName: "Dana",
-        role: "member",
-      },
-    ],
-  });
+  mocks.membersIn.mockImplementation(async (org: string) =>
+    org === "org-1"
+      ? mocks.members()
+      : {
+          members: [
+            {
+              userId: "dana",
+              email: "dana@example.com",
+              displayName: "Dana",
+              role: "member",
+            },
+          ],
+        },
+  );
   mocks.put.mockResolvedValue({ share: person });
   mocks.revoke.mockResolvedValue({ share: person });
   mocks.groupSet.mockResolvedValue({ groupId: "engineering" });
@@ -434,6 +438,311 @@ describe("draft sharing", () => {
     show();
     await screen.findByRole("option", { name: "Bob" });
     expect(mocks.members).toHaveBeenCalledTimes(2);
+  });
+  it.each(["person", "group"] as const)(
+    "reconciles applied but lost %s PUT and DELETE, preserving undo and guarding close",
+    async (kind) => {
+      const name = kind === "person" ? "Alice" : "Engineering";
+      const key = kind === "person" ? "person:alice" : "group:engineering";
+      if (kind === "group")
+        listed.groups = [
+          {
+            groupId: "engineering",
+            name,
+            memberCount: 3,
+            role: "viewer",
+            canApprove: false,
+          },
+        ];
+      const mutation = kind === "person" ? mocks.put : mocks.groupSet;
+      mutation.mockImplementationOnce(async () => {
+        listed =
+          kind === "person"
+            ? { ...listed, shares: [{ ...person, role: "driver" }] }
+            : {
+                ...listed,
+                groups: [{ ...listed.groups![0]!, role: "driver" }],
+              };
+        throw { code: "cloud_workspace_request_outcome_unknown" };
+      });
+      const onClose = vi.fn();
+      show({ onClose });
+      await screen.findByLabelText(`Role for ${name}`);
+      fireEvent.change(screen.getByLabelText(`Role for ${name}`), {
+        target: { value: "driver" },
+      });
+      await save();
+      fireEvent.change(screen.getByLabelText(`Role for ${name}`), {
+        target: { value: "viewer" },
+      });
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(onClose).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+      await save();
+      expect(mutation).toHaveBeenCalledTimes(2);
+      const revoke = kind === "person" ? mocks.revoke : mocks.groupSet;
+      revoke.mockImplementationOnce(async () => {
+        listed =
+          kind === "person"
+            ? { ...listed, shares: [] }
+            : { ...listed, groups: [] };
+        throw { code: "cloud_workspace_request_outcome_unknown" };
+      });
+      fireEvent.click(screen.getByLabelText(`Revoke ${name}`));
+      await save();
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+      await add(key);
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      await save();
+      expect(mutation.mock.calls.at(-1)?.[2]).toBe("viewer");
+    },
+  );
+  it.each([
+    ["person", false],
+    ["person", true],
+    ["group", false],
+    ["group", true],
+  ] as const)(
+    "keeps uncertain %s changes (remove=%s) unresolved when refresh fails, even after undo",
+    async (kind, remove) => {
+      const name = kind === "person" ? "Alice" : "Engineering";
+      if (kind === "group")
+        listed.groups = [
+          {
+            groupId: "engineering",
+            name,
+            memberCount: 3,
+            role: "viewer",
+            canApprove: false,
+          },
+        ];
+      const mutation =
+        kind === "person"
+          ? remove
+            ? mocks.revoke
+            : mocks.put
+          : mocks.groupSet;
+      mutation.mockImplementationOnce(async () => {
+        listed =
+          kind === "person"
+            ? {
+                ...listed,
+                shares: remove ? [] : [{ ...person, role: "driver" }],
+              }
+            : {
+                ...listed,
+                groups: remove
+                  ? []
+                  : [{ ...listed.groups![0]!, role: "driver" }],
+              };
+        mocks.shares.mockRejectedValueOnce(new Error("offline"));
+        throw { code: "cloud_workspace_request_outcome_unknown" };
+      });
+      const onClose = vi.fn();
+      show({ onClose });
+      await screen.findByLabelText(`Role for ${name}`);
+      if (remove) fireEvent.click(screen.getByLabelText(`Revoke ${name}`));
+      else
+        fireEvent.change(screen.getByLabelText(`Role for ${name}`), {
+          target: { value: "driver" },
+        });
+      await save();
+      if (remove)
+        await add(kind === "person" ? "person:alice" : "group:engineering");
+      else
+        fireEvent.change(screen.getByLabelText(`Role for ${name}`), {
+          target: { value: "viewer" },
+        });
+      expect(screen.getByTestId("cloud-share-rows-unknown")).toBeTruthy();
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(onClose).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+      fireEvent.click(screen.getByRole("button", { name: "Check access" }));
+      await waitFor(() =>
+        expect(screen.queryByTestId("cloud-share-rows-unknown")).toBeNull(),
+      );
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      await save();
+      if (remove && kind === "person") {
+        expect(mocks.revoke).toHaveBeenCalledOnce();
+        expect(mocks.put).toHaveBeenCalledWith(
+          "ws",
+          "alice",
+          "viewer",
+          false,
+          "org-1",
+        );
+      } else expect(mutation).toHaveBeenCalledTimes(2);
+    },
+  );
+  it("refreshes departed people after a failure and preserves successful and unrelated failed edits", async () => {
+    mocks.put.mockImplementation(
+      async (_ws: string, id: string, role: "viewer" | "driver") => {
+        if (id === "alice") {
+          listed = { ...listed, shares: [] };
+          mocks.members.mockResolvedValue({
+            members: [
+              {
+                userId: "bob",
+                email: "bob@example.com",
+                displayName: "Bob",
+                role: "member",
+              },
+            ],
+          });
+          throw { code: "organization_member_not_found" };
+        }
+        listed = {
+          ...listed,
+          shares: [
+            ...listed.shares,
+            { ...person, userId: id, name: "Bob", role },
+          ],
+        };
+        return {};
+      },
+    );
+    mocks.groupSet.mockRejectedValue({
+      code: "cloud_workspace_share_forbidden",
+    });
+    show();
+    await screen.findByText("Alice");
+    fireEvent.change(screen.getByLabelText("Role for Alice"), {
+      target: { value: "driver" },
+    });
+    await add("person:bob");
+    await add("group:engineering");
+    await save();
+    expect(screen.queryByLabelText("Role for Alice")).toBeNull();
+    expect(
+      within(screen.getByLabelText("Add person or group")).queryByText("Alice"),
+    ).toBeNull();
+    expect(screen.getByLabelText("Role for Bob")).toBeTruthy();
+    expect(screen.getByLabelText("Role for Engineering")).toBeTruthy();
+    await save();
+    expect(mocks.put).toHaveBeenCalledTimes(2);
+    expect(mocks.groupSet).toHaveBeenCalledTimes(2);
+    expect(mocks.members).toHaveBeenCalledTimes(2);
+  });
+  it("does not let an older roster response resurrect a departed member (#501)", async () => {
+    let finish!: (value: {
+      members: {
+        userId: string;
+        email: string;
+        displayName: string;
+        role: string;
+      }[];
+    }) => void;
+    mocks.members.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mocks.put.mockImplementationOnce(async () => {
+      listed = { ...listed, shares: [] };
+      mocks.members.mockResolvedValue({ members: [] });
+      throw { code: "organization_member_not_found" };
+    });
+    show();
+    await screen.findByText("Alice");
+    fireEvent.change(screen.getByLabelText("Role for Alice"), {
+      target: { value: "driver" },
+    });
+    await save();
+    await act(async () =>
+      finish({
+        members: [
+          {
+            userId: "alice",
+            email: person.email,
+            displayName: "Alice",
+            role: "member",
+          },
+        ],
+      }),
+    );
+    expect(screen.queryByLabelText("Role for Alice")).toBeNull();
+    expect(
+      within(screen.getByLabelText("Add person or group")).queryByText("Alice"),
+    ).toBeNull();
+  });
+  it("settles removal of an already deleted group after verifying its absence", async () => {
+    listed.groups = [
+      {
+        groupId: "engineering",
+        name: "Engineering",
+        memberCount: 3,
+        role: "viewer",
+        canApprove: false,
+      },
+    ];
+    mocks.groupSet.mockImplementationOnce(async () => {
+      listed = { ...listed, groups: [] };
+      mocks.groups.mockResolvedValue({ groups: [] });
+      throw { code: "organization_group_not_found" };
+    });
+    show();
+    await screen.findByText("Engineering");
+    fireEvent.click(screen.getByLabelText("Revoke Engineering"));
+    await save();
+    expect(
+      (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      within(screen.getByLabelText("Add person or group")).queryByText(
+        /Engineering/,
+      ),
+    ).toBeNull();
+    expect(mocks.groupSet).toHaveBeenCalledOnce();
+  });
+  it("does not refresh an old workspace after an uncertain save completes in a new context", async () => {
+    let fail!: (error: unknown) => void;
+    mocks.put.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    const view = show();
+    await screen.findByText("Alice");
+    fireEvent.change(screen.getByLabelText("Role for Alice"), {
+      target: { value: "driver" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    listed = { ...listed, shares: [] };
+    view.rerender(
+      <CloudShareDialog
+        orgId="org-2"
+        workspaceId="other"
+        name="Other"
+        onClose={vi.fn()}
+      />,
+    );
+    await screen.findByRole("option", { name: "Dana" });
+    await act(async () =>
+      fail({ code: "cloud_workspace_request_outcome_unknown" }),
+    );
+    expect(mocks.shares).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("cloud-share-rows-unknown")).toBeNull();
   });
   it("opens through the shared host", async () => {
     render(<CloudShareDialogHost />);

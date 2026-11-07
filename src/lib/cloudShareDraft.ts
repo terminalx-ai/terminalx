@@ -11,6 +11,7 @@ export interface ShareDraftRow {
 export interface ShareDraft {
   access: "private" | "organization";
   rows: ShareDraftRow[];
+  unresolved?: ShareDraftChange[];
 }
 export interface ShareDraftChange {
   key: string;
@@ -70,9 +71,37 @@ export function shareDraftChanges(
 }
 export function shareDraftDirty(base: ShareDraft, draft: ShareDraft): boolean {
   return (
-    base.access !== draft.access || shareDraftChanges(base, draft).length > 0
+    !!base.unresolved?.length ||
+    base.access !== draft.access ||
+    shareDraftChanges(base, draft).length > 0
   );
 }
+/** Refresh untouched rows while retaining pending intent, even an undo of an uncertain write. */
+export function reconcileShareDraft(
+  base: ShareDraft,
+  draft: ShareDraft,
+  actual: ShareDraft,
+  absent: ReadonlySet<string> = new Set(),
+): { saved: ShareDraft; draft: ShareDraft } {
+  const pending = new Set([
+    ...shareDraftChanges(base, draft).map((change) => change.key),
+    ...(base.unresolved ?? []).map((change) => change.key),
+  ]);
+  return {
+    saved: actual,
+    draft: {
+      access: base.access === draft.access ? actual.access : draft.access,
+      rows: [
+        ...actual.rows.filter((row) => !pending.has(shareRowKey(row))),
+        ...draft.rows.filter(
+          (row) =>
+            pending.has(shareRowKey(row)) && !absent.has(shareRowKey(row)),
+        ),
+      ],
+    },
+  };
+}
+
 /** Every successful change becomes the new base; failures remain editable and retryable. */
 export async function applyShareDraftChanges(
   base: ShareDraft,
@@ -80,7 +109,10 @@ export async function applyShareDraftChanges(
   run: (change: ShareDraftChange) => Promise<unknown>,
   explain: (error: unknown) => string,
 ) {
+  if (base.unresolved?.length)
+    throw new Error("Check access before saving again");
   let saved = base;
+  const failedChanges: { change: ShareDraftChange; error: unknown }[] = [];
   const failures: string[] = [];
   for (const change of shareDraftChanges(base, draft)) {
     try {
@@ -93,8 +125,17 @@ export async function applyShareDraftChanges(
         ],
       };
     } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      if (code === "cloud_workspace_request_outcome_unknown")
+        saved = { ...saved, unresolved: [...(saved.unresolved ?? []), change] };
+      failedChanges.push({ change, error });
       failures.push(`${change.label}: ${explain(error)}`);
     }
   }
-  return { saved, failures };
+  return { saved, failures, failedChanges };
 }
