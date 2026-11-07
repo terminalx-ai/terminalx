@@ -219,6 +219,8 @@ fn a_clean_pushed_worktree_is_eligible_and_its_branch_and_conversations_stay() {
     // The conversation is kept, filed under the project as from a removed workspace.
     let kept = index::get(&session.id).unwrap();
     assert!(kept.worktree_removed && kept.removed_workspace.is_some());
+    assert_eq!(kept.removed_workspace.as_ref().unwrap().commit, candidate.head);
+    assert_eq!(kept.removed_workspace.as_ref().unwrap().branch.as_deref(), Some(branch.as_str()));
     assert_eq!(canonical(Path::new(&kept.cwd)), alpha);
     assert!(crate::store::sessions_dir().unwrap().join(&session.id).exists());
     // The project's own session is exactly as it was.

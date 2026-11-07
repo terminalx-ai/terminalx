@@ -1,3 +1,4 @@
+import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
@@ -592,6 +593,7 @@ export function SessionView({
                   <span className="truncate">{workspaceLabel}</span>
                 )}
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
+                {local && session.worktreeRemoved && <Button variant="ghost" size="sm" onClick={() => openWorkspaceRestore(session.id)}>Restore workspace…</Button>}
               </span>
               <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
               </>

@@ -15,7 +15,7 @@ import { listenForChatWindowDrafts } from "@/lib/chatWindowHandoff";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
 import type {
   ProjectPatch,
-  Workspace, HarnessInfo, IssueRef, Project, SessionEntry, TabEntry } from "@/types/session";
+  Workspace, WorkspaceRestorePreview, HarnessInfo, IssueRef, Project, SessionEntry, TabEntry } from "@/types/session";
 
 /**
  * The index of sessions and projects, mirrored from ~/.raccoon and kept in a
@@ -567,6 +567,14 @@ export async function removeWorkspace(projectPath: string, path: string, options
   else removeSessions(report.sessions.map((s) => s.id));
   await refreshWorkspaces(projectPath);
   return report;
+}
+
+/** Reopen the retained tabs after the owner has restored their checkout. */
+export async function restoreWorkspace(sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) {
+  const restored = await api.restoreWorkspace(sessionId, expected, newBranch);
+  for (const session of restored) upsertSession(session);
+  await refreshWorkspaces(expected.projectPath);
+  selectSession(sessionId);
 }
 
 export async function refreshHarnesses() {
