@@ -117,6 +117,7 @@ describe("the chat's Delete workspace action", () => {
   it("sits alongside Commit, Create PR and Run it after a turn that changed files", () => {
     const done = { turns: [{ completed: { status: "ok" } }] } as unknown as Transcript;
     const run = vi.fn();
+    expect(handoffsFor(done, true, undefined, false)?.map((step) => step.label)).toEqual(["Commit", "Run it"]);
     expect(handoffsFor(done, true)?.map((step) => step.label)).toEqual(["Commit", "Create PR", "Run it"]);
     expect(handoffsFor(done, true, run)?.map((step) => step.label)).toEqual(["Commit", "Create PR", "Run it", "Delete workspace"]);
     // The others are prompts for the composer; this one is the app's action.

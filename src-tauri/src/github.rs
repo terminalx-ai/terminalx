@@ -745,6 +745,51 @@ pub fn available() -> bool {
     crate::binpath::resolve("gh").is_some()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectForge {
+    Github,
+    LocalOnly,
+}
+
+/// PR actions need both a GitHub origin and a working CLI for that repo.
+/// Explicitly name the repository so GH_REPO cannot select another project.
+pub fn project_forge(cwd: &Path) -> ProjectForge {
+    detect_forge(crate::git::remote_url(cwd).as_deref(), |repo| {
+        run_bounded(cwd, &["repo", "view", &format!("https://github.com/{repo}"), "--json", "name"]).is_ok()
+    })
+}
+
+fn detect_forge(remote: Option<&str>, gh_works: impl FnOnce(&str) -> bool) -> ProjectForge {
+    match remote.and_then(forge_repo) {
+        Some(repo) if gh_works(&repo) => ProjectForge::Github,
+        _ => ProjectForge::LocalOnly,
+    }
+}
+
+/// Parse the host, rather than searching for "github" in an arbitrary URL.
+/// URL parsing also handles SSH ports, HTTPS credentials and host casing.
+fn forge_repo(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let expanded;
+    let remote = if remote.contains("://") {
+        remote
+    } else {
+        let (authority, path) = remote.split_once(':')?;
+        expanded = format!("ssh://{authority}/{path}");
+        &expanded
+    };
+    let url = url::Url::parse(remote).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let github = host == "github.com" || (url.scheme() == "ssh" && host == "ssh.github.com");
+    if !github || !matches!(url.scheme(), "https" | "http" | "ssh" | "git") || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let path = url.path().trim_matches('/');
+    let repo = path.strip_suffix(".git").unwrap_or(path);
+    crate::issues::is_github_repo(repo).then(|| repo.to_string())
+}
+
 // ---- for the removal of a workspace once its pull request has merged --------
 //
 // These run unattended and on a timer (`merged_cleanup.rs`), so each has a
@@ -1003,6 +1048,17 @@ pub fn enable_head_branch_deletion(cwd: &Path) -> Result<HeadBranchSetting> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forge_detection_requires_a_github_remote_and_a_working_cli() {
+        for remote in ["git@github.com:acme/app.git", "https://github.com/acme/app.git", "ssh://git@github.com/acme/app.git", "ssh://git@github.com:22/acme/app.git", "ssh://git@ssh.github.com:443/acme/app.git", "https://user@GITHUB.COM/acme/app.git", "git@GITHUB.COM:acme/app.git", "github.com:acme/app.git"] {
+            assert_eq!(detect_forge(Some(remote), |repo| { assert_eq!(repo, "acme/app"); true }), ProjectForge::Github);
+            assert_eq!(detect_forge(Some(remote), |_| false), ProjectForge::LocalOnly);
+        }
+        for remote in [None, Some("git@gitlab.com:acme/app.git"), Some("https://bitbucket.org/acme/app"), Some("https://github.com.evil.test/acme/app"), Some("/tmp/github.com/app.git"), Some("https://github.com/acme/app/extra"), Some("https://github.com@evil.test/acme/app")] {
+            assert_eq!(detect_forge(remote, |_| panic!("a non-GitHub remote must not run gh")), ProjectForge::LocalOnly);
+        }
+    }
 
     #[test]
     fn branch_discovery_keeps_same_branch_followups_but_not_an_unrelated_fork() {

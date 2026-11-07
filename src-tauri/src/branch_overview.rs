@@ -61,6 +61,8 @@ pub struct BranchOverview {
     pub base: Option<String>,
     /// The checkout is on the base branch itself.
     pub on_base: bool,
+    /// The main checkout, read from Git rather than inferred from a worktree path.
+    pub main_checkout: Option<String>,
     pub fork_point: Option<CommitInfo>,
     /// Commits only on the branch, and on the base since the fork.
     pub ahead: u32,
@@ -90,7 +92,7 @@ pub struct BranchOverview {
 /// the branch is read against that rather than the default branch, so one
 /// started from `develop` is not said to be behind `main`. A recorded ref that
 /// is gone, or is only `HEAD`, falls back to the default branch.
-pub fn overview(cwd: &Path, recorded: Option<&str>) -> BranchOverview {
+pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchOverview {
     let status = git::work_status(cwd);
     if !status.is_repo {
         return BranchOverview::default();
@@ -108,9 +110,15 @@ pub fn overview(cwd: &Path, recorded: Option<&str>) -> BranchOverview {
         .filter(|r| git::run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]).is_ok())
         .map(String::from);
     let base = recorded.or(default);
-    let on_base = status.branch.is_some() && status.branch == status.default_branch;
+    // A remote-tracking ref can lag behind a local merge. Local actions and
+    // their cleanup must be checked against the actual local target branch.
+    let base = if local_only { base.and_then(|base| local_base(cwd, &base)) } else { base };
+    let on_base = status.branch.is_some() && (status.branch == base || (!local_only && status.branch == status.default_branch));
+    let main_checkout = git::run(cwd, &["worktree", "list", "--porcelain", "-z"]).ok()
+        .and_then(|list| list.split('\0').next()?.strip_prefix("worktree ").map(String::from));
     let mut out = BranchOverview {
         branch: status.branch.clone(),
+        main_checkout,
         on_base,
         upstream: status.upstream.clone(),
         unpushed: status.ahead,
@@ -135,9 +143,18 @@ pub fn overview(cwd: &Path, recorded: Option<&str>) -> BranchOverview {
     out.contributors = contributors(cwd, &mine);
     out.base_contributors = contributors(cwd, &theirs);
     out.fork_point = fork.as_deref().and_then(|sha| git::log_commits(cwd, Some(sha), 1).ok()).and_then(|mut v| v.pop());
-    out.merge = if out.ahead == 0 { MergeCheck { state: "merged".into(), conflicted: vec![] } } else { merge_check(cwd, &base) };
+    out.merge = if out.ahead == 0 && (!local_only || git::run(cwd, &["merge-base", "--is-ancestor", "HEAD", &base]).is_ok()) { MergeCheck { state: "merged".into(), conflicted: vec![] } } else { merge_check(cwd, &base) };
     out.base = Some(base);
     out
+}
+
+/// Only a branch is a local merge target, never a tag or an arbitrary commit.
+fn local_base(cwd: &Path, base: &str) -> Option<String> {
+    let full = git::run(cwd, &["rev-parse", "--symbolic-full-name", base]).ok()?;
+    let full = full.trim();
+    let branch = full.strip_prefix("refs/heads/").or_else(|| full.strip_prefix("refs/remotes/")?.split_once('/').map(|(_, branch)| branch))?;
+    git::run(cwd, &["show-ref", "--verify", &format!("refs/heads/{branch}")]).ok()?;
+    Some(branch.to_string())
 }
 
 /// Merges the checked-out branch into the local branch `into`, for a project
@@ -260,6 +277,35 @@ mod tests {
     }
 
     #[test]
+    fn local_merges_follow_the_local_base_and_report_the_main_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main's checkout");
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&main).unwrap();
+        sh(&main, &["init", "-q", "-b", "main"]);
+        commit(&main, "base.txt", "base", "Ann");
+        sh(&main, &["branch", "develop"]);
+        sh(&main, &["update-ref", "refs/remotes/upstream/develop", "HEAD"]);
+        sh(&main, &["worktree", "add", "-qb", "feature", worktree.to_str().unwrap(), "develop"]);
+        commit(&worktree, "feature.txt", "feature", "Ann");
+        let before = overview(&worktree, Some("upstream/develop"), true);
+        assert_eq!(before.base.as_deref(), Some("develop"));
+        assert_eq!(before.main_checkout.as_deref().map(std::path::PathBuf::from), Some(std::fs::canonicalize(&main).unwrap()));
+        assert_eq!(before.ahead, 1);
+        assert!(!before.on_base);
+        sh(&main, &["switch", "-q", "develop"]);
+        sh(&main, &["merge", "--ff-only", "feature"]);
+        let after = overview(&worktree, Some("upstream/develop"), true);
+        assert_eq!(after.ahead, 0);
+        assert_eq!(after.merge.state, "merged");
+        assert_eq!(overview(&worktree, Some("upstream/develop"), false).ahead, 1, "the remote-tracking ref has not moved");
+        sh(&main, &["tag", "release"]);
+        assert_eq!(local_base(&main, "release"), None);
+        sh(&main, &["update-ref", "refs/remotes/upstream/missing", "HEAD"]);
+        assert_eq!(local_base(&main, "upstream/missing"), None);
+    }
+
+    #[test]
     fn authors_are_counted_once_per_email_most_commits_first() {
         let log = "Ann\x1fann@x.io\x1f2026-10-03\nBo\x1fbo@x.io\x1f2026-10-02\nAnn\x1fANN@x.io\x1f2026-10-01\n";
         let people = tally(log);
@@ -285,7 +331,7 @@ mod tests {
         commit(d, "d.txt", "theirs\n", "Cy");
         sh(d, &["checkout", "-q", "feature"]);
 
-        let o = overview(d, None);
+        let o = overview(d, None, false);
         assert_eq!(o.branch.as_deref(), Some("feature"));
         assert_eq!(o.base.as_deref(), Some("main"));
         assert!(!o.on_base);
@@ -301,7 +347,7 @@ mod tests {
         sh(d, &["checkout", "-q", "main"]);
         commit(d, "b.txt", "not yours\n", "Cy");
         sh(d, &["checkout", "-q", "feature"]);
-        let o = overview(d, None);
+        let o = overview(d, None, false);
         assert_eq!(o.merge.state, "conflicts");
         assert_eq!(o.merge.conflicted, vec!["b.txt"]);
 
@@ -310,9 +356,9 @@ mod tests {
         let o = other.path().join("c");
         sh(other.path(), &["clone", "-q", "-b", "feature", d.to_str().unwrap(), "c"]);
         commit(d, "e.txt", "theirs too\n", "Di");
-        assert_eq!(overview(&o, None).unpulled, 0, "not seen before a fetch");
+        assert_eq!(overview(&o, None, false).unpulled, 0, "not seen before a fetch");
         assert!(fetch(&o));
-        let mine = overview(&o, None);
+        let mine = overview(&o, None, false);
         assert_eq!(mine.unpulled, 1);
         assert_eq!(mine.incoming.iter().map(|c| c.author.as_str()).collect::<Vec<_>>(), vec!["Di"]);
 
@@ -324,21 +370,21 @@ mod tests {
         commit(d, "f.txt", "develop\n", "Cy");
         sh(d, &["checkout", "-qb", "from-develop"]);
         commit(d, "g.txt", "mine\n", "Ann");
-        let o = overview(d, Some("develop"));
+        let o = overview(d, Some("develop"), false);
         assert_eq!(o.base.as_deref(), Some("develop"));
         assert_eq!((o.ahead, o.behind), (1, 0));
         // Gone, or only HEAD: the default branch.
-        assert_eq!(overview(d, Some("no-such-branch")).base.as_deref(), Some("main"));
-        assert_eq!(overview(d, Some("HEAD")).base.as_deref(), Some("main"));
+        assert_eq!(overview(d, Some("no-such-branch"), false).base.as_deref(), Some("main"));
+        assert_eq!(overview(d, Some("HEAD"), false).base.as_deref(), Some("main"));
 
         // Nowhere to open a pull request: merged here, into the branch's own checkout or none.
         assert!(!o.has_remote);
         std::fs::write(d.join("dirt.txt"), "x").unwrap();
-        assert_eq!(overview(d, Some("develop")).changed, 1);
+        assert_eq!(overview(d, Some("develop"), false).changed, 1);
         assert!(merge_into(d, "develop").unwrap_err().to_string().contains("Commit your changes first"));
         std::fs::remove_file(d.join("dirt.txt")).unwrap();
         assert_eq!(merge_into(d, "develop").unwrap(), "Merged into develop");
-        assert_eq!(overview(d, Some("develop")).ahead, 0);
+        assert_eq!(overview(d, Some("develop"), false).ahead, 0);
         assert_eq!(merge_into(d, "develop").unwrap(), "develop already has this work");
         // Into a branch checked out elsewhere, and that has moved on: a merge commit made there.
         let wt = tempfile::tempdir().unwrap();
@@ -361,7 +407,7 @@ mod tests {
 
         // On the base itself there is nothing of a branch to merge.
         sh(d, &["checkout", "-q", "main"]);
-        let o = overview(d, None);
+        let o = overview(d, None, false);
         assert!(o.on_base);
         assert_eq!(o.ahead, 0);
         assert_eq!(o.merge.state, "merged");
