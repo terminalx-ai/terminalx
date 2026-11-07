@@ -56,11 +56,11 @@ export interface GitSource {
   prAccess?(association: PrAssociation): {
     read(): Promise<PullRequest>;
     ready(): Promise<void>;
-    merge(method: "merge" | "squash" | "rebase"): Promise<void>;
+    merge(method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
   };
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
-  mergePr(number: number, method: "merge" | "squash" | "rebase"): Promise<void>;
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
   errorMessage(error: unknown): string;
 }
 

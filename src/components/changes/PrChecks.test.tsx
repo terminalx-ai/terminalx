@@ -34,10 +34,20 @@ beforeEach(() => {
 afterEach(cleanup);
 const show = (inline = true) => render(<PrPanel cwd="/repo" branch="feature" active busy={false} inline={inline} />);
 
-it("opens a failed log with one click in the Branch tab and provides copy and GitHub actions", async () => {
-  show();
+it.each([true, false])("keeps one checks list with summaries, requirements, queue details and log actions (inline=%s)", async (inline) => {
+  current.requiredChecks = ["test", "lint"];
+  current.mergeQueueEntry = { position: 3, state: "AWAITING_CHECKS" };
+  current.deployments = [{ name: "Preview", state: "success", url: "https://preview.example.test/" }];
+  show(inline);
   fireEvent.click(await screen.findByRole("button", { name: "View logs for test" }));
   await screen.findByText("error: assertion failed");
+  expect(screen.getAllByText("3 of 4 failed")).toHaveLength(1);
+  expect(screen.getAllByLabelText("test: failure")).toHaveLength(1);
+  expect(screen.getAllByText("Required")).toHaveLength(2);
+  expect(screen.getAllByText("Optional")).toHaveLength(2);
+  expect(screen.getByText("Queue position 3")).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Deployments" })).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "Re-run failed" })).toHaveLength(1);
   expect(mocks.invoke).toHaveBeenCalledWith("pr_check_log", { cwd: "/repo", prUrl: pr.url, checkUrl: pr.checks[0].url, failed: true });
   fireEvent.click(screen.getByRole("button", { name: "Copy log" }));
   await waitFor(() => expect(copyText).toHaveBeenCalledWith("error: assertion failed"));

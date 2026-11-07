@@ -368,3 +368,168 @@ it("keeps a merged cloud PR visible without offering creation when landed verifi
   expect(screen.queryByRole("button", { name: "Create pull request" })).toBeNull();
   expect(screen.queryByText(/Could not refresh/)).toBeNull();
 });
+
+const { mergeReadiness } = await import("./PrPanel");
+const { checkCounts, checkSummary } = await import("@/lib/checks");
+const openPr: PullRequest = { ...followup, mergeState: "CLEAN", checks: [], requiredChecks: [] };
+
+function panelBackend(read: () => PullRequest) {
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "gh_available") return true;
+    if (command === "work_status") return workStatus(followup.head, read().state === "MERGED" ? 0 : 1);
+    if (command === "pr_list") return [read()];
+    if (command === "pr_merge") return;
+    throw Error(command);
+  });
+}
+
+describe("merge state labels", () => {
+  it.each([
+    [{ mergeState: "BLOCKED" }, "Blocked", false],
+    [{ mergeState: "BEHIND" }, "Behind base", false],
+    [{ mergeState: "UNSTABLE", checks: [{ name: "optional", state: "failure" }] }, "Unstable: optional checks failing", true],
+    [{ mergeState: "DIRTY" }, "Has conflicts", false],
+    [{ mergeState: "UNKNOWN" }, "Checking mergeability", false],
+    [{ isDraft: true, mergeState: "BLOCKED" }, "Draft", false],
+    [{ reviewDecision: "REVIEW_REQUIRED" }, "Blocked", false],
+    [{ checks: [{ name: "ci", state: "failure" }], requiredChecks: ["ci"] }, "Checks failing", false],
+    [{ checks: [{ name: "ci", state: "pending" }], requiredChecks: ["ci"] }, "Checks running", false],
+    [{ checks: [{ name: "ci", state: "new_state" }], requiredChecks: ["ci"] }, "Checking mergeability", false],
+    [{ detailsError: "offline" }, "Merge details unavailable", false],
+    [{ mergeQueueEnabled: true, autoMergeEnabled: true }, "Waiting to enter merge queue", false],
+    [{}, "Ready to merge", true],
+  ] as [Partial<PullRequest>, string, boolean][])("chooses %s → %s", (changes, label, ok) => {
+    expect(mergeReadiness({ ...openPr, ...changes })).toEqual({ label, ok });
+  });
+
+  it.each([
+    ["QUEUED", "Queued (position 3)"],
+    ["MERGEABLE", "Queued (position 3)"],
+    ["AWAITING_CHECKS", "Checks running in queue"],
+    ["UNMERGEABLE", "Blocked in queue"],
+    ["LOCKED", "Locked"],
+  ])("shows %s before branch checks and rules", (state, label) => {
+    const pr = { ...openPr, mergeState: "BLOCKED", checks: [{ name: "optional", state: "failure" }], mergeQueueEntry: { position: 3, state } };
+    expect(mergeReadiness(pr)).toEqual({ ok: false, label });
+    expect(mergeReadiness({ ...pr, state: "MERGED" }).label).toBe("Merged");
+    expect(mergeReadiness({ ...pr, state: "CLOSED" }).label).toBe("Closed");
+  });
+});
+
+describe("check summaries and deployments", () => {
+  const checks = [
+    { name: "build", state: "success" },
+    { name: "lint", state: "failure" },
+    { name: "test", state: "in_progress" },
+    { name: "docs", state: "skipped" },
+    { name: "preview", state: "error" },
+  ];
+
+  it("counts each displayed check once, with skipped distinct from passing", () => {
+    expect(checkCounts(checks)).toEqual({ total: 5, passed: 1, failed: 2, running: 1, skipped: 1, unknown: 0 });
+    expect(checkSummary(checks)).toBe("2 of 5 failed · 1 running · 1 skipped");
+    expect(checkSummary([{ name: "ci", state: "success" }, { name: "docs", state: "neutral" }])).toBe("1 of 2 passed · 1 skipped");
+    expect(checkSummary([{ name: "ci", state: "future" }])).toBe("0 of 1 passed · 1 unknown");
+  });
+
+  it.each([false, true])("renders matching counts, required/optional labels and deployment links (inline=%s)", async (inline) => {
+    panelBackend(() => ({ ...openPr, checks, requiredChecks: ["build", "test"], deployments: [{ name: "Vercel preview", state: "success", url: "https://preview.example.test/" }] }));
+    render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} inline={inline} />);
+    await screen.findByText("2 of 5 failed · 1 running · 1 skipped");
+    for (const check of checks) expect(screen.getByLabelText(`${check.name}: ${check.state}`)).toBeTruthy();
+    expect(screen.getAllByText("Required")).toHaveLength(2);
+    expect(screen.getAllByText("Optional")).toHaveLength(3);
+    expect(screen.getByRole("region", { name: "Deployments" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "https://preview.example.test/" }));
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    expect(openUrl).toHaveBeenCalledWith("https://preview.example.test/");
+  });
+
+  it("keeps unread requirements unknown and refuses non-web provider links", async () => {
+    panelBackend(() => ({ ...openPr, requiredChecks: null, checks: [{ name: "ci", state: "success", url: "file:///tmp/run" }], deployments: [{ name: "unsafe", state: "success", url: "javascript:alert(1)" }] }));
+    render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} />);
+    await screen.findByText("Requirement unknown");
+    expect(screen.queryByRole("button", { name: "ci" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /javascript/ })).toBeNull();
+    expect(screen.queryByText("Optional")).toBeNull();
+  });
+});
+
+describe("merge queue refresh and actions", () => {
+  it.each([false, true])("adds using the queue method and shows position after refresh (inline=%s)", async (inline) => {
+    let pr = { ...openPr, mergeQueueEnabled: true, mergeState: "BLOCKED" };
+    panelBackend(() => pr);
+    render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} inline={inline} />);
+    const add = await screen.findByRole("button", { name: "Add to merge queue" });
+    expect(screen.queryByRole("button", { name: "Merge" })).toBeNull();
+    pr = { ...pr, mergeQueueEntry: { position: 4, state: "QUEUED" } };
+    fireEvent.click(add);
+    await screen.findByText("Queued (position 4)");
+    expect(mocks.invoke).toHaveBeenCalledWith("pr_merge", { cwd, number: followup.number, method: "queue" });
+    expect(screen.queryByRole("button", { name: "Add to merge queue" })).toBeNull();
+  });
+
+  it.each(["removed", "merged"])("leaves the queue when %s on refresh", async (transition) => {
+    let pr: PullRequest = { ...openPr, mergeQueueEnabled: true, mergeQueueEntry: { position: 4, state: "AWAITING_CHECKS" } };
+    panelBackend(() => pr);
+    render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} />);
+    await screen.findByText("Checks running in queue");
+    expect(screen.getByText("Queue position 4")).toBeTruthy();
+    pr = { ...pr, mergeQueueEntry: null, state: transition === "merged" ? "MERGED" : "OPEN" };
+    fireEvent.click(screen.getByRole("button", { name: "Refresh pull requests" }));
+    await waitFor(() => expect(screen.queryByText("Checks running in queue")).toBeNull());
+    expect(screen.queryByText("Queue position 4")).toBeNull();
+    expect(!!screen.queryByRole("button", { name: "Add to merge queue" })).toBe(transition === "removed");
+  });
+
+  it.each([
+    { isDraft: true }, { detailsError: "timed out" }, { mergeable: "CONFLICTING" as const },
+    { autoMergeEnabled: true }, { mergeQueueEntry: { position: 1, state: "LOCKED" } },
+  ])("does not enqueue drafts, conflicts, unread details or an existing request: %s", async (changes) => {
+    panelBackend(() => ({ ...openPr, mergeQueueEnabled: true, ...changes }));
+    render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} />);
+    await screen.findByText(followup.title);
+    expect(screen.queryByRole("button", { name: "Add to merge queue" })).toBeNull();
+  });
+});
+
+it("keeps a queued PR's position visible while branch work holds its actions", async () => {
+  panelBackend(() => ({ ...openPr, mergeQueueEnabled: true, mergeQueueEntry: { position: 8, state: "QUEUED" } }));
+  render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} inline held />);
+  await screen.findByText("Queued (position 8)");
+  expect(screen.queryByRole("button", { name: "Add to merge queue" })).toBeNull();
+});
+
+it("queues an associated PR by its own URL after the checkout changes branches", async () => {
+  const pr = { ...openPr, mergeQueueEnabled: true };
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "gh_available") return true;
+    if (command === "work_status") return workStatus("main");
+    if (command === "pr_associations") return [association(pr)];
+    if (command === "pr_details") return pr;
+    if (command === "pr_merge") return;
+    throw Error(command);
+  });
+  render(<PrPanel cwd={cwd} sessionId="author" branch="main" active busy={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Add to merge queue" }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pr_merge", { cwd, number: pr.number, method: "queue", url: pr.url }));
+});
+
+it.each([false, true])("respects cloud write permission for queue actions (canWrite=%s)", async (canWrite) => {
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus(followup.head, 1);
+    if (method === "git.prs") return { prs: [{ ...openPr, mergeQueueEnabled: true }] };
+    throw Error(method);
+  });
+  const mutate = vi.fn(async () => ({}));
+  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite, author: async () => null });
+  render(<PrPanel source={source} branch={followup.head} active busy={false} />);
+  await screen.findByText(followup.title);
+  const add = screen.queryByRole("button", { name: "Add to merge queue" });
+  expect(!!add).toBe(canWrite);
+  if (add) {
+    fireEvent.click(add);
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("git.prMerge", { repo: "app", number: followup.number, method: "queue" }));
+  } else expect(mutate).not.toHaveBeenCalled();
+  expect(mocks.invoke).not.toHaveBeenCalledWith("pr_merge", expect.anything());
+});

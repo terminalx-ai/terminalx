@@ -15,8 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
-import { PrChecks } from "./PrChecks";
-import { actionsRuns, FAILING_CHECKS, RUNNING_CHECKS, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
+import { Deployments, PrChecks } from "./PrChecks";
+import { actionsRuns, checkCounts, checkSummary, isFailingCheck, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
 import { NextLine } from "./NextStep";
 
 type WorkspaceCleanup = {
@@ -24,18 +24,39 @@ type WorkspaceCleanup = {
   onDelete: () => void;
 };
 
-/** Readiness in one fixed order: state, then conflicts, then checks. */
+/** GitHub's lifecycle and queue take precedence over head-branch checks. */
 export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string } {
-  if (pr.state === "MERGED") return { ok: false, label: "Merged" };
-  if (pr.state === "CLOSED") return { ok: false, label: "Closed" };
-  if (pr.isDraft) return { ok: false, label: "Draft" };
-  if (pr.mergeable === "CONFLICTING") return { ok: false, label: "Has conflicts" };
-  const failing = pr.checks.some((c) => FAILING_CHECKS.includes(c.state));
-  if (failing) return { ok: false, label: "Checks failing" };
-  const running = pr.checks.some((c) => RUNNING_CHECKS.includes(c.state));
-  if (running) return { ok: false, label: "Checks running" };
-  if (pr.mergeable === "UNKNOWN") return { ok: false, label: "Checking mergeability" };
+  const blocked = (label: string) => ({ ok: false, label });
+  if (pr.state === "MERGED") return blocked("Merged");
+  if (pr.state === "CLOSED") return blocked("Closed");
+  if (pr.isDraft) return blocked("Draft");
+  if (pr.detailsError) return blocked("Merge details unavailable");
+  if (pr.mergeQueueEntry) {
+    switch (pr.mergeQueueEntry.state) {
+      case "AWAITING_CHECKS": return blocked("Checks running in queue");
+      case "UNMERGEABLE": return blocked("Blocked in queue");
+      case "LOCKED": return blocked("Locked");
+      default: return blocked(`Queued (position ${pr.mergeQueueEntry.position})`);
+    }
+  }
+  if (pr.mergeable === "CONFLICTING" || pr.mergeState === "DIRTY") return blocked("Has conflicts");
+  if (pr.mergeQueueEnabled && pr.autoMergeEnabled) return blocked("Waiting to enter merge queue");
+  if (pr.mergeState === "BLOCKED") return blocked("Blocked");
+  if (pr.mergeState === "BEHIND") return blocked("Behind base");
+  if (pr.reviewDecision === "CHANGES_REQUESTED" || pr.reviewDecision === "REVIEW_REQUIRED") return blocked("Blocked");
+  const counts = checkCounts(pr.checks.filter((check) => pr.requiredChecks == null || pr.requiredChecks.includes(check.name)));
+  if (pr.mergeState === "UNSTABLE" && !counts.failed && !counts.running && !counts.unknown && pr.mergeable === "MERGEABLE") {
+    return { ok: true, label: "Unstable: optional checks failing" };
+  }
+  if (counts.failed) return blocked("Checks failing");
+  if (counts.running) return blocked("Checks running");
+  if (counts.unknown || pr.mergeable === "UNKNOWN" || pr.mergeState === "UNKNOWN") return blocked("Checking mergeability");
   return { ok: true, label: "Ready to merge" };
+}
+
+function canQueue(pr: PullRequest): boolean {
+  return pr.state === "OPEN" && pr.mergeQueueEnabled === true && !pr.mergeQueueEntry && !pr.autoMergeEnabled
+    && !pr.isDraft && !pr.detailsError && pr.mergeable !== "CONFLICTING" && pr.mergeState !== "DIRTY";
 }
 
 export function PrPanel({
@@ -239,13 +260,13 @@ export function PrPanel({
   });
 
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
-  const merge = (row: SessionPr, method: "merge" | "squash" | "rebase") =>
+  const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue") =>
     void act("merge", () => row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method)).then((done) => {
       if (done) void requestMergedSweep();
     });
 
   if (available === false) {
-    if (inline) return held ? null : <div className="px-3"><NextLine tone="muted" text={<>Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span> to open a pull request</>} /></div>;
+    if (inline) return held ? null : <div><NextLine tone="muted" text={<>Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span> to open a pull request</>} /></div>;
     return (
       <div className="px-3 py-4 text-xs text-muted-foreground">
         Pull requests need the GitHub CLI. Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span>.
@@ -305,7 +326,7 @@ export function PrPanel({
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
         const ready = mergeReadiness(pr);
-        const checks = <PrChecks pr={pr} source={source} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
+        const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
           onRerun={(failedOnly) => rerun(pr, failedOnly)}
           onFix={onFixErrors && pr.state === "OPEN" ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
         if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
@@ -315,7 +336,8 @@ export function PrPanel({
                 {working === "ready" && <Loader2 className="animate-spin" />} Mark ready
               </Button>
             )}
-            {ready.ok && <MergeMenu disabled={!!working || loading || !fresh} working={working === "merge"} onMerge={(method) => merge(row, method)} />}
+            {canQueue(pr) && <Button size="xs" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
+            {ready.ok && !pr.mergeQueueEnabled && <MergeMenu disabled={!!working || loading || !fresh} working={working === "merge"} onMerge={(method) => merge(row, method)} />}
           </>
         )} />;
         return (
@@ -342,17 +364,21 @@ export function PrPanel({
                 </div>
               </div>
             </div>
+            {pr.state === "OPEN" && pr.mergeQueueEntry && <p className="mt-2 text-[11px] text-faint">Queue position {pr.mergeQueueEntry.position}</p>}
             {pr.checks.length > 0 && <div className="mt-2">{checks}</div>}
+            <Deployments pr={pr} />
+            {pr.detailsError && <p role="alert" className="mt-2 text-xs text-destructive">Could not refresh merge details: {pr.detailsError}</p>}
             {pr.state === "OPEN" && (
               <div className="mt-3 flex items-center gap-2">
-                <span className={cn("text-xs", ready.ok ? "text-add" : "text-muted-foreground")}>{ready.label}</span>
+                <span className={cn("text-xs", ready.ok && pr.mergeState !== "UNSTABLE" ? "text-add" : "text-muted-foreground")}>{ready.label}</span>
                 <div className="ml-auto flex items-center gap-1">
                   {pr.isDraft && source.canWrite && (
                     <Button size="sm" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
                       Mark ready
                     </Button>
                   )}
-                  {source.canWrite && <DropdownMenu>
+                  {source.canWrite && canQueue(pr) && <Button size="sm" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
+                  {source.canWrite && !pr.mergeQueueEnabled && <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button size="sm" className={cn("bg-merge text-merge-foreground hover:opacity-90", !ready.ok && "opacity-60")} disabled={!!working || loading || !fresh || !ready.ok}>
                         {working === "merge" ? <Loader2 className="animate-spin" /> : <GitMerge />} Merge
@@ -372,7 +398,7 @@ export function PrPanel({
       })}
 
       {inline && canCreate && !creating && source.canWrite && !held && (
-        <div className="px-3">
+        <div>
           <NextLine
             tone="good"
             text={`Open a pull request into ${status?.defaultBranch ?? "the base"}`}
@@ -467,9 +493,6 @@ export function PrPanel({
   );
 }
 
-const FAILING = FAILING_CHECKS;
-const RUNNING = RUNNING_CHECKS;
-
 function reviewLabel(decision: string): string {
   return decision === "APPROVED" ? "approved" : decision === "CHANGES_REQUESTED" ? "changes requested" : decision === "REVIEW_REQUIRED" ? "review required" : decision.toLowerCase();
 }
@@ -480,14 +503,13 @@ function reviewLabel(decision: string): string {
  * then, unless the branch has a step first, what to do with it now.
  */
 function InlinePr({ pr, ready, held, actions, checks }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode }) {
-  const failing = pr.checks.filter((c) => FAILING.includes(c.state)).length;
-  const passed = pr.checks.filter((c) => !FAILING.includes(c.state) && !RUNNING.includes(c.state)).length;
+  const failing = pr.checks.filter(isFailingCheck).length;
   const [checksOpen, setChecksOpen] = useState(failing > 0);
   useEffect(() => {
     if (failing > 0) setChecksOpen(true);
   }, [failing]);
   const state = pr.state === "OPEN" ? (pr.isDraft ? "Draft" : "Open") : pr.state === "MERGED" ? "Merged" : "Closed";
-  const tone = ready.ok ? "good" : failing > 0 || pr.mergeable === "CONFLICTING" || pr.reviewDecision === "CHANGES_REQUESTED" ? "bad" : "muted";
+  const tone = ready.ok && pr.mergeState !== "UNSTABLE" ? "good" : failing > 0 || pr.mergeable === "CONFLICTING" || pr.reviewDecision === "CHANGES_REQUESTED" ? "bad" : "muted";
   return (
     <div className="flex flex-col gap-1.5 px-3" data-testid="branch-pr">
       <div className="flex min-w-0 items-center gap-2 px-1">
@@ -512,12 +534,15 @@ function InlinePr({ pr, ready, held, actions, checks }: { pr: PullRequest; ready
         <div className="px-1 pl-6.5">
           <button type="button" onClick={() => setChecksOpen((v) => !v)} aria-expanded={checksOpen} className="flex items-center gap-1 text-[11px] text-faint hover:text-foreground" data-testid="branch-pr-checks">
             {checksOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            Checks {passed}/{pr.checks.length}
-            {failing > 0 && <span className="text-destructive"> · {failing} failing</span>}
+            {checkSummary(pr.checks)}
           </button>
           {checksOpen && <div className="mt-0.5">{checks}</div>}
         </div>
       )}
+      <Deployments pr={pr} />
+      {pr.detailsError && <p role="alert" className="text-xs text-destructive">Could not refresh merge details: {pr.detailsError}</p>}
+      {pr.state === "OPEN" && held && pr.mergeQueueEntry && <p className="px-1 text-[11px] text-muted-foreground">{ready.label}</p>}
+      {pr.state === "OPEN" && pr.mergeQueueEntry && pr.mergeQueueEntry.state !== "QUEUED" && pr.mergeQueueEntry.state !== "MERGEABLE" && <p className="px-1 text-[11px] text-faint">Queue position {pr.mergeQueueEntry.position}</p>}
       {pr.state === "OPEN" && !held && (
         <NextLine tone={tone} text={`${ready.label}${pr.reviewDecision ? ` · ${reviewLabel(pr.reviewDecision)}` : ""}`} actions={actions || undefined} />
       )}

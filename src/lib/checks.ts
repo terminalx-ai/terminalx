@@ -4,6 +4,26 @@ export const FAILING_CHECKS = ["failure", "error", "cancelled", "timed_out", "ac
 export const RUNNING_CHECKS = ["pending", "in_progress", "queued", "expected", "waiting", "requested"];
 export const isFailingCheck = (check: PrCheck) => FAILING_CHECKS.includes(check.state);
 
+export function checkBucket(state: string): "passed" | "failed" | "running" | "skipped" | "unknown" {
+  if (FAILING_CHECKS.includes(state)) return "failed";
+  if (RUNNING_CHECKS.includes(state)) return "running";
+  if (state === "success") return "passed";
+  if (state === "neutral" || state === "skipped") return "skipped";
+  return "unknown";
+}
+
+export function checkCounts(checks: PrCheck[]) {
+  const counts = { total: checks.length, passed: 0, failed: 0, running: 0, skipped: 0, unknown: 0 };
+  for (const check of checks) counts[checkBucket(check.state)]++;
+  return counts;
+}
+
+export function checkSummary(checks: PrCheck[]): string {
+  const c = checkCounts(checks);
+  const result = c.failed ? `${c.failed} of ${c.total} failed` : `${c.passed} of ${c.total} passed`;
+  return [result, c.running && `${c.running} running`, c.skipped && `${c.skipped} skipped`, c.unknown && `${c.unknown} unknown`].filter(Boolean).join(" · ");
+}
+
 export function actionsRuns(pr: PullRequest, failedOnly = false): PrCheck[] {
   const runs = new Map<number, PrCheck>();
   for (const check of pr.checks) {
