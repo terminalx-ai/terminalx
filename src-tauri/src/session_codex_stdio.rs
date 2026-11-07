@@ -296,12 +296,14 @@ impl SessionManager {
         let version = codex_version(&program).context("Could not verify experimental Codex stdio version. No prompt was sent.")?;
         anyhow::ensure!(codex::stdio::supported(&version), "Experimental stdio requires Codex {} or newer (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::MIN_VERSION, version.trim());
         current()?;
-        let mut env = vec![
+        let environment = crate::store::environment::launch(cwd);
+        let mut env: Vec<_> = environment.values.into_iter().collect();
+        env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
             ("RACCOON_HOOK_TOKEN".into(), uuid::Uuid::now_v7().to_string()),
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
-        ];
+        ]);
         // A cloud workspace's credential, route and configuration, from one
         // grant snapshot like a terminal launch's; read here, off every lock,
         // because the first grant sync may still be on its way.
@@ -330,6 +332,7 @@ impl SessionManager {
             // cancelled child must be installed as a cleanup witness, never
             // discarded on an error path or replaced by a key-based lookup.
             let cancelled = !same_launch(&rt, launch) || rt.stopping || matches!(&rt.engine, Engine::CodexStdio(e) if e.exited || e.blocked);
+            rt.environment = environment.stamp;
             rt.child_pid = Some(child.pid);
             rt.child = Some(child.clone());
             cancelled

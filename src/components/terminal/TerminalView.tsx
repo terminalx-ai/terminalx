@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react"
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { EnvironmentNotice } from "./EnvironmentNotice";
 import { pty } from "@/lib/api";
 import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
@@ -315,6 +316,7 @@ export function TerminalView({
 
   return (
     <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      <EnvironmentNotice id={id} active={visible && !create} />
       {redraw && <div className="flex h-6 shrink-0 justify-end px-3">
         <button
           type="button"

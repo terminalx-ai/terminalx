@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { searchSettingsSections } from "./settingsSections";
 
 describe("settings section search", () => {
+  it("lists each section once when independent settings features are combined", () => {
+    const sections = searchSettingsSections("").map((match) => match.item.tab);
+    expect(new Set(sections).size).toBe(sections.length);
+    expect(sections.filter((section) => section === "repositories")).toHaveLength(1);
+    expect(sections).toContain("environment");
+  });
+
   it("ranks a title ahead of descriptions and search terms", () => {
     const matches = searchSettingsSections("agents");
     expect(matches[0].item.tab).toBe("agents");
@@ -23,6 +30,8 @@ describe("settings section search", () => {
   it("matches fuzzy titles, aliases, and terms across fields", () => {
     expect(searchSettingsSections("apprnc")[0].item.tab).toBe("appearance");
     expect(searchSettingsSections("hotkeys")[0].item.tab).toBe("shortcuts");
+    expect(searchSettingsSections("environment")[0].item.tab).toBe("environment");
+    expect(searchSettingsSections("variables")[0].item.tab).toBe("environment");
     expect(searchSettingsSections("appearance text")[0].item.tab).toBe("appearance");
     expect(searchSettingsSections("zzzz-no-such-setting")).toEqual([]);
   });

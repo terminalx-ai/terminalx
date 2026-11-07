@@ -157,7 +157,8 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
 }
 
 fn environment(project: &Path, path: &Path, session: Option<&SessionEntry>) -> Vec<(String, String)> {
-    // The PTY inherits the runtime environment and the login-shell PATH.
+    // The PTY applies Settings user/repository variables over the runtime
+    // environment, then the login-shell PATH and these lifecycle variables.
     // Provider credentials and per-agent hook tokens belong only to the agent.
     let mut env = vec![
         ("TERMINALX_WORKSPACE_PATH".into(), path.to_string_lossy().into_owned()),

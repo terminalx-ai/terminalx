@@ -13,6 +13,7 @@ export const SETTINGS_SECTIONS = {
   general: { title: "General", group: "Personal", entry: "general.websiteLinks" },
   appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme" },
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup" },
+  environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
   repositories: { title: "Repositories", group: "Repositories", entry: "repositories.mergedCleanup" },
@@ -233,6 +234,12 @@ export const SETTINGS_ROWS = [
     description: "Inspect and revoke devices paired with this computer.",
     searchTerms: ["devices", "paired", "devices"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/devices.json" }, layout: "content",
+  }),
+  defineSetting({
+    id: "environment.variables", section: "environment", title: "Environment variables",
+    description: "Variables for new local agent and shell tabs. Repository values override user values. All values are stored in Keychain on this Mac.",
+    searchTerms: ["environment", "variables", "env", "dotenv", "secrets", "keychain", "repository", "overrides", "import"], scope: "user",
+    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names and revisions)" }, layout: "content",
   }),
   defineSetting({
     id: "experimental.nativeCodex", section: "experimental", title: "Native Codex",

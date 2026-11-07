@@ -10,6 +10,7 @@ import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
 import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
+import { EnvironmentSettings } from "./EnvironmentSettings";
 
 interface SectionContext {
   onOpenSkills?: () => void;
@@ -26,6 +27,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   appearance: ({ onOpenUsage }) => <AppearanceTab onOpenUsage={onOpenUsage} />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
+  environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
   repositories: ({ projectPath, row }) => projectPath ? row === "repositories.scripts" ? <RepositoryScriptsTab projectPath={projectPath} /> : <MergedCleanupSettings projectPath={projectPath} /> : <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>,
