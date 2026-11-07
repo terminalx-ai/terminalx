@@ -208,6 +208,10 @@ fn copy_files(project: &Path, destination: &Path) -> Result<CopyReport> {
 
 fn copy_files_with_limits(project: &Path, destination: &Path, max_files: usize, max_bytes: u64) -> Result<CopyReport> {
     let project = fs::canonicalize(project)?;
+    // Resolve configured parent aliases once; keep the checkout's final
+    // component unresolved so safe_open still refuses a replaced root symlink.
+    let destination = fs::canonicalize(destination.parent().context("Missing workspace parent")?)?
+        .join(destination.file_name().context("Missing workspace name")?);
     anyhow::ensure!(git::is_own_worktree(&project), "Choose the root of a Git repository");
     let (_, patterns) = effective_patterns(&project, None)?;
     anyhow::ensure!(patterns.len() <= MAX_PATTERNS, "Use at most {MAX_PATTERNS} patterns");
@@ -225,8 +229,9 @@ fn copy_files_with_limits(project: &Path, destination: &Path, max_files: usize, 
     }
     let files: Vec<_> = files.into_iter().collect();
     let eligible = if files.is_empty() { BTreeSet::new() } else {
-        git::ignored_untracked_paths(destination, &files[..files.len().min(max_files)])?
+        git::ignored_untracked_paths(&destination, &files[..files.len().min(max_files)])?
     };
+    if !eligible.is_empty() { validate_staging_directory(&destination)?; }
     for (index, path) in files.into_iter().enumerate() {
         if index >= max_files {
             report.skip(path, format!("Copy limit: at most {max_files} matching files per workspace"));
@@ -236,7 +241,7 @@ fn copy_files_with_limits(project: &Path, destination: &Path, max_files: usize, 
             report.skip(path, "Tracked or not ignored in the new workspace");
             continue;
         }
-        match copy_one(&project, destination, Path::new(&path), max_bytes - report.copied_bytes) {
+        match copy_one(&project, &destination, Path::new(&path), max_bytes - report.copied_bytes) {
             Ok((bytes, warning)) => {
                 report.copied_count += 1;
                 report.copied_bytes += bytes;
@@ -250,8 +255,35 @@ fn copy_files_with_limits(project: &Path, destination: &Path, max_files: usize, 
     Ok(report)
 }
 
+/// Staging is outside the new checkout. If its parent is inside another
+/// checkout (normally the source repository), the entire directory must be
+/// ignored there too. Check once per batch, before writing any temporary data.
+fn validate_staging_directory(destination: &Path) -> Result<()> {
+    let destination = fs::canonicalize(destination)?;
+    let staging = destination.parent().context("Missing workspace parent")?;
+    for ancestor in staging.ancestors() {
+        match fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        // Once a checkout marker exists, a failed Git query must fail closed.
+        let root = fs::canonicalize(git::run(staging, &["rev-parse", "--show-toplevel"])?.trim())?;
+        let relative = staging.strip_prefix(&root)?.to_str().context("Workspace parent is not valid UTF-8")?.to_owned();
+        anyhow::ensure!(!relative.is_empty()
+            && git::ignored_untracked_paths(&root, std::slice::from_ref(&relative))?.contains(&relative),
+            "Workspace parent must be ignored before staging file copies");
+        break;
+    }
+    Ok(())
+}
+
 fn copy_one(project: &Path, destination: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
     anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
+    // A copied nested ignore file could unignore secrets that were eligible
+    // under the new checkout's original rules. Preserve those rules throughout.
+    anyhow::ensure!(!relative.file_name().is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(".gitignore")),
+        "Git ignore rules are kept from the new workspace");
     let mut source = safe_open::read(project, relative)?;
     anyhow::ensure!(source.metadata()?.len() <= remaining_bytes, "Workspace copy byte limit reached");
     safe_open::copy(&mut source, destination, relative, remaining_bytes)
@@ -332,18 +364,24 @@ mod safe_open {
 
     pub(super) fn write_atomic(root: &Path, relative: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<Option<String>> {
         let (directory, name) = parent(root, relative, true)?;
+        // A temporary sibling of the final file may itself be unignored. Keep
+        // temporary contents outside the checkout, including on cleanup failure.
+        // Managed workspaces and their parent share a filesystem for linkat.
+        let staging = fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root.parent().context("Missing workspace parent")?)?;
         let temporary = CString::new(format!(".terminalx-copy-{}", uuid::Uuid::new_v4()))?;
-        let mut target = open_at(&directory, &temporary, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+        let mut target = open_at(&staging, &temporary, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         let result = write(&mut target).and_then(|()| {
             // Publish only the complete file. linkat fails if anything already
             // occupies the destination, including a dangling symbolic link.
-            // SAFETY: both names and the held directory fd remain valid.
-            let linked = unsafe { libc::linkat(directory.as_raw_fd(), temporary.as_ptr(), directory.as_raw_fd(), name.as_ptr(), 0) };
+            // SAFETY: both names and the held directory fds remain valid.
+            let linked = unsafe { libc::linkat(staging.as_raw_fd(), temporary.as_ptr(), directory.as_raw_fd(), name.as_ptr(), 0) };
             if linked < 0 { return Err(std::io::Error::last_os_error().into()); }
             Ok(())
         });
-        // SAFETY: remove the temporary entry in the same held directory.
-        let removed = unsafe { libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0) };
+        // SAFETY: remove the temporary entry in its held staging directory.
+        let removed = unsafe { libc::unlinkat(staging.as_raw_fd(), temporary.as_ptr(), 0) };
         finish_publication(result, if removed < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) })
     }
 
@@ -381,7 +419,8 @@ mod safe_open {
     }
     pub(super) fn copy(source: &mut File, root: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
         let destination = checked(root, relative, true)?;
-        let temporary = destination.with_file_name(format!(".terminalx-copy-{}", uuid::Uuid::new_v4()));
+        let temporary = fs::canonicalize(root)?.parent().context("Missing workspace parent")?
+            .join(format!(".terminalx-copy-{}", uuid::Uuid::new_v4()));
         let mut target = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
         let mut bytes = 0;
         let result = copy_bounded(source, &mut target, remaining_bytes).and_then(|copied| {

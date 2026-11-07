@@ -6,29 +6,18 @@ import { copyText } from "@/lib/clipboard";
 import { updateProject, useSessionStore } from "@/lib/sessions";
 import type { Project } from "@/types/session";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
+import { RegisteredSetting } from "./settingsRegistry";
+import { MergedCleanupSettings } from "./MergedCleanupSettings";
 
-/** Self-contained until the grouped settings registry (PRO-123) lands. */
-export function RepositoriesTab() {
+export function RepositoriesTab({ projectPath, row }: { projectPath?: string; row?: string | null }) {
   const { projects } = useSessionStore();
-  const [path, setPath] = useState<string | null>(null);
-  const repositories = projects.filter((project) => project.kind !== "folder");
-  const project = repositories.find((project) => project.path === path);
-  if (project) return <RepositorySettingsPage key={project.path} project={project} onBack={() => setPath(null)} />;
-  return (
-    <div className="flex flex-col gap-2">
-      {!repositories.length && <p className="text-sm text-muted-foreground">Open a Git repository to configure its workspaces.</p>}
-      {repositories.map((project) => (
-        <button key={project.path} type="button" onClick={() => setPath(project.path)} className="min-w-0 rounded-md border border-hairline p-3 text-left hover:bg-veil-raised">
-          <span className="block text-sm font-medium">{project.name}</span>
-          <span className="block truncate text-xs text-muted-foreground" title={project.path}>{project.path}</span>
-        </button>
-      ))}
-    </div>
-  );
+  const project = projects.find((project) => !project.archived && project.path === projectPath);
+  if (!project) return <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>;
+  if (row === "repositories.mergedCleanup" || project.kind === "folder") return <MergedCleanupSettings projectPath={project.path} />;
+  return <RepositorySettingsPage key={project.path} project={project} page={row === "repositories.filesToCopy" ? "files" : "general"} />;
 }
 
-export function RepositorySettingsPage({ project, onBack }: { project: Project; onBack: () => void }) {
-  const [page, setPage] = useState<"general" | "files">("general");
+export function RepositorySettingsPage({ project, page }: { project: Project; page: "general" | "files" }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [preview, setPreview] = useState<RepositoryFilesPreview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -79,20 +68,16 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
 
   return (
     <div className="min-w-0">
-      <Button size="sm" variant="ghost" onClick={onBack}>Back to repositories</Button>
-      <h3 className="mt-3 break-words text-lg font-medium">{project.name}</h3>
-      <nav aria-label="Repository settings" className="my-4 flex gap-2">
-        <Button variant={page === "general" ? "secondary" : "ghost"} aria-current={page === "general" ? "page" : undefined} onClick={() => setPage("general")}>General</Button>
-        <Button variant={page === "files" ? "secondary" : "ghost"} aria-current={page === "files" ? "page" : undefined} onClick={() => setPage("files")}>Files to copy</Button>
-      </nav>
+      <h3 className="mb-3 text-base font-medium">{page === "general" ? "General" : "Files to copy"}</h3>
       {page === "general" ? (
         <>
-          {pathRow("Root path", project.path)}
-          {preview && pathRow("Workspaces path", preview.workspacesPath)}
+          <RegisteredSetting setting="repositories.rootPath" instance={project.path}>{pathRow("Root path", project.path)}</RegisteredSetting>
+          {preview && <RegisteredSetting setting="repositories.workspacesPath" instance={project.path}>{pathRow("Workspaces path", preview.workspacesPath)}</RegisteredSetting>}
         </>
       ) : (
+        <RegisteredSetting setting="repositories.filesToCopy" instance={project.path}>
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-muted-foreground">Copy up to 1,000 matching files and 100 MiB into each new workspace. Files must be ignored and untracked in both checkouts. Existing files and symbolic links are skipped.</p>
+          <p className="text-sm text-muted-foreground">Copy up to 1,000 matching files and 100 MiB into each new workspace. Files must be ignored and untracked in both checkouts. Existing files, symbolic links and .gitignore files are skipped.</p>
           <p className="text-xs text-muted-foreground">Both lists use positive globs from the repository root: .env matches only the root, **/.env matches any folder, and secrets/** includes a directory's contents. Leading / and ! exclusions are unsupported. In .worktreeinclude, blank lines and # comments are ignored.</p>
           {preview?.fromIncludeFile && <p role="status" className="text-sm">Patterns come from this repository's .worktreeinclude</p>}
           <label htmlFor="repository-copy-patterns" className="text-sm font-medium">Glob patterns (one per line)</label>
@@ -130,6 +115,7 @@ export function RepositorySettingsPage({ project, onBack }: { project: Project; 
             </div>
           )}
         </div>
+        </RegisteredSetting>
       )}
       {error && <p role="alert" className="mt-3 break-words text-sm text-destructive">{error}</p>}
     </div>

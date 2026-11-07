@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// PRO-131: standalone repository settings while the grouped registry is pending.
+// PRO-131: repository settings integrated with grouped registry navigation.
 // Headless WebKit exercises the editor, include-file precedence and layout.
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -30,10 +30,12 @@ try {
           })();`,
       });
       await page.getByRole("button", { name: "Settings", exact: true }).click();
-      await page.getByRole("button", { name: "Repositories", exact: true }).waitFor();
+      const repositories = page.getByRole("group", { name: "Repositories", exact: true });
+      await repositories.waitFor();
       await page.getByRole("combobox", { name: "Search settings" }).fill("worktreeinclude");
       await page.getByRole("option", { name: /Repositories/ }).click();
-      await page.getByRole("button", { name: /local-0/ }).click();
+      await repositories.getByRole("button", { name: "local-0", exact: true }).click();
+      await repositories.getByRole("button", { name: "General", exact: true }).click();
       await page.getByText("/repos/p0/.raccoon/worktrees", { exact: true }).waitFor();
       if (shots && width === 1100) await page.getByRole("main", { name: "Settings", exact: true }).screenshot({ path: join(shots, `general-${mode}.png`) });
       const paths = await page.getByRole("button", { name: /^(Copy|Reveal) (root|workspaces) path$/ }).count();

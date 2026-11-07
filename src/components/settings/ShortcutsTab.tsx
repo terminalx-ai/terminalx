@@ -1,3 +1,4 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -43,7 +44,7 @@ export function ShortcutsTab() {
 
   return (
     <div className="flex flex-col gap-4" data-testid="shortcuts-tab">
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <RegisteredSetting setting="shortcuts.reset"><div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <p className="min-w-0 flex-1 basis-64 text-xs leading-relaxed text-muted-foreground">
           Click a shortcut and press the new keys. Shortcuts are kept on this computer and change at once.
         </p>
@@ -71,7 +72,7 @@ export function ShortcutsTab() {
             Reset all to defaults
           </Button>
         )}
-      </div>
+      </div></RegisteredSetting>
       <SystemShortcutSection />
       {SHORTCUT_GROUPS.map((group) => (
         <section key={group} aria-label={`${group} shortcuts`}>
@@ -153,7 +154,7 @@ function ShortcutRow({
   };
 
   return (
-    <li ref={row} className="flex flex-col py-1 text-[13px]" data-shortcut={action.id}>
+    <RegisteredSetting setting={`shortcuts.${action.id}`}><li ref={row} className="flex flex-col py-1 text-[13px]" data-shortcut={action.id}>
       <div className="flex min-w-0 items-center gap-3">
         <span className="min-w-0 flex-1">{action.label}</span>
         <span className="flex shrink-0 items-center gap-1">
@@ -221,7 +222,7 @@ function ShortcutRow({
         </div>
       )}
       {slot != null && !action.fixed && <ShortcutEditor action={action} bindings={bindings} slot={slot} keymap={keymap} onClose={close} onSaid={onSaid} />}
-    </li>
+    </li></RegisteredSetting>
   );
 }
 

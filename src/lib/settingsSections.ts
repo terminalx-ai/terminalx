@@ -1,6 +1,6 @@
 import { indexPaletteItem, rankPaletteItems } from "@/lib/commandPalette";
 
-// Section navigation only. PRO-123 will supply the row registry for row search and links.
+// Search currently navigates sections; individual row metadata lives in settingsRegistry.
 export const SETTINGS_SECTIONS = [
   { id: "account", title: "Account", description: "Sign in, profile and account diagnostics", terms: ["login email subscription"] },
   { id: "devices", title: "Devices", description: "Pair a phone and manage connected devices", terms: ["mobile pairing remote revoke"] },

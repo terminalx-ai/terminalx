@@ -14,14 +14,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("Settings search", () => {
-  it("keeps repository settings reachable through search and section navigation", () => {
+  it("keeps repository settings reachable through search and grouped navigation", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     const input = screen.getByRole("combobox", { name: "Search settings" });
     fireEvent.change(input, { target: { value: "worktreeinclude" } });
     fireEvent.click(screen.getByRole("option", { name: /Repositories/ }));
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Repositories");
     const navigation = screen.getByRole("navigation", { name: "Settings sections" });
-    expect(within(navigation).getByRole("button", { name: "Repositories" }).getAttribute("aria-current")).toBe("page");
+    expect(within(navigation).getByRole("group", { name: "Repositories" })).toBeTruthy();
+    expect(screen.getByText("Choose a repository to view its settings.")).toBeTruthy();
   });
 
   it("focuses with the find shortcut, highlights font matches, and opens the section with Enter", () => {
@@ -266,4 +267,60 @@ describe("Usage auto-refresh interval", () => {
       tauri.__TAURI_INTERNALS__ = previous;
     }
   });
+});
+
+describe("grouped settings navigation and row links (PRO-123)", () => {
+  it("shows all five navigation groups and keeps their section destinations", () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    const nav = within(screen.getByRole("navigation", { name: "Settings sections" }));
+    for (const group of ["Personal", "Agents & environment", "Repositories", "Admin", "More"]) expect(nav.getByRole("group", { name: group })).toBeTruthy();
+    expect(within(nav.getByRole("group", { name: "Personal" })).getByRole("button", { name: "Appearance" })).toBeTruthy();
+    expect(within(nav.getByRole("group", { name: "Admin" })).getByRole("button", { name: "Organizations" })).toBeTruthy();
+  });
+
+  it("opens and focuses a row, keeps manual navigation, and handles a repeated request", () => {
+    const view = render(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
+    const row = () => view.container.querySelector('[data-setting-id="appearance.textSize"]');
+    expect(document.activeElement).toBe(row());
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={2} onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+    expect(document.activeElement).toBe(row());
+  });
+
+  it("keeps row controls connected to the original preference keys", () => {
+    setPrefs({ fontScale: "md", transcriptLayout: "wide" });
+    render(<SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />);
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Text size" })).getByRole("radio", { name: "Large" }));
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).fontScale).toBe("lg");
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Transcript layout" })).getByRole("radio", { name: "Chat" }));
+    expect(getPrefs().transcriptLayout).toBe("chat");
+  });
+
+  it("clears an active search and focuses a repeated external row link", () => {
+    const view = render(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search settings" });
+    input.focus();
+    fireEvent.change(input, { target: { value: "hotkeys" } });
+    expect(screen.getByRole("option", { name: /Shortcuts/ })).toBeTruthy();
+
+    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={2} onBack={vi.fn()} />);
+
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(document.activeElement).toBe(view.container.querySelector('[data-setting-id="appearance.textSize"]'));
+  });
+});
+
+it("does not move focus out of an open dialog when a row link arrives", () => {
+  function WithDialog() {
+    return <>
+      <SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />
+      <Dialog open><DialogContent aria-describedby={undefined}><DialogTitle>Confirm sign in</DialogTitle><button>Continue</button></DialogContent></Dialog>
+    </>;
+  }
+  render(<WithDialog />);
+  expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true);
 });

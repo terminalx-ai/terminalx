@@ -1,3 +1,4 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -106,7 +107,7 @@ export function StorageTab() {
   }, [items]);
 
   return (
-    <div className="flex flex-col gap-4">
+    <RegisteredSetting setting="storage.leftovers"><div className="flex flex-col gap-4">
       <p className="text-xs leading-relaxed text-muted-foreground">
         Deleting a session or workspace can leave things behind: a workspace no session uses, an agent's conversations for a workspace that is gone, a
         branch with no workspace. They are listed here with what they take on disk. Only what is clean and merged into the default branch can be
@@ -269,6 +270,6 @@ export function StorageTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </div></RegisteredSetting>
   );
 }

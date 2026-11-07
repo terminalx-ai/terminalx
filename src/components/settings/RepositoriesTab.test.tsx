@@ -23,26 +23,20 @@ beforeEach(() => {
   mock.copy.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
-function openFiles() { fireEvent.click(screen.getByRole("button", { name: "Files to copy" })); }
 
 describe("Repository settings", () => {
-  it("lists Git repositories and offers root and workspace paths with Reveal and Copy", async () => {
-    render(<RepositoriesTab />);
-    expect(screen.queryByText("Folder")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /Example/ }));
+  it("offers root and workspace paths with Reveal and Copy for the selected repository", async () => {
+    render(<RepositoriesTab projectPath="/repo" />);
     await screen.findByText("/repo/.raccoon/worktrees");
     fireEvent.click(screen.getByRole("button", { name: "Copy root path" }));
     fireEvent.click(screen.getByRole("button", { name: "Reveal workspaces path" }));
     expect(mock.copy).toHaveBeenCalledWith("/repo");
     expect(mock.reveal).toHaveBeenCalledWith("/repo/.raccoon/worktrees");
     expect(screen.queryByRole("textbox")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Back to repositories" }));
-    expect(screen.getByRole("button", { name: /Example/ })).toBeTruthy();
   });
 
   it("previews edits without saving and saves only the chosen repository's patterns", async () => {
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
-    openFiles();
+    render(<RepositorySettingsPage project={project} page="files" />);
     await screen.findByText(".env.local");
     const snapshot = mock.preview.mock.calls[0][2];
     fireEvent.change(screen.getByRole("textbox"), { target: { value: ".env*\nconfig/local/**\n" } });
@@ -56,8 +50,7 @@ describe("Repository settings", () => {
 
   it("shows the repository include patterns read-only and keeps the saved list separate", async () => {
     mock.preview.mockResolvedValue(result(["config/local/**"], true));
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
-    openFiles();
+    render(<RepositorySettingsPage project={project} page="files" />);
     await screen.findByText("Patterns come from this repository's .worktreeinclude");
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
     expect(textarea.readOnly).toBe(true);
@@ -73,18 +66,17 @@ describe("Repository settings", () => {
 
   it("keeps paths visible and the list read-only when the repository file cannot be read", async () => {
     mock.preview.mockResolvedValue({ ...result([], true), error: "Could not read .worktreeinclude" });
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
+    const view = render(<RepositorySettingsPage project={project} page="general" />);
     await screen.findByText("/repo/.raccoon/worktrees");
     expect(screen.getByRole("alert").textContent).toBe("Could not read .worktreeinclude");
-    openFiles();
+    view.rerender(<RepositorySettingsPage project={project} page="files" />);
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).readOnly).toBe(true);
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   });
 
   it("ignores a stale preview and reports invalid patterns without allowing a save", async () => {
     let answer!: (value: RepositoryFilesPreview) => void;
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
-    openFiles();
+    render(<RepositorySettingsPage project={project} page="files" />);
     await screen.findByText(".env.local");
     mock.preview.mockImplementationOnce(() => new Promise<RepositoryFilesPreview>((resolve) => { answer = resolve; }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "slow" } });
@@ -99,8 +91,7 @@ describe("Repository settings", () => {
   });
 
   it("lets the reader correct a draft rejected by the preview service", async () => {
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
-    openFiles();
+    render(<RepositorySettingsPage project={project} page="files" />);
     await screen.findByText(".env.local");
     mock.preview.mockRejectedValueOnce(new Error("Use at most 128 patterns"));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: Array(129).fill(".env*").join("\n") } });
@@ -113,8 +104,7 @@ describe("Repository settings", () => {
 
   it("keeps the draft when saving fails and supports retry", async () => {
     mock.update.mockRejectedValueOnce(new Error("Cannot save"));
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
-    openFiles();
+    render(<RepositorySettingsPage project={project} page="files" />);
     await screen.findByText(".env.local");
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "config/local/**" } });
     await screen.findByText("config/local/app.json");
@@ -127,8 +117,7 @@ describe("Repository settings", () => {
 
   it("reports unreadable previews and can refresh after recovery", async () => {
     mock.preview.mockRejectedValueOnce(new Error("Cannot read .worktreeinclude"));
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
-    openFiles();
+    render(<RepositorySettingsPage project={project} page="files" />);
     expect((await screen.findByRole("alert")).textContent).toContain("Cannot read .worktreeinclude");
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
@@ -139,8 +128,7 @@ describe("Repository settings", () => {
 
   it("reports scan and preview limits without treating them as invalid patterns", async () => {
     mock.preview.mockResolvedValue({ ...result(), warning: "Ignored-file scan limit reached", patterns: [{ pattern: ".env*", matches: [".env"], omitted: 105, error: null }] });
-    render(<RepositorySettingsPage project={project} onBack={vi.fn()} />);
-    openFiles();
+    render(<RepositorySettingsPage project={project} page="files" />);
     await screen.findByText("105 more matches omitted from preview.");
     expect(screen.getByText("Ignored-file scan limit reached")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();

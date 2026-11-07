@@ -1,0 +1,111 @@
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Project } from "@/types/session";
+
+const mocks = vi.hoisted(() => ({
+  projects: [] as Project[],
+  listeners: new Map<string, (event: { payload: unknown }) => void>(),
+  preview: vi.fn(),
+}));
+vi.mock("@/lib/sessions", async (original) => {
+  const actual = await original<typeof import("@/lib/sessions")>();
+  return { ...actual, useSessionStore: () => ({ ...actual.useSessionStore(), projects: mocks.projects }) };
+});
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+    mocks.listeners.set(name, handler);
+    return () => { if (mocks.listeners.get(name) === handler) mocks.listeners.delete(name); };
+  }),
+}));
+vi.mock("@/lib/api", async (original) => {
+  const actual = await original<typeof import("@/lib/api")>();
+  return { ...actual, api: { ...actual.api, repositoryFilesPreview: mocks.preview }, experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) } };
+});
+const { SettingsPage } = await import("./SettingsPage");
+
+beforeEach(() => {
+  mocks.preview.mockReset().mockImplementation(async (path, patterns) => ({
+    rootPath: path, workspacesPath: `${path}/.raccoon/worktrees`, fromIncludeFile: false,
+    patterns: patterns.map((pattern: string) => ({ pattern, matches: [".env.local"], error: null })),
+  }));
+  mocks.projects = [
+    { path: "/repos/one", name: "One", kind: "git" },
+    { path: "/repos/two", name: "Two", kind: "git" },
+    { path: "/notes", name: "Notes", kind: "folder" },
+    { path: "/repos/old", name: "Archived", archived: true },
+  ];
+});
+afterEach(cleanup);
+
+describe("registry navigation", () => {
+  it("expands each repository independently and opens its existing cleanup controls", () => {
+    const view = render(<SettingsPage onBack={vi.fn()} />);
+    const group = within(screen.getByRole("group", { name: "Repositories" }));
+    expect(group.queryByRole("button", { name: "Archived" })).toBeNull();
+    expect(group.getByRole("button", { name: "Notes" })).toBeTruthy();
+    expect(group.queryByRole("button", { name: "Workspace cleanup" })).toBeNull();
+    fireEvent.click(group.getByRole("button", { name: "One" }));
+    expect(group.getByRole("button", { name: "One" }).getAttribute("aria-expanded")).toBe("true");
+    expect(group.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(group.getByRole("button", { name: "Workspace cleanup" }));
+    expect(screen.getByRole("heading", { name: "One" })).toBeTruthy();
+    expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/one");
+    expect(screen.getByRole("radiogroup", { name: "Delete merged workspaces of One" })).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "Delete merged workspaces of Two" })).toBeNull();
+    mocks.projects = mocks.projects.filter((project) => project.path !== "/repos/one");
+    view.rerender(<SettingsPage onBack={vi.fn()} />);
+    expect(screen.queryByRole("radiogroup", { name: "Delete merged workspaces of One" })).toBeNull();
+    expect(screen.getByText("Choose a repository to view its settings.")).toBeTruthy();
+  });
+
+  it("updates an open registry page when the paired phone changes an experimental setting", async () => {
+    const view = render(<SettingsPage initialTab="experimental.nativeCodex" onBack={vi.fn()} />);
+    const toggle = () => screen.getByRole("switch", { name: "Native Codex" });
+    await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+    act(() => mocks.listeners.get("experimental_settings_changed")!({ payload: { nativeCodex: true } }));
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    view.unmount();
+    await waitFor(() => expect(mocks.listeners.has("experimental_settings_changed")).toBe(false));
+  });
+});
+
+it("opens a repository row link on the named project and expands its navigation entry", () => {
+  const view = render(<SettingsPage initialTab="repositories.mergedCleanup" initialProjectPath="/repos/two" onBack={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("true");
+  expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/two");
+});
+
+it("lists folder projects and explains why Git cleanup does not apply to them", () => {
+  render(<SettingsPage initialTab="repositories.mergedCleanup" initialProjectPath="/notes" onBack={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "Notes" })).toBeTruthy();
+  expect(screen.getByText("Workspace cleanup is available for Git repositories. This project is a folder.")).toBeTruthy();
+  expect(screen.queryByRole("radiogroup", { name: "Delete merged workspaces of Notes" })).toBeNull();
+  const group = within(screen.getByRole("group", { name: "Repositories" }));
+  expect(group.queryByRole("button", { name: "Files to copy" })).toBeNull();
+  expect(group.queryByRole("button", { name: "General" })).toBeNull();
+});
+
+it("opens registered repository paths and files, retains drafts within a repository, and isolates them across repositories", async () => {
+  const view = render(<SettingsPage initialTab="repositories.workspacesPath" initialProjectPath="/repos/one" onBack={vi.fn()} />);
+  const group = within(screen.getByRole("group", { name: "Repositories" }));
+  const workspace = await screen.findByText("/repos/one/.raccoon/worktrees");
+  expect(document.activeElement).toBe(workspace.closest('[data-setting-id="repositories.workspacesPath"]'));
+  expect(group.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+  fireEvent.click(group.getByRole("button", { name: "Files to copy" }));
+  const textarea = screen.getByRole("textbox", { name: "Glob patterns (one per line)" });
+  fireEvent.change(textarea, { target: { value: ".env*" } });
+  await screen.findByText(".env.local");
+  expect(view.container.querySelector('[data-setting-id="repositories.filesToCopy"]')?.getAttribute("data-setting-instance")).toBe("/repos/one");
+  fireEvent.click(group.getByRole("button", { name: "General" }));
+  fireEvent.click(group.getByRole("button", { name: "Files to copy" }));
+  expect((screen.getByRole("textbox", { name: "Glob patterns (one per line)" }) as HTMLTextAreaElement).value).toBe(".env*");
+  view.rerender(<SettingsPage initialTab="repositories.filesToCopy" initialProjectPath="/repos/two" onBack={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("true");
+  const row = view.container.querySelector('[data-setting-id="repositories.filesToCopy"]');
+  expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
+  expect(document.activeElement).toBe(row);
+  expect((screen.getByRole("textbox", { name: "Glob patterns (one per line)" }) as HTMLTextAreaElement).value).toBe("");
+  expect(group.getAllByRole("button", { name: "Files to copy" }).map((button) => button.getAttribute("aria-current"))).toEqual([null, "page"]);
+});

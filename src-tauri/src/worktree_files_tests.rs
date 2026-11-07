@@ -215,6 +215,78 @@ fn different_base_ignore_rules_cannot_expose_secrets_in_create_or_checkout() {
 }
 
 #[test]
+fn copied_ignore_rules_cannot_make_a_secret_visible_to_git() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    write(repo.path(), ".gitignore", "secrets/\n");
+    git::run(repo.path(), &["commit", "-qam", "ignore source directory"]).unwrap();
+    git::run(repo.path(), &["checkout", "-qb", "destination-rules"]).unwrap();
+    write(repo.path(), ".gitignore", "secrets/*\n");
+    git::run(repo.path(), &["commit", "-qam", "ignore destination files"]).unwrap();
+    git::run(repo.path(), &["checkout", "-q", "main"]).unwrap();
+    write(repo.path(), "secrets/.env", "local secret");
+    write(repo.path(), "secrets/.gitignore", "!.env\n");
+    write(repo.path(), ".worktreeinclude", "secrets/**\n");
+    let created = git::create_worktree(repo.path(), "keep-ignore-rules", Some("destination-rules")).unwrap();
+    let checked_out = git::checkout_worktree(repo.path(), "keep-ignore-checkout", "destination-rules").unwrap();
+    for worktree in [created, checked_out] {
+        let destination = Path::new(&worktree.path);
+        let report = worktree.worktree_base.unwrap().file_copy.unwrap();
+        assert_eq!(report.copied_count, 1);
+        assert_eq!(report.skipped_count, 1);
+        assert_eq!(report.skipped[0].path, "secrets/.gitignore");
+        assert!(report.skipped[0].reason.contains("ignore rules"));
+        assert_eq!(fs::read_to_string(destination.join("secrets/.env")).unwrap(), "local secret");
+        assert!(!destination.join("secrets/.gitignore").exists());
+        git::run(destination, &["check-ignore", "secrets/.env"]).unwrap();
+        git::run(destination, &["add", "-A"]).unwrap();
+        assert!(git::run(destination, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+        // Case-insensitive filesystems must not accept an alternate spelling.
+        assert!(copy_one(repo.path(), destination, Path::new("secrets/.GITIGNORE"), MAX_COPY_BYTES)
+            .unwrap_err().to_string().contains("ignore rules"));
+    }
+}
+
+#[test]
+fn staging_cannot_expose_copies_in_the_surrounding_repository() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    // A higher-priority repository rule can override info/exclude's managed
+    // workspace rule. Refuse to leave temporary secrets visible in that parent.
+    write(repo.path(), ".gitignore", ".env*\n!/.raccoon/\n");
+    git::run(repo.path(), &["commit", "-qam", "make managed parent visible"]).unwrap();
+    write(repo.path(), ".env", "local secret");
+    write(repo.path(), ".worktreeinclude", ".env\n");
+    let created = git::create_worktree(repo.path(), "unsafe-staging", Some("main")).unwrap();
+    let report = created.worktree_base.unwrap().file_copy.unwrap();
+    assert!(report.error.unwrap().contains("Workspace parent must be ignored"));
+    assert!(!Path::new(&created.path).join(".env").exists());
+    assert!(!fs::read_dir(git::worktree_root(repo.path())).unwrap()
+        .any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".terminalx-copy-")));
+    let broken = tempfile::tempdir().unwrap();
+    let destination = broken.path().join("workspace");
+    fs::create_dir(&destination).unwrap();
+    write(broken.path(), ".git", "gitdir: missing\n");
+    assert!(validate_staging_directory(&destination).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_workspace_parent_aliases_still_copy_files() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    let workspaces = tempfile::tempdir().unwrap();
+    let root = git::worktree_root(repo.path());
+    fs::create_dir_all(root.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(workspaces.path(), &root).unwrap();
+    write(repo.path(), ".env", "local secret");
+    write(repo.path(), ".worktreeinclude", ".env\n");
+    let created = git::create_worktree(repo.path(), "aliased-parent", Some("main")).unwrap();
+    assert_eq!(created.worktree_base.unwrap().file_copy.unwrap().copied_count, 1);
+    assert_eq!(fs::read_to_string(Path::new(&created.path).join(".env")).unwrap(), "local secret");
+}
+
+#[test]
 fn scan_limits_discard_partial_names_without_corrupting_utf8() {
     let repo = repo();
     write(repo.path(), ".env.a", "a");
@@ -314,16 +386,23 @@ fn growing_source_cannot_publish_a_file_beyond_the_byte_budget() {
 fn failed_writes_leave_no_partial_file_and_successful_copies_preserve_owner_execute() {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let error = safe_open::write_atomic(root.path(), Path::new(".env"), |file| {
+    let staging = tempfile::tempdir().unwrap();
+    let root = staging.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    let error = safe_open::write_atomic(&root, Path::new(".env"), |file| {
+        // Even while writing, no unignored temporary secret exists in the checkout.
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 2);
         file.write_all(b"PARTIAL=")?;
         anyhow::bail!("injected copy failure");
     }).unwrap_err();
     assert!(error.to_string().contains("injected copy failure"));
-    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 1);
     let source = tempfile::tempdir().unwrap();
     write(source.path(), "setup", "#!/bin/sh\n");
     fs::set_permissions(source.path().join("setup"), fs::Permissions::from_mode(0o755)).unwrap();
-    copy_one(source.path(), root.path(), Path::new("setup"), MAX_COPY_BYTES).unwrap();
-    assert_eq!(fs::metadata(root.path().join("setup")).unwrap().permissions().mode() & 0o777, 0o700);
+    copy_one(source.path(), &root, Path::new("setup"), MAX_COPY_BYTES).unwrap();
+    assert_eq!(fs::metadata(root.join("setup")).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 1);
 }
