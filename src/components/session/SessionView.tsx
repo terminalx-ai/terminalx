@@ -704,7 +704,8 @@ export function SessionView({
           )}
 
           {/* At the right edge whatever the width. */}
-          <div className={cn("ml-auto flex shrink-0 items-center gap-0.5", !compact && "max-w-[70%]")}>
+          {/* The header's actions draw their icons a size up from the buttons' 14px, at 16px. */}
+          <div className={cn("ml-auto flex shrink-0 items-center gap-0.5 [&_button>svg]:size-4", !compact && "max-w-[70%]")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
