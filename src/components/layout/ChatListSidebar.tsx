@@ -1,3 +1,4 @@
+import { ArchiveRowButton, DraftPreview, SessionRowExtras, sidebarConversationTitle, useSessionDraft } from "./SessionRowExtras";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
@@ -26,7 +27,7 @@ import { sessionStatus, type SessionEntry } from "@/types/session";
 import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { PROJECT_COLORS, colorCss } from "./PixelMascot";
 import { BotFace } from "./BotFace";
-import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuItems, RowContextMenu, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuItems, RowContextMenu, rowMenuKeys, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, mixesAgents, orderConversations } from "./SessionSidebar";
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, usePickedSessions } from "@/lib/rowSelection";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
@@ -189,7 +190,9 @@ function ChatRow({
   /** Drawn under the Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
-  const title = conversationTitle(session);
+  const { sessions } = useSessionStore();
+  const title = sidebarConversationTitle(session, link?.branch, sessions);
+  const draft = useSessionDraft([session]);
   const ids = [session.id];
   const pickedNow = usePickedSessions();
   const picking = pickedNow.length > 0;
@@ -233,19 +236,23 @@ function ChatRow({
                 <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{title}</span>
                 {session.worktreeRemoved && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
+                <SessionRowExtras sessions={[session]} selected={selected} />
                 <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>{relativeTime(conversationTime(session))}</span>
               </span>
-              <span className="flex items-center gap-2">
-                <span className={cn("flex min-w-0 flex-1 items-center gap-1 truncate text-[12px]", preview.tone === "waiting" ? "text-warning" : "text-faint")} data-testid="chat-preview">
-                  {preview.tone === "place" && link?.branch && <GitBranch className="size-3 shrink-0" />}
-                  <span className="truncate">{preview.text}</span>
-                </span>
+              <span className="flex min-w-0 items-center gap-2">
+                {draft ? <DraftPreview text={draft} /> : (
+                  <span className={cn("flex min-w-0 flex-1 items-center gap-1 truncate text-[12px]", preview.tone === "waiting" ? "text-warning" : "text-faint")} data-testid="chat-preview">
+                    {preview.tone === "place" && link?.branch && <GitBranch className="size-3 shrink-0" />}
+                    <span className="truncate">{preview.text}</span>
+                  </span>
+                )}
                 {/* One sign: waiting on you first, then still working, then an answer nobody has read. */}
                 <StatusMark status={status} unread={isUnread(session)} className={yieldsToRowActions} />
               </span>
             </span>
           </button>
           <RowActions>
+            <ArchiveRowButton session={session} title={title} />
             {session.archived && <UnarchiveButton session={session} title={title} />}
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${title}`}>
@@ -257,7 +264,7 @@ function ChatRow({
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </ContextMenu>
-        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
+        <DropdownMenuContent align="end" className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </DropdownMenuContent>
       </DropdownMenu>

@@ -125,6 +125,7 @@ mod chat_windows;
 mod relay_e2ee;
 pub mod remote;
 mod session;
+mod sidebar_activity;
 mod session_archive;
 mod session_ops;
 mod stray_processes;
@@ -650,6 +651,7 @@ pub fn run() {
             commands::set_tab_permission_mode,
             commands::set_tab_effort,
             commands::mark_tab_read,
+            commands::set_tab_unread,
             commands::tab_status,
             commands::list_models,
             commands::frontend_log,
@@ -701,6 +703,7 @@ pub fn run() {
             commands::pty_shells,
             commands::pty_rename,
             commands::pty_busy,
+            commands::listening_sessions,
             commands::pty_write,
             commands::pty_attach,
             commands::pty_attach_sized,

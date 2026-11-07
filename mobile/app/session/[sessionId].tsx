@@ -108,6 +108,9 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
   const [permissionErrors, setPermissionErrors] = useConversationState<Record<string, string>>(`${stateKey}:permissionErrors`, {});
   const draftEdited = useRef(false);
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
+  useEffect(() => {
+    if (connected) void app.api.markRead(sessionId, tabId).catch(() => {});
+  }, [app.api, connected, sessionId, tabId]);
   const draftIdKey = `terminalx:draft-id:${hostId}:${sessionId}:${tabId}`;
   // Whether this connection's watcher read the Mac's history to its end: only then is a compaction shown as running (#644).
   const [caughtUp, setCaughtUp] = useState(false);

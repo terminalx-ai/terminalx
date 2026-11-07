@@ -3,6 +3,7 @@ export type DashboardTabStatus = "idle" | "in_progress" | "completed" | "waiting
 export interface DashboardTab {
   harness: string;
   status: DashboardTabStatus;
+  markedUnread?: boolean;
   lastMessageAt?: string | null;
   hasMessages?: boolean;
 }
@@ -68,7 +69,7 @@ export function sessionColumn(session: DashboardSession): ColumnId {
 }
 
 export function isUnread(session: DashboardSession): boolean {
-  return sessionColumn(session) === "done" && session.tabs.some((tab) => tab.status === "completed");
+  return session.tabs.some((tab) => tab.markedUnread) || (sessionColumn(session) === "done" && session.tabs.some((tab) => tab.status === "completed"));
 }
 
 export function workspaceName(session: DashboardSession): string {

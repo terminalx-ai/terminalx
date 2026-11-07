@@ -3,7 +3,7 @@ import { keepMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { api, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
+import { api, agent, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
@@ -698,6 +698,18 @@ export async function renameSession(id: string, title: string) {
   patchSession(id, { title });
 }
 
+/** Mark every tab represented by a row read, or leave a reminder on its active tab. */
+export async function setSessionUnread(ids: string[], unread: boolean) {
+  for (const id of ids) {
+    const session = state.sessions.find((entry) => entry.id === id);
+    if (!session) continue;
+    const tabs = unread ? [session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0]].filter((tab): tab is TabEntry => !!tab) : session.tabs;
+    for (const tab of tabs) await agent.setUnread(id, tab.id, unread);
+  }
+  // The runtime also broadcasts to every window; reread for callers without a live subscription.
+  await refreshSessions();
+}
+
 /** A conversation's name: its agent's title for it once there is one. */
 export function conversationTitle(session: SessionEntry): string {
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
@@ -708,7 +720,7 @@ export function conversationTitle(session: SessionEntry): string {
 export async function renameConversation(session: SessionEntry, title: string) {
   await renameSession(session.id, title);
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
-  if (tab?.title?.trim()) await api.renameTab(session.id, tab.id, title);
+  if (tab) await api.renameTab(session.id, tab.id, title);
 }
 
 /** Rename a branch in git where it is checked out; its sessions and its label go with it. */

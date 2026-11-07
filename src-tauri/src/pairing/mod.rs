@@ -1833,6 +1833,7 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "terminal.unsubscribe",
         // What a tab runs, the models to pick from, and the context a
         // continuation would carry: reads, as the transcript is.
+        "session.markRead",
         "session.tab",
         "models.list",
         "session.prepareContinuation",

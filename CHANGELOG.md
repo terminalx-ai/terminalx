@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Sidebar rows show change counts, command/server activity and the current
+  window's unsent prompt previews. Mark rows read or unread from their menu
+  (R), archive on hover, and cycle waiting sessions with ⌘⌥L. Unread reminders
+  persist per tab and clear when opened on desktop or phone. Renaming a
+  conversation also pins its active tab's title, including a previously
+  untitled tab, so automatic branch/title changes keep the explicit name.
+  (PRO-179, #851)
+
 - Native Codex no longer asks for attention while it is working. A turn
   that ran longer than five minutes was called stalled at every look of the
   watcher, because Codex's own progress did not count as activity, and a

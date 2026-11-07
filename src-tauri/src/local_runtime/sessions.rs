@@ -255,6 +255,10 @@ impl Sessions {
         self.tab("effort", session, tab, json!({"effort":effort}))
     }
 
+    pub fn set_tab_unread(&self, session: &str, tab: &str, unread: bool) -> Result<()> {
+        self.quick_tab("setUnread", session, tab, json!({"unread": unread}))
+    }
+
     pub fn mark_read(&self, session: &str, tab: &str) -> Result<()> {
         self.quick_tab("markRead", session, tab, json!({}))
     }

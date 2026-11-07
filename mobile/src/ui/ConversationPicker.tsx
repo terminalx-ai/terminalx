@@ -25,7 +25,7 @@ export function ConversationPicker({ session, selectedTabId, onSelect, horizonta
     const color = conversation.status === "waiting" ? palette.warning
       : conversation.status === "in_progress" ? palette.accent
       : conversation.status === "completed" ? palette.success : palette.faint;
-    const status = statusLabel(conversation.status);
+    const status = `${statusLabel(conversation.status)}${conversation.unread ? " · Unread" : ""}`;
     return <Pressable
       key={conversation.id}
       accessibilityRole="button"

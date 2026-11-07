@@ -212,6 +212,7 @@ pub fn kept(session: &SessionEntry, sweep: &Sweep) -> Option<Kept> {
     }
     // As the index last had it: a runtime that has not looked at the tab since still says so.
     for tab in &session.tabs {
+        if tab.marked_unread { return Some(Kept::Unread); }
         match tab.status {
             TabStatus::InProgress => return Some(Kept::Working),
             TabStatus::Waiting => return Some(Kept::WaitingForYou),
@@ -326,7 +327,7 @@ pub fn taken_up(manager: &crate::session::SessionManager, session: &SessionEntry
         if view.status == TabStatus::InProgress || !manager.pipeline_idle(&session.id, &tab.id) {
             return Some(Kept::Working);
         }
-        if view.status == TabStatus::Completed {
+        if tab.marked_unread || view.status == TabStatus::Completed {
             return Some(Kept::Unread);
         }
     }

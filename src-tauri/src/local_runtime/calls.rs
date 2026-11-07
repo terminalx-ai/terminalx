@@ -176,6 +176,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "model" => { manager.set_model(session, tab, string(&params, "model")?)?; Value::Null }
         "mode" => { manager.set_permission_mode(session, tab, string(&params, "mode")?)?; Value::Null }
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
+        "setUnread" => { manager.set_tab_unread(session, tab, params["unread"].as_bool().context("unread must be a boolean")?)?; Value::Null }
         "markRead" => { manager.mark_read(session, tab)?; Value::Null }
         "handoff" => serde_json::to_value(manager.handoff(session, tab)?)?,
         "toTerminal" => { manager.codex_stdio_to_terminal(session, tab)?; Value::Null }
