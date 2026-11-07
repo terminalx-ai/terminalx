@@ -3,45 +3,47 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { PrAssociation } from "@/lib/api";
 import { useDashboardPrs } from "./dashboardPrs";
 import type { DashboardSession } from "./dashboard";
-const associations = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/api", () => ({ gh: { associations } }));
-afterEach(() => { cleanup(); associations.mockReset(); });
+const associationsBatch = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/api", () => ({ gh: { associationsBatch } }));
+afterEach(() => { cleanup(); associationsBatch.mockReset(); vi.useRealTimers(); });
 const session = (id: string): DashboardSession => ({ id, title: id, projectPath: "/repo", cwd: "/repo", modified: "2026-11-01", archived: false, tabs: [] });
 const pr: PrAssociation = { number: 2, url: "https://github.com/acme/api/pull/2", head: "feature", scope: { kind: "local", cwd: "/repo" } };
 
-it("only reads in Table, preserves recorded session ownership and tolerates an unavailable record", async () => {
-  associations.mockImplementation(async (id: string) => { if (id === "b") throw new Error("unavailable"); return [pr]; });
-  const sessions = [session("a"), session("b")];
+it("reads one indexed batch only in Table, including on refresh", async () => {
+  vi.useFakeTimers();
+  const sessions = Array.from({ length: 118 }, (_, i) => session(String(i)));
+  associationsBatch.mockResolvedValue({ "0": [pr], "1": [] });
   const hook = renderHook(({ enabled }) => useDashboardPrs(sessions, enabled), { initialProps: { enabled: false } });
-  expect(associations).not.toHaveBeenCalled();
-  hook.rerender({ enabled: true });
-  await waitFor(() => expect(hook.result.current.get("a")).toEqual([pr]));
-  expect(hook.result.current.has("b")).toBe(false);
-  expect(associations.mock.calls).toEqual([["a"], ["b"]]);
+  expect(associationsBatch).not.toHaveBeenCalled();
+  await act(async () => { hook.rerender({ enabled: true }); });
+  expect(hook.result.current.get("0")).toEqual([pr]);
+  expect(associationsBatch.mock.calls).toEqual([[sessions.map(({ id }) => id)]]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(associationsBatch).toHaveBeenCalledTimes(2);
+  associationsBatch.mockRejectedValueOnce(Error("unavailable"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(hook.result.current.get("0")).toEqual([pr]);
 });
 
-it("bounds concurrent reads and discards responses from an old list", async () => {
-  const finish = new Map<string, (rows: PrAssociation[]) => void>();
-  associations.mockImplementation((id: string) => new Promise<PrAssociation[]>((resolve) => finish.set(id, resolve)));
-  const hook = renderHook(({ sessions }) => useDashboardPrs(sessions, true), { initialProps: { sessions: Array.from({ length: 8 }, (_, i) => session(String(i))) } });
-  expect(associations).toHaveBeenCalledTimes(4);
+it("discards responses from an old list", async () => {
+  let finish!: (rows: Record<string, PrAssociation[]>) => void;
+  associationsBatch.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue({ new: [pr] });
+  const hook = renderHook(({ sessions }) => useDashboardPrs(sessions, true), { initialProps: { sessions: [session("old")] } });
   hook.rerender({ sessions: [session("new")] });
-  await act(async () => { finish.get("new")!([pr]); });
   await waitFor(() => expect(hook.result.current.get("new")).toEqual([pr]));
-  await act(async () => { for (const [id, resolve] of finish) if (id !== "new") resolve([]); });
+  await act(async () => { finish({ old: [] }); });
   expect([...hook.result.current.keys()]).toEqual(["new"]);
-  expect(associations).toHaveBeenCalledTimes(5);
 });
 
-it("finishes later rows while existing sessions receive streaming updates", async () => {
-  const finish = new Map<string, (rows: PrAssociation[]) => void>();
-  associations.mockImplementation((id: string) => new Promise<PrAssociation[]>((resolve) => finish.set(id, resolve)));
-  const sessions = Array.from({ length: 5 }, (_, i) => session(String(i)));
+it("does not restart or overlap a batch on streaming updates, reordering or a slow refresh", async () => {
+  vi.useFakeTimers();
+  let finish!: (rows: Record<string, PrAssociation[]>) => void;
+  associationsBatch.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const sessions = [session("a"), session("b")];
   const hook = renderHook(({ rows }) => useDashboardPrs(rows, true), { initialProps: { rows: sessions } });
   hook.rerender({ rows: sessions.map((row) => ({ ...row, modified: "2026-11-02" })).reverse() });
-  expect(associations).toHaveBeenCalledTimes(4);
-  await act(async () => { for (const id of ["0", "1", "2", "3"]) finish.get(id)!([]); });
-  expect(associations).toHaveBeenCalledTimes(5);
-  await act(async () => { finish.get("4")!([pr]); });
-  expect(hook.result.current.get("4")).toEqual([pr]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(associationsBatch).toHaveBeenCalledTimes(1);
+  await act(async () => { finish({ a: [pr], b: [] }); });
+  expect(hook.result.current.get("a")).toEqual([pr]);
 });

@@ -1,5 +1,5 @@
 import { createRef } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { SessionTable, type SessionTableRow } from "./SessionTable";
 const openUrl = vi.hoisted(() => vi.fn());
@@ -22,6 +22,46 @@ it("renders change counts, dates and missing values, and opens PR links without 
   expect(onOpen).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Open PR #10" }));
   expect(openUrl).toHaveBeenCalledTimes(1);
-  fireEvent.click(screen.getByRole("row", { name: "Feature" }));
+  fireEvent.click(screen.getByRole("row", { name: /Feature/ }));
   expect(onOpen).toHaveBeenCalledWith("one");
+});
+
+it("windows large tables and moves keyboard focus across window edges with one active row", () => {
+  const rows: SessionTableRow[] = Array.from({ length: 1000 }, (_, index) => ({
+    id: String(index), name: `Task ${index}`, status: "Working", project: "API", branch: "feature", agent: "Codex", owner: "Amy",
+    changes: null, additions: null, deletions: null, pr: null, prs: [], updated: null, created: null,
+  }));
+  const containerRef = createRef<HTMLDivElement>();
+  const navigationRef = createRef<import("./SessionTable").SessionTableHandle>();
+  const onOpen = vi.fn();
+  const props = { containerRef, navigationRef, rows, hiddenColumns: [], sort: { column: "name" as const, direction: "asc" as const }, onSort: vi.fn(), onFocus: vi.fn(), onOpen, loading: false };
+  const view = render(<SessionTable {...props} selectedId={null} />);
+  const rendered = () => containerRef.current!.querySelectorAll("tr[data-session]");
+  const tabbable = () => containerRef.current!.querySelectorAll('tr[data-session][tabindex="0"]');
+  expect(rendered().length).toBeLessThan(40);
+  expect(tabbable()).toHaveLength(1);
+  expect(screen.getByRole("table").getAttribute("aria-rowcount")).toBe("1001");
+  expect(screen.getByRole("row", { name: /Task 0 / }).hasAttribute("aria-label")).toBe(false);
+  act(() => {
+    navigationRef.current!.focusRow("300");
+    view.rerender(<SessionTable {...props} selectedId="300" />);
+  });
+  const selected = screen.getByRole("row", { name: /Task 300 / });
+  expect(selected.getAttribute("aria-rowindex")).toBe("302");
+  expect(document.activeElement).toBe(selected);
+  expect(tabbable()).toHaveLength(1);
+  expect(tabbable()[0]).toBe(selected);
+  expect(rendered().length).toBeLessThan(40);
+  fireEvent.keyDown(selected, { key: "Enter" });
+  expect(onOpen).toHaveBeenCalledWith("300");
+  // A pointer scroll away from selection still leaves one reachable row.
+  containerRef.current!.scrollTop = 30_000;
+  fireEvent.scroll(containerRef.current!);
+  expect(tabbable()).toHaveLength(1);
+  expect(rendered().length).toBeLessThan(40);
+  act(() => {
+    navigationRef.current!.focusRow("299");
+    view.rerender(<SessionTable {...props} selectedId="299" />);
+  });
+  expect(document.activeElement).toBe(screen.getByRole("row", { name: /Task 299 / }));
 });

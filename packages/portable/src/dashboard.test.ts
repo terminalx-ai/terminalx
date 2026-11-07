@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import { dashboardPreferences, DEFAULT_DASHBOARD_PREFERENCES, filterSessions, nextDashboardSort, NO_FILTERS, sortDashboardRows, TABLE_COLUMNS, toggleTableColumn, type DashboardSession, type DashboardTableRow } from "./dashboard";
 
 const row = (id: string, patch: Partial<DashboardTableRow> = {}): DashboardTableRow => ({
-  id, status: "Done", name: "Task 2", project: "Api", branch: "feature/2", agent: "Claude", pr: 2, changes: 9, owner: "Amy",
+  id, status: "Needs you", name: "Task 2", project: "Api", branch: "feature/2", agent: "Claude", pr: 2, changes: 9, owner: "Amy",
   updated: "2026-11-01T12:00:00Z", created: "2026-10-01T12:00:00Z", ...patch,
 });
 
 describe("table sorting", () => {
+  it("sorts statuses in board order", () => {
+    const labels = ["Archived", "Done", "Not started", "Working", "Needs you"];
+    expect(sortDashboardRows(labels.map((status) => row(status, { status })), { column: "status", direction: "asc" }).map((row) => row.status)).toEqual(["Needs you", "Working", "Done", "Not started", "Archived"]);
+  });
   it.each(TABLE_COLUMNS)("sorts $id in both directions without changing the input", ({ id }) => {
     const larger = row("b", { status: "Working", name: "Task 10", project: "Site", branch: "feature/10", agent: "Codex", pr: 10, changes: 100, owner: "Zoe", updated: "2026-11-02T12:00:00Z", created: "2026-10-02T12:00:00Z" });
     const input = [larger, row("a")];

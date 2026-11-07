@@ -190,6 +190,10 @@ export function sortDashboardRows<T extends DashboardTableRow>(rows: readonly T[
       const date = Date.parse(String(raw));
       return Number.isFinite(date) ? date : null;
     }
+    if (sort.column === "status") {
+      const rank = DASHBOARD_STATES.findIndex((state) => state.label === raw);
+      return rank < 0 ? null : rank;
+    }
     return raw;
   };
   return [...rows].sort((left, right) => {

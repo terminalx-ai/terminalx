@@ -54,7 +54,7 @@ function session(id: string, patch: Partial<SessionEntry> = {}): SessionEntry {
   return { id, title: id, projectPath: "/api", cwd: "/api", worktreeRemoved: false, created: at, modified: at, archived: false, pinned: false,
     tabs: [{ id: `${id}-tab`, harness: "codex", status: "in_progress", created: at, modified: at, model: "", permissionMode: "auto" }], ...patch };
 }
-const rowNames = () => within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("row").slice(1).map((r) => r.getAttribute("aria-label"));
+const rowNames = () => within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("row").slice(1).map((r) => r.querySelectorAll("td")[1]?.textContent);
 const openMenu = (name: string) => fireEvent.pointerDown(screen.getByRole("button", { name }), { button: 0, ctrlKey: false, pointerType: "mouse" });
 const closeMenu = () => fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
 
@@ -119,14 +119,14 @@ it("moves and opens in sorted order, preserves selection after sorting, and leav
   render(<AgentDashboard />);
   fireEvent.click(screen.getByRole("button", { name: "Table" }));
   fireEvent.keyDown(window, { key: "ArrowDown" });
-  expect(screen.getByRole("row", { name: "Alpha" }).getAttribute("data-focused")).toBe("true");
-  expect(document.activeElement).toBe(screen.getByRole("row", { name: "Alpha" }));
+  expect(screen.getByRole("row", { name: /Alpha/ }).getAttribute("data-focused")).toBe("true");
+  expect(document.activeElement).toBe(screen.getByRole("row", { name: /Alpha/ }));
   fireEvent.keyDown(window, { key: "ArrowDown" });
   fireEvent.keyDown(window, { key: "Enter" });
   expect(state.select).toHaveBeenLastCalledWith("Beta");
   fireEvent.click(screen.getByRole("button", { name: "Name" }));
   fireEvent.click(screen.getByRole("button", { name: "Name" }));
-  expect(screen.getByRole("row", { name: "Beta" }).getAttribute("data-focused")).toBe("true");
+  expect(screen.getByRole("row", { name: /Beta/ }).getAttribute("data-focused")).toBe("true");
   fireEvent.keyDown(window, { key: "ArrowDown" });
   fireEvent.keyDown(window, { key: "Enter" });
   expect(state.select).toHaveBeenLastCalledWith("Alpha");

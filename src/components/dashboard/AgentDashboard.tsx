@@ -27,7 +27,7 @@ import {
 import { usePref } from "@/lib/prefs";
 import { loadRosterIn, usePeople } from "@/lib/cloudPeople";
 import { useDashboardPrs } from "@/lib/dashboardPrs";
-import { SessionTable, type SessionTableRow } from "./SessionTable";
+import { SessionTable, type SessionTableRow, type SessionTableHandle } from "./SessionTable";
 import { cn } from "@/lib/cn";
 import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { SessionEntry } from "@/types/session";
@@ -63,6 +63,7 @@ export function AgentDashboard() {
   const [filters, setFilters] = useState<DashboardFilters>(NO_FILTERS);
   const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
   const tableRef = useRef<HTMLDivElement>(null);
+  const tableNavigation = useRef<SessionTableHandle>(null);
   const [cursor, setCursor] = useState<string | null>(null);
   const [preferences, setPreferences] = usePref("dashboard");
   const personName = usePeople(false);
@@ -105,8 +106,10 @@ export function AgentDashboard() {
   }), [filtered]);
   const boardColumns = filters.columns.includes("archived") ? DASHBOARD_STATES.filter((state) => filters.columns.includes(state.id)) : COLUMNS;
   const shown = useMemo(() => ({ ...buckets, done: buckets.done.slice(0, doneLimit) }), [buckets, doneLimit]);
-  const owners = new Map<string, string>();
-  for (const session of sessions) if (session.ownerId) owners.set(session.ownerId, session.ownerId === "local" ? "This Mac" : personName(session.ownerId));
+  const ownerIds = useMemo(() => [...new Set(sessions.flatMap((session) => session.ownerId ? [session.ownerId] : []))], [sessions]);
+  // usePeople notifies on roster changes while keeping its resolver identity.
+  const ownerNames = JSON.stringify(ownerIds.map((id) => [id, id === "local" ? "This Mac" : personName(id)]));
+  const owners = useMemo(() => new Map<string, string>(JSON.parse(ownerNames)), [ownerNames]);
   const orgs = JSON.stringify([...new Set(visibleCloud.map((session) => session.orgId))].sort());
   useEffect(() => {
     for (const orgId of JSON.parse(orgs) as string[]) void loadRosterIn(orgId).catch(() => undefined);
@@ -128,9 +131,11 @@ export function AgentDashboard() {
     [store.harnesses],
   );
 
-  const tableRows: SessionTableRow[] = sortDashboardRows(filtered.map((session) => {
+  const workspaceByPath = useMemo(() => new Map(Object.values(store.workspaces ?? {}).flat().map((workspace) => [workspace.path, workspace])), [store.workspaces]);
+  const harnessNames = useMemo(() => new Map(store.harnesses.map((harness) => [harness.id, harness.name])), [store.harnesses]);
+  const tableRows = useMemo<SessionTableRow[]>(() => preferences.view === "table" ? sortDashboardRows(filtered.map((session) => {
     const local = !isCloudDashboardSession(session);
-    const workspace = local && !session.worktreeRemoved ? store.workspaces?.[session.projectPath]?.find((w) => w.path === session.cwd) : undefined;
+    const workspace = local && !session.worktreeRemoved ? workspaceByPath.get(session.cwd) : undefined;
     const recorded = [...(prs.get(session.id) ?? [])].sort((a, b) => a.number - b.number || a.url.localeCompare(b.url));
     const additions = workspace ? workspace.branchAdditions ?? workspace.additions : null;
     const deletions = workspace ? workspace.branchDeletions ?? workspace.deletions : null;
@@ -140,7 +145,7 @@ export function AgentDashboard() {
       name: session.title,
       project: projectName(session.projectPath),
       branch: session.worktreeRemoved ? session.removedWorkspace?.branch ?? null : session.branch ?? null,
-      agent: [...new Set(session.tabs.map((tab) => store.harnesses.find((h) => h.id === tab.harness)?.name ?? tab.harness))].join(", "),
+      agent: [...new Set(session.tabs.map((tab) => harnessNames.get(tab.harness) ?? tab.harness))].join(", "),
       pr: recorded[0]?.number ?? null,
       prs: recorded,
       additions, deletions,
@@ -149,7 +154,7 @@ export function AgentDashboard() {
       updated: session.modified,
       created: session.created ?? null,
     };
-  }), preferences.sort);
+  }), preferences.sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, preferences.sort, preferences.view]);
 
   // Keep selection by identity when rows reorder, filters change, or the view switches.
   const move = (dColumn: number, dRow: number) => {
@@ -160,8 +165,7 @@ export function AgentDashboard() {
       const next = index < 0 ? 0 : Math.max(0, Math.min(tableRows.length - 1, index + dRow));
       const id = tableRows[next]?.id ?? null;
       setCursor(id);
-      const row = [...(tableRef.current?.querySelectorAll<HTMLTableRowElement>("tbody tr[data-session]") ?? [])].find((row) => row.dataset.session === id);
-      row?.focus({ preventScroll: true });
+      if (id) tableNavigation.current?.focusRow(id);
       return true;
     }
     const currentColumn = boardColumns.find(({ id }) => shown[id].some((s) => s.id === cursor))?.id;
@@ -343,7 +347,7 @@ export function AgentDashboard() {
       </header>
 
       {preferences.view === "table" ? (
-        <SessionTable containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={preferences.sort}
+        <SessionTable navigationRef={tableNavigation} containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={preferences.sort}
           onSort={(column) => setPreferences({ ...preferences, sort: nextDashboardSort(preferences.sort, column) })}
           selectedId={cursor} onFocus={setCursor}
           onOpen={(id) => {

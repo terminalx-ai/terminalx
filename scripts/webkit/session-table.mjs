@@ -10,8 +10,15 @@ const browser = await launch();
 try {
   for (const width of [1360, 800]) {
     const page = await browser.newPage({ viewport: { width, height: 650 }, colorScheme: "dark" });
-    await page.addInitScript(`window.__PW_FIXTURE__ = { cloud: true, localProjects: 2, dashboardCount: 20 };\n${stub}`);
-    await page.goto(server.url);
+    page.setDefaultTimeout(60_000);
+    await page.addInitScript(`window.__PW_FIXTURE__ = { cloud: true, localProjects: 2, dashboardCount: 120 };\n${stub}
+      // Keep 120 matching rows plus a few distractors for the shared-search check.
+      // This exercises table windowing without mounting 960 board cards first.
+      const answers = window.__PW_STUB__.answers;
+      answers.list_sessions = answers.list_sessions.filter((session) => session.id.startsWith("Local-working-") || Number(session.id.split("-").at(-1)) < 2);
+      for (const entry of Object.values(answers.cloud_catalog_load.orgs["org-a"].sessions)) entry.sessions = entry.sessions.slice(0, 2);
+    `);
+    await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 120_000 });
     await page.getByRole("button", { name: /^Dashboard/ }).click();
     await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
     const search = page.getByRole("textbox", { name: "Search sessions" });
@@ -19,20 +26,23 @@ try {
     await page.getByRole("button", { name: "Table", exact: true }).click();
     const table = page.getByRole("table", { name: "Sessions", exact: true });
     const rows = table.locator("tbody tr[data-session]");
-    assert.equal(await rows.count(), 20, "table keeps the board's search");
+    assert.equal(await table.getAttribute("aria-rowcount"), "121", "table keeps the board's search");
+    assert.ok(await rows.count() < 40, "large lists render only a window of rows");
     assert.equal(await search.inputValue(), "Local working");
     await table.getByRole("button", { name: "Name", exact: true }).click();
-    assert.equal(await rows.first().getAttribute("aria-label"), "Local working session 01");
+    assert.equal(await rows.first().locator("td").nth(1).textContent(), "Local working session 01");
     await table.getByRole("button", { name: "Name", exact: true }).click();
-    assert.equal(await rows.first().getAttribute("aria-label"), "Local working session 20");
+    assert.equal(await rows.first().locator("td").nth(1).textContent(), "Local working session 120");
     await rows.first().focus();
     await page.keyboard.press("ArrowDown");
     assert.equal(await rows.nth(1).getAttribute("data-focused"), "true");
     assert.ok(await rows.nth(1).evaluate((row) => row === document.activeElement));
-    for (let i = 0; i < 18; i++) await page.keyboard.press("ArrowDown");
+    for (let i = 0; i < 118; i++) await page.keyboard.press("ArrowDown");
+    assert.equal(await rows.last().getAttribute("aria-rowindex"), "121");
+    assert.equal(await table.locator('tr[data-session][tabindex="0"]').count(), 1);
     const bounds = await rows.last().boundingBox();
     assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 650, "arrow keys scroll the final row into view");
-    for (let i = 0; i < 19; i++) await page.keyboard.press("ArrowUp");
+    for (let i = 0; i < 119; i++) await page.keyboard.press("ArrowUp");
     const first = await rows.first().boundingBox();
     const heading = await table.locator("thead").boundingBox();
     assert.ok(first.y >= heading.y + heading.height - 1, "upward navigation keeps the selected row below the sticky header");

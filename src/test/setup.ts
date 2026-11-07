@@ -1,9 +1,4 @@
-import { configure } from "@testing-library/dom";
-
-// Let constrained build hosts wait for asynchronous UI work without changing
-// the normal test timeout or any assertions.
-const asyncUtilTimeout = Number(process.env.TERMINALX_TEST_ASYNC_TIMEOUT_MS);
-if (Number.isFinite(asyncUtilTimeout) && asyncUtilTimeout > 0) configure({ asyncUtilTimeout });
+import "@testing-library/dom";
 
 // jsdom lays nothing out and ships no ResizeObserver. Components observe
 // their own boxes for re-fitting, so give them an observer that never fires;
