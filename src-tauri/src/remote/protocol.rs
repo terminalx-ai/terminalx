@@ -65,9 +65,9 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   `pipeline.noteTracker`. It also lets `session.create` take an issue, which
 ///   an older runtime would ignore: a client sends one only once this is granted.
 /// - `pipeline/2`: paginated persistent reviewer identities, independent of pipeline history.
-pub const CAPABILITIES: [&str; 23] = [
+pub const CAPABILITIES: [&str; 24] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "environment/1",
 ];
 
 /// The namespace that lets a connection address an agent tab's own terminal
@@ -110,6 +110,8 @@ const fn method(name: &'static str, capability: &'static str, authority: Authori
 use Authority::{Manage, Participate};
 
 pub const METHODS: &[Method] = &[
+    method("environment.report", "environment/1", Participate, false),
+    method("environment.cancel", "environment/1", Participate, false),
     method("session.list", "session/1", Participate, false),
     method("session.get", "session/1", Participate, false),
     method("session.create", "session/1", Manage, true),
@@ -267,6 +269,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "session/1" | "session/2" | "session/3" | "session-repository/1" => &["session."],
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
+        "environment/1" => &["environment."],
         "keys/1" => &["keys."],
         "lifecycle/1" => &["lifecycle."],
         "mirror/1" => &["mirror."],
@@ -523,6 +526,11 @@ mod tests {
         // An interrupt is for the turn running now: never replayed from a cache.
         let interrupt = find_method("session.interrupt").unwrap();
         assert_eq!((interrupt.capability, interrupt.authority, interrupt.idempotent), ("session/3", Participate, false));
+        for name in ["environment.report", "environment.cancel"] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), ("environment/1", Participate, false));
+        }
+        assert!(find_method("environment.exec").is_none());
         assert!(find_method("runtime.exec").is_none());
         assert!(find_method("invoke").is_none());
     }

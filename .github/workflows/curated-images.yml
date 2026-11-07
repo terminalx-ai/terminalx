@@ -1,0 +1,85 @@
+name: Curated provider images
+on:
+  workflow_run:
+    workflows: [Release terminalx-serve]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: curated-provider-images
+  cancel-in-progress: false
+jobs:
+  build:
+    if: >-
+      github.ref == 'refs/heads/main' && vars.CURATED_IMAGES_ENABLED == 'true' &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    environment: curated-provider-images
+    runs-on: [self-hosted, curated-images-amd64]
+    timeout-minutes: 45
+    steps:
+      - name: Validate pinned server source and runner
+        env:
+          SERVER_SHA: ${{ vars.CURATED_IMAGE_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          [[ "$SERVER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(uname -m)" = x86_64
+          test "$(bun --version)" = 1.3.2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: dudhatparesh/terminalx-saas
+          ref: ${{ vars.CURATED_IMAGE_SERVER_SHA }}
+          token: ${{ secrets.CURATED_IMAGE_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Resolve the existing runtime release and verify its checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh api --paginate --slurp "repos/$GH_REPO/releases" > artifacts/releases.json
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          releases = [r for r in [r for page in json.loads(pathlib.Path('artifacts/releases.json').read_text()) for r in page] if r['prerelease'] and not r['draft'] and re.fullmatch(r'runtime-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{7}', r['tag_name'])]
+          release = max(releases, key=lambda r: r['created_at'])
+          pathlib.Path('artifacts/tag').write_text(release['tag_name'])
+          PY
+          tag=$(cat artifacts/tag)
+          gh release download "$tag" --repo "$GH_REPO" --dir artifacts --pattern terminalx-serve.json --pattern SHA256SUMS --pattern terminalx-serve-linux-x64
+          (cd artifacts && sha256sum --check --ignore-missing SHA256SUMS)
+          if [ -n "$RUN_SHA" ]; then
+            test "$(jq -r .commit artifacts/terminalx-serve.json)" = "$RUN_SHA"
+          fi
+          test "$(jq -r .protocol artifacts/terminalx-serve.json)" = 1
+          sha=$(sha256sum artifacts/terminalx-serve-linux-x64 | cut -d' ' -f1)
+          printf 'RUNTIME_URL=https://github.com/%s/releases/download/%s/terminalx-serve-linux-x64\nRUNTIME_SHA=%s\n' "$GH_REPO" "$tag" "$sha" >> "$GITHUB_ENV"
+      - name: Build the same recipe used by Boat and Hetzner
+        env:
+          SERVER_SHA: ${{ vars.CURATED_IMAGE_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          (cd apps/api && bun scripts/emitCuratedImage.ts ../../artifacts/context "$RUNTIME_URL" "$RUNTIME_SHA")
+          bun build apps/api/scripts/cloudLocalE2e/launcher.ts --compile --outfile artifacts/context/launcher
+          docker build --pull=false --platform linux/amd64 --iidfile artifacts/image-id artifacts/context
+          python3 deploy/curated-images/docker-fixtures.py --image "$(cat artifacts/image-id)" --restore-script artifacts/context/restore.sh --output artifacts/docker-fixtures.json
+          cp deploy/curated-images/hetzner.pkr.hcl artifacts/
+          docker save "$(cat artifacts/image-id)" -o artifacts/curated-image.tar
+          cp deploy/curated-images/README.md artifacts/
+          printf '%s\n' "$SERVER_SHA" > artifacts/server-commit
+          (cd artifacts && sha256sum curated-image.tar context/manifest.json context/install.sh context/boat.sh > image-SHA256SUMS)
+          rm -f artifacts/releases.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: curated-provider-images
+          path: artifacts
+          if-no-files-found: error
+          retention-days: 14

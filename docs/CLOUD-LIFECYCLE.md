@@ -24,6 +24,8 @@ disk) and `true` only where the machine is frozen as it is
 (local Docker in pause mode). An older server does not send it, and the
 dialog then promises neither (`resumeBehaviourText`).
 
+For curated images (PRO-203), [Boat's current persistence contract](https://docs.boat.dev/snapshots/whats-saved.md) saves changes in `/etc`, `/usr`, `/opt`, `/srv`, `/var`, `/root` and home directories, while dropping machine/network identity, `/tmp`, `~/.cache`, journal logs and unused Docker image/build cache. Processes still end. The existing mount-safe `/srv/terminalx/state` layout also supports earlier Boat mounts that did not retain `/var`. Curated tools stay under `/usr` and `/opt`; bootstrap restores missing package records/cache directories on that earlier layout. Actual create/resume evidence, rather than a Docker fixture, remains required for the provider contract. See [Environment info](ENVIRONMENT-INFO.md) for the runtime report, and the paired server's `deploy/curated-images/README.md` for image provenance, fallback, release and retirement gates.
+
 ## Desktop
 
 - `src/components/cloud/CloudWorkspaceLifecycle.tsx`: one dialog for all

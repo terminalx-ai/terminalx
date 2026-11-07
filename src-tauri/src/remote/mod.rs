@@ -13,6 +13,7 @@
 pub mod bootstrap_link;
 pub mod client;
 pub mod collab;
+mod environment;
 pub mod files;
 pub mod git;
 pub mod host;

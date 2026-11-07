@@ -991,6 +991,16 @@ impl WorkspaceRpc {
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "environment.cancel" {
+            return super::environment::cancel(peer.id(), &params);
+        }
+        if method == "environment.report" {
+            let spec = protocol::find_method(method).expect("registered method");
+            return super::environment::report(peer.id(), &params, || {
+                !peer.hung_up() && peer.granted("environment/1") &&
+                    (self.authority(peer) == Authority::Manage || self.authorize_participant(peer, spec).is_ok())
+            }).await;
+        }
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
             return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;

@@ -8,6 +8,7 @@ import { CloudTerminalPane } from "./CloudTerminalPane";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
 import { CloudPortsView } from "./CloudPorts";
+import { EnvironmentInfo } from "./EnvironmentInfo";
 import { NotSharedNotice, ParticipantsBar } from "./CloudCollab";
 import { CloudShareDialog } from "./CloudShareDialog";
 import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
@@ -275,6 +276,7 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
       {(cloudTarget || collab.available) && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1" data-testid="cloud-collab-bar">
           <ParticipantsBar collabKey={key} you={shared} tabLabel={tabLabel} />
+          {cloudTarget && <EnvironmentInfo key={key} client={client} state={state} organizationId={cloudTarget.organizationId} />}
           {cloudTarget && (
             <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setSharing(true)}>
               <UserPlus className="size-3.5" /> Share
