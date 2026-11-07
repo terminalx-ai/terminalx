@@ -1,0 +1,128 @@
+[
+  {
+    "expected": "noPr",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": null,
+    "working": false
+  },
+  {
+    "expected": "agentWorking",
+    "porcelain": " M src/app.ts\u0000",
+    "counts": "0\t0\n",
+    "pr": {},
+    "working": true
+  },
+  {
+    "expected": "uncommitted",
+    "porcelain": " M src/app.ts\u0000?? new.txt\u0000",
+    "counts": "0\t0\n",
+    "pr": {},
+    "working": false
+  },
+  {
+    "expected": "behind",
+    "porcelain": "",
+    "counts": "0\t2\n",
+    "pr": {},
+    "working": false
+  },
+  {
+    "expected": "ahead",
+    "porcelain": "",
+    "counts": "2\t0\n",
+    "pr": {},
+    "working": false
+  },
+  {
+    "expected": "diverged",
+    "porcelain": "",
+    "counts": "2\t1\n",
+    "pr": {},
+    "working": false
+  },
+  {
+    "expected": "conflicts",
+    "porcelain": "UU src/app.ts\u0000",
+    "counts": "0\t0\n",
+    "pr": {},
+    "working": false
+  },
+  {
+    "expected": "changesRequested",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": {
+      "reviewDecision": "CHANGES_REQUESTED"
+    },
+    "working": false
+  },
+  {
+    "expected": "draft",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": {
+      "isDraft": true,
+      "mergeStateStatus": "DRAFT"
+    },
+    "working": false
+  },
+  {
+    "expected": "checksFailing",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": {
+      "mergeStateStatus": "UNSTABLE",
+      "statusCheckRollup": [
+        {
+          "name": "test",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE"
+        }
+      ]
+    },
+    "working": false
+  },
+  {
+    "expected": "checksPending",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": {
+      "mergeStateStatus": "UNSTABLE",
+      "statusCheckRollup": [
+        {
+          "name": "test",
+          "status": "IN_PROGRESS",
+          "conclusion": ""
+        }
+      ]
+    },
+    "working": false
+  },
+  {
+    "expected": "reviewRequired",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": {
+      "reviewDecision": "REVIEW_REQUIRED",
+      "mergeStateStatus": "BLOCKED"
+    },
+    "working": false
+  },
+  {
+    "expected": "ready",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": {},
+    "working": false
+  },
+  {
+    "expected": "merged",
+    "porcelain": "",
+    "counts": "0\t0\n",
+    "pr": {
+      "state": "MERGED"
+    },
+    "working": false
+  }
+]

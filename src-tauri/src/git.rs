@@ -291,7 +291,7 @@ pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
 }
 
 /// The paths `git status --porcelain -z` lists as unmerged.
-fn unmerged_in(porcelain: &str) -> Vec<String> {
+pub(crate) fn unmerged_in(porcelain: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut entries = porcelain.split('\0').filter(|entry| !entry.is_empty());
     while let Some(entry) = entries.next() {
@@ -581,11 +581,13 @@ pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
     }
     run(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
         .ok()
-        .and_then(|s| {
-            let mut it = s.split_whitespace();
-            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
-        })
+        .and_then(|s| parse_upstream_counts(&s))
         .unwrap_or((0, 0))
+}
+
+pub(crate) fn parse_upstream_counts(output: &str) -> Option<(u32, u32)> {
+    let mut it = output.split_whitespace();
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
 }
 
 /// One command answering everything the header and handoff row need, so no

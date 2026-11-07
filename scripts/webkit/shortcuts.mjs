@@ -119,7 +119,7 @@ const fits = (layout) => ({
   // A changed shortcut works at the next keypress.
   await openShortcuts(page);
   await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').click();
-  await page.keyboard.press("Meta+Shift+Y");
+  await page.keyboard.press("Meta+Shift+V");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
   await page.getByRole("button", { name: "Close", exact: true }).click();
@@ -127,10 +127,10 @@ const fits = (layout) => ({
   await page.keyboard.press("Meta+B");
   await page.waitForTimeout(150);
   const afterOld = await sidebarShown();
-  await page.keyboard.press("Meta+Shift+Y");
+  await page.keyboard.press("Meta+Shift+V");
   await page.waitForTimeout(150);
   const afterNew = await sidebarShown();
-  await page.keyboard.press("Meta+Shift+Y");
+  await page.keyboard.press("Meta+Shift+V");
   await sidebar(page);
   // The command palette shows the keys in force.
   await page.keyboard.press("Meta+K");
@@ -142,10 +142,10 @@ const fits = (layout) => ({
   failed += report(
     "a changed shortcut",
     {
-      "the tab shows the new keys": shown === "⌘⇧Y",
+      "the tab shows the new keys": shown === "⌘⇧V",
       "the old keys do nothing": afterOld === true,
       "the new keys run the action": afterNew === false,
-      "the command palette shows the new keys": paletteKeys === "⌘⇧Y",
+      "the command palette shows the new keys": paletteKeys === "⌘⇧V",
     },
     { shown, afterOld, afterNew, paletteKeys },
   );

@@ -274,6 +274,25 @@ pub fn create_pr(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft:
     create_pr_with(cwd, title, body, base, draft, run)
 }
 
+/// The account used by API writes, which may differ from the checkout's SSH key.
+#[cfg(feature = "desktop")]
+pub fn authenticated_login(cwd: &Path, destination: &str) -> Result<String> {
+    authenticated_login_with(cwd, destination, run)
+}
+
+#[cfg(feature = "desktop")]
+fn authenticated_login_with(cwd: &Path, destination: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
+    let url = url::Url::parse(destination)?;
+    let host = url.host_str().context("The GitHub destination has no host.")?;
+    let host = url.port().map(|port| format!("{host}:{port}")).unwrap_or_else(|| host.to_string());
+    let login = run(cwd, &["api", "--hostname", &host, "user", "--jq", ".login"])?;
+    let login = login.trim();
+    if login.is_empty() || !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("GitHub did not identify the signed-in account.");
+    }
+    Ok(login.to_string())
+}
+
 fn create_pr_with(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft: bool, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
     let mut args = vec!["pr", "create", "--title", title, "--body", body];
     if let Some(b) = base {
@@ -1003,6 +1022,26 @@ pub fn enable_head_branch_deletion(cwd: &Path) -> Result<HeadBranchSetting> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn publishing_account_is_read_from_the_destination_host() {
+        for (destination, host) in [
+            ("https://github.com/example/repo.git", "github.com"),
+            ("https://github.company.example/example/repo/pull/7", "github.company.example"),
+            ("https://github.company.example:8443/example/repo.git", "github.company.example:8443"),
+        ] {
+            let login = authenticated_login_with(Path::new("/repo"), destination, |cwd, args| {
+                assert_eq!(cwd, Path::new("/repo"));
+                assert_eq!(args, ["api", "--hostname", host, "user", "--jq", ".login"]);
+                Ok("alice\n".into())
+            }).unwrap();
+            assert_eq!(login, "alice");
+        }
+        for invalid in ["", "owner/deploy-key", "alice\nother"] {
+            assert!(authenticated_login_with(Path::new("/repo"), "https://github.com/example/repo", |_, _| Ok(invalid.into())).is_err());
+        }
+    }
 
     #[test]
     fn branch_discovery_keeps_same_branch_followups_but_not_an_unrelated_fork() {

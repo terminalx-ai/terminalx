@@ -2865,6 +2865,68 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
 
 // ------------------------------------------------------------------ git actions & PRs
 
+fn branch_agent_working(sessions: &crate::local_runtime::sessions::Sessions, session: &index::SessionEntry) -> anyhow::Result<bool> {
+    let cwd = std::fs::canonicalize(&session.cwd)?;
+    // Several conversations may share one checkout. An idle selected tab is
+    // not permission to commit files another conversation is still editing.
+    for neighbor in index::load()? {
+        if std::fs::canonicalize(&neighbor.cwd).ok().as_ref() != Some(&cwd) { continue; }
+        for tab in &neighbor.tabs {
+            if matches!(sessions.status_of(&neighbor.id, &tab.id)?, index::TabStatus::InProgress | index::TabStatus::Waiting) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[tauri::command]
+pub async fn branch_step_refresh(app: AppHandle, state: State<'_, AppState>, session_id: String) -> CmdResult<crate::branch_step::Snapshot> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        let working = branch_agent_working(&sessions, &session).map_err(err)?;
+        let mut snapshot = crate::branch_step::read(&session, working).map_err(err)?;
+        if branch_agent_working(&sessions, &session).map_err(err)? {
+            snapshot.state = crate::branch_step::Step::AgentWorking;
+            snapshot.actions.clear();
+        }
+        let _ = app.emit(crate::branch_step::EVENT, &snapshot);
+        Ok(snapshot)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn branch_step_account(session_id: String, action: crate::branch_step::Action) -> CmdResult<crate::branch_step::Account> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::branch_step::account(&session, action).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn branch_step_action(state: State<'_, AppState>, session_id: String, request: crate::branch_step::Request) -> CmdResult<String> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        let _guard = crate::branch_step::RunGuard::acquire(&session.cwd).map_err(err)?;
+        let working = branch_agent_working(&sessions, &session).map_err(err)?;
+        let now = crate::branch_step::read(&session, working).map_err(err)?;
+        if branch_agent_working(&sessions, &session).map_err(err)? { return Err("Wait for the agent to finish before running a Git action.".into()); }
+        match crate::branch_step::act(&session, &now, &request, || {
+            anyhow::ensure!(!branch_agent_working(&sessions, &session)?, "Wait for the agent to finish before running a Git action.");
+            Ok(())
+        }).map_err(err)? {
+            crate::branch_step::Outcome::Done(message) => Ok(message),
+            crate::branch_step::Outcome::Prompt(prompt) => {
+                let tab = request.tab_id.as_deref().and_then(|id| session.tab(id)).ok_or_else(|| "Select an agent tab first.".to_string())?;
+                sessions.send_confirmed(&session.id, &tab.id, prompt).map_err(err)?;
+                Ok("Sent to the agent. Progress and results appear in this conversation.".into())
+            }
+        }
+    }).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn git_commit(cwd: String, message: String, paths: Option<Vec<String>>) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || git::commit_all(Path::new(&cwd), &message, paths.as_deref()).map_err(err)).await.map_err(err)?
