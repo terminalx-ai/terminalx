@@ -107,7 +107,9 @@ pub enum Action {
         anchor: Box<Anchor>,
         note: String,
         expected: Option<Revision>,
-        #[serde(default)]
+        // Only trusted backend callers can assign an agent or GitHub author.
+        // Desktop requests create user notes; edits preserve the saved author.
+        #[serde(skip_deserializing)]
         author: Author,
     },
     Delete {

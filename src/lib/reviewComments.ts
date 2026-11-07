@@ -7,7 +7,7 @@ export interface CommentAuthor { kind: "user" | "agent" | "github"; sessionId?: 
 export interface ReviewComment extends ReviewAnchor { author?: CommentAuthor; createdAt?: string; textHash?: string; anchorHash?: string; id: string; revision: number; note: string; sent: boolean; outdated: boolean }
 export interface ReviewRevision { id: string; revision: number }
 export type ReviewAction = { type: "list" }
-  | { type: "save"; anchor: ReviewAnchor; note: string; expected: ReviewRevision | null; author?: CommentAuthor }
+  | { type: "save"; anchor: ReviewAnchor; note: string; expected: ReviewRevision | null }
   | { type: "delete"; expected: ReviewRevision }
   | { type: "sent"; comments: ReviewRevision[] }
   | { type: "reconcile"; path: string; base: string; before: string | null; after: string | null; comments: ReviewRevision[] };

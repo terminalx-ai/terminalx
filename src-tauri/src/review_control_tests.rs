@@ -80,7 +80,8 @@ fn saves_the_exact_range_with_tab_attribution_and_a_persisted_chat_card() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("foo.ts"), "first\r\nsecond\r\nthird").unwrap();
     let session = session(root.path());
-    let request = params(&session);
+    let mut request = params(&session);
+    request["author"] = json!({"kind": "agent", "name": "Spoofed", "tabId": "another-tab"});
     let (service, _) = headless_service();
     let result = service
         .execute("review.comment", request.clone(), "one")
@@ -190,9 +191,10 @@ fn user_and_agent_comments_share_edit_sent_and_outdated_lifecycle() {
     let workspace = review_comments::workspace_key(Path::new(&session.cwd)).unwrap();
     let store = crate::store::root().unwrap();
     let anchor = json!({"path": "foo.ts", "side": "after", "startLine": 2, "endLine": 3, "lineText": "second\nthird", "base": crate::git::head_tree(root.path()).unwrap()});
-    // The existing desktop action has no author field; its record stays a user note.
+    // The desktop action cannot choose an agent author, even if the UI sends one.
     let user = serde_json::from_value(
-        json!({"type": "save", "anchor": anchor, "note": "User note", "expected": null}),
+        json!({"type": "save", "anchor": anchor, "note": "User note", "expected": null,
+            "author": {"kind": "agent", "role": "reviewer", "name": "Spoofed", "tabId": "another-tab"}}),
     )
     .unwrap();
     review_comments::apply(&store, &workspace, user).unwrap();
