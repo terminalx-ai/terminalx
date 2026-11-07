@@ -198,7 +198,8 @@ export function BranchPanel({
 
   return (
     <div className={inline ? undefined : "h-full overflow-y-auto scrollbar-thin"} data-testid="branch-panel">
-      <div className="flex flex-col gap-3 p-3">
+      {/* One rule for the tab: a box's edge 16px from the panel, and every row's content at 28px, where a box's own content starts. */}
+      <div className="flex flex-col gap-3 px-4 py-3">
         <header className="flex min-h-6 min-w-0 items-center gap-2 px-3">
           <GitBranch className="size-4 shrink-0 text-accent" aria-hidden />
           <h3 className="truncate font-mono text-[13px] text-foreground" title={branch ?? "Detached HEAD"} data-testid="branch-name">
@@ -315,7 +316,7 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
   const forkY = y(0) + ROW * 0.55;
   const fade = `branch-fade-${useId().replace(/:/g, "")}`;
   return (
-    <section aria-label="Commits" data-testid="branch-graph" className="px-1">
+    <section aria-label="Commits" data-testid="branch-graph" className="px-3">
       <div className="relative" style={{ height }}>
         <svg className="pointer-events-none absolute inset-0 overflow-visible" width={BRANCH_X + 8} height={height} aria-hidden>
           {lastBase > 0 && <line x1={BASE_X} x2={BASE_X} y1={y(0)} y2={y(lastBase)} className="stroke-muted-foreground/60" strokeWidth={1.5} />}
