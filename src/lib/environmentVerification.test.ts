@@ -135,6 +135,8 @@ describe("verifyProposal, with a scripted runner", () => {
 // checkout is a clone of it. Nothing is mocked but the terminal: each script
 // runs with a non-interactive bash from the "workspace root".
 const bash = spawnSync("bash", ["-c", "git --version"]).status === 0;
+// Real Git subprocesses need scheduling headroom alongside concurrent builds.
+const shellTestTimeout = 180_000;
 describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
   const base = mkdtempSync(join(tmpdir(), "tx-verify-"));
   const github = join(base, "github");
@@ -222,7 +224,7 @@ describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
     // The agent's own checkout is untouched: no deps, no build output.
     expect(spawnSync("bash", ["-c", "test ! -e widgets/deps && test ! -e widgets/out.txt"], { cwd: root }).status).toBe(0);
     expect(steps).toContain("acme/widgets: checking failures without the recipe");
-  }, 60_000);
+  }, shellTestTimeout);
 
   it("is not turned green by an agent that edits a failing test and commits without pushing", async () => {
     const head = repository("gamed", { "test.sh": "#!/bin/bash\nexit 4\n" });
@@ -239,7 +241,7 @@ describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
     expect(observations.repositories[0].commit).toBe(head);
     expect(observations.repositories[0].checks[2]).toMatchObject({ kind: "test", status: "failed", exitCode: 4, preexisting: true });
     expect(sources[0]).toMatchObject({ commit: head, agentCheckout: "differs" });
-  }, 60_000);
+  }, shellTestTimeout);
 
   it("notices files the agent changed without committing, but not its own proposal file", async () => {
     repository("dirty", { "test.sh": "#!/bin/bash\nexit 0\n" });
@@ -251,25 +253,25 @@ describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
     const edited = await verifyProposal(one("dirty", { setup: [], commands: { test: "./test.sh" } }), run, real({ "acme/dirty": "dirty" }));
     expect(edited.sources[0].agentCheckout).toBe("differs");
     expect(edited.observations.repositories[0].checks[2].status).toBe("passed");
-  }, 60_000);
+  }, shellTestTimeout);
 
   it("shows a failure the recipe itself causes as failed, not as also failing without it", async () => {
     repository("solo", { "lint.sh": "#!/bin/bash\ntest ! -e broken-by-setup\n" });
     const { observations } = await verifyProposal(one("solo", { setup: [{ workingDirectory: ".", script: "touch broken-by-setup" }], commands: { lint: "./lint.sh" } }), run, real({ "acme/solo": "solo" }));
     expect(observations.machine).toBeNull();
     expect(observations.repositories[0].checks[1]).toMatchObject({ kind: "lint", status: "failed", exitCode: 1, preexisting: false });
-  }, 60_000);
+  }, shellTestTimeout);
 
   it("runs nothing for a repository it cannot fetch", async () => {
     const { observations, sources } = await verifyProposal(one("missing", { setup: [], commands: { test: "true" } }), run, real({}));
     expect(observations.repositories[0].checks[2].status).toBe("not-run");
     expect(sources[0]).toMatchObject({ commit: null, agentCheckout: "unknown" });
-  }, 60_000);
+  }, shellTestTimeout);
 
   it("times a command out instead of waiting on it, and says so", async () => {
     repository("slow", { "test.sh": "#!/bin/bash\nsleep 30\n" });
     const quick: RunScript = (script, timeoutMs) => run(script, script.includes("./test.sh") ? 300 : timeoutMs);
     const { observations } = await verifyProposal(one("slow", { setup: [], commands: { test: "./test.sh" } }), quick, real({ "acme/slow": "slow" }));
     expect(observations.repositories[0].checks[2]).toMatchObject({ kind: "test", status: "timed-out", exitCode: null, preexisting: true });
-  }, 60_000);
+  }, shellTestTimeout);
 });
