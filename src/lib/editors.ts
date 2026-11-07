@@ -2,13 +2,14 @@ import { useSyncExternalStore } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
+import type { ChangeRange } from "./changes";
+import type { PrAssociation } from "./api";
 import { discardStashedBuffers } from "@/lib/workspaceFiles";
 
 /**
- * Open files per session. They live in an editor pane beside the transcript,
- * so reading or editing a file never hides the conversation about it. Nothing
- * here is persisted: the files come back from disk, and an unsaved buffer is
- * guarded on close.
+ * Files live beside the transcript; diff and PR tabs fill the centre. Nothing
+ * here persists unsaved text. Review tabs restore their locations after restart;
+ * files come back from disk and unsaved buffers are guarded on close.
  */
 export type ViewMode = "source" | "preview";
 
@@ -20,7 +21,7 @@ export function fileKind(rel: string): FileKind {
   return format?.kind === "image" || format?.kind === "audio" || format?.kind === "video" ? format.kind : "text";
 }
 
-export interface EditorEntry {
+interface EditorBase {
   id: string;
   sessionId: string;
   /** Session workspace captured when the file was opened; browser links stay scoped here. */
@@ -35,11 +36,70 @@ export interface EditorEntry {
   rel: string;
   name: string;
   dirty: boolean;
-  kind: FileKind;
   /** Text mode only; media surfaces are always read-only. */
   viewMode: ViewMode;
   /** Set to scroll to a place; bumped `nonce` re-fires it on a re-open. */
   jump?: { line: number; col?: number; nonce: number };
+}
+
+export interface FileEditorEntry extends EditorBase { kind: FileKind }
+export type DiffMode = "diff" | "entire" | "preview" | "edit";
+export interface DiffEditorEntry extends EditorBase {
+  kind: "diff";
+  diff: {
+    scope: "turn" | "all";
+    range: ChangeRange | null;
+    oldPath?: string;
+    /** A live workspace comparison can be explicitly refreshed. Turn snapshots stay fixed. */
+    target?: string | null;
+    uncommitted?: boolean;
+    mode: DiffMode;
+  };
+}
+export interface PrEditorEntry extends EditorBase { kind: "pr"; pr: PrAssociation }
+export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry;
+
+const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
+
+/** Persist only locators, never snapshot contents, PR bodies or unsaved buffers. */
+export function serializeReviewTabs(value: Pick<State, "editors" | "active" | "collapsed">): string {
+  return JSON.stringify({
+    editors: value.editors.filter((e) => e.kind === "diff" || e.kind === "pr").map((e) => ({ ...e, dirty: false, jump: undefined })),
+    active: value.active,
+    collapsed: value.collapsed,
+  });
+}
+
+export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "active" | "collapsed"> {
+  const empty = { editors: [], active: {}, collapsed: {} };
+  try {
+    const saved = JSON.parse(raw ?? "null");
+    if (!saved || !Array.isArray(saved.editors)) return empty;
+    const editors: EditorEntry[] = [];
+    for (const e of saved.editors) {
+      if (!e || ![e.id, e.sessionId, e.root, e.workspaceRoot, e.rel, e.name].every((s) => typeof s === "string")) continue;
+      if (e.source || !e.root || editors.some((known) => known.id === e.id)) continue;
+      if (e.kind === "diff") {
+        const d = e.diff;
+        if (!d || !["turn", "all"].includes(d.scope) || !["diff", "entire", "preview", "edit"].includes(d.mode)) continue;
+        if (d.range !== null && (!d.range || typeof d.range.base !== "string" || !(d.range.head === null || typeof d.range.head === "string"))) continue;
+        if (d.oldPath !== undefined && (typeof d.oldPath !== "string" || !reviewPath(e.root, d.oldPath))) continue;
+        if (!reviewPath(e.root, e.rel)) continue;
+        if (d.target != null && typeof d.target !== "string") continue;
+        editors.push({ ...e, dirty: false, jump: undefined, viewMode: "source", diff: { ...d, mode: d.mode === "edit" ? "diff" : d.mode } });
+      } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
+        && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {
+        editors.push({ ...e, dirty: false, jump: undefined });
+      }
+    }
+    const active: State["active"] = {};
+    const collapsed: State["collapsed"] = {};
+    for (const e of editors) {
+      active[e.sessionId] = editors.some((tab) => tab.sessionId === e.sessionId && tab.id === saved.active?.[e.sessionId]) ? saved.active[e.sessionId] : e.id;
+      collapsed[e.sessionId] = saved.collapsed?.[e.sessionId] === true;
+    }
+    return { editors, active, collapsed };
+  } catch { return empty; }
 }
 
 /** Which region took the last click or focus, so ⌘W closes the right thing. */
@@ -54,10 +114,13 @@ interface State {
   lastFocused: Region;
 }
 
-let state: State = { editors: [], active: {}, collapsed: {}, lastFocused: "chat" };
+let state: State = { ...restoreReviewTabs((() => {
+  try { return localStorage.getItem(REVIEW_TABS_KEY); } catch { return null; }
+})()), lastFocused: "chat" };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
+  try { localStorage.setItem(REVIEW_TABS_KEY, serializeReviewTabs(state)); } catch { /* Optional persistence. */ }
   for (const l of listeners) l();
 }
 
@@ -87,7 +150,7 @@ let nonce = 0;
  * reader wants a line, which only source can show, so it forces source mode.
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
-  const existing = state.editors.find((e) => e.sessionId === sessionId && e.root === root && e.rel === rel);
+  const existing = state.editors.find((e) => e.kind !== "diff" && e.kind !== "pr" && e.sessionId === sessionId && e.root === root && e.rel === rel);
   const kind = fileKind(rel);
   const jump = at && kind === "text" ? { ...at, nonce: ++nonce } : undefined;
   const collapsed = { ...state.collapsed, [sessionId]: false };
@@ -115,6 +178,55 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
   };
   set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
   return id;
+}
+
+function openReview(entry: DiffEditorEntry | PrEditorEntry) {
+  // Reopening a review focuses its existing buffer without resetting its mode or scroll.
+  const existing = state.editors.find((e) => e.id === entry.id);
+  if (!existing) set({ editors: [...state.editors, entry] });
+  else if (entry.kind === "diff" && existing.kind === "diff" && entry.diff.scope === "all") {
+    updateDiffRange(entry.id, entry.diff.range, entry.diff.oldPath);
+  }
+  setActiveEditor(entry.sessionId, entry.id);
+  setLastFocused("editor");
+  return entry.id;
+}
+
+/** A repository diff must never read an absolute path outside its checkout. */
+export function reviewPath(root: string, path: string): string | null {
+  const prefix = `${root.replace(/\/$/, "")}/`;
+  const rel = path.startsWith(prefix) ? path.slice(prefix.length) : path;
+  if (!rel || rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || rel.includes("\0") || rel.split(/[\\/]/).includes("..")) return null;
+  return rel.replace(/^\.\//, "");
+}
+
+export function openDiff(sessionId: string, root: string, rel: string, diff: Omit<DiffEditorEntry["diff"], "mode">) {
+  const path = reviewPath(root, rel);
+  if (!path || (diff.oldPath && !reviewPath(root, diff.oldPath))) throw new Error("This file is outside the repository.");
+  rel = path;
+  const id = JSON.stringify([sessionId, root, "diff", rel, diff.scope, diff.scope === "turn" ? diff.range : [diff.target, diff.uncommitted]]);
+  return openReview({ id, sessionId, root, workspaceRoot: root, rel, name: `${fileName(rel)} · ${diff.scope === "turn" ? "Latest turn" : "All changes"}`,
+    kind: "diff", dirty: false, viewMode: "source", diff: { ...diff, mode: "diff" } });
+}
+
+export function openPr(sessionId: string, root: string, pr: PrAssociation) {
+  const id = JSON.stringify([sessionId, root, "pr", pr.url.toLowerCase().replace(/\/$/, "")]);
+  return openReview({ id, sessionId, root, workspaceRoot: root, rel: pr.url, name: `PR #${pr.number}`, kind: "pr", dirty: false, viewMode: "source", pr });
+}
+
+export async function setDiffMode(id: string, mode: DiffMode) {
+  const entry = state.editors.find((e) => e.id === id);
+  if (entry?.kind !== "diff" || entry.diff.mode === mode) return;
+  if (entry.diff.mode === "edit" && entry.dirty) {
+    const leave = await ask(`${fileName(entry.rel)} has unsaved changes. Leave Edit? Your changes stay in this tab until you save or close it.`,
+      { title: "Unsaved changes", kind: "warning", okLabel: "Leave Edit", cancelLabel: "Keep editing" }).catch(() => false);
+    if (!leave) return;
+  }
+  set({ editors: state.editors.map((e) => e.id === id && e.kind === "diff" ? { ...e, diff: { ...e.diff, mode } } : e) });
+}
+
+export function updateDiffRange(id: string, range: ChangeRange | null, oldPath?: string) {
+  set({ editors: state.editors.map((e) => e.id === id && e.kind === "diff" ? { ...e, diff: { ...e.diff, range, oldPath } } : e) });
 }
 
 /** Link routing in a Markdown preview uses the document parent for files but the captured session workspace for browser tabs. */
@@ -179,7 +291,7 @@ export function setActiveEditor(sessionId: string, id: string | null) {
 
 export function setEditorDirty(id: string, dirty: boolean) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || e.kind !== "text" || e.dirty === dirty) return;
+  if (!e || (e.kind !== "text" && e.kind !== "diff") || e.dirty === dirty) return;
   set({ editors: state.editors.map((x) => (x.id === id ? { ...x, dirty } : x)) });
 }
 
@@ -190,7 +302,7 @@ export function setViewMode(id: string, viewMode: ViewMode) {
 /** Flip preview and source for a markdown editor; other files stay as source. */
 export function toggleViewMode(id: string) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || !isMarkdown(e.rel)) return;
+  if (!e || e.kind !== "text" || !isMarkdown(e.rel)) return;
   setViewMode(id, e.viewMode === "preview" ? "source" : "preview");
 }
 

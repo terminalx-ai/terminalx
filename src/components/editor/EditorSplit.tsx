@@ -15,6 +15,8 @@ import {
   toggleViewMode,
   useEditors,
 } from "@/lib/editors";
+import { DiffEditorPane } from "./DiffEditorPane";
+import { PrPanel } from "@/components/changes/PrPanel";
 import { MediaPane } from "./MediaPane";
 import { EditorPane } from "./EditorPane";
 
@@ -32,9 +34,17 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
   const ed = useEditors();
   const editors = ed.editors.filter((e) => e.sessionId === sessionId);
   const activeId = ed.active[sessionId] ?? editors[editors.length - 1]?.id ?? null;
+  const reviewActive = editors.some((e) => e.id === activeId && (e.kind === "diff" || e.kind === "pr"));
+  const fullWidth = fill || reviewActive;
   const collapsed = !!ed.collapsed[sessionId];
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; w: number; max: number } | null>(null);
+
+  // A review covers the composer, so give it focus (also after restoration).
+  // Otherwise typing or ⌘W could still act on the hidden conversation.
+  useEffect(() => {
+    if (active && reviewActive && !collapsed) root.current?.focus({ preventScroll: true });
+  }, [active, activeId, reviewActive, collapsed]);
 
   // Leave enough space for the composer in side-by-side mode.
   const maxWidth = useCallback(() => {
@@ -75,8 +85,8 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
 
   if (!editors.length) return null;
 
-  if (collapsed) {
-    return (
+  return <>
+    {collapsed && (
       <div className="flex h-full w-8 shrink-0 flex-col items-center border-l border-hairline bg-well/30 pt-1.5">
         <WithTooltip label={`Show ${editors.length} open file${editors.length === 1 ? "" : "s"}`}>
           <Button variant="ghost" size="icon-xs" aria-label="Show editor pane" onClick={() => setPaneCollapsed(sessionId, false)}>
@@ -85,21 +95,20 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
         </WithTooltip>
         <span className="mt-2 rounded-full bg-veil-raised px-1.5 text-[10px] tabular-nums text-faint">{editors.length}</span>
       </div>
-    );
-  }
-
-  return (
+    )}
     <div
       ref={root}
+      tabIndex={-1}
       className={cn(
-        "absolute inset-0 z-10 flex h-full w-full min-w-0 shrink-0 flex-col border-l border-hairline bg-background",
+        "absolute inset-0 z-10 flex h-full w-full min-w-0 shrink-0 flex-col border-l border-hairline bg-background outline-none",
+        collapsed && "hidden",
         // Beside a transcript it takes a resizable share; alone (a cloud workspace's files) it fills.
-        !fill && "@min-[768px]/editor-host:relative @min-[768px]/editor-host:w-(--editor-w) @min-[768px]/editor-host:max-w-[calc(100%-360px)]",
+        !fullWidth && "@min-[768px]/editor-host:relative @min-[768px]/editor-host:w-(--editor-w) @min-[768px]/editor-host:max-w-[calc(100%-360px)]",
       )}
       onPointerDownCapture={() => setLastFocused("editor")}
       onFocusCapture={() => setLastFocused("editor")}
     >
-      {!fill && <div
+      {!fullWidth && <div
         role="separator"
         aria-orientation="vertical"
         onPointerDown={onDown}
@@ -158,10 +167,10 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
       <div className="relative min-h-0 flex-1">
         {editors.map((e) => (
           <div key={e.id} className={cn("absolute inset-0 flex flex-col", e.id !== activeId && "hidden")}>
-            {e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active} /> : <MediaPane entry={e} visible={e.id === activeId && active} />}
+            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed} busy={false} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed} />}
           </div>
         ))}
       </div>
     </div>
-  );
+  </>;
 }

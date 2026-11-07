@@ -22,7 +22,7 @@ import { api } from "@/lib/api";
 import { registerLiveEditor } from "@/lib/editorViews";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
-import { clearJump, editorLinkContext, getEditors, isMarkdown, setEditorDirty, setViewMode, type EditorEntry } from "@/lib/editors";
+import { clearJump, editorLinkContext, getEditors, isMarkdown, setEditorDirty, setViewMode, type FileEditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, isConflict, stashBuffer, takeStashedBuffer, useFileSource, type FileState } from "@/lib/workspaceFiles";
 import { useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
@@ -108,7 +108,7 @@ function gitMarks(head: string, now: string): Map<number, Mark> {
  * overwritten without an explicit choice, and an unsaved cloud buffer
  * survives reconnects and the workspace page closing.
  */
-export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+export function EditorPane({ entry, visible, embedded = false }: { entry: FileEditorEntry; visible: boolean; embedded?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const savedDoc = useRef<string>("");
@@ -231,6 +231,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     }
     let cancelled = false;
     let markTimer: number | undefined;
+    let textTimer: number | undefined;
     let unregister: (() => void) | undefined;
     (async () => {
       try {
@@ -256,7 +257,6 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         const restoredDirty = doc !== savedDoc.current;
         setDirty(restoredDirty);
         setEditorDirty(entry.id, restoredDirty);
-        let textTimer: number | undefined;
         const extensions: Extension[] = [
           raccoonTheme,
           raccoonHighlight,
@@ -323,6 +323,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     return () => {
       cancelled = true;
       window.clearTimeout(markTimer);
+      window.clearTimeout(textTimer);
       unregister?.();
       const view = viewRef.current;
       // A cloud buffer with unsaved text outlives its view while its editor
@@ -386,6 +387,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       return stop;
     }
     if (!visible) return;
+    void checkForChange();
     const t = window.setInterval(() => void checkForChange(), 2000);
     return () => window.clearInterval(t);
   }, [visible, status, source, entry.rel, checkForChange]);
@@ -395,7 +397,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       <EditorToolbar
         path={abs}
         relativePath={entry.rel}
-        markdown={markdown}
+        markdown={markdown && !embedded}
         viewMode={entry.viewMode}
         onViewModeChange={(mode) => setViewMode(entry.id, mode)}
         cloud={cloud}
