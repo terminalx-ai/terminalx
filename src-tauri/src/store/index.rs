@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::transaction;
 
+#[path = "local_sections.rs"]
+pub mod local_sections;
+
 const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The launch mode of any session or tab whose creator did not name one —
@@ -612,6 +615,10 @@ pub struct TabState {
 struct IndexFile {
     #[serde(default)]
     sessions: Vec<SessionEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_sections: Vec<local_sections::LocalSection>,
+    #[serde(default)]
+    local_sections_revision: u64,
     /// Left out of the file until a workspace is arranged, so an index nobody
     /// reordered is written exactly as before.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -639,6 +646,7 @@ pub fn revision() -> u64 {
 }
 
 fn save_file(file: &mut IndexFile) -> Result<()> {
+    local_sections::prune(file);
     // A closed tab goes with its session: there is nothing left to reopen it into.
     let IndexFile { sessions, closed_tabs, .. } = file;
     closed_tabs.retain(|closed| sessions.iter().any(|session| session.id == closed.session_id));
@@ -968,17 +976,23 @@ mod tests {
             row["manualStatus"] = value;
             rows.push(row);
         }
-        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({"sessions": rows})).unwrap()).unwrap();
+        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({
+            "sessions": rows,
+            "localSections": [{"id":"release", "name":"Release", "sessions":["future", "known"]}],
+            "localSectionsRevision": 17
+        })).unwrap()).unwrap();
         let loaded = load().expect("a newer build's status must not hide every session");
         assert_eq!(loaded.len(), 4);
         assert!(loaded[..3].iter().all(|session| session.manual_status.is_none()));
         assert_eq!(loaded[3].manual_status, Some(ManualStatus::InReview));
+        let sections = local_sections::load().unwrap();
         crate::session_ops::update_session_meta("future", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
         assert_eq!(get("future").unwrap().title, "renamed");
         save(&load().unwrap()).unwrap();
         assert_eq!(load().unwrap().len(), 4);
         assert_eq!(get("known").unwrap().manual_status, Some(ManualStatus::InReview));
         assert_eq!(get("future").unwrap().manual_status, None);
+        assert_eq!(local_sections::load().unwrap(), sections, "status edits preserve section membership and revision");
     }
 
     fn tab(id: &str) -> TabEntry {

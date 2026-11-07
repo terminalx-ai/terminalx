@@ -2,6 +2,9 @@ import { StatusGroups } from "./StatusGroups";
 import { ManualStatusIcon } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { useId, useMemo, useState } from "react";
+import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { LocalSidebarSections } from "./LocalSidebarSections";
+import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
 import { Ellipsis, GitBranch, Pin, Settings, SquarePen } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -80,8 +83,13 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
   const showAgents = useMemo(() => mixesAgents(listed), [listed]);
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
-  const live = conversations.filter((session) => !session.worktreeRemoved);
-  const removed = conversations.filter((session) => session.worktreeRemoved);
+  const { sections: localSections } = useLocalSections();
+  const sectioned = groupLocalSessions(listed, localSections);
+  const ungrouped = new Set(sectioned.ungrouped.map((session) => session.id));
+  const ungroupedArchived = archived.filter((session) => ungrouped.has(session.id));
+  const ungroupedConversations = conversations.filter((session) => ungrouped.has(session.id));
+  const live = ungroupedConversations.filter((session) => !session.worktreeRemoved);
+  const removed = ungroupedConversations.filter((session) => session.worktreeRemoved);
   const chatRow = (session: SessionEntry, inArchive = false) => (
     <ChatRow
       key={session.id}
@@ -115,10 +123,11 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
+        <LocalSidebarSections groups={sectioned.sections} filtered={filter.active} groupByStatus={sidebarLayout === "status"} renderSession={(session) => chatRow(session)} />
         {conversations.length === 0 && archived.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
-        ) : conversations.length === 0 && archived.length === 0 ? (
+        ) : conversations.length === 0 && archived.length === 0 && localSections.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -129,7 +138,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           </button>
         ) : (
           <ul className="flex flex-col gap-px">
-            {sidebarLayout === "status" ? <StatusGroups sessions={conversations}>{(session) => chatRow(session)}</StatusGroups> : live.map((session) => chatRow(session))}
+            {sidebarLayout === "status" ? <StatusGroups sessions={ungroupedConversations}>{(session) => chatRow(session)}</StatusGroups> : live.map((session) => chatRow(session))}
             {sidebarLayout !== "status" && removed.length > 0 && (
               <RemovedWorkspaces
                 id="chats"
@@ -139,9 +148,9 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
                 {removed.map((session) => chatRow(session))}
               </RemovedWorkspaces>
             )}
-            {archived.length > 0 && (
-              <ArchivedSessions id="list" count={archived.length} opened={archived.some((session) => session.id === store.selectedSessionId)}>
-                {sidebarLayout === "status" ? <StatusGroups sessions={archived} scope="local:archived">{(session) => chatRow(session, true)}</StatusGroups> : archived.map((session) => chatRow(session, true))}
+            {ungroupedArchived.length > 0 && (
+              <ArchivedSessions id="list" count={ungroupedArchived.length} opened={ungroupedArchived.some((session) => session.id === store.selectedSessionId)}>
+                {sidebarLayout === "status" ? <StatusGroups sessions={ungroupedArchived} scope="local:archived">{(session) => chatRow(session, true)}</StatusGroups> : ungroupedArchived.map((session) => chatRow(session, true))}
               </ArchivedSessions>
             )}
           </ul>
@@ -256,7 +265,7 @@ function ChatRow({
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </AsyncContextMenu>
-        <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </DropdownMenuContent>
       </AsyncDropdownMenu>
