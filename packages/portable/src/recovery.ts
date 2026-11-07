@@ -40,6 +40,8 @@ export function isBusyRefusal(error: unknown): boolean {
 export function classifyRecovery(message: string): RecoveryKind {
   // The agents' own sign-in wording only, as `recovery.rs` reads it: another service's 401 is that tool's failure.
   if (/run \/login|authentication_failed|oauth token has expired|run codex login|agent is signed out/i.test(message)) return "signed_out";
+  if (/ExpiredTokenException|UnrecognizedClientException|InvalidSignatureException|invalid security token|AccessDeniedException/i.test(message)) return "signed_out";
+  if (/ThrottlingException|TooManyRequestsException|ServiceUnavailableException/i.test(message)) return "capacity";
   if (/usage.?limit|hit your|limit reached|quota/i.test(message)) return "usage_limit";
   if (/capacity|overloaded|rate.?limit|too many requests|429|529/i.test(message)) return "capacity";
   if (/timeout|timed out|no progress/i.test(message)) return "timeout";

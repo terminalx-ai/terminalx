@@ -52,7 +52,7 @@ Checked against the CLIs' own documentation on 2026-10-22:
 Sources: Claude Code's gateway pages (code.claude.com/docs/en/llm-gateway-connect,
 …/llm-gateway-protocol) and Codex's custom model providers
 (learn.chatgpt.com/docs/config-file/config-advanced). Provider-format
-gateways (Bedrock, Vertex, Foundry) are not templates yet.
+gateways for Vertex and Foundry are not templates yet. Amazon Bedrock is offered as `claude-bedrock@1`; see PRO-200-BEDROCK.md.
 
 Fields, as the service checks them (`src/lib/agentRoutes.ts` checks the same
 first, and `agent_route_check.rs` again in the runtime):
@@ -232,3 +232,7 @@ Claude Code endpoint did not list the model … It lists …").
 Not verified: a real gateway or provider account, the cloud runtime image's
 own CLI versions (Claude Code 2.1.285, Codex 0.159.1) in a VM, and the
 end-to-end path through a deployed server.
+
+Amazon Bedrock (`claude-bedrock@1`) uses a server-side Test and save with AWS
+keys or a Bedrock API key. See [PRO-200-BEDROCK.md](PRO-200-BEDROCK.md) for the
+credential boundaries, runtime environment and validation limits.

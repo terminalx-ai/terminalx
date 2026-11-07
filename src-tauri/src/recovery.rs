@@ -18,8 +18,10 @@ impl RecoveryKind {
         let text = message.to_ascii_lowercase();
         // The agent's own sign-in lapsed: nothing works again until the user
         // signs in, so retrying first only fails the same way.
-        if ["run /login", "authentication_failed", "oauth token has expired", "run codex login", "agent is signed out"].iter().any(|s| text.contains(s)) {
+        if ["run /login", "authentication_failed", "oauth token has expired", "run codex login", "agent is signed out", "expiredtokenexception", "unrecognizedclientexception", "invalidsignatureexception", "invalid security token", "accessdeniedexception"].iter().any(|s| text.contains(s)) {
             Self::SignedOut
+        } else if ["throttlingexception", "toomanyrequestsexception", "serviceunavailableexception"].iter().any(|s| text.contains(s)) {
+            Self::Capacity
         } else
         // The user's own plan ran out, not the provider: retrying before the
         // reset fails the same way.
@@ -847,5 +849,19 @@ mod lifecycle_tests {
         assert_eq!(failure(&payloads[0]), Some(RecoveryKind::Capacity));
         sanitize(&mut payloads[0]);
         assert!(!serde_json::to_string(&payloads[0]).unwrap().contains("secret"));
+    }
+}
+
+#[cfg(test)]
+mod bedrock_recovery_tests {
+    use super::*;
+    #[test]
+    fn bedrock_provider_auth_quota_and_transient_errors_have_distinct_recoveries() {
+        for (message, kind) in [("ExpiredTokenException synthetic-secret", RecoveryKind::SignedOut), ("AccessDeniedException synthetic-secret", RecoveryKind::SignedOut), ("ServiceQuotaExceededException synthetic-secret", RecoveryKind::UsageLimit), ("ThrottlingException quota retry later", RecoveryKind::Capacity), ("ServiceUnavailableException", RecoveryKind::Capacity)] {
+            assert_eq!(RecoveryKind::classify(message), kind);
+        }
+        let mut payloads = Vec::new();
+        crate::harness::claude::transcript::decode_line(r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"ThrottlingException: too many requests synthetic-secret"}]}}"#, &Default::default(), &mut payloads);
+        assert_eq!(failure(&payloads[0]), Some(RecoveryKind::Capacity));
     }
 }

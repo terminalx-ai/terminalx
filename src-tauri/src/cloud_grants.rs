@@ -767,6 +767,7 @@ enum Material {
 /// applied at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteKind {
+    ClaudeBedrock,
     /// `claude-gateway@1`: `ANTHROPIC_BASE_URL` with the stored credential as
     /// `ANTHROPIC_AUTH_TOKEN` (bearer) or `ANTHROPIC_API_KEY` (x-api-key).
     ClaudeGateway,
@@ -782,6 +783,7 @@ pub enum RouteKind {
 impl RouteKind {
     fn of(template_id: &str, version: u64) -> Option<Self> {
         match (template_id, version) {
+            ("claude-bedrock", 1) => Some(Self::ClaudeBedrock),
             ("claude-gateway", 1) => Some(Self::ClaudeGateway),
             ("claude-key-helper", 1) => Some(Self::ClaudeKeyHelper),
             ("codex-provider", 1) => Some(Self::CodexProvider),
@@ -792,7 +794,7 @@ impl RouteKind {
 
     fn provider(self) -> Provider {
         match self {
-            Self::ClaudeGateway | Self::ClaudeKeyHelper => Provider::Claude,
+            Self::ClaudeBedrock | Self::ClaudeGateway | Self::ClaudeKeyHelper => Provider::Claude,
             Self::CodexProvider | Self::CodexAuthCommand => Provider::Codex,
         }
     }
@@ -814,6 +816,8 @@ struct Route {
     base_url: Option<String>,
     /// `authScheme: x-api-key` (Claude Code's `ANTHROPIC_API_KEY`), else bearer.
     api_key_header: bool,
+    region: Option<String>,
+    auth_scheme: Option<String>,
     model: Option<String>,
     helper_path: Option<String>,
     credential: Option<Zeroizing<String>>,
@@ -829,6 +833,9 @@ impl Route {
             && route.model.as_deref().is_none_or(crate::agent_route_check::valid_model_id)
             && route.helper_path.as_deref().is_none_or(crate::agent_route_check::valid_helper_path);
         let fits = match kind {
+            RouteKind::ClaudeBedrock => route.base_url.is_none() && route.helper_path.is_none() && route.model.is_some()
+                && route.region.as_deref().is_some_and(crate::agent_route_check::valid_bedrock_region)
+                && route.credential.as_deref().zip(route.auth_scheme.as_deref()).is_some_and(|(credential, scheme)| crate::agent_route_check::BedrockCredential::parse(credential, scheme).is_some()),
             RouteKind::ClaudeGateway => route.base_url.is_some() && route.credential.is_some() && route.helper_path.is_none(),
             RouteKind::ClaudeKeyHelper => route.helper_path.is_some() && route.credential.is_none(),
             RouteKind::CodexProvider => route.base_url.is_some() && route.model.is_some() && route.credential.is_some() && route.helper_path.is_none(),
@@ -913,6 +920,8 @@ struct RoutePlain {
 #[serde(rename_all = "camelCase")]
 struct RouteSettingsPlain {
     #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
     base_url: Option<String>,
     #[serde(default)]
     auth_scheme: Option<String>,
@@ -971,6 +980,8 @@ fn parse_plaintext(bytes: &[u8]) -> Result<Option<(Material, u64, String)>> {
                 kind: None,
                 base_url: settings.base_url,
                 api_key_header: settings.auth_scheme.as_deref() == Some("x-api-key"),
+                region: settings.region,
+                auth_scheme: settings.auth_scheme,
                 model: settings.model,
                 helper_path: settings.helper_path,
                 credential,
@@ -1809,6 +1820,11 @@ impl Drop for GrantStore {
 
 /// Claude Code's provider switches: any of them would send its requests
 /// somewhere other than the route's endpoint.
+const BEDROCK_ENV: &[&str] = &[
+    "AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN",
+    "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "ANTHROPIC_BEDROCK_BASE_URL", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+];
 const CLAUDE_PROVIDER_SWITCHES: [&str; 3] = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
 
 /// The environment a route gives a new agent process: its endpoint and
@@ -1822,7 +1838,7 @@ fn route_env(provider: Provider, route: &Route) -> Vec<(String, Option<String>)>
     let set = |name: &str, value: &str| (name.to_string(), Some(value.to_string()));
     let unset = |name: &str| (name.to_string(), None);
     let mut env: Vec<(String, Option<String>)> = match provider {
-        Provider::Claude => [CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV].into_iter().chain(CLAUDE_PROVIDER_SWITCHES).map(unset).collect(),
+        Provider::Claude => [CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV].into_iter().chain(CLAUDE_PROVIDER_SWITCHES).chain(BEDROCK_ENV.iter().copied()).map(unset).collect(),
         Provider::Codex => [CODEX_API_KEY_ENV, OPENAI_API_KEY_ENV, CODEX_ROUTE_KEY_ENV].into_iter().map(unset).collect(),
         Provider::Cursor => vec![unset(CURSOR_API_KEY_ENV)],
     };
@@ -1831,6 +1847,23 @@ fn route_env(provider: Provider, route: &Route) -> Vec<(String, Option<String>)>
         env.push(set(name, value));
     };
     match route.kind {
+        Some(RouteKind::ClaudeBedrock) => {
+            if let Some(region) = &route.region {
+                put("CLAUDE_CODE_USE_BEDROCK", "1");
+                put("AWS_REGION", region);
+                put("AWS_DEFAULT_REGION", region);
+                put("AWS_EC2_METADATA_DISABLED", "true");
+                put("AWS_SHARED_CREDENTIALS_FILE", "/dev/null");
+                put("AWS_CONFIG_FILE", "/dev/null");
+                put("CLAUDE_CODE_SKIP_BEDROCK_AUTH", "0");
+                if let Some(endpoint) = crate::agent_route_check::bedrock_endpoint(region) { put("ANTHROPIC_BEDROCK_BASE_URL", &endpoint); }
+            }
+            env.push(unset(CLAUDE_BASE_URL_ENV));
+            env.push(unset(CLAUDE_GATEWAY_DISCOVERY_ENV));
+            if let Some(credential) = route.credential.as_deref().zip(route.auth_scheme.as_deref()).and_then(|(raw, scheme)| crate::agent_route_check::BedrockCredential::parse(raw, scheme)) {
+                for (key, value) in credential.env() { env.retain(|(name, _)| *name != key); env.push((key, value)); }
+            }
+        }
         Some(RouteKind::ClaudeGateway) => {
             let token = if route.api_key_header { CLAUDE_API_KEY_ENV } else { CLAUDE_AUTH_TOKEN_ENV };
             if let (Some(base), Some(credential)) = (&route.base_url, &route.credential) {
@@ -1924,6 +1957,8 @@ fn codex_route_args(route: &Route, kind: RouteKind, cwd: &Path) -> String {
 /// What a route adds to a launch besides the environment.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RouteLaunch {
+    /// Stored Bedrock credentials must not be replaced by a repository AWS helper.
+    pub bedrock: bool,
     /// The model to start on instead of the tab's: the one the route names.
     pub model: Option<String>,
     /// Claude Code's `apiKeyHelper`, for the `--settings` payload: the
@@ -1946,6 +1981,18 @@ pub struct RouteLaunch {
 /// route's address (Claude Code's own for a helper route that names none),
 /// and its provider switches off.
 fn claude_settings_env(route: &Route) -> Vec<(String, String)> {
+    if route.kind == Some(RouteKind::ClaudeBedrock) {
+        let region = route.region.clone().unwrap_or_default();
+        let mut env: Vec<_> = CLAUDE_PROVIDER_SWITCHES.iter().map(|name| (name.to_string(), if *name == "CLAUDE_CODE_USE_BEDROCK" { "1" } else { "0" }.to_string())).collect();
+        env.extend([
+            ("AWS_REGION".into(), region.clone()), ("AWS_DEFAULT_REGION".into(), region.clone()),
+            ("ANTHROPIC_BEDROCK_BASE_URL".into(), crate::agent_route_check::bedrock_endpoint(&region).unwrap_or_default()),
+            ("CLAUDE_CODE_SKIP_BEDROCK_AUTH".into(), "0".into()),
+            ("AWS_PROFILE".into(), "".into()), ("AWS_SHARED_CREDENTIALS_FILE".into(), "/dev/null".into()), ("AWS_CONFIG_FILE".into(), "/dev/null".into()),
+            ("AWS_EC2_METADATA_DISABLED".into(), "true".into()),
+        ]);
+        return env;
+    }
     if !matches!(route.kind, Some(RouteKind::ClaudeGateway | RouteKind::ClaudeKeyHelper)) {
         return Vec::new();
     }
@@ -2011,6 +2058,11 @@ pub struct RouteCheckJob {
 pub fn run_route_check(job: &RouteCheckJob) -> crate::agent_route_check::Checked {
     use crate::agent_route_check::{probe, run_helper, Checked, CredentialHeader, ModelList, Probe, HELPER_TIMEOUT};
     let Some(kind) = job.kind else { return Checked::failed("template-unsupported") };
+    // Bedrock was tested explicitly by the account service. Automatic runtime
+    // checks must not invoke a billable model or fall through to AWS credentials.
+    if kind == RouteKind::ClaudeBedrock {
+        return Checked { outcome: "unverified", code: Some("bedrock-server-tested"), http_status: None, models: Vec::new() };
+    }
     let credential = if kind.user_managed() {
         let Some(helper) = &job.helper else { return Checked::failed("helper-not-found") };
         match run_helper(helper, &job.helper_cwd, HELPER_TIMEOUT) {
@@ -2024,6 +2076,7 @@ pub fn run_route_check(job: &RouteCheckJob) -> crate::agent_route_check::Checked
         }
     };
     let (list, header, default_base) = match kind {
+        RouteKind::ClaudeBedrock => unreachable!("handled above"),
         RouteKind::ClaudeGateway => (ModelList::Anthropic, if job.api_key_header { CredentialHeader::ApiKey } else { CredentialHeader::Bearer }, None),
         RouteKind::ClaudeKeyHelper => (ModelList::Anthropic, CredentialHeader::Both, Some(CLAUDE_DEFAULT_BASE_URL)),
         RouteKind::CodexProvider | RouteKind::CodexAuthCommand => (ModelList::OpenAi, CredentialHeader::Bearer, None),
@@ -2049,11 +2102,11 @@ fn route_launch_in(state: &State, provider: Provider, cwd: &Path, now: Instant) 
                 ..RouteLaunch::default()
             });
         };
-        let mut launch = RouteLaunch { model: route.model.clone(), ..RouteLaunch::default() };
+        let mut launch = RouteLaunch { bedrock: kind == RouteKind::ClaudeBedrock, model: route.model.clone(), ..RouteLaunch::default() };
         match kind {
             RouteKind::ClaudeKeyHelper => launch.api_key_helper = route.helper_in(cwd).map(|path| shell_quote(&path.to_string_lossy())),
             RouteKind::CodexProvider | RouteKind::CodexAuthCommand => launch.codex_args = codex_route_args(route, kind, cwd),
-            RouteKind::ClaudeGateway => {}
+            RouteKind::ClaudeGateway | RouteKind::ClaudeBedrock => {}
         }
         if provider == Provider::Claude {
             launch.claude_settings_env = claude_settings_env(route);
@@ -2096,6 +2149,7 @@ impl GrantStore {
                 Some(check) => check.checked.as_ref().is_some_and(|checked| !checked.passed()) && now.saturating_duration_since(check.at) >= recheck_after,
             };
             let Some(route) = state.active.get(&provider).and_then(|grant| grant.material.route()) else { continue };
+            if route.kind == Some(RouteKind::ClaudeBedrock) { continue; }
             let relative = route.helper_path.as_deref().is_some_and(|helper| helper.starts_with("./"));
             let helper_cwd = match cwd {
                 Some(cwd) => cwd.to_path_buf(),
@@ -3536,6 +3590,44 @@ mod tests {
 
     fn unsets(env: &[(String, Option<String>)], name: &str) -> bool {
         env.iter().any(|(set, value)| set == name && value.is_none())
+    }
+
+    #[test]
+    fn bedrock_grants_launch_claude_without_other_credentials_or_paid_periodic_checks() {
+        for (scheme, credential, present, absent) in [
+            ("bedrock-api-key", r#"{"apiKey":"synthetic-bedrock-key"}"#, "AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID"),
+            ("aws-session", r#"{"accessKeyId":"ASIASYNTHETIC","secretAccessKey":"synthetic-secret","sessionToken":"synthetic-session"}"#, "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK"),
+        ] {
+            let server = FakeServer::new();
+            routed(&server, "claude", route("claude-bedrock", 1, json!({ "region": "us-east-1", "authScheme": scheme, "model": "us.anthropic.test-v1:0" }), Some(credential), 1, "claude"));
+            let store = store(None);
+            let now = Instant::now();
+            store.sync(&server, now, NOW).unwrap();
+            let env = store.agent_env(Provider::Claude, now);
+            assert_eq!(sets(&env, "CLAUDE_CODE_USE_BEDROCK"), Some("1"));
+            assert_eq!(sets(&env, "AWS_REGION"), Some("us-east-1"));
+            assert!(sets(&env, present).is_some());
+            for name in [absent, CLAUDE_API_KEY_ENV, CLAUDE_AUTH_TOKEN_ENV, CLAUDE_OAUTH_ENV, "AWS_PROFILE", "AWS_WEB_IDENTITY_TOKEN_FILE"] { assert!(unsets(&env, name), "{name}"); }
+            assert_eq!(sets(&env, "AWS_SHARED_CREDENTIALS_FILE"), Some("/dev/null"));
+            let launch = store.route_launch(Provider::Claude, Path::new("/work"), now).unwrap();
+            assert_eq!(launch.model.as_deref(), Some("us.anthropic.test-v1:0"));
+            assert!(launch.claude_settings_env.contains(&("ANTHROPIC_BEDROCK_BASE_URL".into(), "https://bedrock-runtime.us-east-1.amazonaws.com".into())));
+            assert!(!format!("{launch:?}").contains("synthetic-"));
+            assert!(!store.status(now).to_string().contains("synthetic-"));
+            assert!(store.due_route_checks(None, now, ROUTE_RECHECK_AFTER).is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_bedrock_grants_never_fall_back_to_organization_or_machine_credentials() {
+        let server = FakeServer::new();
+        routed(&server, "claude", route("claude-bedrock", 1, json!({ "region": "us-east-1", "authScheme": "aws-keys", "model": "test-model" }), Some(r#"{"apiKey":"synthetic-key"}"#), 1, "claude"));
+        let store = store(None);
+        let now = Instant::now();
+        store.sync(&server, now, NOW).unwrap();
+        let env = store.agent_env(Provider::Claude, now);
+        for name in ["CLAUDE_CODE_USE_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK", CLAUDE_API_KEY_ENV, CLAUDE_OAUTH_ENV] { assert!(unsets(&env, name)); }
+        assert!(store.route_launch(Provider::Claude, Path::new("/work"), now).unwrap().notice.unwrap().contains("does not apply"));
     }
 
     #[test]

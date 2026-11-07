@@ -79,6 +79,7 @@ export function routeStatus(route: AgentRoute): { text: string; tone: "ok" | "ne
   const check = route.lastCheck;
   switch (route.status) {
     case "connected":
+      if (route.templateId === "claude-bedrock") return { text: "Amazon Bedrock accepted the test model from the account service. New sessions use this route.", tone: "ok" };
       return { text: helper ? "User managed · working: a workspace ran the helper and the endpoint accepted its credential" : "Connected: a workspace reached the endpoint with the credential", tone: "ok" };
     case "unverified":
       return {
@@ -121,11 +122,23 @@ export function routeErrorMessage(error: unknown): string {
     case "cloud_agent_route_helper_invalid":
       return "The credential helper must be one executable path, ./relative or absolute, without spaces, arguments or .. segments. Put arguments in a script. Nothing was changed.";
     case "cloud_agent_route_credential_invalid":
-      return "That credential cannot be sent in a header (it has spaces or other characters). Nothing was changed.";
+      return "The credential format is invalid. Check all required fields; temporary AWS keys need their session token. Nothing was changed.";
     case "cloud_agent_route_credential_required":
       return "Enter the credential: the endpoint type or its address changed, and a stored credential is never sent somewhere new. Nothing was changed.";
     case "cloud_agent_route_conflict":
       return "Your route for this agent changed elsewhere meanwhile. Refresh to see it, then try again. Nothing was changed.";
+    case "cloud_agent_route_bedrock_unauthorized":
+      return "Amazon Bedrock refused the credentials (UnrecognizedClient, InvalidSignature or expired token). Check the keys and session token. Nothing was saved.";
+    case "cloud_agent_route_bedrock_forbidden":
+      return "Amazon Bedrock returned AccessDenied (403). Check model access and bedrock:InvokeModel permission. Nothing was saved.";
+    case "cloud_agent_route_bedrock_quota":
+      return "Amazon Bedrock returned ServiceQuotaExceeded. Ask an organisation admin to raise the quota or switch logins. Nothing was saved.";
+    case "cloud_agent_route_bedrock_throttled":
+      return "Amazon Bedrock is temporarily throttling requests. Try again later. Nothing was saved.";
+    case "cloud_agent_route_bedrock_model":
+      return "Amazon Bedrock refused the test model (ValidationException or not found). Check its ID and region. Nothing was saved.";
+    case "cloud_agent_route_bedrock_unavailable":
+      return "Amazon Bedrock did not complete the test. Try again later. Nothing was saved.";
     case "cloud_agent_route_invalid":
       return "That is not a setting this endpoint type takes. Nothing was changed.";
     case "cloud_workspace_not_found":
@@ -181,6 +194,8 @@ export function fieldProblem(field: AgentRouteField, raw: string | undefined): s
   const value = (raw ?? "").trim();
   if (!value) return field.required ? `${field.label} is required.` : null;
   switch (field.kind) {
+    case "region":
+      return /^(us|eu|ap|sa|ca|me|af|il|mx|cn)-(gov-)?[a-z]+-\d$/.test(value) ? null : "Enter an AWS region, such as us-east-1.";
     case "url":
       return baseUrlProblem(value);
     case "model":
@@ -226,6 +241,7 @@ export function routeSummary(route: AgentRoute, template: AgentRouteTemplate | u
   const parts = [template?.label ?? `${route.templateId} (version ${route.templateVersion})`];
   const host = originOf(route.settings.baseUrl);
   if (host) parts.push(new URL(host).host);
+  if (route.settings.region) parts.push(route.settings.region);
   if (route.settings.helperPath) parts.push(`helper ${route.settings.helperPath}`);
   if (route.settings.model) parts.push(`model ${route.settings.model}`);
   return parts.join(" · ");

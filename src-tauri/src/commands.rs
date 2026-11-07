@@ -1217,7 +1217,37 @@ pub async fn cloud_agent_route_save(
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
     let change = std::sync::Arc::new(change);
     let mut check = None;
-    let credential = if save.enter_credential {
+    let credential = if change.template.bedrock {
+        if !save.enter_credential || save.save_unchecked {
+            return Err(CloudWorkspaceClientError::local("cloud_agent_route_invalid", false));
+        }
+        let organization = dialog_name(state.account.organization_name(&change.organization_id), &change.organization_id);
+        let scheme = change.settings.get("authScheme").and_then(serde_json::Value::as_str).unwrap_or("");
+        let fields: &[(&str, &str)] = match scheme {
+            "bedrock-api-key" => &[("apiKey", "Bedrock API key")],
+            "aws-keys" => &[("accessKeyId", "AWS access key ID"), ("secretAccessKey", "AWS secret access key")],
+            "aws-session" => &[("accessKeyId", "AWS access key ID"), ("secretAccessKey", "AWS secret access key"), ("sessionToken", "AWS session token")],
+            _ => return Err(CloudWorkspaceClientError::local("cloud_agent_route_invalid", false)),
+        };
+        let mut parts = Vec::new();
+        for &(key, label) in fields {
+            let text = format!("Enter {label} for Amazon Bedrock in organization {organization}. Test and save sends one small billable model request from the account service. Credentials are encrypted and reach only your own unshared cloud workspaces. Temporary credentials expire and must be replaced.");
+            let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            app.run_on_main_thread(move || { let _ = sender.send(secure_prompt("Amazon Bedrock", &text, label)); }).map_err(|_| unavailable())?;
+            let entered = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+            let value = entered.map_err(ProviderPromptError::client_error)?;
+            let escaped = zeroize::Zeroizing::new(serde_json::to_string(value.as_str()).map_err(|_| unavailable())?);
+            parts.push(zeroize::Zeroizing::new(format!("\"{key}\":{}", escaped.as_str())));
+        }
+        let mut body = zeroize::Zeroizing::new(String::from("{"));
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 { body.push(','); }
+            body.push_str(part);
+        }
+        body.push('}');
+        Some(body)
+    } else if save.enter_credential {
         let organization = dialog_name(state.account.organization_name(&change.organization_id), &change.organization_id);
         let agent = save.agent.label();
         let host = change.host().map(|host| dialog_text(&host)).unwrap_or_else(|| "your endpoint".into());

@@ -81,7 +81,7 @@ pub struct AgentRouteSaved {
     pub routes: Option<Value>,
 }
 
-const SETTING_KEYS: [&str; 4] = ["baseUrl", "authScheme", "model", "helperPath"];
+const SETTING_KEYS: [&str; 5] = ["baseUrl", "authScheme", "model", "helperPath", "region"];
 
 /// The settings as plain strings of the keys a template can have; anything
 /// else is refused before a dialog opens.
@@ -113,6 +113,7 @@ fn template_id_ok(id: &str) -> bool {
 /// needs it.
 pub(crate) struct TemplateFacts {
     pub label: String,
+    pub bedrock: bool,
     pub custom_endpoint: bool,
     pub model_list: ModelList,
 }
@@ -122,6 +123,7 @@ fn template_in(routes: &Value, agent: AgentRouteAgent, id: &str) -> Option<Templ
         template.get("id").and_then(Value::as_str) == Some(id) && template.get("provider").and_then(Value::as_str) == Some(agent.as_str())
     })?;
     Some(TemplateFacts {
+        bedrock: id == "claude-bedrock",
         label: template.get("label").and_then(Value::as_str).unwrap_or(id).to_string(),
         custom_endpoint: template.get("mode").and_then(Value::as_str) == Some("custom-endpoint"),
         model_list: match template.pointer("/capabilities/modelList").and_then(Value::as_str) {

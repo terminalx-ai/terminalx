@@ -412,7 +412,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         }
         // The plan's window ran out: the CLI records the limit as an API
         // error, with the reset time beside it.
-        "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) && (v["error"] == "rate_limit" || v["apiError"] == "usage_limit_reached") => {
+        "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) && (v["apiError"] == "usage_limit_reached" || v["quotaLimits"]["status"] == "rejected" || v["apiErrorParams"]["rate_limit_info"]["status"] == "rejected" || (v["error"] == "rate_limit" && crate::recovery::RecoveryKind::classify(&text_of(&v["message"]["content"])) == crate::recovery::RecoveryKind::UsageLimit)) => {
             let quota = if v["quotaLimits"].is_object() { &v["quotaLimits"] } else { &v["apiErrorParams"]["rate_limit_info"] };
             out.push(Payload::RateLimited {
                 status: Some("rejected".into()),

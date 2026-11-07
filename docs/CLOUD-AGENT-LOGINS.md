@@ -306,3 +306,8 @@ login", which a disconnect with a running Claude Code workspace disproved.
   workspaces: the same open question as PRO-82.
 - Whether a temporary lend is worth offering at all once PRO-82's sign-in
   exists.
+
+
+PRO-200 retains Cursor API keys after a bounded supported-token-export spike.
+Cloud usage-limit cards offer a safe request to an organisation admin. See
+[PRO-200-BEDROCK.md](PRO-200-BEDROCK.md) for findings and Bedrock model access.

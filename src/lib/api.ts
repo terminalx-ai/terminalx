@@ -865,11 +865,11 @@ export type AgentLoginProvider = "codex" | "claude" | "cursor";
 /** The agents a route can be for: Cursor's CLI supports neither a custom endpoint nor a credential helper. */
 export type AgentRouteAgent = "claude" | "codex";
 export type AgentRouteMode = "custom-endpoint" | "user-managed";
-export type AgentRouteFieldKey = "baseUrl" | "authScheme" | "model" | "helperPath";
+export type AgentRouteFieldKey = "baseUrl" | "authScheme" | "model" | "helperPath" | "region";
 
 export interface AgentRouteField {
   key: AgentRouteFieldKey;
-  kind: "url" | "choice" | "model" | "path";
+  kind: "url" | "choice" | "model" | "path" | "region";
   required: boolean;
   label: string;
   help: string;
@@ -888,7 +888,7 @@ export interface AgentRouteTemplate {
   fields: AgentRouteField[];
   /** What a custom endpoint stores; null for a helper, whose credential never reaches the app. */
   credential: { label: string; help: string } | null;
-  capabilities: { modelList: "anthropic" | "openai"; defaultBaseUrl?: string; modelPicker: boolean };
+  capabilities: { modelList: "anthropic" | "openai" | "bedrock"; defaultBaseUrl?: string; modelPicker: boolean };
   docs: string;
 }
 

@@ -55,6 +55,11 @@ const templates: AgentRouteTemplate[] = [
     capabilities: { modelList: "openai", modelPicker: false },
     docs: "",
   },
+  { id: "claude-bedrock", version: 1, provider: "claude", mode: "custom-endpoint", label: "Amazon Bedrock", description: "AWS model access", fields: [
+    { key: "region", kind: "region", required: true, label: "AWS region", help: "" },
+    { key: "authScheme", kind: "choice", required: true, label: "AWS authentication", help: "", choices: [{ value: "bedrock-api-key", label: "Bedrock API key" }], default: "bedrock-api-key" },
+    { key: "model", kind: "model", required: true, label: "Test model", help: "" },
+  ], credential: { label: "AWS credentials", help: "One billable test request." }, capabilities: { modelList: "bedrock", modelPicker: false }, docs: "" },
 ];
 
 let routes: AgentRoute[];
@@ -106,7 +111,7 @@ describe("your model access in Settings (PRO-18)", () => {
     await show();
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Use your own endpoint or helper…" }));
     // Only Claude Code's own templates.
-    expect(within(row("claude")).getAllByTestId("agent-route-template").map((item) => item.dataset.template)).toEqual(["claude-gateway", "claude-key-helper"]);
+    expect(within(row("claude")).getAllByTestId("agent-route-template").map((item) => item.dataset.template)).toEqual(["claude-gateway", "claude-key-helper", "claude-bedrock"]);
     const save = within(row("claude")).getByTestId("agent-route-save") as HTMLButtonElement;
     expect(save.disabled).toBe(true);
     fill("claude", "baseUrl", "http://llm.example.com");
@@ -211,5 +216,32 @@ describe("your model access in Settings (PRO-18)", () => {
     vi.mocked(api.cloudAgentRouteSave).mockRejectedValueOnce({ code: "cloud_agent_route_conflict", status: 409 });
     fireEvent.click(within(row("claude")).getByTestId("agent-route-save"));
     await waitFor(() => expect(screen.getByTestId("agent-route-error").textContent).toMatch(/changed elsewhere/));
+  });
+});
+
+describe("Amazon Bedrock Test and save", () => {
+  it("requires region/model, enters credentials natively and never offers an unchecked save", async () => {
+    vi.mocked(api.cloudAgentRouteSave).mockResolvedValue({ saved: true, check: null, routes: view() });
+    await show();
+    fireEvent.click(within(row("claude")).getByText("Use your own endpoint or helper…"));
+    fireEvent.click(within(row("claude")).getByLabelText(/Amazon Bedrock/));
+    expect((screen.getByText("Test and save") as HTMLButtonElement).disabled).toBe(true);
+    fill("claude", "region", "us-east-1");
+    fill("claude", "model", "us.anthropic.test-v1:0");
+    expect(screen.queryByText(/Save even if/)).toBeNull();
+    fireEvent.click(screen.getByText("Test and save"));
+    await waitFor(() => expect(api.cloudAgentRouteSave).toHaveBeenCalledWith(expect.objectContaining({ templateId: "claude-bedrock", enterCredential: true, saveUnchecked: false, settings: { region: "us-east-1", model: "us.anthropic.test-v1:0", authScheme: "bedrock-api-key" } })));
+    expect(await screen.findByText(/Amazon Bedrock accepted the test model/)).toBeTruthy();
+  });
+
+  it("confirms disconnect and preserves the credential until confirmed", async () => {
+    routes = [gatewayRoute({ templateId: "claude-bedrock", settings: { region: "us-east-1", model: "test-model", authScheme: "bedrock-api-key" } })];
+    vi.mocked(api.cloudAgentRouteRemove).mockResolvedValue(view());
+    await show();
+    fireEvent.click(screen.getByTestId("agent-route-switch-back"));
+    expect(screen.getByText("Disconnect Amazon Bedrock?")).toBeTruthy();
+    expect(api.cloudAgentRouteRemove).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Switch back" }));
+    await waitFor(() => expect(api.cloudAgentRouteRemove).toHaveBeenCalledWith("claude", "rev-1", "org-2"));
   });
 });

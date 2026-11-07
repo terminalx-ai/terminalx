@@ -451,10 +451,14 @@ describe("the same SessionView for local and cloud sessions", () => {
     ];
     await openConnected();
     expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.getByText("Claude Code usage limit reached.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy request" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /retry/i, hidden: true })).toBeNull();
     cleanup();
     render(wrap(<CloudHarness />));
     expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.getByText("Claude Code usage limit reached.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy request" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /retry/i, hidden: true })).toBeNull();
     expect(guard.violations).toEqual([]);
   });

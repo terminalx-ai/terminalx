@@ -90,7 +90,7 @@ export function OrganizationAgentRoutes({
         settings,
         expectedVersion: route?.version ?? 0,
         enterCredential,
-        saveUnchecked: edit.saveUnchecked,
+        saveUnchecked: template.id === "claude-bedrock" ? false : edit.saveUnchecked,
       });
       const checked: AgentRouteCheckResult | null = saved.check;
       if (!saved.saved) {
@@ -105,6 +105,8 @@ export function OrganizationAgentRoutes({
         agent: edit.agent,
         text: line
           ? `${line.text}${line.warn ? " Saved anyway, as you chose." : ""}`
+          : template.id === "claude-bedrock"
+            ? "Amazon Bedrock accepted the test model. Saved for new Claude Code sessions in your own cloud workspaces."
           : template.mode === "user-managed"
             ? "Saved. It is user managed: a workspace checks it when it gets the route or starts the agent."
             : "Saved. The stored credential was kept.",
@@ -226,6 +228,7 @@ export function OrganizationAgentRoutes({
                   {confirmRemove === agent && route && (
                     <div className="mt-2 space-y-1.5 rounded-md border border-hairline bg-background p-2" data-testid="agent-route-confirm-remove">
                       <p>
+                        {route.templateId === "claude-bedrock" && <strong className="block">Disconnect Amazon Bedrock?</strong>}
                         Switch {name} back to {organization}'s login? Your route{route.credentialStored ? " and its stored credential are" : " is"} deleted.
                         New sessions in your workspaces use the organization's login; running sessions keep what they started with until restarted
                         {route.credentialStored ? ", and a workspace that received the credential stays unshareable until it restarts" : ""}.
@@ -378,11 +381,11 @@ function RouteEditor({
             </label>
           ) : (
             <p className="text-muted-foreground">
-              When you save, the app asks for the {template.credential.label.toLowerCase()} in its own secure dialog and checks it from this Mac.{" "}
+              When you save, the app asks for the {template.credential.label.toLowerCase()} in its own secure dialog and checks it {template.id === "claude-bedrock" ? "from the account service" : "from this Mac"}.{" "}
               {template.credential.help}
             </p>
           )}
-          {entering && (
+          {entering && template.id !== "claude-bedrock" && (
             <label className="flex items-start gap-2">
               <input type="checkbox" checked={edit.saveUnchecked} disabled={busy} onChange={(event) => onChange({ ...edit, saveUnchecked: event.target.checked })} />
               <span>Save even if this Mac's check fails: an endpoint may answer only the cloud, or serve a model it doesn't list. The workspace checks it again.</span>
@@ -399,7 +402,7 @@ function RouteEditor({
       <div className="flex gap-1.5">
         <Button size="xs" disabled={busy || invalid} onClick={() => onSave(template)} data-testid="agent-route-save">
           {busy && <Loader2 className="animate-spin" />}
-          {entering ? "Enter credential and save" : "Save"}
+          {template.id === "claude-bedrock" ? "Test and save" : entering ? "Enter credential and save" : "Save"}
         </Button>
         <Button size="xs" variant="ghost" disabled={busy} onClick={onCancel}>
           Cancel

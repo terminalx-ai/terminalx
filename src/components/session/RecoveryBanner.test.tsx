@@ -336,3 +336,34 @@ describe("session recovery UI smoke", () => {
     expect(askDetail({ input: null })).toBeNull();
   });
 });
+
+describe("organisation usage-limit card (PRO-200)", () => {
+  it("copies a ready admin request using only an allowlisted agent name", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<RecoveryBanner {...props()} kind="usage_limit" organizationAgent="claude" />);
+    expect(screen.getByText("Claude Code usage limit reached.")).toBeTruthy();
+    expect(screen.getByText("Ask an organisation admin to raise it or switch logins.")).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy request" })));
+    expect(writeText).toHaveBeenCalledWith("Claude Code usage limit reached. Please raise the provider usage limit or switch logins in Settings → Organizations → Agent logins so our cloud workspace can continue.");
+  });
+
+  it("never copies unknown harness values, provider errors, prompts or workspace secrets", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<RecoveryBanner {...props()} kind="usage_limit" organizationAgent="AWS_SECRET_ACCESS_KEY=synthetic-secret" />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy request" })));
+    expect(writeText.mock.calls[0][0]).toMatch(/^Agent usage limit reached/);
+    expect(writeText.mock.calls[0][0]).not.toContain("synthetic-secret");
+  });
+
+  it.each(["signed_out", "capacity", "timeout", "failed"] as const)("does not show the usage card for %s", kind => {
+    render(<RecoveryBanner {...props()} kind={kind} organizationAgent="claude" />);
+    expect(screen.queryByRole("button", { name: "Copy request" })).toBeNull();
+  });
+
+  it.each([
+    ["ExpiredTokenException", "signed_out"], ["AccessDeniedException", "signed_out"],
+    ["ServiceQuotaExceededException", "usage_limit"], ["ThrottlingException: quota retry later", "capacity"], ["ServiceUnavailableException", "capacity"],
+  ])("classifies %s separately", (message, kind) => expect(classifyRecovery(message)).toBe(kind));
+});

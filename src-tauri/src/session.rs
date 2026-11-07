@@ -4397,6 +4397,13 @@ impl SessionManager {
         if let Some(helper) = route.and_then(|route| route.api_key_helper.clone()) {
             settings["apiKeyHelper"] = serde_json::Value::String(helper);
         }
+        if route.is_some_and(|route| route.bedrock) {
+            // The explicit route owns its AWS credential set; a checkout's helper
+            // must not replace it or turn an expired session into another identity.
+            settings["awsAuthRefresh"] = serde_json::Value::String(String::new());
+            settings["awsCredentialExport"] = serde_json::Value::String(String::new());
+            settings["apiKeyHelper"] = serde_json::Value::String(String::new());
+        }
         // A route's endpoint, at the level above the checkout's own settings.
         if let Some(env) = route.map(|route| &route.claude_settings_env).filter(|env| !env.is_empty()) {
             settings["env"] = env.iter().map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone()))).collect::<serde_json::Map<_, _>>().into();

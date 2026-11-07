@@ -768,6 +768,7 @@ export function OrganizationAgentLogins({
                       <div className={status.warn ? "text-warning" : "text-muted-foreground"} data-testid="agent-login-status">
                         {status.text}
                       </div>
+                      {agent.id === "cursor" && <p className="mt-1 text-muted-foreground">For cloud workspaces, create a user API key in Cursor Dashboard → API Keys. Cursor's browser sign-in stays on the computer where you sign in.</p>}
                       {agentLoginConfigurerLeft(login) && (
                         <div className="mt-1 text-warning" data-testid="agent-login-configurer-left">
                           The person who connected this login is no longer an owner or admin of {organization}. It keeps working, on their subscription.

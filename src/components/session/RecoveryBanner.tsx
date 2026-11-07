@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { copyText } from "@/lib/clipboard";
 import type { RecoveryKind } from "@/types/events";
 import { recoveryOffer } from "@/lib/recovery";
 import type { PendingAsk } from "@/lib/transcript";
@@ -22,7 +24,9 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend, onPressed }: {
+export function RecoveryBanner({ organizationAgent, placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend, onPressed }: {
+  /** Present only for a cloud tab. Only an allowlisted harness name reaches the clipboard. */
+  organizationAgent?: string;
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -60,6 +64,15 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
     onPressed?.(inputOf(event));
     run();
   };
+  const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
+  const agentName = organizationAgent == null ? null : ({ claude: "Claude Code", codex: "Codex", cursor: "Cursor", "cursor-agent": "Cursor" }[organizationAgent] ?? "Agent");
+  const organizationLimit = kind === "usage_limit" && agentName !== null;
+  const copyRequest = async () => {
+    try {
+      await copyText(`${agentName} usage limit reached. Please raise the provider usage limit or switch logins in Settings → Organizations → Agent logins so our cloud workspace can continue.`);
+      setCopied("copied");
+    } catch { setCopied("failed"); }
+  };
   const now = useCountdownNow([kind === "usage_limit" ? limit?.resetsAt ?? null : null]);
   if (!kind && !waiting) return null;
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
@@ -82,8 +95,12 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   return <section aria-label="Session recovery" role="status" className={placement === "composer"
     ? "mx-auto mb-2 max-h-[50vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 overflow-auto rounded-xl border border-warning/30 bg-warning/10 p-3 text-xs"
     : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
-    <p className="font-medium">{offer.title}</p>
-    <p className="mt-1">{offer.message}</p>
+    <p className="font-medium">{organizationLimit ? `${agentName} usage limit reached.` : offer.title}</p>
+    <p className="mt-1">{organizationLimit ? "Ask an organisation admin to raise it or switch logins." : offer.message}</p>
+    {organizationLimit && <div className="mt-2 flex items-center gap-2">
+      <Button size="sm" variant="outline" onClick={() => void copyRequest()}>Copy request</Button>
+      {copied !== "idle" && <span role="status">{copied === "copied" ? "Copied" : "Could not copy. Try again."}</span>}
+    </div>}
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />

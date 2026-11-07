@@ -95,6 +95,57 @@ impl Checked {
     }
 }
 
+/// Bedrock routes always bring explicit credentials. Never read this machine's
+/// AWS profile, metadata service, or default credential chain for a route.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BedrockCredential {
+    api_key: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    session_token: Option<String>,
+}
+
+impl Drop for BedrockCredential {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for value in [&mut self.api_key, &mut self.access_key_id, &mut self.secret_access_key, &mut self.session_token].into_iter().flatten() { value.zeroize(); }
+    }
+}
+
+impl BedrockCredential {
+    pub fn parse(raw: &str, scheme: &str) -> Option<Self> {
+        if raw.len() > 16384 { return None; }
+        let value: Self = serde_json::from_str(raw).ok()?;
+        let valid = |part: &Option<String>| part.as_ref().is_some_and(|text| !text.is_empty() && text.bytes().all(|c| (33..=126).contains(&c)));
+        let fits = match scheme {
+            "bedrock-api-key" => valid(&value.api_key) && value.access_key_id.is_none() && value.secret_access_key.is_none() && value.session_token.is_none(),
+            "aws-keys" | "aws-session" => value.api_key.is_none() && valid(&value.access_key_id) && valid(&value.secret_access_key)
+                && if scheme == "aws-session" { valid(&value.session_token) } else { value.session_token.is_none() && !value.access_key_id.as_ref().is_some_and(|id| id.starts_with("ASIA")) },
+            _ => false,
+        };
+        fits.then_some(value)
+    }
+
+    pub fn env(&self) -> Vec<(String, Option<String>)> {
+        [("AWS_BEARER_TOKEN_BEDROCK", &self.api_key), ("AWS_ACCESS_KEY_ID", &self.access_key_id), ("AWS_SECRET_ACCESS_KEY", &self.secret_access_key), ("AWS_SESSION_TOKEN", &self.session_token)]
+            .into_iter().map(|(key, value)| (key.to_string(), value.clone())).collect()
+    }
+}
+
+pub fn valid_bedrock_region(region: &str) -> bool {
+    let parts: Vec<_> = region.split('-').collect();
+    matches!(parts.first(), Some(&"us" | &"eu" | &"ap" | &"sa" | &"ca" | &"me" | &"af" | &"il" | &"mx" | &"cn"))
+        && (parts.len() == 3 || (parts.len() == 4 && parts[1] == "gov"))
+        && parts[parts.len() - 2].bytes().all(|b| b.is_ascii_lowercase())
+        && !parts[parts.len() - 2].is_empty()
+        && parts.last().is_some_and(|part| part.len() == 1 && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+pub fn bedrock_endpoint(region: &str) -> Option<String> {
+    valid_bedrock_region(region).then(|| format!("https://bedrock-runtime.{region}.amazonaws.com{}", if region.starts_with("cn-") { ".cn" } else { "" }))
+}
+
 /// A model id as the server accepts one: one token, no traversal.
 pub fn valid_model_id(value: &str) -> bool {
     let mut chars = value.chars();
@@ -493,5 +544,32 @@ mod tests {
         let here = script(dir.path(), "here", "pwd", 0o755);
         let cwd = dir.path().canonicalize().unwrap();
         assert_eq!(run_helper(&here, &cwd, HELPER_TIMEOUT).unwrap().as_str(), cwd.to_str().unwrap());
+    }
+}
+#[cfg(test)]
+mod bedrock_tests {
+    use super::*;
+
+    #[test]
+    fn aws_credentials_are_exclusive_and_temporary_keys_require_their_token() {
+        let raw = r#"{"accessKeyId":"ASIASYNTHETIC","secretAccessKey":"synthetic-secret","sessionToken":"synthetic-session"}"#;
+        let parsed = BedrockCredential::parse(raw, "aws-session").unwrap();
+        let env = parsed.env();
+        assert!(env.contains(&("AWS_SESSION_TOKEN".into(), Some("synthetic-session".into()))));
+        assert!(env.contains(&("AWS_BEARER_TOKEN_BEDROCK".into(), None)));
+        assert!(BedrockCredential::parse(raw, "aws-keys").is_none());
+        assert!(BedrockCredential::parse(r#"{"accessKeyId":"ASIASYNTHETIC","secretAccessKey":"synthetic-secret"}"#, "aws-keys").is_none());
+        for bad in [r#"{"apiKey":"secret","sessionToken":"extra"}"#, r#"{"apiKey":"secret","profile":"default"}"#, r#"{"apiKey":"bad\nheader"}"#] {
+            assert!(BedrockCredential::parse(bad, "bedrock-api-key").is_none());
+        }
+        let api = BedrockCredential::parse(r#"{"apiKey":"synthetic-api-key"}"#, "bedrock-api-key").unwrap();
+        assert!(api.env().contains(&("AWS_ACCESS_KEY_ID".into(), None)));
+    }
+
+    #[test]
+    fn bedrock_regions_cannot_redirect_credentials() {
+        assert_eq!(bedrock_endpoint("us-east-1").as_deref(), Some("https://bedrock-runtime.us-east-1.amazonaws.com"));
+        assert_eq!(bedrock_endpoint("cn-north-1").as_deref(), Some("https://bedrock-runtime.cn-north-1.amazonaws.com.cn"));
+        for bad in ["", "us-east-1.evil.example", "us-east-1/", "https://example.com", "us--1"] { assert!(bedrock_endpoint(bad).is_none(), "{bad}"); }
     }
 }
