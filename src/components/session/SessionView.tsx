@@ -527,7 +527,7 @@ export function SessionView({
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
-          className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline px-2"
+          className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-2"
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && !compact && (
