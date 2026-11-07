@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { SessionEntry, TabEntry } from "@/types/session";
@@ -23,7 +23,9 @@ vi.mock("@/lib/models", async (original) => ({
   ...await original<typeof import("@/lib/models")>(), loadModels: vi.fn(async () => {}), refreshModels: vi.fn(),
   useModels: () => [{ harness: "claude", id: "opus", label: "Opus", efforts: ["high"], defaultEffort: "high", isDefault: true, acceptsImages: true }],
 }));
-import { upsertPipeline } from "@/lib/issuePipeline";
+import { pipelineForSession, upsertPipeline, useIssuePipelines } from "@/lib/issuePipeline";
+import { secondOpinionPrompt } from "@/lib/agentHandoff";
+import type { Turn } from "@/lib/transcript";
 import { ContinuationDialog } from "./ContinuationDialog";
 
 const source = { id: "source", harness: "claude", model: "opus", effort: "high", permissionMode: "plan", status: "completed" } as TabEntry;
@@ -86,4 +88,24 @@ it("starts no automation for an issue's session that has no pipeline", async () 
   const { shown, sent } = await continueIn(issueSession(null));
   expect(shown).toEqual(["false", "false"]);
   expect(sent).toEqual({ autoMerge: false, resolveConflicts: false });
+});
+
+it("a second opinion creates one tab and sends one diff prompt while keeping the source pipeline", async () => {
+  const session = issueSession({});
+  const original = { ...source, harness: "codex" };
+  session.tabs = [original];
+  const { result } = renderHook(() => useIssuePipelines());
+  const before = pipelineForSession(result.current, session.id);
+  const prompt = secondOpinionPrompt({ key: "turn", seq: 1, ts: "", live: false, toolCount: 1, editedFiles: 1,
+    prompt: { text: "Fix the bug", ts: "", seq: 1 }, completed: { status: "ok", ts: "" },
+    work: [{ kind: "text", key: "answer", seq: 3, text: "Fixed" }, { kind: "tool", key: "edit", call: { callId: "edit", name: "Edit", toolType: "edit", input: {}, seq: 2, edits: [{ path: "app.ts", kind: "update", unified: "@@ -1 +1 @@\n-bug\n+fix" }] } }],
+  } satisfies Turn);
+  const onClose = vi.fn();
+  render(<ContinuationDialog session={session} source={original} initialHarness="claude" reviewPrompt={prompt} onClose={onClose} />);
+  await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  expect(mocks.add).toHaveBeenCalledExactlyOnceWith(session.id, "claude", "opus", expect.anything(), "plan");
+  expect(mocks.send).toHaveBeenCalledExactlyOnceWith(session.id, "next", prompt, undefined, true);
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.invoke.mock.calls.filter(([command]) => command.startsWith("issue_pipeline_"))).toEqual([]);
+  expect(pipelineForSession(result.current, session.id)).toEqual(before);
 });

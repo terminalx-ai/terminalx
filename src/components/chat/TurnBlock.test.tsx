@@ -17,6 +17,18 @@ afterEach(cleanup);
 const turn = (images: { url: string; name?: string }[]): Turn =>
   ({ key: "t1", prompt: { text: "what is this?", images, ts: "2026-10-03T00:00:00Z", seq: 1 }, work: [], live: false }) as unknown as Turn;
 
+it("offers a second opinion only for a finished turn with an available action", () => {
+  const value = { ...turn([]), completed: { status: "ok", ts: "" } };
+  const review = vi.fn();
+  const { rerender } = render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onSecondOpinion={review} />);
+  fireEvent.click(screen.getByRole("button", { name: "Second opinion" }));
+  expect(review).toHaveBeenCalledExactlyOnceWith(value);
+  rerender(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+  expect(screen.queryByRole("button", { name: "Second opinion" })).toBeNull();
+  rerender(<TurnBlock turn={{ ...value, live: true, completed: undefined }} sessionId="s" stream={[]} working onSecondOpinion={review} />);
+  expect(screen.queryByRole("button", { name: "Second opinion" })).toBeNull();
+});
+
 it("shows verified sender attribution on prompts and queued inputs", () => {
   const value = turn([]);
   value.prompt!.author = { userId: "alice", displayName: "Alice" };
