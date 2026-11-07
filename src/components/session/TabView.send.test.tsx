@@ -130,12 +130,13 @@ describe("sending a message (#727)", () => {
     // Only the turns in and near the view are drawn, however long the conversation.
     expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
 
-    // The work the window does is timed by its CPU time: on a machine with
+    // Time this worker's CPU, excluding Vitest's runner and transform threads
+    // when tests share a process. On a machine with
     // other work queued (a load of 50 is usual where this was written) a wall
     // clock times the scheduler as much as the chat. The wall clock is held to
     // a looser bound, which still catches a frame or a timer waited for.
     const cpuMs = (since: NodeJS.CpuUsage) => {
-      const used = process.cpuUsage(since);
+      const used = process.threadCpuUsage(since);
       return (used.user + used.system) / 1000;
     };
     const atOnce = { cpu: [] as number[], wall: [] as number[] };
@@ -144,13 +145,13 @@ describe("sending a message (#727)", () => {
       const text = `Follow-up ${send}`;
       fireEvent.change(field(), { target: { value: text } });
       let started = performance.now();
-      let cpu = process.cpuUsage();
+      let cpu = process.threadCpuUsage();
       fireEvent.keyDown(field(), { key: "Enter" });
       expect(sendingText()).toContain(text);
       atOnce.cpu.push(cpuMs(cpu));
       atOnce.wall.push(performance.now() - started);
       started = performance.now();
-      cpu = process.cpuUsage();
+      cpu = process.threadCpuUsage();
       await act(async () => reply!.resolve());
       await waitFor(() => {
         expect(sendingText()).toBeNull();

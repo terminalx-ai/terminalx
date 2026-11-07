@@ -1,4 +1,9 @@
-import "@testing-library/dom";
+import { configure } from "@testing-library/dom";
+
+// Cold editor/composer mounts and their follow-up effects can exceed the
+// one-second default on busy runners. Keep readiness assertions, but give
+// asynchronous UI work enough time to settle; explicit test deadlines still win.
+configure({ asyncUtilTimeout: 10_000 });
 
 // jsdom lays nothing out and ships no ResizeObserver. Components observe
 // their own boxes for re-fitting, so give them an observer that never fires;
