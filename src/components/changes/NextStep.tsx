@@ -4,7 +4,7 @@ import { cn } from "@/lib/cn";
 
 export type StepTone = "bad" | "warn" | "good" | "muted";
 
-export type LocalStepKind = "pull" | "detached" | "conflicts" | "commit" | "empty" | "local" | "push";
+export type LocalStepKind = "pull" | "reconcile" | "detached" | "conflicts" | "commit" | "empty" | "local" | "push";
 
 /**
  * The step, and in plain words why it is the step: written for someone who
@@ -13,11 +13,8 @@ export type LocalStepKind = "pull" | "detached" | "conflicts" | "commit" | "empt
 export type LocalStep = { kind: LocalStepKind; text: string; why: string; tone: StepTone };
 
 /**
- * What the branch needs before its pull request is the thing to look at. One
- * at a time, the first that holds in this order: a step lower down is moot
- * while one above it stands (conflicts make a pull or a push pointless, an
- * uncommitted change is not in what would be pushed). Null when the branch
- * itself needs nothing and the pull request (or opening one) is the next step.
+ * Wording for the native local-step resolver shared with the session header.
+ * Null when the branch needs nothing before its pull request (or opening one).
  *
  * A project with no remote has no push and no pull request: its work ends by
  * being merged here (`local`), or by publishing the project.
@@ -25,16 +22,16 @@ export type LocalStep = { kind: LocalStepKind; text: string; why: string; tone: 
  * `pr` is undefined while it is being read: no step is claimed from it then.
  */
 export function localStep(o: BranchOverview, pr: PullRequest | null | undefined, baseName: string): LocalStep | null {
-  if (o.unpulled > 0) {
+  if (o.nextStep === "pull") {
     return { kind: "pull", text: `Pull ${commits(o.unpulled)}`, why: `Someone else pushed to this branch. Pull so you are working on the latest.`, tone: "warn" };
   }
-  if (o.onBase) return null;
-  if (!o.branch) return { kind: "detached", text: "Not on a branch", why: "Work done here belongs to no branch and is easy to lose. Make a branch to keep it.", tone: "muted" };
-  if (o.merge.state === "conflicts") {
+  if (o.nextStep === "reconcile") return { kind: "reconcile", text: "Reconcile with upstream", why: "Both this branch and its remote have new commits. Keep both sides before pushing.", tone: "warn" };
+  if (o.nextStep === "detached") return { kind: "detached", text: "Not on a branch", why: "Work done here belongs to no branch and is easy to lose. Make a branch to keep it.", tone: "muted" };
+  if (o.nextStep === "conflicts") {
     const n = o.merge.conflicted.length;
-    return { kind: "conflicts", text: `Conflicts with ${baseName} in ${files(n)}`, why: `${baseName} changed the same lines you did. Resolve them before this can be merged.`, tone: "bad" };
+    return { kind: "conflicts", text: n ? `Conflicts with ${baseName} in ${files(n)}` : "Finish the Git operation", why: n ? `${baseName} changed the same lines you did. Resolve them before this can be merged.` : "Finish the merge, rebase or other operation before continuing.", tone: "bad" };
   }
-  if (o.dirty) {
+  if (o.nextStep === "commit") {
     return {
       kind: "commit",
       text: "Commit your changes",
@@ -43,8 +40,8 @@ export function localStep(o: BranchOverview, pr: PullRequest | null | undefined,
     };
   }
   // Nothing of its own: unless a pull request already speaks for it (a merged one, say).
-  if (o.ahead === 0) return pr === null || !o.hasRemote ? { kind: "empty", text: "No changes yet", why: "", tone: "muted" } : null;
-  if (!o.hasRemote) {
+  if (o.nextStep === "empty") return pr === null || !o.hasRemote ? { kind: "empty", text: "No changes yet", why: "", tone: "muted" } : null;
+  if (o.nextStep === "local") {
     return {
       kind: "local",
       text: `${commits(o.ahead)} ready for ${baseName}`,
@@ -52,8 +49,8 @@ export function localStep(o: BranchOverview, pr: PullRequest | null | undefined,
       tone: "good",
     };
   }
-  if (!o.upstream) return { kind: "push", text: `Push ${commits(o.ahead)}`, why: "Your commits are only on this computer. Push them so others can see them and you can open a pull request.", tone: "muted" };
-  if (o.unpushed > 0) return { kind: "push", text: `Push ${commits(o.unpushed)}`, why: "Your newest commits are only on this computer. Push them so the remote, and any pull request, has them.", tone: "muted" };
+  if (o.nextStep === "push" && !o.upstream) return { kind: "push", text: `Push ${commits(o.ahead)}`, why: "Your commits are only on this computer. Push them so others can see them and you can open a pull request.", tone: "muted" };
+  if (o.nextStep === "push") return { kind: "push", text: `Push ${commits(o.unpushed)}`, why: "Your newest commits are only on this computer. Push them so the remote, and any pull request, has them.", tone: "muted" };
   return null;
 }
 

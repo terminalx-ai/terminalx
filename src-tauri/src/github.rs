@@ -373,6 +373,47 @@ pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
     }
 }
 
+/// A bounded, batched GraphQL read for UI status. Full workflow/suite evidence
+/// is deliberately collected only when a Merge action is about to run.
+pub fn branch_snapshot(cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
+    branch_snapshot_with(cwd, branch, false, run)
+}
+
+/// Explicit refreshes/actions preserve the PR tab's limited-checks permission
+/// fallback. Automatic polling still makes only one query and backs off.
+pub fn branch_snapshot_on_demand(cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
+    branch_snapshot_with(cwd, branch, true, run)
+}
+
+fn branch_snapshot_with(cwd: &Path, branch: &str, allow_unread: bool, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Option<PrSnapshot>> {
+    let fields = format!("{SNAPSHOT_FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
+    let mut read = |fields: &str| run(cwd, &["pr", "list", "--head", branch, "--state", "all", "--limit", "100", "--json", fields]);
+    let (out, checks_unread) = match read(&fields) {
+        Ok(out) => (out, false),
+        Err(error) if allow_unread && not_permitted(&format!("{error:#}")) => (read(&without_checks(&fields)).map_err(|_| error)?, true),
+        Err(error) => return Err(error),
+    };
+    let records: Vec<Value> = serde_json::from_str(&out)?;
+    let origin = crate::git::remote_url(cwd).as_deref().and_then(crate::issues::github_repo_from_url);
+    let mut prs: Vec<_> = records.iter().filter(|pr| {
+        pr["isCrossRepository"].as_bool() != Some(true) || origin.as_ref().is_some_and(|origin| {
+            origin.eq_ignore_ascii_case(&format!("{}/{}", pr["headRepositoryOwner"]["login"].as_str().unwrap_or_default(), pr["headRepository"]["name"].as_str().unwrap_or_default()))
+        })
+    }).map(|record| {
+        let mut pr = parse_snapshot(record);
+        pr.checks_unread = checks_unread;
+        pr
+    }).collect();
+    prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
+    // A full page cannot prove that an older open PR does not exist.
+    if records.len() == 100 && prs.first().is_none_or(|pr| pr.state != "OPEN") {
+        bail!("Pull request history is truncated; open the PR tab to inspect it.");
+    }
+    let pr = prs.into_iter().next();
+    if pr.as_ref().is_some_and(|pr| pr.head_sha.is_empty()) { bail!("GitHub omitted the pull request head."); }
+    Ok(pr)
+}
+
 /// What a `gh` call printed and how it ended, for the calls whose exit code
 /// is part of the answer.
 pub(crate) struct GhOutput {
@@ -1022,6 +1063,54 @@ pub fn enable_head_branch_deletion(cwd: &Path) -> Result<HeadBranchSetting> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn branch_status_batches_readiness_into_one_query_without_validation_calls() {
+        let mut calls = 0;
+        let pr = branch_snapshot_with(Path::new("/missing-repo"), "feature", false, |_, args| {
+            calls += 1;
+            assert_eq!(&args[..8], &["pr", "list", "--head", "feature", "--state", "all", "--limit", "100"]);
+            for field in ["mergeStateStatus", "reviewDecision", "statusCheckRollup", "headRefOid"] { assert!(args[9].contains(field)); }
+            let mut record: Value = serde_json::from_str(include_str!("fixtures/branch_step_gh.json")).unwrap();
+            record["isCrossRepository"] = serde_json::json!(false);
+            Ok(serde_json::json!([record]).to_string())
+        }).unwrap().unwrap();
+        assert_eq!(calls, 1);
+        assert!(!pr.head_sha.is_empty());
+        assert!(pr.validation.is_none(), "polling must not collect workflow/job/suite evidence");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn only_explicit_branch_reads_retry_without_inaccessible_checks() {
+        for explicit in [false, true] {
+            let mut calls = 0;
+            let result = branch_snapshot_with(Path::new("/missing-repo"), "feature", explicit, |_, args| {
+                calls += 1;
+                if calls == 1 {
+                    assert!(args[9].contains("statusCheckRollup"));
+                    bail!("GraphQL: Resource not accessible by integration");
+                }
+                assert!(!args[9].contains("statusCheckRollup"));
+                assert!(args[9].contains("headRefOid"));
+                let mut record: Value = serde_json::from_str(include_str!("fixtures/branch_step_gh.json")).unwrap();
+                record.as_object_mut().unwrap().remove("statusCheckRollup");
+                record["isCrossRepository"] = serde_json::json!(false);
+                Ok(serde_json::json!([record]).to_string())
+            });
+            if explicit {
+                let pr = result.unwrap().unwrap();
+                assert!(pr.checks_unread);
+                assert!(pr.checks.is_empty());
+                assert!(pr.validation.is_none());
+                assert_eq!(calls, 2);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(calls, 1, "background permission failures must back off after one query");
+            }
+        }
+    }
 
     #[cfg(feature = "desktop")]
     #[test]

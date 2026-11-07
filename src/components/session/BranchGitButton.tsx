@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, GitBranch, Loader2 } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { isMac } from "@/lib/shortcuts";
 import { useShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
 import { BRANCH_ACTIONS, BRANCH_STATES, branchError, branchStep, useBranchStep, type BranchAction, type BranchRequest } from "@/lib/branchStep";
 import type { SessionEntry } from "@/types/session";
@@ -37,7 +38,8 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
   const agentWorking = agentPending || snapshot?.state === "agentWorking"
     || (awaitingStatus && session.tabs.some((tab) => tab.status === "in_progress" || tab.status === "waiting"));
   const state = agentWorking ? BRANCH_STATES.agentWorking : snapshot ? BRANCH_STATES[snapshot.state] : null;
-  const enabled = (action: BranchAction) => !!snapshot?.actions.includes(action) && !readError && !agentWorking && !running && (!BRANCH_ACTIONS[action].agent || !!tabId);
+  const agentAction = (action: BranchAction) => BRANCH_ACTIONS[action].agent || (action === "pull" && snapshot?.pullNeedsAgent);
+  const enabled = (action: BranchAction) => !!snapshot?.actions.includes(action) && !readError && !agentWorking && !running && (!agentAction(action) || !!tabId);
 
   useEffect(() => {
     alive.current = true;
@@ -76,15 +78,16 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
     setPending(null);
     setError(null);
     setNotice(null);
-    setRunning(BRANCH_ACTIONS[request.action].progress);
-    if (BRANCH_ACTIONS[request.action].agent && request.tabId) {
+    const isAgent = BRANCH_ACTIONS[request.action].agent || (request.action === "pull" && request.expected.pullNeedsAgent);
+    setRunning(isAgent ? "Sending to agent…" : BRANCH_ACTIONS[request.action].progress);
+    if (isAgent && request.tabId) {
       agentRun.current = { tabId: request.tabId, started: false };
       setAgentPending(true);
     }
     try {
       const result = await branchStep.run(session.id, request);
       if (agentRun.current) agentRun.current.acceptedAfter = latestSnapshot.current?.revision ?? 0;
-      if (!BRANCH_ACTIONS[request.action].agent || agentRun.current) setNotice(result);
+      if (!isAgent || agentRun.current) setNotice(result);
     }
     catch (reason) { agentRun.current = null; setAgentPending(false); setError(branchError(reason)); }
     finally { lock.current = false; setRunning(null); refresh(); }
@@ -112,28 +115,38 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
     } catch (reason) { setError(branchError(reason)); }
     finally { lock.current = false; setRunning(null); }
   };
-  const shortcut = (action: BranchAction) => () => {
-    if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return false;
-    void prepare(action);
-  };
-  useShortcut("git.commitPush", shortcut(snapshot?.state === "ahead" ? "push" : "commitPush"));
-  useShortcut("git.createPr", shortcut("createPr"));
-  useShortcut("git.pull", shortcut("pull"));
-  useShortcut("git.fixChecks", shortcut("fixChecks"));
-  useShortcut("git.merge", shortcut("merge"));
+  const latest = useRef({ prepare, enabled, pending, snapshot });
+  latest.current = { prepare, enabled, pending, snapshot };
+  // Stable registrations keep shortcut precedence unchanged as status updates.
+  const shortcuts = useMemo(() => {
+    const handler = (action: BranchAction) => (event: KeyboardEvent) => {
+      if (!isMac && event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "c" && event.target instanceof Element && event.target.closest(".xterm, .terminal-host")) return false;
+      const now = latest.current;
+      const actual = action === "commitPush" && now.snapshot?.state === "ahead" ? "push" : action;
+      if (lock.current || now.pending || !now.enabled(actual) || document.querySelector('[role="dialog"], [role="alertdialog"]')) return false;
+      void now.prepare(actual);
+    };
+    return { commitPush: handler("commitPush"), createPr: handler("createPr"), pull: handler("pull"), fixChecks: handler("fixChecks"), merge: handler("merge") };
+  }, []);
+  useShortcut("git.commitPush", shortcuts.commitPush);
+  useShortcut("git.createPr", shortcuts.createPr);
+  useShortcut("git.pull", shortcuts.pull);
+  useShortcut("git.fixChecks", shortcuts.fixChecks);
+  useShortcut("git.merge", shortcuts.merge);
 
   const tooltip = snapshot
-    ? `${state?.detail}. Base: ${snapshot.base}. Merge method: ${snapshot.mergeMethod}.${snapshot.state === "behind" ? (snapshot.behindUpstream ? " Pull fast-forwards from the upstream branch." : " Pull merges the latest base into this branch.") : ""}`
+    ? `${state?.detail}. Base: ${snapshot.base}. Merge method: ${snapshot.mergeMethod}.${snapshot.state === "behind" ? (snapshot.pullNeedsAgent ? " The agent preserves uncommitted work while pulling." : snapshot.behindUpstream ? " Pull fast-forwards from the upstream branch." : " Pull merges the latest base into this branch.") : ""}`
     : "Reading branch status";
-  const failure = error ?? readError;
+  const failure = error;
+  if ((!snapshot || snapshot.state === "hidden" || snapshot.state === "merged") && !error && !running && !pending) return null;
   const needsMessage = pending?.action === "commitPush" || pending?.action === "createPr";
   return (
     <div className="flex min-w-0 items-center gap-2" data-testid="branch-git-button">
       <div className="flex shrink-0 items-center">
         <WithTooltip label={tooltip} shortcut={state?.action ? BRANCH_ACTIONS[state.action].shortcut : undefined}>
-          <Button variant="outline" size="sm" className="max-w-44 rounded-r-none border-r-0" aria-label={running ?? (readError ? "Git unavailable" : state?.label ?? "Checking branch…")} disabled={!state?.action || !enabled(state.action) || !!pending} onClick={() => state?.action && void prepare(state.action)}>
+          <Button variant="outline" size="sm" className="max-w-44 rounded-r-none border-r-0" aria-label={running ?? (state?.label || "Git actions")} disabled={!state?.action || !enabled(state.action) || !!pending} onClick={() => state?.action && void prepare(state.action)}>
             {running || refreshing || agentWorking ? <Loader2 className="size-3.5 animate-spin" /> : <GitBranch className="size-3.5" />}
-            <span className="truncate @max-[520px]/session-header:hidden">{running ?? (readError ? "Git unavailable" : state?.label ?? "Checking branch…")}</span>
+            <span className="truncate @max-[520px]/session-header:hidden">{running ?? (state?.label || "Git actions")}</span>
           </Button>
         </WithTooltip>
         <DropdownMenu>
@@ -141,7 +154,7 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
           <DropdownMenuContent align="end">
             {(Object.entries(BRANCH_ACTIONS) as [BranchAction, typeof BRANCH_ACTIONS[BranchAction]][]).map(([action, definition]) => (
               <DropdownMenuItem key={action} disabled={!enabled(action) || !!pending} onSelect={() => void prepare(action)}>
-                {definition.label}{definition.shortcut && <span className="ml-auto pl-4 text-xs text-muted-foreground">{keycaps(definition.shortcut).join("")}</span>}
+                {action === "resolveConflicts" && snapshot?.state === "diverged" ? BRANCH_STATES.diverged.label : definition.label}{definition.shortcut && <span className="ml-auto pl-4 text-xs text-muted-foreground">{keycaps(definition.shortcut).join("")}</span>}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />

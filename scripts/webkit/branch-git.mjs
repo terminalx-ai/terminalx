@@ -33,8 +33,8 @@ localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: false }));
   };
 })();`;
 try {
-  for (const mode of ["light", "dark"]) for (const width of [1280, 960, 720]) {
-    const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width, height: 780 }, { extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\n${extra}` });
+  for (const mode of (process.env.BRANCH_GIT_MODES?.split(",") ?? ["light", "dark"])) for (const width of (process.env.BRANCH_GIT_WIDTHS?.split(",").map(Number) ?? [1280, 960, 720])) {
+    const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width, height: 780 }, { waitUntil: "domcontentloaded", extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\n${extra}` });
     await openConversation(page, "Local long session");
     const button = page.getByTestId("branch-git-button");
     const primary = button.getByRole("button", { name: "Commit and push", exact: true });
@@ -64,6 +64,11 @@ try {
     await page.keyboard.press("Meta+Shift+M");
     await page.waitForFunction(() => window.__gitCalls.includes("merge"));
     failed += report("merge shortcut", { "uses the same session authorization": await page.getByRole("dialog").count() === 0 });
+    await page.evaluate(() => window.__setBranch("diverged", "resolveConflicts"));
+    await button.getByRole("button", { name: "Reconcile with upstream", exact: true }).waitFor();
+    await page.evaluate(() => window.__setBranch("hidden", null));
+    await button.waitFor({ state: "hidden" });
+    failed += report("inapplicable branch", { "no Git button or background alert": await button.count() === 0 });
     await page.evaluate(() => { window.__failGit = true; window.__setBranch("ahead", "push"); });
     await button.getByRole("button", { name: "Push", exact: true }).click();
     await button.getByRole("alert").waitFor();

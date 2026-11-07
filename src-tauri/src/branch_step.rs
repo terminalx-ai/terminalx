@@ -1,6 +1,6 @@
 //! The session header's next Git step. Reads are published after one complete
 //! refresh; actions re-read their inputs and never force push or bypass GitHub rules.
-use std::{collections::HashSet, path::Path, sync::{atomic::{AtomicU64, Ordering}, LazyLock, Mutex}, time::Duration};
+use std::{collections::{HashMap, HashSet}, path::Path, sync::{atomic::{AtomicU64, Ordering}, LazyLock, Mutex}, time::{Duration, Instant}};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ static REVISION: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Step {
-    NoPr, AgentWorking, Uncommitted, Behind, Ahead, Diverged, Conflicts,
+    Hidden, NoPr, AgentWorking, Uncommitted, Behind, Ahead, Diverged, Conflicts,
     ChangesRequested, Draft, ChecksFailing, ChecksPending, ReviewRequired, Ready, Merged,
 }
 
@@ -21,21 +21,31 @@ pub enum Step {
 /// and unpublished requirements cannot turn into an enabled Merge button.
 pub fn resolve(work: &WorkStatus, pr: Option<&PrSnapshot>, working: bool) -> Step {
     if working { return Step::AgentWorking; }
-    if !work.conflicted.is_empty() || work.operation.is_some() { return Step::Conflicts; }
-    if work.dirty { return Step::Uncommitted; }
-    if work.ahead > 0 && work.behind > 0 { return Step::Diverged; }
-    if work.behind > 0 { return Step::Behind; }
-    if work.ahead > 0 { return Step::Ahead; }
+    use crate::branch_overview::LocalStep;
+    // GitHub describes the published head. A local resolution waiting to be
+    // pushed must not inherit that older head's base conflicts/behind status.
+    let current_pr = pr.filter(|pr| pr.state == "OPEN" && work.head.as_deref() == Some(&pr.head_sha));
+    let base_conflicts = current_pr.is_some_and(|pr| pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY");
+    // A PR base that must advance also takes precedence over committing dirt.
+    let base_behind = current_pr.is_some_and(|pr| pr.merge_state == "BEHIND");
+    let local = crate::branch_overview::next_step(work, base_conflicts, work.ahead_of_base.unwrap_or(1), true);
+    match local {
+        Some(LocalStep::Conflicts) => return Step::Conflicts,
+        Some(LocalStep::Reconcile) => return Step::Diverged,
+        Some(LocalStep::Pull) => return Step::Behind,
+        _ if base_behind => return Step::Behind,
+        Some(LocalStep::Commit) => return Step::Uncommitted,
+        Some(LocalStep::Push) => return Step::Ahead,
+        _ => {}
+    }
     let Some(pr) = pr else { return Step::NoPr; };
     if pr.state == "MERGED" {
         return if work.head.as_deref() == Some(&pr.head_sha) { Step::Merged } else { Step::NoPr };
     }
     if pr.state != "OPEN" { return Step::NoPr; }
-    if pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY" { return Step::Conflicts; }
-    if pr.merge_state == "BEHIND" { return Step::Behind; }
     if pr.review_decision.as_deref() == Some("CHANGES_REQUESTED") { return Step::ChangesRequested; }
     if pr.is_draft { return Step::Draft; }
-    if pr.checks_unread || pr.validation.is_none() || work.head.as_deref() != Some(&pr.head_sha) { return Step::ChecksPending; }
+    if pr.checks_unread || work.head.as_deref() != Some(&pr.head_sha) { return Step::ChecksPending; }
     let checks: Vec<_> = pr.checks.iter().chain(pr.validation.iter().flatten()).collect();
     if checks.iter().any(|c| check_bucket(&c.state) == CheckBucket::Fail) { return Step::ChecksFailing; }
     if checks.iter().any(|c| check_bucket(&c.state) == CheckBucket::Pending)
@@ -69,12 +79,13 @@ pub struct Snapshot {
     pub actions: Vec<Action>,
     pub pr: Option<PrSnapshot>,
     pub behind_upstream: bool,
+    pub pull_needs_agent: bool,
 }
 
 fn actions(step: Step, pr: Option<&PrSnapshot>) -> Vec<Action> {
     use Action::*;
     let mut available = match step {
-        Step::AgentWorking | Step::Merged => vec![],
+        Step::Hidden | Step::AgentWorking | Step::Merged => vec![],
         Step::Uncommitted => vec![CommitPush],
         Step::Ahead => vec![Push],
         Step::Behind => vec![Pull],
@@ -125,39 +136,136 @@ fn read_work(cwd: &Path) -> Result<WorkStatus> {
             }
         }
     }
+    if work.upstream.is_none() {
+        work.upstream = git::comparison_ref(cwd).map(|r| r.strip_prefix("refs/remotes/").unwrap_or(&r).to_string());
+    }
     Ok(work)
 }
 
-pub fn read(session: &SessionEntry, working: bool) -> Result<Snapshot> {
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Refresh { Local, Auto, Remote }
+
+const REMOTE_EVERY: Duration = Duration::from_secs(5 * 60);
+#[derive(Default)]
+struct Hosted {
+    pr: Option<PrSnapshot>,
+    known: bool,
+    next: Option<Instant>,
+    failures: u32,
+    running: bool,
+}
+impl Hosted {
+    fn start(&mut self, mode: Refresh, now: Instant) -> bool {
+        if mode == Refresh::Local || self.running || (mode != Refresh::Remote && self.next.is_some_and(|next| now < next)) { return false; }
+        self.running = true;
+        true
+    }
+    fn finish(&mut self, result: Result<Option<PrSnapshot>>, now: Instant) {
+        self.running = false;
+        match result {
+            Ok(pr) => { self.pr = pr; self.known = true; self.failures = 0; }
+            Err(_) => { self.known = false; self.failures = self.failures.saturating_add(1); }
+        }
+        self.next = Some(now + REMOTE_EVERY * 2_u32.pow(self.failures.min(4)));
+    }
+}
+static HOSTED: LazyLock<Mutex<HashMap<String, Hosted>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn supported(work: &WorkStatus, remote: Option<&str>) -> bool {
+    work.branch.is_some() && work.branch != work.default_branch && work.head.is_some()
+        && remote.is_some_and(|remote| crate::github_identity::remote_host_kind(remote) == "github")
+}
+
+fn hidden(session: &SessionEntry, revision: u64) -> Snapshot {
+    Snapshot { revision, session_id: session.id.clone(), cwd: session.cwd.clone(),
+        branch: String::new(), head: String::new(), base: String::new(), merge_method: "merge".into(), state: Step::Hidden,
+        actions: vec![], pr: None, behind_upstream: false, pull_needs_agent: false }
+}
+
+/// Frequent reads only inspect local Git and cached hosted status. An automatic
+/// hosted read is shared per checkout/branch/remote, survives view remounts and
+/// backs off (10, 20, 40, 80 minutes) after errors. Manual refresh bypasses it.
+pub fn preview(session: &SessionEntry, working: bool, mode: Refresh) -> Result<Snapshot> {
     let revision = REVISION.fetch_add(1, Ordering::Relaxed);
     let cwd = checkout(session)?;
-    let mut work = read_work(cwd)?;
-    let branch = work.branch.clone().context("Check out a branch to use Git actions.")?;
-    if work.branch == work.default_branch { bail!("Create a worktree branch before opening a pull request."); }
-    let remote = git::remote_url(cwd).context("Add a GitHub origin remote to use Git actions.")?;
-    if crate::github_identity::remote_host_kind(&remote) != "github" { bail!("The header's pull request actions need a GitHub remote."); }
-    let pr = if working || work.operation.is_some() || !work.conflicted.is_empty() { None } else {
-        if !crate::branch_overview::fetch(cwd) { bail!("Could not fetch the remote. Check your connection and Git credentials, then refresh."); }
-        if git::current_branch(cwd).as_deref() != Some(&branch) { bail!("The branch changed while refreshing. Refresh again."); }
-        let prs = github::prs_for_branch(cwd, &branch)?;
-        match prs.first() {
-            Some(pr) => Some(github::pr_snapshot(cwd, pr.number)?),
-            None => None,
-        }
+    let work = read_work(cwd)?;
+    let remote = git::remote_url(cwd);
+    if !supported(&work, remote.as_deref()) { return Ok(hidden(session, revision)); }
+    let branch = work.branch.as_deref().unwrap();
+    let key = format!("{}\0{branch}\0{}", std::fs::canonicalize(cwd)?.display(), remote.as_deref().unwrap());
+    let fetch = !working && HOSTED.lock().unwrap().entry(key.clone()).or_default().start(mode, Instant::now());
+    if fetch {
+        let result = (|| {
+            anyhow::ensure!(crate::branch_overview::fetch(cwd), "Could not fetch the remote");
+            let pr = if mode == Refresh::Remote { github::branch_snapshot_on_demand(cwd, branch)? }
+                else { github::branch_snapshot(cwd, branch)? };
+            anyhow::ensure!(git::remote_url(cwd) == remote, "The remote changed while refreshing");
+            Ok(pr)
+        })();
+        HOSTED.lock().unwrap().get_mut(&key).unwrap().finish(result, Instant::now());
+    }
+    let (pr, known) = {
+        let cache = HOSTED.lock().unwrap();
+        let hosted = cache.get(&key);
+        (hosted.and_then(|h| h.pr.clone()), hosted.is_some_and(|h| h.known))
     };
-    // Do not combine a hosted snapshot with local work read before a commit.
+    let after = if fetch {
+        let after = read_work(cwd)?;
+        if after.branch != work.branch || git::remote_url(cwd) != remote { return Ok(hidden(session, revision)); }
+        after
+    } else { work };
+    compose(session, after, pr, working, known, revision)
+}
+
+/// An action re-reads the remote immediately. Only Merge needs the expensive
+/// pinned workflow/suite validation; the polling path never runs it.
+pub fn read(session: &SessionEntry, working: bool, action: Action) -> Result<Snapshot> {
+    let revision = REVISION.fetch_add(1, Ordering::Relaxed);
+    let cwd = checkout(session)?;
+    let work = read_work(cwd)?;
+    anyhow::ensure!(supported(&work, git::remote_url(cwd).as_deref()), "Git actions need a GitHub feature branch.");
+    anyhow::ensure!(!working, "Wait for the agent to finish before running a Git action.");
+    let branch = work.branch.as_deref().unwrap();
+    anyhow::ensure!(crate::branch_overview::fetch(cwd), "Could not fetch the remote. Check your connection and Git credentials.");
+    let mut pr = github::branch_snapshot_on_demand(cwd, branch)?;
+    if action == Action::Merge {
+        let number = pr.as_ref().context("There is no open pull request.")?.number;
+        let evidence = github::pr_snapshot(cwd, number)?;
+        anyhow::ensure!(evidence.validation.is_some() && !evidence.checks_unread, "Could not validate the pull request checks. Refresh before merging.");
+        pr = Some(evidence);
+    }
     let after = read_work(cwd)?;
-    if after.branch.as_deref() != Some(&branch) { bail!("The branch changed while refreshing. Refresh again."); }
-    work = after;
-    let state = resolve(&work, pr.as_ref(), working);
+    anyhow::ensure!(after.branch == work.branch, "The branch changed while refreshing. Refresh again.");
+    compose(session, after, pr, working, true, revision)
+}
+
+fn compose(session: &SessionEntry, work: WorkStatus, pr: Option<PrSnapshot>, working: bool, known: bool, revision: u64) -> Result<Snapshot> {
+    let cwd = Path::new(&session.cwd);
     let base = pr.as_ref().filter(|p| p.state == "OPEN").map(|p| p.base.clone())
         .or_else(|| session.base_ref.as_deref().filter(|s| *s != "HEAD").map(|s| s.strip_prefix("origin/").unwrap_or(s).to_string())
             .filter(|base| git::run(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{base}")]).is_ok()
                 || git::run(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{base}")]).is_ok()))
         .or(work.default_branch.clone()).context("The base branch is unknown.")?;
+    let mut work = work;
+    if work.default_branch.as_deref() != Some(&base) {
+        let remote_base = format!("refs/remotes/origin/{base}");
+        let base_ref = if git::run(cwd, &["show-ref", "--verify", "--quiet", &remote_base]).is_ok() { remote_base } else { format!("refs/heads/{base}") };
+        work.ahead_of_base = git::run(cwd, &["rev-list", "--count", &format!("{base_ref}..HEAD")]).ok().and_then(|n| n.trim().parse().ok());
+    }
+    let mut state = resolve(&work, pr.as_ref().filter(|_| known), working);
+    // Failed/unfinished hosted reads do not pretend there is no PR or claim
+    // readiness. Local steps remain useful even without a network connection.
+    if !known && !matches!(state, Step::AgentWorking | Step::Conflicts | Step::Diverged | Step::Behind | Step::Uncommitted | Step::Ahead) {
+        state = Step::Hidden;
+    }
+    if state == Step::NoPr && work.ahead_of_base == Some(0) { state = Step::Hidden; }
     let merge_method = crate::store::projects::issue_pipeline_settings(&session.project_path)?.merge_method;
-    Ok(Snapshot { revision, session_id: session.id.clone(), cwd: session.cwd.clone(), branch, head: work.head.context("This branch has no commits yet.")?, base,
-        merge_method, state, actions: actions(state, pr.as_ref()), pr, behind_upstream: work.behind > 0 })
+    let mut available = actions(state, pr.as_ref());
+    if !known { available.retain(|action| *action != Action::CreatePr); }
+    Ok(Snapshot { revision, session_id: session.id.clone(), cwd: session.cwd.clone(),
+        branch: work.branch.context("Check out a branch first.")?, head: work.head.context("This branch has no commits yet.")?, base,
+        merge_method, state, actions: available, pr, behind_upstream: work.behind > 0, pull_needs_agent: state == Step::Behind && work.dirty })
 }
 
 /// Authorization is held only in this app process, per session, destination,
@@ -260,7 +368,8 @@ pub fn account(session: &SessionEntry, action: Action) -> Result<Account> {
 #[serde(rename_all = "camelCase")]
 pub struct ExpectedPr { pub url: String, pub head_sha: String }
 
-/// Only identity crosses back from the UI; fresh evidence decides the action.
+/// Identity and the displayed pull route cross back from the UI; fresh
+/// evidence decides availability. A click must not silently change into an agent turn.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Expected {
@@ -271,6 +380,8 @@ pub struct Expected {
     pub base: String,
     pub merge_method: String,
     pub pr: Option<ExpectedPr>,
+    #[serde(default)]
+    pub pull_needs_agent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,7 +399,7 @@ pub enum Outcome { Done(String), Prompt(String) }
 
 fn unchanged(expected: &Expected, now: &Snapshot) -> Result<()> {
     if expected.session_id != now.session_id || expected.cwd != now.cwd || expected.branch != now.branch || expected.head != now.head
-        || expected.base != now.base || expected.merge_method != now.merge_method
+        || expected.base != now.base || expected.merge_method != now.merge_method || expected.pull_needs_agent != now.pull_needs_agent
         || expected.pr.as_ref().map(|p| (&p.url, &p.head_sha)) != now.pr.as_ref().map(|p| (&p.url, &p.head_sha)) {
         bail!("The branch or pull request changed. Review its current state and try again.");
     }
@@ -315,6 +426,15 @@ fn transfer(cwd: &Path, args: &[&str]) -> Result<()> {
         })
 }
 
+fn check_publish_target(cwd: &Path, branch: &str) -> Result<()> {
+    let remote = git::run(cwd, &["config", "--get", &format!("branch.{branch}.remote")]).ok();
+    let merge = git::run(cwd, &["config", "--get", &format!("branch.{branch}.merge")]).ok();
+    anyhow::ensure!(remote.as_ref().is_none_or(|r| r.trim() == "origin")
+        && merge.as_ref().is_none_or(|r| r.trim() == format!("refs/heads/{branch}")),
+        "This branch tracks a different remote branch. Use the Branch tab to inspect it before publishing.");
+    Ok(())
+}
+
 pub fn act(session: &SessionEntry, now: &Snapshot, request: &Request, ensure_idle: impl FnOnce() -> Result<()>) -> Result<Outcome> {
     unchanged(&request.expected, now)?;
     if !now.actions.contains(&request.action) { bail!("This action is not available in the branch's current state. Refresh and try again."); }
@@ -332,6 +452,12 @@ pub fn act(session: &SessionEntry, now: &Snapshot, request: &Request, ensure_idl
     if !actions(resolve(&work, now.pr.as_ref(), false), now.pr.as_ref()).contains(&request.action) {
         bail!("The working tree changed while preparing the action. Refresh and try again.");
     }
+    if request.action == Action::Pull && work.dirty != now.pull_needs_agent {
+        bail!("The working tree changed while preparing the pull. Review its current state and try again.");
+    }
+    if matches!(request.action, Action::CommitPush | Action::Push | Action::CreatePr) {
+        check_publish_target(cwd, &now.branch)?;
+    }
     let publish = || -> Result<()> {
         let source = format!("refs/heads/{}:refs/heads/{}", now.branch, now.branch);
         transfer(cwd, &["-c", "credential.interactive=false", "push", "--set-upstream", "origin", &source])
@@ -342,7 +468,7 @@ pub fn act(session: &SessionEntry, now: &Snapshot, request: &Request, ensure_idl
     match request.action {
         CommitPush => {
             git::commit_all(cwd, message()?, None)?;
-            publish().context("Committed locally, but the push failed. Your commit is safe; retry with Push.")?;
+            publish().context("Committed locally, but the push failed. Your commit is safe; refresh to see the next step.")?;
         }
         Push => { publish()?; }
         CreatePr => {
@@ -354,8 +480,13 @@ pub fn act(session: &SessionEntry, now: &Snapshot, request: &Request, ensure_idl
             return Ok(Outcome::Done(format!("Created {url}")));
         }
         Pull => {
+            if work.dirty {
+                return Ok(Outcome::Prompt(format!("Pull the latest commits into branch {:?} (base {:?}). Preserve all uncommitted, staged and untracked work; reconcile both sides and resolve conflicts. Do not discard changes, force push, push, merge a pull request or open a new pull request. Report the result.", now.branch, now.base)));
+            }
             if now.behind_upstream {
-                transfer(cwd, &["-c", "credential.interactive=false", "pull", "--ff-only"])?;
+                let target = git::comparison_ref(cwd).context("The remote branch is no longer available. Refresh and try again.")?;
+                // read() already fetched. An explicit ref also works for --no-track worktrees.
+                git::run(cwd, &["merge", "--ff-only", "--", &target])?;
             } else {
                 // GitHub's BEHIND refers to the PR base, not the tracking branch.
                 // Background refreshes also fetch. FETCH_HEAD is shared and
@@ -367,11 +498,14 @@ pub fn act(session: &SessionEntry, now: &Snapshot, request: &Request, ensure_idl
             }
         }
         MarkReady => { github::mark_ready(cwd, pr()?.number)?; }
-        Merge => match github::merge_pr_at(cwd, pr()?.number, &now.merge_method, &pr()?.head_sha)? {
+        Merge => {
+            anyhow::ensure!(pr()?.validation.is_some() && !pr()?.checks_unread, "Could not validate the pull request checks. Refresh before merging.");
+            match github::merge_pr_at(cwd, pr()?.number, &now.merge_method, &pr()?.head_sha)? {
             github::PinnedMerge::Merged => return Ok(Outcome::Done("Merged".into())),
             github::PinnedMerge::Accepted => return Ok(Outcome::Done("GitHub accepted the merge; awaiting its result.".into())),
             github::PinnedMerge::HeadMoved { .. } => bail!("The pull request head changed. Refresh before merging."),
             github::PinnedMerge::Refused(reason) => bail!("{reason}"),
+            }
         },
         ResolveConflicts | FixChecks | AddressReview => {
             let task = match request.action {
@@ -408,9 +542,74 @@ mod tests {
     }
 
     #[test]
+    fn background_reads_are_local_bounded_and_back_off() {
+        let mut hosted = Hosted::default();
+        let start = Instant::now();
+        assert!(!hosted.start(Refresh::Local, start));
+        assert!(hosted.start(Refresh::Auto, start));
+        assert!(!hosted.start(Refresh::Remote, start), "coalesce simultaneous callers");
+        hosted.finish(Ok(Some(ready())), start);
+        for second in 1..300 {
+            assert!(!hosted.start(Refresh::Auto, start + Duration::from_secs(second)), "focus must not defeat the interval");
+            assert!(!hosted.start(Refresh::Local, start + Duration::from_secs(second)));
+        }
+        let now = start + REMOTE_EVERY;
+        assert!(hosted.start(Refresh::Auto, now));
+        hosted.finish(Err(anyhow::anyhow!("rate limited")), now);
+        assert!(!hosted.known);
+        assert!(!hosted.start(Refresh::Auto, now + REMOTE_EVERY));
+        assert!(hosted.start(Refresh::Auto, now + REMOTE_EVERY * 2));
+        hosted.finish(Err(anyhow::anyhow!("offline")), now + REMOTE_EVERY * 2);
+        assert!(!hosted.start(Refresh::Auto, now + REMOTE_EVERY * 4));
+        assert!(hosted.start(Refresh::Remote, now + REMOTE_EVERY * 4), "explicit refresh can retry");
+        hosted.finish(Ok(None), now + REMOTE_EVERY * 4);
+        assert!(hosted.known);
+        assert_eq!(hosted.failures, 0);
+        assert!(hosted.start(Refresh::Auto, now + REMOTE_EVERY * 5));
+    }
+
+    #[test]
+    fn publishing_cannot_silently_switch_the_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        git::run(cwd, &["init", "-q"]).unwrap();
+        assert!(check_publish_target(cwd, "feature").is_ok(), "--no-track branches can publish");
+        git::run(cwd, &["config", "branch.feature.remote", "origin"]).unwrap();
+        git::run(cwd, &["config", "branch.feature.merge", "refs/heads/feature"]).unwrap();
+        assert!(check_publish_target(cwd, "feature").is_ok());
+        git::run(cwd, &["config", "branch.feature.merge", "refs/heads/other"]).unwrap();
+        assert!(check_publish_target(cwd, "feature").is_err(), "even a missing tracking ref must not change the configured destination");
+    }
+
+    #[test]
+    fn inapplicable_checkouts_have_no_header_action() {
+        assert!(supported(&work(), Some("git@github.com:example/repo.git")));
+        assert!(!supported(&WorkStatus { branch: Some("main".into()), ..work() }, Some("git@github.com:example/repo.git")));
+        assert!(!supported(&WorkStatus { branch: None, ..work() }, Some("git@github.com:example/repo.git")));
+        for remote in [None, Some("git@gitlab.com:example/repo.git"), Some("/local/repo.git")] {
+            assert!(!supported(&work(), remote));
+        }
+        assert!(hidden(&session(), 1).actions.is_empty());
+    }
+
+    #[test]
+    fn offline_status_keeps_local_steps_and_empty_branches_stay_hidden() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = crate::store::projects::ensure(dir.path().to_str().unwrap()).unwrap();
+        let session = SessionEntry { cwd: project.path.clone(), project_path: project.path, ..session() };
+        let empty = WorkStatus { ahead_of_base: Some(0), ..work() };
+        assert_eq!(compose(&session, empty, None, false, true, 1).unwrap().state, Step::Hidden);
+        let offline = compose(&session, WorkStatus { dirty: true, ..work() }, Some(ready()), false, false, 2).unwrap();
+        assert_eq!(offline.state, Step::Uncommitted);
+        assert_eq!(offline.actions, vec![Action::CommitPush]);
+        assert_eq!(compose(&session, work(), Some(ready()), false, false, 3).unwrap().state, Step::Hidden, "stale hosted readiness is not shown after a failed read");
+    }
+
+    #[test]
     fn every_state_from_git_porcelain_counts_and_gh_records() {
         let records: Vec<Value> = serde_json::from_str(include_str!("fixtures/branch_step_cases.json")).unwrap();
-        assert_eq!(records.len(), 14);
+        assert_eq!(records.len(), 16);
         for record in records {
             let porcelain = record["porcelain"].as_str().unwrap();
             let (ahead, behind) = git::parse_upstream_counts(record["counts"].as_str().unwrap()).unwrap();
@@ -433,12 +632,11 @@ mod tests {
 
     #[test]
     fn unread_stale_missing_unknown_or_pending_evidence_never_merges() {
-        for kind in ["unread", "head", "validation", "required", "unknown", "queued", "blocked", "optionalFailure", "behind", "conflicting"] {
+        for kind in ["unread", "head", "required", "unknown", "queued", "blocked", "optionalFailure", "behind", "conflicting"] {
             let mut pr = ready();
             match kind {
                 "unread" => pr.checks_unread = true,
                 "head" => pr.head_sha = "2".repeat(40),
-                "validation" => pr.validation = None,
                 "required" => pr.required_checks = Some(vec!["missing".into()]),
                 "unknown" => pr.checks[0].state = "future_status".into(),
                 "queued" => pr.validation = Some(vec![github::PrCheck { name: "workflow".into(), state: "queued".into(), url: None }]),
@@ -457,9 +655,15 @@ mod tests {
     #[test]
     fn local_work_precedes_hosted_readiness_and_new_work_is_not_already_merged() {
         let pr = ready();
-        assert_eq!(resolve(&WorkStatus { dirty: true, behind: 2, ..work() }, Some(&pr), false), Step::Uncommitted);
+        assert_eq!(resolve(&WorkStatus { dirty: true, behind: 2, ..work() }, Some(&pr), false), Step::Behind);
         assert_eq!(resolve(&WorkStatus { dirty: true, conflicted: vec!["src/a".into()], ..work() }, Some(&pr), false), Step::Conflicts);
         assert_eq!(resolve(&WorkStatus { operation: Some("rebase".into()), ..work() }, Some(&pr), false), Step::Conflicts);
+        for remote_state in ["BEHIND", "DIRTY"] {
+            let mut old = pr.clone();
+            old.merge_state = remote_state.into();
+            let committed_resolution = WorkStatus { ahead: 1, head: Some("2".repeat(40)), ..work() };
+            assert_eq!(resolve(&committed_resolution, Some(&old), false), Step::Ahead);
+        }
         let mut merged = pr;
         merged.state = "MERGED".into();
         assert_eq!(resolve(&WorkStatus { head: Some("2".repeat(40)), ..work() }, Some(&merged), false), Step::NoPr);
@@ -483,19 +687,19 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         Snapshot { revision: 1, session_id: "branch-step-test".into(), cwd: "/repo".into(), branch: "feature".into(), head: "1".repeat(40), base: "main".into(), merge_method: "merge".into(),
-            state: Step::Ready, actions: vec![Action::Merge], pr: Some(ready()), behind_upstream: false }
+            state: Step::Ready, actions: vec![Action::Merge], pr: Some(ready()), behind_upstream: false, pull_needs_agent: false }
     }
 
     #[test]
     fn a_click_cannot_follow_a_changed_branch_head_base_repo_or_merge_method() {
         let before: Expected = serde_json::from_value(serde_json::to_value(snapshot()).unwrap()).unwrap();
         assert!(unchanged(&before, &snapshot()).is_ok());
-        for changed in ["session", "cwd", "branch", "head", "base", "method", "pr", "prHead"] {
+        for changed in ["session", "cwd", "branch", "head", "base", "method", "pr", "prHead", "pullRoute"] {
             let mut now = snapshot();
             match changed {
                 "session" => now.session_id = "other".into(), "cwd" => now.cwd = "/other".into(), "branch" => now.branch = "other".into(),
                 "head" => now.head = "2".repeat(40), "base" => now.base = "release".into(), "method" => now.merge_method = "squash".into(),
-                "pr" => now.pr.as_mut().unwrap().url = "https://github.com/other/repo/pull/7".into(), "prHead" => now.pr.as_mut().unwrap().head_sha = "2".repeat(40), _ => unreachable!(),
+                "pr" => now.pr.as_mut().unwrap().url = "https://github.com/other/repo/pull/7".into(), "prHead" => now.pr.as_mut().unwrap().head_sha = "2".repeat(40), "pullRoute" => now.pull_needs_agent = true, _ => unreachable!(),
             }
             assert!(unchanged(&before, &now).is_err(), "{changed}");
         }
@@ -577,7 +781,14 @@ mod tests {
         git::run(&cwd, &["push"]).unwrap();
         let mut pr = ready();
         pr.head_sha = git::head_commit(&cwd).unwrap();
-        assert_eq!(resolve(&git::work_status(&cwd), Some(&pr), false), Step::Ready);
+        // A local branch that happens to look like a remote ref cannot alter the counts.
+        git::run(&cwd, &["branch", "origin/feature", "main"]).unwrap();
+        assert_eq!(git::comparison_ref(&cwd).as_deref(), Some("refs/remotes/origin/feature"));
+        assert_eq!(resolve(&read_work(&cwd).unwrap(), Some(&pr), false), Step::Ready);
+        git::run(&cwd, &["branch", "--unset-upstream"]).unwrap();
+        assert!(git::work_status(&cwd).upstream.is_none());
+        assert_eq!(resolve(&read_work(&cwd).unwrap(), Some(&pr), false), Step::Ready);
+        git::run(&cwd, &["branch", "-D", "origin/feature"]).unwrap();
         git::run(root.path(), &["clone", "--branch", "feature", remote.to_str().unwrap(), other.to_str().unwrap()]).unwrap();
         configure(&other);
         // GitHub's BEHIND can mean the PR base advanced even though our
@@ -593,7 +804,7 @@ mod tests {
         assert!(matches!(act(&session, &now, &request, || Ok(())).unwrap(), Outcome::Done(_)));
         assert_eq!(std::fs::read_to_string(cwd.join("base-file")).unwrap(), "new base content\n");
         assert_eq!(resolve(&git::work_status(&cwd), None, false), Step::Ahead);
-        git::run(&cwd, &["push"]).unwrap();
+        git::run(&cwd, &["push", "origin", "HEAD"]).unwrap();
         git::run(&other, &["checkout", "feature"]).unwrap();
         git::run(&other, &["pull", "--ff-only"]).unwrap();
         pr.head_sha = git::head_commit(&cwd).unwrap();
@@ -602,8 +813,28 @@ mod tests {
         git::commit_all(&other, "Other", None).unwrap();
         git::run(&other, &["push"]).unwrap();
         git::run(&cwd, &["fetch", "origin"]).unwrap();
-        assert_eq!(resolve(&git::work_status(&cwd), Some(&pr), false), Step::Behind);
+        assert_eq!(resolve(&read_work(&cwd).unwrap(), Some(&pr), false), Step::Behind);
+        let before_pull = git::head_commit(&cwd).unwrap();
+        let incoming = Snapshot { head: before_pull.clone(), state: Step::Behind, actions: vec![Action::Pull], pr: Some(pr.clone()), behind_upstream: true, ..now.clone() };
+        let pull = Request { expected: serde_json::from_value(serde_json::to_value(&incoming).unwrap()).unwrap(), action: Action::Pull, confirmed_account: None, message: None, body: None, tab_id: None };
+        assert!(matches!(act(&session, &incoming, &pull, || Ok(())).unwrap(), Outcome::Done(_)));
+        assert_eq!(git::head_commit(&cwd), git::head_commit(&other), "a no-track checkout pulls the published branch");
+        assert!(git::work_status(&cwd).upstream.is_none(), "pull does not rewrite tracking configuration");
+        git::run(&cwd, &["reset", "--hard", &before_pull]).unwrap();
+        git::pull(&cwd).unwrap();
+        assert_eq!(git::head_commit(&cwd), git::head_commit(&other), "the Branch tab can pull the same no-track checkout");
+        assert!(git::work_status(&cwd).upstream.is_none());
+        // Rewind this disposable test checkout to exercise dirty incoming work.
+        git::run(&cwd, &["reset", "--hard", &before_pull]).unwrap();
         std::fs::write(cwd.join("file"), "ours\n").unwrap();
+        let dirty = read_work(&cwd).unwrap();
+        assert_eq!(resolve(&dirty, Some(&pr), false), Step::Behind);
+        assert!(act(&session, &incoming, &pull, || Ok(())).err().unwrap().to_string().contains("working tree changed"));
+        let dirty_snapshot = Snapshot { head: dirty.head.clone().unwrap(), state: Step::Behind, actions: vec![Action::Pull], pr: Some(pr.clone()), behind_upstream: true, pull_needs_agent: true, ..now.clone() };
+        let dirty_request = Request { expected: serde_json::from_value(serde_json::to_value(&dirty_snapshot).unwrap()).unwrap(), action: Action::Pull, confirmed_account: None, message: None, body: None, tab_id: None };
+        assert!(matches!(act(&session, &dirty_snapshot, &dirty_request, || Ok(())).unwrap(), Outcome::Prompt(_)));
+        assert_eq!(std::fs::read_to_string(cwd.join("file")).unwrap(), "ours\n");
+        assert_eq!(git::head_commit(&cwd), dirty.head, "asking to reconcile must not commit or push");
         git::commit_all(&cwd, "Ours", None).unwrap();
         assert_eq!(resolve(&git::work_status(&cwd), Some(&pr), false), Step::Diverged);
         assert!(git::run(&cwd, &["merge", "origin/feature"]).is_err());

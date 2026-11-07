@@ -47,10 +47,10 @@ afterEach(() => { cleanup(); vi.useRealTimers(); });
 describe("header Git action", () => {
   it.each([
     ["noPr", "Create PR", "createPr"], ["agentWorking", "Agent working", null], ["uncommitted", "Commit and push", "commitPush"],
-    ["behind", "Pull latest", "pull"], ["ahead", "Push", "push"], ["diverged", "Resolve conflicts", "resolveConflicts"],
+    ["behind", "Pull latest", "pull"], ["ahead", "Push", "push"], ["diverged", "Reconcile with upstream", "resolveConflicts"],
     ["conflicts", "Resolve conflicts", "resolveConflicts"], ["changesRequested", "Address review", "addressReview"], ["draft", "Mark ready", "markReady"],
     ["checksFailing", "Fix checks", "fixChecks"], ["checksPending", "Checks pending", null], ["reviewRequired", "Review required", null],
-    ["ready", "Merge", "merge"], ["merged", "Merged", null],
+    ["ready", "Merge", "merge"],
   ] as const)("%s shows %s and runs its action", async (state, label, action) => {
     current = snapshot(state); approved = true;
     render(<BranchGitButton session={session} tabId="t1" />);
@@ -65,6 +65,39 @@ describe("header Git action", () => {
     }
     await waitFor(() => expect(calls()).toHaveLength(1));
     expect(calls()[0][1]).toMatchObject({ sessionId: "s1", request: { action, expected: { branch: "feature", head: "abc" }, tabId: "t1" } });
+  });
+
+  it.each(["hidden", "merged"] as const)("hides %s when there is no next step", async (state) => {
+    current = snapshot(state);
+    render(<BranchGitButton session={session} tabId="t1" />);
+    await act(async () => {});
+    expect(screen.queryByTestId("branch-git-button")).toBeNull();
+  });
+
+  it("hides failed background reads without showing an alert", async () => {
+    mocks.invoke.mockRejectedValue(new Error("Offline"));
+    render(<BranchGitButton session={session} tabId="t1" />);
+    await act(async () => {});
+    expect(screen.queryByTestId("branch-git-button")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("leaves disabled shortcuts and terminal copy unhandled", async () => {
+    current = snapshot("noPr");
+    render(<><BranchGitButton session={session} tabId="t1" /><textarea className="xterm" aria-label="terminal" /></>);
+    await screen.findByRole("button", { name: "Create PR" });
+    expect(fireEvent.keyDown(window, { key: "m", ctrlKey: true, shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(screen.getByLabelText("terminal"), { key: "c", ctrlKey: true, shiftKey: true })).toBe(true);
+    expect(mocks.invoke.mock.calls.some(([name]) => name === "branch_step_account")).toBe(false);
+    expect(calls()).toHaveLength(0);
+  });
+
+  it("asks the agent to pull a dirty branch, tracking its progress", async () => {
+    current = { ...snapshot("behind"), pullNeedsAgent: true };
+    render(<BranchGitButton session={session} tabId="t1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Pull latest" }));
+    await waitFor(() => expect(calls()).toHaveLength(1));
+    expect(await screen.findByRole("button", { name: "Agent working" })).toBeTruthy();
   });
 
   it("asks before publishing, names the account, and cancel sends nothing", async () => {
