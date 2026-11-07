@@ -384,6 +384,7 @@ impl ControlService {
     }
 
     pub fn handle(&self, request: ControlRequest) -> ControlResponse {
+        let _github_request = crate::github_process::scope();
         let id = request.id.clone();
         let _request = match self.local_lifetime.as_ref().map(|lifetime| lifetime.enter_command(request.command == "runtime.stopAll")).transpose() {
             Ok(guard) => guard,

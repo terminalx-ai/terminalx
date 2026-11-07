@@ -61,8 +61,14 @@ Frontend gates stop catalog polling and queued cloud/remote actions. Webview
 external images and update checks are suppressed too. The app's existing
 diagnostic logs stay local; no external logging sink is enabled by this mode.
 
-App-owned GitHub subprocesses are refused while enabled and terminated before
-activation is acknowledged. Agent-owned subprocesses retain their network access.
+App-owned GitHub subprocesses (PRs, issue reads/writes, repository listing and
+SSH/gh identity probes) share admission and cancellation. They are refused while
+enabled and terminated, reaped and drained before activation is acknowledged,
+including when a process stops reading a request body. Authority is captured
+before blocking dispatch and retained across pages and fallbacks; an off/on cycle
+cannot revive queued work. Local Git metadata and checkout issue templates remain
+available. Identity headers refresh when privacy is disabled, without signing in
+again. Agent-owned subprocesses retain their network access.
 Update checks and downloads use native admission too: an already admitted
 transfer drains, with a 60-second limit, before privacy activation is acknowledged.
 Its result is then discarded. Cached updates and deferred install choices are

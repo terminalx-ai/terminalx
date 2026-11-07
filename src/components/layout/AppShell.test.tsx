@@ -1,4 +1,6 @@
 vi.mock("@/lib/dataPrivacy", () => ({
+  getDataPrivacy: () => ({ enabled: false, managed: false, ready: true }),
+  PRIVACY_MESSAGE: "Turned off by data privacy mode",
   bootDataPrivacy: () => Promise.resolve(),
   privacyEnabled: () => false,
   privacyBlocksCommand: () => false,

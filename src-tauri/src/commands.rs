@@ -1720,7 +1720,7 @@ fn start_failure(error: impl std::fmt::Display) -> crate::project_start::Failure
 /// The reader's GitHub repositories through `gh`, or why there is no list.
 #[tauri::command]
 pub async fn github_repositories() -> CmdResult<crate::project_start::GithubRepositories> {
-    tauri::async_runtime::spawn_blocking(crate::project_start::github_repositories).await.map_err(err)
+    github_work(crate::project_start::github_repositories).await.map_err(err)
 }
 
 /// Clone a repository under `parent`. Resolves when the clone is whole (or
@@ -1786,7 +1786,7 @@ pub async fn automation_issue_states(state: State<'_, AppState>) -> CmdResult<Ve
 
 #[tauri::command]
 pub async fn automation_issue_preview(project_path: String, repo: String, query: String) -> CmdResult<Vec<crate::issues::Issue>> {
-    tauri::async_runtime::spawn_blocking(move || crate::issues::github_search(Path::new(&project_path), &repo, &query, 50).map_err(err))
+    github_work(move || crate::issues::github_search(Path::new(&project_path), &repo, &query, 50).map_err(err))
         .await
         .map_err(err)?
 }
@@ -2936,7 +2936,7 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 
 #[tauri::command]
 pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github::PullRequest>> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
+    github_work(move || crate::github::prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2946,12 +2946,12 @@ pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
 
 #[tauri::command]
 pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdResult<crate::github::PullRequest> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::associated_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+    github_work(move || crate::github::associated_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn pr_create(cwd: String, title: String, body: String, base: Option<String>, draft: bool, session_id: Option<String>) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let url = crate::github::create_pr(Path::new(&cwd), &title, &body, base.as_deref(), draft).map_err(err)?;
         if let Some(session) = session_id {
             crate::pr_associations::record_local(&session, Path::new(&cwd), &url, &crate::git::current_branch(Path::new(&cwd)).unwrap_or_default())
@@ -2965,12 +2965,12 @@ pub async fn pr_create(cwd: String, title: String, body: String, base: Option<St
 
 #[tauri::command]
 pub async fn pr_merge(cwd: String, number: u64, method: String, url: Option<String>) -> CmdResult<()> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::merge_associated_pr(Path::new(&cwd), number, &method, url.as_deref()).map_err(err)).await.map_err(err)?
+    github_work(move || crate::github::merge_associated_pr(Path::new(&cwd), number, &method, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn pr_ready(cwd: String, number: u64, url: Option<String>) -> CmdResult<()> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::ready_associated_pr(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+    github_work(move || crate::github::ready_associated_pr(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3388,6 +3388,12 @@ pub fn transcription_set_mute(state: State<'_, AppState>, mute: bool) -> CmdResu
     state.transcription.set_mute(mute).map_err(err)
 }
 
+// GitHub work captures privacy authority before entering the blocking queue.
+fn github_work<F, R>(work: F) -> tauri::async_runtime::JoinHandle<R>
+where F: FnOnce() -> R + Send + 'static, R: Send + 'static {
+    tauri::async_runtime::spawn_blocking(crate::github_process::queued(work))
+}
+
 // ------------------------------------------------------------------ issues
 
 #[derive(Serialize)]
@@ -3404,7 +3410,7 @@ fn linear_key() -> CmdResult<String> {
 
 #[tauri::command]
 pub async fn issues_list(project_path: String, provider: String, filter: crate::issues::IssueFilter) -> CmdResult<Vec<crate::issues::Issue>> {
-    tauri::async_runtime::spawn_blocking(move || match provider.as_str() {
+    github_work(move || match provider.as_str() {
         "github" => crate::issues::github_list(Path::new(&project_path), &filter).map_err(err),
         "linear" => crate::issues::linear_list(&linear_key()?, &filter).map_err(err),
         other => Err(format!("unknown issue provider {other}")),
@@ -3424,7 +3430,7 @@ async fn issue_op<T: Send + 'static>(
     provider: crate::issue_ops::Provider,
     op: impl FnOnce(&crate::issue_ops::Target) -> IssueOpResult<T> + Send + 'static,
 ) -> IssueOpResult<T> {
-    tauri::async_runtime::spawn_blocking(move || op(&crate::issue_ops::Target::resolve(Path::new(&project_path), provider)?))
+    github_work(move || op(&crate::issue_ops::Target::resolve(Path::new(&project_path), provider)?))
         .await
         .map_err(|_| crate::issue_ops::IssueOpError::new(crate::issue_ops::IssueOpErrorKind::Other, provider))?
 }
@@ -3508,7 +3514,7 @@ pub async fn issue_create(project_path: String, provider: crate::issue_ops::Prov
 /// The project's Markdown issue templates (`.github/ISSUE_TEMPLATE/*.md`), from its checkout or cloud repository.
 #[tauri::command]
 pub async fn issue_templates(project_path: String) -> IssueOpResult<Vec<crate::issue_ops::templates::IssueTemplate>> {
-    tauri::async_runtime::spawn_blocking(move || crate::issue_ops::templates::load(Path::new(&project_path)))
+    github_work(move || crate::issue_ops::templates::load(Path::new(&project_path)))
         .await
         .map_err(|_| crate::issue_ops::IssueOpError::new(crate::issue_ops::IssueOpErrorKind::Other, crate::issue_ops::Provider::Github))?
 }
@@ -3555,7 +3561,7 @@ pub fn github_repo(project_path: String) -> Option<String> {
 /// The GitHub account a project is connected to: the one its pushes land as.
 #[tauri::command]
 pub async fn github_identity(project_path: String, refresh: Option<bool>) -> CmdResult<crate::github_identity::GithubIdentity> {
-    tauri::async_runtime::spawn_blocking(move || crate::github_identity::identity(Path::new(&project_path), refresh.unwrap_or(false)))
+    github_work(move || crate::github_identity::identity(Path::new(&project_path), refresh.unwrap_or(false)))
         .await
         .map_err(err)
 }
@@ -4614,12 +4620,12 @@ fn attached_project(project_path: &str) -> CmdResult<std::path::PathBuf> {
 /// repository, and whether the reader may change it.
 #[tauri::command]
 pub async fn github_head_branch_setting(project_path: String) -> CmdResult<crate::github::HeadBranchSetting> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::head_branch_setting(&attached_project(&project_path)?).map_err(err)).await.map_err(err)?
+    github_work(move || crate::github::head_branch_setting(&attached_project(&project_path)?).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn github_enable_head_branch_deletion(project_path: String) -> CmdResult<crate::github::HeadBranchSetting> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::enable_head_branch_deletion(&attached_project(&project_path)?).map_err(err)).await.map_err(err)?
+    github_work(move || crate::github::enable_head_branch_deletion(&attached_project(&project_path)?).map_err(err)).await.map_err(err)?
 }
 
 /// What a workspace takes on disk. Asked for one workspace at a time, after

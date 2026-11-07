@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,7 @@ static KNOWN: Mutex<Option<HashMap<PathBuf, (Instant, GithubIdentity)>>> = Mutex
 
 /// The account the project at `cwd` is connected to; a fresh answer when `refresh`.
 pub fn identity(cwd: &Path, refresh: bool) -> GithubIdentity {
+    let _request = crate::github_process::scope();
     if !refresh {
         let known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, answer)) = known.as_ref().and_then(|map| map.get(cwd)) {
@@ -54,6 +55,9 @@ pub fn identity(cwd: &Path, refresh: bool) -> GithubIdentity {
         }
     }
     let answer = look_up(cwd);
+    // A disabled/cancelled lookup returns local metadata, without caching a
+    // missing login for ten minutes after privacy is turned off again.
+    if !crate::github_process::ticket().valid() { return answer; }
     let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
     known.get_or_insert_with(HashMap::new).insert(cwd.to_path_buf(), (Instant::now(), answer.clone()));
     answer
@@ -140,30 +144,14 @@ pub fn active_login_in_status(text: &str) -> Option<String> {
 
 fn ssh_greeting(cwd: &Path, host: &str) -> Option<String> {
     let ssh = crate::binpath::resolve("ssh").unwrap_or_else(|| PathBuf::from("ssh"));
-    let mut child = Command::new(ssh)
-        .current_dir(cwd)
+    let mut command = Command::new(ssh);
+    command.current_dir(cwd)
         .env("PATH", crate::binpath::login_path())
-        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new", &format!("git@{host}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let started = Instant::now();
-    // GitHub closes the connection itself (exit 1), so this is a wait with a
-    // ceiling, not a success check.
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < SSH_PATIENCE => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let out = child.wait_with_output().ok()?;
+        // Own the physical connection; never reuse or leave a background SSH master.
+        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", &format!("git@{host}")]);
+    // GitHub closes the greeting with exit 1; it is not a success check.
+    let out = crate::github_process::output(command, SSH_PATIENCE, None).ok()?;
     let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stdout));
     Some(text)
@@ -171,14 +159,11 @@ fn ssh_greeting(cwd: &Path, host: &str) -> Option<String> {
 
 fn gh_active_login() -> Option<String> {
     let gh = crate::binpath::resolve("gh")?;
-    let out = Command::new(gh)
-        .env("PATH", crate::binpath::login_path())
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .args(["auth", "status", "--hostname", "github.com"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = Command::new(gh);
+    command.env("PATH", crate::binpath::login_path())
+        .env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1")
+        .args(["auth", "status", "--hostname", "github.com"]);
+    let out = crate::github_process::output(command, crate::github_process::TIMEOUT, None).ok()?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     active_login_in_status(&text)

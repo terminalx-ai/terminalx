@@ -80,13 +80,13 @@ pub enum GithubRepositories {
     Failed { message: String },
 }
 
-fn gh_output(args: &[&str]) -> anyhow::Result<std::process::Output> {
+fn local_gh_output(args: &[&str]) -> anyhow::Result<std::process::Output> {
     Ok(crate::issues::gh()?.args(args).stdin(std::process::Stdio::null()).output()?)
 }
 
 /// A token is stored for github.com. Read from `gh`'s own store, no request made.
 fn gh_signed_in() -> bool {
-    gh_output(&["auth", "token", "--hostname", GITHUB_HOST]).is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
+    local_gh_output(&["auth", "token", "--hostname", GITHUB_HOST]).is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
 }
 
 pub fn parse_repositories(lines: &str) -> Vec<GithubRepository> {
@@ -94,6 +94,10 @@ pub fn parse_repositories(lines: &str) -> Vec<GithubRepository> {
 }
 
 pub fn github_repositories() -> GithubRepositories {
+    let _request = crate::github_process::scope();
+    if !crate::github_process::ticket().valid() {
+        return GithubRepositories::Failed { message: crate::data_privacy::MESSAGE.into() };
+    }
     if crate::binpath::resolve("gh").is_none() {
         return GithubRepositories::Missing;
     }
@@ -102,7 +106,7 @@ pub fn github_repositories() -> GithubRepositories {
     }
     // Read together: one page after another keeps the reader waiting several seconds.
     let pages: Vec<Result<Vec<GithubRepository>, String>> = std::thread::scope(|scope| {
-        let reads: Vec<_> = (1..=REPOSITORY_PAGES).map(|page| scope.spawn(move || repository_page(page))).collect();
+        let reads: Vec<_> = (1..=REPOSITORY_PAGES).map(|page| scope.spawn(crate::github_process::queued(move || repository_page(page)))).collect();
         reads.into_iter().map(|read| read.join().unwrap_or_else(|_| Err("GitHub CLI could not list your repositories.".into()))).collect()
     });
     let mut repositories = Vec::new();
@@ -132,7 +136,9 @@ pub fn github_repositories() -> GithubRepositories {
 fn repository_page(page: usize) -> Result<Vec<GithubRepository>, String> {
     let endpoint = format!("user/repos?per_page={REPOSITORY_PAGE_SIZE}&page={page}&sort=pushed");
     let query = ".[] | {nameWithOwner: .full_name, description, isPrivate: .private, pushedAt: .pushed_at}";
-    let out = gh_output(&["api", &endpoint, "--jq", query]).map_err(|error| error.to_string())?;
+    let mut command = crate::issues::gh().map_err(|error| error.to_string())?;
+    command.args(["api", &endpoint, "--jq", query]);
+    let out = crate::github_process::output(command, crate::github_process::TIMEOUT, None).map_err(|error| error.to_string())?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if stderr.is_empty() { "GitHub CLI could not list your repositories.".into() } else { stderr });
@@ -378,7 +384,7 @@ fn transport(source: &Source) -> (String, Vec<String>) {
         return (source.url.clone(), Vec::new());
     }
     let Some(gh) = crate::binpath::resolve("gh").filter(|_| gh_signed_in()) else { return (source.url.clone(), Vec::new()) };
-    let protocol = gh_output(&["config", "get", "git_protocol", "--host", GITHUB_HOST]).map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
+    let protocol = local_gh_output(&["config", "get", "git_protocol", "--host", GITHUB_HOST]).map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
     // Only where the reader named no protocol: a pasted HTTPS URL stays HTTPS, so it is a way out when SSH fails.
     if protocol == "ssh" && source.shorthand {
         return (format!("git@{GITHUB_HOST}:{repository}.git"), Vec::new());

@@ -86,6 +86,7 @@ mod media_types;
 mod branch_overview;
 mod git;
 mod github;
+mod github_process;
 mod unfinished_merge;
 mod pr_associations;
 mod github_identity;

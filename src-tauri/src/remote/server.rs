@@ -999,7 +999,7 @@ impl WorkspaceRpc {
         let peer = peer.clone();
         let method = method.to_string();
         // File, Git and process work blocks; keep it off the socket's task.
-        tokio::task::spawn_blocking(move || rpc.execute_blocking(&peer, &method, params))
+        tokio::task::spawn_blocking(crate::github_process::queued(move || rpc.execute_blocking(&peer, &method, params)))
             .await
             .map_err(RpcError::internal)?
     }
