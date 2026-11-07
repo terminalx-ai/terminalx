@@ -61,6 +61,7 @@ mod organization_compute;
 mod organization_environment;
 #[cfg(feature = "desktop")]
 mod organization_workspace_config;
+#[cfg(feature = "desktop")]
 mod organization_mcp_import;
 #[cfg(feature = "desktop")]
 pub mod computer;
