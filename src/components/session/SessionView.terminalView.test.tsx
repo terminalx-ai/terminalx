@@ -32,6 +32,12 @@ vi.mock("@/lib/account", () => {
   return { useAccount: () => account, getAccount: () => account, subscribeAccount: () => () => undefined, refreshAccount: vi.fn() };
 });
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
+vi.mock("@/lib/terminal", async (original) => ({
+  ...(await original<typeof import("@/lib/terminal")>()),
+  // The renderer is stubbed in these layout tests. Real output attachment
+  // and the switch's refusal/retry path are covered in createInstance.test.ts.
+  ensureTerminalAttached: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string>() }));

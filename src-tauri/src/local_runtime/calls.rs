@@ -174,7 +174,15 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
         "markRead" => { manager.mark_read(session, tab)?; Value::Null }
         "handoff" => serde_json::to_value(manager.handoff(session, tab)?)?,
-        "toTerminal" => serde_json::to_value(manager.codex_stdio_to_terminal_reported(session, tab, serde_json::from_value(params["transitionId"].clone())?)?)?,
+        "toTerminal" => {
+            let ready = manager.codex_stdio_to_terminal_reported(session, tab, serde_json::from_value(params["transitionId"].clone())?)?;
+            if params["deferUntilIdle"] == true { json!(ready) } else {
+                // Protocol 1 callers decode success as (). Only callers that
+                // explicitly opt in understand a deferred boolean response.
+                anyhow::ensure!(ready, "Codex is still working. Wait or interrupt before opening Terminal view.");
+                Value::Null
+            }
+        }
         _ => bail!("unsupported local session operation"),
     };
     Ok(value)

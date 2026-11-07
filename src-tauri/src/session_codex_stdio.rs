@@ -184,6 +184,8 @@ impl SessionManager {
                 }
                 (running, tab.provider_session_id.clone(), fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
             };
+            #[cfg(test)]
+            tests::handoff_fenced();
             // The general PTY launcher can restart a missing conversation.
             // A view switch must never take that fallback. Check before
             // stopping, then copy after exit so the final writes are included.
@@ -433,7 +435,6 @@ impl SessionManager {
                 let rt_arc = runtime.upgrade().context("Codex runtime was removed")?;
                 let mut rt = rt_arc.lock().unwrap();
                 self.accepting_work()?;
-                crate::issue_pipeline::admission::check(&rt.session_id, &rt.tab_id)?;
                 anyhow::ensure!(same_launch(&rt, launch) && !rt.stopping, "Codex launch was cancelled; input will not be replayed");
                 anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(e) if !e.exited && !e.blocked), "Codex connection is no longer writable");
                 let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
@@ -443,6 +444,12 @@ impl SessionManager {
                     engine.retire_write(&frame, false);
                     return Ok(());
                 }
+                // Completion can retire an interrupt while it waits for this
+                // writer. Discard it before a handoff's hold fence is checked:
+                // it has no bytes to admit and must not fail a usable owner if
+                // the handoff later refuses (for example, a missing rollout).
+                crate::issue_pipeline::admission::check(&rt.session_id, &rt.tab_id)?;
+                let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
                 let (_mobile, _owner) = match (admitted, owner) {
                     (Ok(mobile), Ok(owner)) => (mobile, owner),
                     (Err(error), _) | (_, Err(error)) => {

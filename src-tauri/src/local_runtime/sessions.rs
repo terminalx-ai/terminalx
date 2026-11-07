@@ -264,7 +264,7 @@ impl Sessions {
 
     pub fn to_terminal(&self, session: &str, tab: &str, transition_id: Option<uuid::Uuid>) -> Result<bool> {
         // Older local runtimes returned null for a completed handoff.
-        let ready: Option<bool> = self.tab("toTerminal", session, tab, json!({"transitionId":transition_id}))?;
+        let ready: Option<bool> = self.tab("toTerminal", session, tab, json!({"transitionId":transition_id,"deferUntilIdle":true}))?;
         Ok(ready.unwrap_or(true))
     }
 }

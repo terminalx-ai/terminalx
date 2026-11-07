@@ -2374,9 +2374,10 @@ async fn native_terminal_child() {
         (peer, events)
     };
     let mut requests = 0;
-    let mut move_as = |peer: Arc<Peer>| {
+    let mut move_as = |peer: Arc<Peer>, defer: bool| {
         requests += 1;
-        let params = json!({ "sessionId": session, "tabId": tab, "clientRequestId": format!("to-terminal-{requests}") });
+        let mut params = json!({ "sessionId": session, "tabId": tab, "clientRequestId": format!("to-terminal-{requests}") });
+        if defer { params["deferUntilIdle"] = json!(true); }
         let rpc = f.rpc.clone();
         async move { call(&rpc, &peer, "session.toTerminal", params).await }
     };
@@ -2384,14 +2385,15 @@ async fn native_terminal_child() {
     // Viewers, and drivers who may not approve, cannot start its terminal.
     let (bob, _bob_events) = agent_person(f.rpc.clone(), "d-bob", "bob").await;
     let (erin, _erin_events) = agent_person(f.rpc.clone(), "d-erin", "erin").await;
-    assert_eq!(code(move_as(bob).await), "forbidden");
-    assert_eq!(code(move_as(erin).await), "forbidden");
+    assert_eq!(code(move_as(bob, false).await), "forbidden");
+    assert_eq!(code(move_as(erin, false).await), "forbidden");
     assert_eq!(transport(), Native);
 
     // Active work defers the switch, without fencing protocol progress.
     let (alice, _alice_events) = agent_person(f.rpc.clone(), "d-alice", "alice").await;
     manager.send(&session, &tab, "hello".into(), Vec::new()).unwrap();
-    assert_eq!(move_as(alice.clone()).await.unwrap()["waitingForTurn"], true);
+    assert_eq!(code(move_as(alice.clone(), false).await), "conflict", "older clients must not mistake deferred work for a completed handoff");
+    assert_eq!(move_as(alice.clone(), true).await.unwrap()["waitingForTurn"], true);
     assert_eq!(transport(), Native);
     let log = crate::store::log_path(&session, &tab).unwrap();
     let events = || crate::store::read_lines::<crate::events::AgentEvent>(&log).unwrap();
@@ -2400,7 +2402,7 @@ async fn native_terminal_child() {
         assert!(std::time::Instant::now() < until, "the deferred switch must allow the native prompt to start");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(move_as(alice.clone()).await.unwrap()["waitingForTurn"], true);
+    assert_eq!(move_as(alice.clone(), true).await.unwrap()["waitingForTurn"], true);
     assert!(manager.interrupt(&session, &tab).unwrap());
     while !events().iter().any(|event| matches!(event.payload, crate::events::Payload::TurnCompleted { .. })) {
         assert!(std::time::Instant::now() < until, "interrupt must remain writable while the switch waits");
@@ -2412,7 +2414,7 @@ async fn native_terminal_child() {
 
     // No terminal may silently start a new conversation when the native
     // thread has not saved its rollout yet. The refusal keeps Chat usable.
-    let refused = move_as(alice.clone()).await.unwrap_err();
+    let refused = move_as(alice.clone(), true).await.unwrap_err();
     assert!(refused.1.contains("saved conversation is not available"), "{refused:?}");
     assert_eq!((transport(), terminal_launches()), (Native, 0));
     assert_eq!(index::get(&session).unwrap().tab(&tab).unwrap().provider_session_id.as_deref(), Some("thread-1"));
@@ -2422,7 +2424,7 @@ async fn native_terminal_child() {
     std::fs::write(saved, "{}\n").unwrap();
 
     // A driver who may approve retries, and the same conversation starts.
-    move_as(alice.clone()).await.unwrap();
+    move_as(alice.clone(), true).await.unwrap();
     assert_eq!(transport(), Pty);
     let until = std::time::Instant::now() + Duration::from_secs(5);
     while terminal_launches() == 0 {
@@ -2430,7 +2432,8 @@ async fn native_terminal_child() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     // Asking again changes nothing and starts nothing more.
-    move_as(alice).await.unwrap();
+    let legacy = move_as(alice, false).await.unwrap();
+    assert!(legacy.get("waitingForTurn").is_none(), "a legacy success only means a completed handoff");
     assert_eq!((transport(), terminal_launches()), (Pty, 1));
     assert!(launches().lines().any(|line| line.contains("resume thread-1")), "the terminal resumes the same conversation");
     let frames = std::fs::read_to_string(bin.join("received")).unwrap();

@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { agent, errorMessage, type HandoffInfo, type TabPtyEvent } from "@/lib/api";
 import { defaultTabView, tabPaneId, tabViewIn, type TabViewMode } from "@/lib/tabFront";
-import { adoptPane, closeTerminal, followShellToTab, openTerminal } from "@/lib/terminal";
+import { adoptPane, closeTerminal, ensureTerminalAttached, followShellToTab, openTerminal } from "@/lib/terminal";
 import { getSessionStore } from "@/lib/sessions";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
@@ -281,6 +281,7 @@ export async function enterTerminalView(session: SessionEntry, tab: TabEntry, pl
         category = "attach";
         note("attaching");
         await adoptTabPane(session.id, tab.id, token);
+        await ensureTerminalAttached(terminalPaneId(tab));
       } else {
         const info = await agent.tabHandoff(session.id, tab.id);
         if (!valid()) return;

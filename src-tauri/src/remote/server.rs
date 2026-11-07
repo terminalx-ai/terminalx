@@ -1930,7 +1930,15 @@ impl WorkspaceRpc {
         }
         let transition_id = serde_json::from_value(params["transitionId"].clone()).map_err(|_| RpcError::new("invalid_params", "transitionId must be a UUID"))?;
         let ready = self.start_in_terminal(&tab.session_id, &tab.tab_id, transition_id)?;
-        Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id, "waitingForTurn": !ready }))
+        if params["deferUntilIdle"] == true {
+            Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id, "waitingForTurn": !ready }))
+        } else if ready {
+            Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id }))
+        } else {
+            // Existing session/3 clients treat any success as a completed
+            // switch and cannot poll. Keep their original busy refusal.
+            Err(RpcError::new("conflict", "Codex is still working. Wait or interrupt before opening Terminal view."))
+        }
     }
 
     /// Start a tab's CLI in its terminal, moving native Codex there first.

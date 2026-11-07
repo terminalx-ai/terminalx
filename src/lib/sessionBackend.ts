@@ -440,7 +440,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     toTerminal: async (tabId, transitionId) => {
       guard();
       if (!client) throw new Error("A tab moves to its terminal once the workspace is connected.");
-      return !(await client.moveAgentTabToTerminal(ctx.sessionId, tabId, transitionId)).waitingForTurn;
+      return !(await client.moveAgentTabToTerminal(ctx.sessionId, tabId, { transitionId, deferUntilIdle: true })).waitingForTurn;
     },
     respondPermission: (tabId, requestId, optionId) => {
       if (approveBlockedReason) return Promise.reject(new Error(approveBlockedReason));

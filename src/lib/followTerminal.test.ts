@@ -101,6 +101,9 @@ async function openWindow(label: "main" | "floating") {
   appWindow.setAppWindowForTest(label);
   const sessions = await import("./sessions");
   const terminal = await import("./terminal");
+  // These store tests have no renderer. Attachment itself is exercised with
+  // the real TerminalView instance and PTY feed in createInstance.test.ts.
+  vi.spyOn(terminal, "ensureTerminalAttached").mockResolvedValue(undefined);
   const tabViews = await import("./tabViews");
   const sessionTabs = await import("./sessionTabs");
   await sessions.bootSessions();

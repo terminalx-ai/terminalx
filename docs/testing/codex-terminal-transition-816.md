@@ -54,6 +54,26 @@ excluded. Writes are best effort and never determine a transition's result.
 This supplies the view-transition evidence for #815; it does not implement
 that issue's broader recovery-visibility analytics or infer its root cause.
 
+## Compatibility and attachment
+
+Deferred handoff is explicitly requested with `deferUntilIdle: true`. Local
+protocol 1 callers without that option still receive null for success and a
+busy refusal during active work. Cloud session/3 callers without the option
+also retain the busy refusal: they cannot interpret a deferred success or poll
+for completion. Updated callers still accept older runtimes' completed responses.
+
+A queued interrupt whose turn completed retires before checking the handoff
+fence. The regression releases that writer inside the actual handoff fence,
+then refuses the move for missing history and verifies the owner stays usable.
+
+Local PTY switches await the terminal instance's real `attachSized` result.
+Pane registration is not an attachment acknowledgment. A rejected attachment
+keeps Chat visible and records a failed attachment stage; a retry drains old
+parser writes and reattaches before showing Terminal. A mounted hidden view can
+recreate an evicted parser. `createInstance.test.ts` exercises this path with the
+real xterm/feed and view-switch store, including delayed success, rejection,
+retry, and reuse of the successful attachment.
+
 ## Regression seams
 
 - `src/lib/followTerminal.test.ts`: startup failure/retry, pending handoff,
