@@ -89,7 +89,7 @@ esac
 hold=''
 if [ -f "$TERMINALX_HOME/hold" ]; then read -r hold < "$TERMINALX_HOME/hold"; fi
 case "$hold:$*" in
- all:*|write:*' -X PATCH '*)
+ all:*|write:*' -X PATCH '*|create:'pr create '*)
    : > "$TERMINALX_HOME/held-$$"
    exec /bin/sleep 30 ;;
 esac
@@ -99,6 +99,12 @@ esac
 case "$*" in
  'auth status '*) printf 'Logged in to github.com account privacy-reader\n  Active account: true\n'; exit 0 ;;
 esac
+if [ -f "$TERMINALX_HOME/create-pr" ]; then
+ case "$*" in
+  'pr list '*) if [ ! -f "$TERMINALX_HOME/created-pr" ]; then printf '[]\n'; exit 0; fi ;;
+  'pr create '*) : > "$TERMINALX_HOME/created-pr"; printf 'https://github.com/privacy/fixture/pull/7\n'; exit 0 ;;
+ esac
+fi
 for arg do
  if [ "$arg" = '--input' ]; then /bin/cat > /dev/null; fi
 done
@@ -126,9 +132,16 @@ esac
 case "$1" in
  fetch|pull|push|ls-remote)
    printf 'git %s\n' "$*" >> "$TERMINALX_HOME/launches"
-   if [ -f "$TERMINALX_HOME/hold" ]; then
+   hold=''
+   if [ -f "$TERMINALX_HOME/hold" ]; then read -r hold < "$TERMINALX_HOME/hold"; fi
+   case "$hold:$1" in
+    all:*|fetch:fetch)
      : > "$TERMINALX_HOME/held-$$"
-     exec /bin/sleep 30
+     exec /bin/sleep 30 ;;
+   esac
+   if [ "$1" = fetch ] && [ -f "$TERMINALX_HOME/real-fetch" ]; then exec /usr/bin/git "$@"; fi
+   if [ "$1" = ls-remote ] && [ -f "$TERMINALX_HOME/create-pr" ]; then
+     printf '%s\trefs/heads/main\n' "$(/usr/bin/git rev-parse HEAD)"
    fi
    exit 0 ;;
  *) exec /usr/bin/git "$@" ;;
@@ -216,8 +229,12 @@ fn privacy_entry_points_child() {
     }
     overview_reads_share_authority(&root, &ssh, managed);
     workspace_rpc(&root, &ssh, managed);
+    let fetch = fresh_fixture(&root);
+    fresh_runtime(&root, &fetch, managed);
+    cleanup_keeps_revoked_branches(&root, &fetch, managed);
+    forwarded_cleanup_keeps_denial(&root, &fetch, managed);
     #[cfg(feature = "desktop")]
-    queued_commands(&root, &ssh, managed);
+    queued_commands(&root, &ssh, &fetch, managed);
     let observed = std::fs::read_to_string(root.join("launches")).unwrap();
     assert!(observed.contains("ControlMaster=no -o ControlPath=none -o ControlPersist=no"));
 }
@@ -225,7 +242,7 @@ fn privacy_entry_points_child() {
 /// Saturate the actual Tauri blocking pool, poll each IPC command until queued,
 /// flip the policy, then let it run. No sleeps decide whether capture happened.
 #[cfg(feature = "desktop")]
-fn queued_commands(root: &Path, cwd: &Path, managed: bool) {
+fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool) {
     use std::future::Future;
     use std::task::{Context, Waker};
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
@@ -255,6 +272,7 @@ fn queued_commands(root: &Path, cwd: &Path, managed: bool) {
         if operation == "overview" { assert_eq!(launches(root), before + 2, "both overview reads execute when valid"); }
         else { assert!(launches(root) > before); }
     }
+    fresh_ipcs(root, fetch, managed, &runtime);
 }
 
 #[cfg(feature = "desktop")]
@@ -313,10 +331,14 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
     let (peer, _notifications) = Peer::new("privacy-runtime-client".into(), Authority::Manage);
     let hello = json!({"id":"hello", "method":"rpc.hello", "params":{"protocol":PROTOCOL,"want":["git/1","lifecycle/1"]}});
     assert_eq!(runtime.block_on(rpc.handle(&peer, &hello))["ok"], true);
-    let request = |method: &str| json!({"id":"privacy-call", "method":method,"params":{
-        "repo":".","branch":"main","base":"develop","number":7,"title":"Privacy fixture",
-        "clientRequestId":uuid::Uuid::new_v4().to_string()
-    }});
+    let request = |method: &str| {
+        let mut request = json!({"id":"privacy-call", "method":method,"params":{
+            "repo":".","branch":"main","base":"develop","number":7,"title":"Privacy fixture",
+            "clientRequestId":uuid::Uuid::new_v4().to_string()
+        }});
+        if method == "git.prs" { request["params"].as_object_mut().unwrap().remove("number"); }
+        request
+    };
     let refused = |answer: &Value| {
         assert_eq!(answer["ok"], false, "{answer}");
         assert_eq!(answer["error"]["code"], "forbidden", "{answer}");
@@ -324,6 +346,7 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
     };
     for method in ["git.prs", "git.prCreate", "git.prReady", "git.prMerge", "git.fetch"] {
         println!("privacy WorkspaceRpc/WorkspaceGit: managed={managed}/{method}");
+        if method == "git.prCreate" { std::fs::write(root.join("create-pr"), "").unwrap(); }
         policy(true, managed);
         let before = launches(root);
         let input = request(method);
@@ -363,13 +386,18 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
         refused(&runtime.block_on(pending));
         assert_eq!(launches(root), before, "{method} revived from the blocking queue");
 
-        std::fs::write(root.join("hold"), "all\n").unwrap();
+        std::fs::write(root.join("hold"), if method == "git.prCreate" { "create\n" } else { "all\n" }).unwrap();
         let pending = runtime.spawn(rpc.handle_owned(peer.clone(), request(method)));
         let until = Instant::now() + Duration::from_secs(10);
         while held(root).is_empty() {
             assert!(!pending.is_finished(), "{method} returned before physical work");
             assert!(Instant::now() < until, "{method} never started");
             std::thread::sleep(Duration::from_millis(5));
+        }
+        if method == "git.prCreate" {
+            assert!(std::fs::read_to_string(root.join("launches")).unwrap().lines().any(|line| line.starts_with("gh pr create ")),
+                "active cancellation must reach physical PR creation, not the initial read");
+            assert!(!root.join("created-pr").exists());
         }
         let started = Instant::now();
         policy(true, managed);
@@ -386,6 +414,13 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
         let answer = runtime.block_on(rpc.handle_owned(peer.clone(), request(method)));
         assert_eq!(answer["ok"], true, "fresh {method}: {answer}");
         assert!(launches(root) > cancelled);
+        if method == "git.prCreate" {
+            assert_eq!(answer["result"]["created"], true, "must execute gh pr create");
+            assert_eq!(answer["result"]["existing"], false);
+            assert!(root.join("created-pr").exists());
+            std::fs::remove_file(root.join("create-pr")).unwrap();
+            std::fs::remove_file(root.join("created-pr")).unwrap();
+        }
     }
 
     // A failed ready call normally reconciles by reading the PR. Invalidate
@@ -416,4 +451,286 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
     assert_eq!(launches(root), before);
     assert!(workspace.disposition_repositories()[0]["openPullRequests"].is_array());
     assert_eq!(launches(root), before + 1);
+}
+
+struct FetchFixture {
+    seed: std::path::PathBuf,
+    project: std::path::PathBuf,
+    worktree: std::path::PathBuf,
+    session: String,
+}
+
+fn real_git(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("/usr/bin/git").current_dir(cwd)
+        .args(["-c", "user.email=local@example.test", "-c", "user.name=Privacy Fixture", "-c", "commit.gpgsign=false"])
+        .args(args).output().unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+/// Real bare origin, clone and indexed non-main worktree. The observed fetch
+/// wrapper delegates to real Git, so restoration must actually update refs.
+fn fresh_fixture(root: &Path) -> FetchFixture {
+    let seed = root.join("fetch-seed");
+    std::fs::create_dir(&seed).unwrap();
+    real_git(&seed, &["init", "-q", "-b", "main"]);
+    real_git(&seed, &["commit", "--allow-empty", "-qm", "seed"]);
+    real_git(root, &["clone", "-q", "--bare", "fetch-seed", "fetch-origin.git"]);
+    real_git(root, &["clone", "-q", "fetch-origin.git", "fetch-project"]);
+    real_git(&seed, &["remote", "add", "origin", root.join("fetch-origin.git").to_str().unwrap()]);
+    let project = std::fs::canonicalize(root.join("fetch-project")).unwrap();
+    let entry = crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        project_path: project.to_string_lossy().into_owned(), checkout_branch: None,
+        title: Some("Fetch privacy".into()), use_worktree: true, base_ref: Some("main".into()),
+        worktree_name: Some("privacy-fetch".into()), on_main: false, issue: None, automation: None, cwd: None,
+        tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+    }).unwrap();
+    std::fs::write(root.join("real-fetch"), "").unwrap();
+    FetchFixture { seed, project, worktree: entry.cwd.into(), session: entry.id }
+}
+
+impl FetchFixture {
+    fn advance(&self) -> String {
+        real_git(&self.seed, &["commit", "--allow-empty", "-qm", "Advance origin"]);
+        real_git(&self.seed, &["push", "-q", "origin", "main"]);
+        let expected = real_git(&self.seed, &["rev-parse", "HEAD"]);
+        assert_ne!(real_git(&self.project, &["rev-parse", "origin/main"]), expected);
+        expected
+    }
+    fn disposition(&self, value: &serde_json::Value, fresh: bool) {
+        assert_eq!(value["exists"], true, "{value}");
+        assert_eq!(value["checked"], true);
+        assert_eq!(value["isMain"], false, "must reach the non-main fetching branch");
+        assert!(value["branch"].is_string());
+        assert_eq!(value["sessionIds"], serde_json::json!([self.session]));
+        assert_landed(&value["landed"], fresh);
+    }
+}
+
+fn assert_landed(value: &serde_json::Value, fresh: bool) {
+    assert_eq!(value["checked"], true, "{value}");
+    assert_eq!(value["clean"], true);
+    assert!(value["branch"].is_string() && value["head"].is_string(), "local metadata survives");
+    assert_eq!(value["base"], "origin/main");
+    assert!(!value["merged"].is_null(), "even apparently merged stale refs must not permit deletion");
+    assert_eq!(value["fresh"], fresh, "{value}");
+    assert_eq!(value["safe"], fresh, "{value}");
+    if fresh { assert!(value["notVerified"].is_null(), "{value}"); }
+    else { assert!(value["notVerified"].as_str().unwrap().contains(data_privacy::MESSAGE), "{value}"); }
+}
+
+fn wait_for_fetch(root: &Path, finished: impl Fn() -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while held(root).is_empty() {
+        assert!(!finished(), "call completed before observed fetch");
+        assert!(Instant::now() < until, "no physical fetch reached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(std::fs::read_to_string(root.join("launches")).unwrap().lines().last().unwrap().starts_with("git fetch "));
+}
+
+fn cancel_fetch(root: &Path, managed: bool) {
+    let started = Instant::now();
+    policy(true, managed);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    for pid in held(root) {
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "fetch must be dead and reaped before activation acknowledgement");
+    }
+}
+
+fn clear_hold(root: &Path) {
+    std::fs::remove_file(root.join("hold")).unwrap();
+    for pid in held(root) { std::fs::remove_file(root.join(format!("held-{pid}"))).unwrap(); }
+}
+
+fn fresh_runtime(root: &Path, fixture: &FetchFixture, managed: bool) {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Waker};
+    use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
+    use serde_json::json;
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
+        .max_blocking_threads(1).enable_all().build().unwrap();
+    let rpc = WorkspaceRpc::new(&fixture.project, 1, Arc::new(crate::sink::BroadcastSink::new(64)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+    let (peer, _events) = Peer::new("privacy-fetch-client".into(), Authority::Manage);
+    assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["workspace/1"]}})))["ok"], true);
+    let request = || json!({"id":"fetch","method":"workspace.disposition","params":{"sessionId":fixture.session,"fetch":true}});
+    let check = |answer: serde_json::Value, fresh| {
+        assert_eq!(answer["ok"], true, "local disposition still answers: {answer}");
+        fixture.disposition(&answer["result"]["disposition"], fresh);
+    };
+    policy(true, managed);
+    let before = launches(root);
+    check(runtime.block_on(rpc.handle_owned(peer.clone(), request())), false);
+    assert_eq!(launches(root), before);
+    policy(false, managed);
+    let queued = rpc.handle_owned(peer.clone(), request());
+    policy(true, managed);
+    policy(false, managed);
+    check(runtime.block_on(queued), false);
+    assert_eq!(launches(root), before, "first async queue must retain the fetch ticket");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = runtime.spawn_blocking(move || { entered_tx.send(()).unwrap(); release_rx.recv().unwrap(); });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut pending = Box::pin(rpc.handle_owned(peer.clone(), request()));
+    {
+        let _runtime = runtime.enter();
+        assert!(pending.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+    }
+    policy(true, managed);
+    policy(false, managed);
+    release_tx.send(()).unwrap();
+    runtime.block_on(blocker).unwrap();
+    check(runtime.block_on(pending), false);
+    assert_eq!(launches(root), before, "blocking queue must retain the fetch ticket");
+
+    std::fs::write(root.join("hold"), "fetch\n").unwrap();
+    let pending = runtime.spawn(rpc.handle_owned(peer.clone(), request()));
+    wait_for_fetch(root, || pending.is_finished());
+    cancel_fetch(root, managed);
+    check(runtime.block_on(pending).unwrap(), false);
+    clear_hold(root);
+    let cancelled = launches(root);
+    policy(false, managed);
+    assert_eq!(launches(root), cancelled, "restoration must not replay a cancelled fetch");
+    let expected = fixture.advance();
+    check(runtime.block_on(rpc.handle_owned(peer.clone(), request())), true);
+    assert_eq!(real_git(&fixture.project, &["rev-parse", "origin/main"]), expected);
+
+    // Fresh fetch completed, but a policy change while reading local metadata
+    // must also withdraw freshness. The process hook is after lease release.
+    let (arrived, release) = after_output_barrier();
+    let project = fixture.project.clone();
+    let path = fixture.worktree.clone();
+    let worker = std::thread::spawn(move || crate::landed::check(&project, &path, crate::landed::Fetch::Fresh));
+    arrived.recv_timeout(Duration::from_secs(10)).unwrap();
+    policy(true, managed);
+    policy(false, managed);
+    release.send(()).unwrap();
+    assert_landed(&serde_json::to_value(worker.join().unwrap()).unwrap(), false);
+    // A sweep's retained JustFetched optimization must not resurrect its old
+    // verified base after the same toggle, even without another subprocess.
+    let stale = super::queued(|| crate::landed::check(&fixture.project, &fixture.worktree, crate::landed::Fetch::JustFetched));
+    policy(true, managed);
+    policy(false, managed);
+    assert_landed(&serde_json::to_value(stale()).unwrap(), false);
+}
+
+#[cfg(feature = "desktop")]
+async fn fresh_ipc(operation: &str, fixture: &FetchFixture) -> serde_json::Value {
+    let project = fixture.project.to_string_lossy().into_owned();
+    let path = fixture.worktree.to_string_lossy().into_owned();
+    match operation {
+        "disposition" => serde_json::to_value(crate::commands::workspace_disposition(project, path, Some(true)).await.unwrap()).unwrap(),
+        "pr_landed" => serde_json::to_value(crate::commands::pr_landed(path).await.unwrap()).unwrap(),
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn fresh_ipcs(root: &Path, fixture: &FetchFixture, managed: bool, runtime: &tokio::runtime::Runtime) {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    for operation in ["disposition", "pr_landed"] {
+        println!("privacy non-main IPC fetch: managed={managed}/{operation}");
+        let check = |answer: serde_json::Value, fresh| {
+            if operation == "disposition" { fixture.disposition(&answer, fresh); }
+            else { assert_landed(&answer, fresh); }
+        };
+        policy(true, managed);
+        let before = launches(root);
+        check(runtime.block_on(fresh_ipc(operation, fixture)), false);
+        assert_eq!(launches(root), before);
+        policy(false, managed);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || { entered_tx.send(()).unwrap(); release_rx.recv().unwrap(); });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut command = Box::pin(fresh_ipc(operation, fixture));
+        assert!(command.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        policy(true, managed);
+        policy(false, managed);
+        release_tx.send(()).unwrap();
+        runtime.block_on(blocker).unwrap();
+        check(runtime.block_on(command), false);
+        assert_eq!(launches(root), before, "stale non-main {operation} must not fetch");
+
+        std::fs::write(root.join("hold"), "fetch\n").unwrap();
+        let completed = std::sync::atomic::AtomicBool::new(false);
+        // The real IPC future runs on Tauri's configured runtime. Scope keeps
+        // its borrowed fixture alive while policy refresh occurs concurrently.
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let answer = runtime.block_on(fresh_ipc(operation, fixture));
+                completed.store(true, std::sync::atomic::Ordering::Release);
+                answer
+            });
+            wait_for_fetch(root, || completed.load(std::sync::atomic::Ordering::Acquire));
+            cancel_fetch(root, managed);
+            check(worker.join().unwrap(), false);
+        });
+        clear_hold(root);
+        let cancelled = launches(root);
+        policy(false, managed);
+        assert_eq!(launches(root), cancelled);
+        let expected = fixture.advance();
+        check(runtime.block_on(fresh_ipc(operation, fixture)), true);
+        assert_eq!(real_git(&fixture.project, &["rev-parse", "origin/main"]), expected, "fresh {operation} must execute the real fetch");
+    }
+}
+
+/// An indirect Fresh caller scans once, then deletes many items. Invalidation
+/// between that scan and the branch mutation must withdraw its proof too.
+fn cleanup_keeps_revoked_branches(root: &Path, fixture: &FetchFixture, managed: bool) {
+    use crate::cleanup::{Progress, Sources};
+    let project = store::projects::add(fixture.project.to_str().unwrap()).unwrap();
+    let branch = format!("{}privacy-leftover", store::settings::load().branch_prefix);
+    real_git(&fixture.project, &["branch", &branch, "main"]);
+    let projects = [project];
+    let sessions = store::index::load().unwrap();
+    let sources = Sources { projects: &projects, sessions: &sessions, claude_root: None, codex_home: None, fetch: crate::landed::Fetch::Fresh };
+    let id = format!("branch:{}:{branch}", fixture.project.display());
+    policy(true, managed);
+    let before = launches(root);
+    let scan = crate::cleanup::scan_sources(&sources);
+    assert!(scan.iter().find(|item| item.id == id).unwrap().kept_because.is_some());
+    assert_eq!(launches(root), before);
+    policy(false, managed);
+    let revoked = crate::cleanup::remove_from_sources(&sources, std::slice::from_ref(&id), &|progress| {
+        if matches!(progress, Progress::Started { .. }) { policy(true, managed); policy(false, managed); }
+    });
+    assert!(revoked.removed.is_empty());
+    assert_eq!(revoked.failed.len(), 1);
+    assert!(revoked.failed[0].error.contains(data_privacy::MESSAGE));
+    assert!(!real_git(&fixture.project, &["rev-parse", "--verify", &branch]).is_empty());
+    let fresh = crate::cleanup::remove_from_sources(&sources, &[id], &|_| {});
+    assert_eq!(fresh.removed.len(), 1);
+    assert!(fresh.failed.is_empty());
+}
+
+/// Forwarding from the desktop may narrow the owner's ticket, never renew it.
+/// Exercise the actual owner call dispatcher and non-main removal verifier.
+fn forwarded_cleanup_keeps_denial(root: &Path, fixture: &FetchFixture, managed: bool) {
+    use std::sync::Arc;
+    let manager = crate::session::SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(64)), Arc::new(crate::sink::NoObserver),
+        Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()),
+        Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let request = |allowed| serde_json::json!({"operation":"removeWorkspace", "networkAllowed":allowed, "params":{
+        "projectPath":fixture.project, "path":fixture.worktree, "keepSessions":true, "deleteBranch":false,
+        "confirmedDigest":null, "expectedSessions":[fixture.session]
+    }});
+    policy(false, managed);
+    let before = launches(root);
+    let error = crate::local_runtime::calls::session(&manager, "workspace", request(false)).unwrap_err();
+    assert!(format!("{error:#}").contains(data_privacy::MESSAGE));
+    assert_eq!(launches(root), before, "a stale desktop must not reacquire owner authority");
+    let queued = super::queued(|| crate::local_runtime::calls::session(&manager, "workspace", request(true)));
+    policy(true, managed);
+    policy(false, managed);
+    assert!(format!("{:#}", queued().unwrap_err()).contains(data_privacy::MESSAGE));
+    assert_eq!(launches(root), before, "a forwarding flag cannot override the owner's original ticket");
+    assert!(fixture.worktree.exists());
+    assert!(store::index::get(&fixture.session).is_ok());
 }

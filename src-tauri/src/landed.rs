@@ -549,6 +549,7 @@ pub fn state_in_list(context: &ListContext, path: &Path, branch: Option<&str>, h
 /// fresh)`. `not_verified` says why the comparison is not certain, when it
 /// is not; `fresh` is whether the remote default branch was fetched for it.
 pub(crate) fn base_for(project: &Path, fetch: Fetch) -> (Option<String>, Option<String>, bool) {
+    let _request = crate::github_process::scope();
     let Some(default) = known_default_branch(project) else {
         return (None, Some("The project's default branch could not be determined (origin/HEAD is not set and there is no main or master), so there is nothing certain to compare the branch with.".to_string()), false);
     };
@@ -556,12 +557,18 @@ pub(crate) fn base_for(project: &Path, fetch: Fetch) -> (Option<String>, Option<
         return (Some(default.clone()), Some(format!("This project has no remote, so the branch is compared with the local {default} only.")), false);
     }
     let mut not_verified = None;
-    let mut fresh = fetch == Fetch::JustFetched;
+    let ticket = crate::github_process::ticket();
+    let mut fresh = fetch == Fetch::JustFetched && ticket.valid();
+    if fetch == Fetch::JustFetched && !fresh { not_verified = Some(crate::data_privacy::MESSAGE.into()); }
     if fetch == Fetch::Fresh {
-        match git::run_within(project, &["fetch", "--quiet", "origin", &default], FETCH_TIMEOUT, &|| false) {
+        match git::fetch_admitted(project, &default, FETCH_TIMEOUT) {
             Ok(()) => fresh = true,
-            Err(error) => not_verified = Some(format!("origin/{default} could not be fetched ({}), so this is compared with the last known copy.", fetch_failure(&error))),
+            Err(error) => not_verified = Some(format!("origin/{default} could not be fetched ({}), so this is compared with the last known copy.", first_line(&error.to_string()))),
         }
+    }
+    if fetch != Fetch::Skip && !ticket.valid() {
+        fresh = false;
+        not_verified = Some(crate::data_privacy::MESSAGE.into());
     }
     let remote = format!("origin/{default}");
     if git::run(project, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{remote}")]).is_ok() {
@@ -573,6 +580,7 @@ pub(crate) fn base_for(project: &Path, fetch: Fetch) -> (Option<String>, Option<
 
 /// Check whether the workspace at `path` is clean and merged.
 pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
+    let _request = crate::github_process::scope();
     if !git::is_worktree_of(project, path) {
         let mut unchecked = Landed::default();
         unchecked.losses = unchecked.describe_losses();
@@ -647,21 +655,15 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     if let (None, Err(error)) = (&landed.not_verified, &merging) {
         landed.not_verified = Some(format!("Git could not read whether a merge is in progress, or which of its files are this branch's own ({error:#})."));
     }
+    if fetch != Fetch::Skip && !crate::github_process::ticket().valid() {
+        landed.fresh = false;
+        landed.not_verified = Some(crate::data_privacy::MESSAGE.into());
+    }
     landed.base = base;
     landed.safe = landed.clean && landed.merged.is_some() && landed.not_verified.is_none() && landed.fresh;
     landed.losses = landed.describe_losses();
     landed.digest = landed.describe_digest();
     landed
-}
-
-/// Why a fetch did not succeed, in a few words.
-fn fetch_failure(error: &git::RunError) -> String {
-    match error {
-        git::RunError::TimedOut => format!("no answer within {} s", FETCH_TIMEOUT.as_secs()),
-        git::RunError::Stopped => "it was stopped".to_string(),
-        git::RunError::Failed(text) => first_line(text.trim()).to_string(),
-        git::RunError::Spawn(error) => format!("git could not be started: {error}"),
-    }
 }
 
 fn first_line(text: &str) -> &str {

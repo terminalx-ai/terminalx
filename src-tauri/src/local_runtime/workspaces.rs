@@ -38,6 +38,7 @@ struct Removal {
 }
 
 pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &str, params: Value) -> Result<Value> {
+    let _github_request = crate::github_process::scope();
     // Cancellation must not wait behind the operation it is cancelling.
     if method == "cancelSizes" {
         cleanup::Jobs::sizes().cancel(&format!("local:{}", text(&params,"prefix")?));

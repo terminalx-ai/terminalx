@@ -624,6 +624,7 @@ pub fn sweep(run: &Sweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
 }
 
 pub(crate) fn sweep_fallible(run: &FallibleSweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
+    let _github_request = crate::github_process::scope();
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let wanted: Vec<PathBuf> = scope.projects.iter().map(|path| cleanup::canonical(Path::new(path))).collect();
     let on_for = |path: &str| {

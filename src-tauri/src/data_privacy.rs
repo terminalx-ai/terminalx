@@ -98,6 +98,10 @@ impl Default for Ticket {
 }
 
 impl Ticket {
+    /// A forwarded/held request may only narrow the receiving owner's policy.
+    pub(crate) fn denied() -> Self {
+        Self { epoch: None, ..Self::default() }
+    }
     fn with_policy(policy: Arc<Policy>) -> Self {
         let state = policy.state.read().unwrap();
         let epoch = (!state.status.enabled).then_some(state.epoch);

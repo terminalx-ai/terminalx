@@ -120,7 +120,14 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {
         "pipeline" => return manager.pipeline(string(&params, "operation")?, params["params"].clone()),
-        "workspace" => return manager.workspace(string(&params, "operation")?, params["params"].clone()),
+        "workspace" => {
+            // A desktop that queued this before activation cannot grant fresh
+            // authority in the owner. Local facts are still useful. A true or
+            // absent flag never grants permission beyond the owner's ticket.
+            let ticket = if params["networkAllowed"] == false { crate::data_privacy::Ticket::denied() }
+                else { crate::github_process::ticket() };
+            return crate::github_process::with_ticket(ticket, || manager.workspace(string(&params, "operation")?, params["params"].clone()));
+        }
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),

@@ -2941,7 +2941,7 @@ pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github
 
 #[tauri::command]
 pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
-    tauri::async_runtime::spawn_blocking(move || crate::landed::check(Path::new(&cwd), Path::new(&cwd), crate::landed::Fetch::Fresh)).await.map_err(err)
+    github_work(move || crate::landed::check(Path::new(&cwd), Path::new(&cwd), crate::landed::Fetch::Fresh)).await.map_err(err)
 }
 
 #[tauri::command]
@@ -4303,7 +4303,7 @@ pub async fn list_workspaces(project_path: String) -> CmdResult<Vec<crate::works
 /// Reads only, apart from fetching each project's default branch.
 #[tauri::command]
 pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
-    tauri::async_runtime::spawn_blocking(|| crate::cleanup::scan().map_err(err)).await.map_err(err)?
+    github_work(|| crate::cleanup::scan().map_err(err)).await.map_err(err)?
 }
 
 /// Delete the leftovers the person confirmed. Each is checked again first;
@@ -4311,7 +4311,7 @@ pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
 /// goes out as `leftover_cleanup_progress` events carrying `run`.
 #[tauri::command]
 pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let run = run.unwrap_or_default();
         let report = |progress: &crate::cleanup::Progress| {
             let _ = app.emit(crate::cleanup::PROGRESS_EVENT, crate::worktree_cleanup::OfRun { run: &run, progress });
@@ -4334,7 +4334,7 @@ pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<Stri
 /// clean-up may remove it, and why not. Reads only.
 #[tauri::command]
 pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let state = app.state::<crate::AppState>();
         state.sessions().map_err(err)?.workspace("scan", serde_json::json!({"projectPaths":project_paths})).map_err(err)
     }).await.map_err(err)?
@@ -4364,7 +4364,7 @@ pub async fn worktree_cleanup_cancel_sizes(app: AppHandle, prefix: String) -> Cm
 /// `run`; the list returned is what happened.
 #[tauri::command]
 pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<serde_json::Value> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let state = app.state::<crate::AppState>();
         let items: Vec<_> = items.into_iter().map(|item| serde_json::json!({
             "projectPath":item.project_path,"path":item.path,"token":item.token,"deleteSessions":item.delete_sessions,
@@ -4570,7 +4570,7 @@ pub fn session_set_work_private(app: AppHandle, session_id: String, private: boo
 /// with the setting off this removes nothing.
 #[tauri::command]
 pub async fn merged_cleanup_sweep(app: AppHandle) -> CmdResult<serde_json::Value> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let state = app.state::<crate::AppState>();
         let result: serde_json::Value = state.sessions().map_err(err)?.workspace("mergedSweep", serde_json::json!({})).map_err(err)?;
         for status in result["statuses"].as_array().into_iter().flatten() {
@@ -4733,7 +4733,7 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
 #[tauri::command]
 pub async fn remove_workspace(app: AppHandle, project_path: String, path: String, keep_sessions: bool,
     delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>) -> CmdResult<WorkspaceRemoveReport> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let state = app.state::<crate::AppState>();
         let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", serde_json::json!({
             "projectPath":project_path,"path":path,"keepSessions":keep_sessions,"deleteBranch":delete_branch,

@@ -29,6 +29,20 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// App-owned remote read. Local metadata and agent processes use their own
+/// runners; this one retains the caller's admission until the group is drained.
+pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Duration) -> Result<()> {
+    let mut command = git();
+    command.current_dir(cwd).args(["fetch", "--quiet", "origin", branch]);
+    // Do not let an existing SSH master outlive the counted process group.
+    command.env("GIT_SSH_COMMAND", "ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no");
+    let output = crate::github_process::output(command, timeout, None)?;
+    if !output.status.success() {
+        bail!("git fetch: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code
 /// and stdout, or `None` when git could not be started or was killed.
 pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {

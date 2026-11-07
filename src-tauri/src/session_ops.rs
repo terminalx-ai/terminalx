@@ -874,6 +874,7 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
 
 /// A stop error leaves the workspace and conversation records intact.
 pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<WorkspaceRemoved> {
+    let _github_request = crate::github_process::scope();
     let project = std::fs::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
     let target = std::fs::canonicalize(request.path).unwrap_or_else(|_| PathBuf::from(request.path));
     if target == project {
