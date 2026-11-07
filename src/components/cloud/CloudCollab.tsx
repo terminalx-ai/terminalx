@@ -3,6 +3,8 @@ import { Keyboard, Loader2, Lock, StickyNote, Trash2, Users, X } from "@/icons";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { leaseHeldBy, leaseLive, type TabLease } from "@terminalx/portable/workspaceCollab";
 import { Button } from "@/components/ui/button";
+import { Avatar } from "@/components/ui/avatar";
+import { Chip } from "@/components/ui/chip";
 import { ACCESS_REMOVED_TITLE, type SessionLock, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
 import { initials, usePeople } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
@@ -48,9 +50,7 @@ export function ParticipantsBar({ collabKey, you, tabLabel }: { collabKey: strin
             data-testid="cloud-participant"
             title={`${name} · ${ROLE_BADGE[person.role] ?? person.role}${person.canApprove ? " · can approve" : ""}${person.surfaces > 1 ? ` · ${person.surfaces} windows` : ""}${where ? ` · on ${where}` : ""}`}
           >
-            <span className={cn("flex size-5 items-center justify-center rounded-full bg-well text-[9px] font-medium", typing && "ring-1 ring-accent")}>
-              {initials(nameOf(person.userId))}
-            </span>
+            <Avatar name={nameOf(person.userId)} initials={initials(nameOf(person.userId))} decorative className={cn(typing && "ring-1 ring-accent")} />
             <span className="max-w-24 truncate">{name}</span>
             <span className="rounded bg-well px-1 text-[10px] text-muted-foreground">{ROLE_BADGE[person.role] ?? person.role}</span>
             {person.surfaces > 1 && <span className="text-faint">×{person.surfaces}</span>}
@@ -87,17 +87,18 @@ export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: strin
   return (
     <span className="ml-1 flex shrink-0 items-center -space-x-1" data-testid="session-presence" aria-label={`Also here: ${others.map((person) => nameOf(person.userId)).join(", ")}`}>
       {shown.map((person) => (
-        <span
+        <Avatar
           key={person.userId}
+          name={nameOf(person.userId)}
+          initials={initials(nameOf(person.userId))}
+          aria-label={describe(person)}
           className={cn(
             "flex size-5 items-center justify-center rounded-full border border-background bg-well text-[9px] font-medium text-foreground",
             person.activity === "typing" && "ring-1 ring-accent",
           )}
           title={describe(person)}
           data-testid="session-presence-person"
-        >
-          {initials(nameOf(person.userId))}
-        </span>
+        />
       ))}
       {others.length > shown.length && (
         <span className="flex h-5 items-center rounded-full border border-background bg-well px-1 text-[9px] text-muted-foreground" title={others.slice(HEADER_FACES).map(describe).join("\n")}>
@@ -130,15 +131,15 @@ export function AccessChip({ you, viewOnly = false, className }: { you: Workspac
           : "Shared with you as a driver: you can send to agents. Someone else approves permission requests, and typing in terminals needs that right too."
         : "Not shared with you: ask an organization admin or its creator to share it.";
   return (
-    <span
-      className={cn("flex shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1 text-[10px] text-muted-foreground", className)}
+    <Chip
+      className={cn("flex shrink-0 rounded-sm border-0 bg-veil-raised px-1 py-0 text-[10px] font-normal text-muted-foreground", className)}
       title={title}
       data-testid="cloud-access-chip"
       data-role={role}
     >
-      {role !== "driver" && <Lock className="size-2.5" />}
+      {role !== "driver" && <Lock aria-hidden className="size-2.5" />}
       {role === "viewer" ? "View only" : role === "driver" ? "Driver" : "Not shared"}
-    </span>
+    </Chip>
   );
 }
 
