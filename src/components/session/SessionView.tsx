@@ -211,6 +211,8 @@ const HEADER_CHIP_ICON = "my-1 size-3 shrink-0";
 const HEADER_CHIP_LABEL = "min-w-[2ch] grow basis-0";
 const HEADER_PROJECT_YIELDS = "min-w-0 shrink-[40]";
 const HEADER_TIGHT = "@max-[360px]/session-header:hidden";
+/** At the minimum window width, reclaim decorative spacing before taking space from the title. */
+const HEADER_COMPACT_SPACING = "@max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0";
 
 /** GitHub's mark (the Octicons `mark-github` outline, MIT), since the icon set carries no brand marks. */
 function GithubMark({ className }: { className?: string }) {
@@ -544,7 +546,7 @@ export function SessionView({
             <div className="flex min-w-0 flex-1 items-center gap-1 text-sm" data-testid="session-compact-leading">{chrome?.leading}</div>
           ) : (
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
-          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden", cloud && HEADER_COMPACT_SPACING)} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
             {githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
