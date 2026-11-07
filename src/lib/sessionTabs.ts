@@ -6,7 +6,7 @@ import { getPrefs, usePrefs } from "@/lib/prefs";
 import { getSessionStore, openWelcome, removeTab, selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { followedSelection, isTerminalTab, tabLabel, tabPaneId } from "@/lib/tabFront";
 import { closeTerminal, getTerminalState, setActiveTerminal, useTerminals, type SelectedSessionTab, type TerminalPane } from "@/lib/terminal";
-import { NO_LAYOUT, branchSessionsAsTabs, followedLayout, getTabState, layoutOf, rememberClosed, saveTabLayout, settleLayout, sortByLayout, tabKey, useTabState, workspaceKey, workspaceSessions } from "@/lib/tabLayouts";
+import { NO_LAYOUT, panesOf, selectPaneTab, branchSessionsAsTabs, followedLayout, getTabState, layoutOf, rememberClosed, saveTabLayout, settleLayout, sortByLayout, tabKey, useTabState, workspaceKey, workspaceSessions } from "@/lib/tabLayouts";
 import type { SessionEntry, TabEntry, TabStatus, Workspace } from "@/types/session";
 
 interface PeerBase {
@@ -120,6 +120,14 @@ export function useTabRow(session: SessionEntry): TabRow {
   return useMemo(() => rowOf(session, sessions, chatsPath, workspaces, shared, saved, panes, agents, browser.pages), [session, sessions, chatsPath, workspaces, shared, panes, agents, browser, saved]);
 }
 
+/** The focused pane's row, for tab navigation and bulk actions. */
+export function paneRow(row: TabRow, key?: string | null): TabRow {
+  if (!row.layout.panes?.length) return row;
+  const panes = panesOf(row.layout, row.tabs.map((tab) => tab.key));
+  const pane = panes.find((pane) => key ? pane.tabs.includes(key) : pane.id === row.layout.focusedPane) ?? panes[0];
+  return { ...row, tabs: row.tabs.filter((tab) => pane.tabs.includes(tab.key)) };
+}
+
 /** One session's tabs, in the order its workspace's layout gives them. */
 export function peerOrder(session: SessionEntry, panes: readonly TerminalPane[], pages: readonly BrowserPage[] = [], layout: TabLayout = NO_LAYOUT, agents: Readonly<Record<string, string>> = {}): PeerTab[] {
   return workspaceTabs([session], panes, pages, layout, agents);
@@ -158,6 +166,11 @@ export function sessionOfPeer(sessionId: string, tab: PeerTab): string {
  * panel and the session's actions always describe the tab on screen.
  */
 export function openPeer(sessionId: string, tab: PeerTab) {
+  const session = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  if (session) {
+    const row = workspaceRow(session);
+    if (row.layout.panes?.length) saveTabLayout(row.workspace, selectPaneTab(row.layout, row.tabs.map((peer) => peer.key), tab.key));
+  }
   const target = sessionOfPeer(sessionId, tab);
   if (getSessionStore().selectedSessionId !== target) selectSession(target);
   activatePeer(target, tab);
@@ -196,7 +209,7 @@ export function noteClosed(sessionId: string, closing: readonly PeerTab[]) {
       page: tab.kind === "browser" ? { url: tab.page.url, cwd: session.cwd } : undefined,
     });
   });
-  const mentions = (key: string) => layout.order.includes(key) || layout.pinned.includes(key) || layout.muted.includes(key) || key in layout.titles;
+  const mentions = (key: string) => layout.order.includes(key) || layout.pinned.includes(key) || layout.muted.includes(key) || key in layout.titles || !!layout.panes?.some((pane) => pane.tabs.includes(key));
   if (![...gone].some(mentions)) return;
   saveTabLayout(workspace, settleLayout(layout, tabs.filter((tab) => !gone.has(tab.key)).map((tab) => tab.key), (key) => gone.has(key)));
 }
@@ -229,7 +242,9 @@ export function offerUndoFor(undo: Map<string, TabEntry[]>) {
 export async function closePeer(sessionId: string, tab: PeerTab, tabs: PeerTab[], selected?: SelectedSessionTab | null) {
   const index = tabs.findIndex((candidate) => candidate.kind === tab.kind && candidate.id === tab.id);
   const remaining = tabs.filter((_, i) => i !== index);
-  const next = remaining[Math.min(Math.max(index, 0), remaining.length - 1)];
+  const session = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  const survivors = remaining.length ? remaining : session ? workspaceRow(session).tabs.filter((candidate) => candidate.key !== tab.key) : [];
+  const next = survivors[Math.min(Math.max(index, 0), survivors.length - 1)];
   // Read before it closes: whether this stops the last agent its session has running.
   const undo = offersUndo(agentTabsOf([tab]));
   noteClosed(sessionId, [tab]);
@@ -240,6 +255,11 @@ export async function closePeer(sessionId: string, tab: PeerTab, tabs: PeerTab[]
     activatePeer(target, next);
   }
   await endPeer(sessionId, tab);
+  const owner = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  if (owner) {
+    const now = workspaceRow(owner);
+    saveTabLayout(now.workspace, settleLayout(now.layout, now.tabs.map((peer) => peer.key), (key) => key === tab.key));
+  }
   offerUndoFor(undo);
   const current = getSessionStore().sessions.find((session) => session.id === sessionId);
   if (current && getSessionStore().selectedSessionId === sessionId && !workspaceRow(current).tabs.length) openWelcome(sessionId);

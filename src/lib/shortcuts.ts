@@ -89,6 +89,8 @@ const ACTIONS = [
   { id: "session.tab7", label: "Switch to tab 7", group: "Session", keys: ["mod+7"] },
   { id: "session.tab8", label: "Switch to tab 8", group: "Session", keys: ["mod+8"] },
   { id: "session.lastTab", label: "Switch to last tab", group: "Session", keys: ["mod+9"] },
+  { id: "session.focusOtherPane", label: "Focus other pane", group: "Session", keys: ["mod+alt+o"] },
+  { id: "session.moveTabToOtherPane", label: "Move tab to other pane", group: "Session", keys: ["mod+alt+shift+o"] },
   { id: "session.moveTabLeft", label: "Move tab left", group: "Session", keys: ["mod+alt+shift+["] },
   { id: "session.moveTabRight", label: "Move tab right", group: "Session", keys: ["mod+alt+shift+]"] },
   // The browser's own keys for this (mod+shift+t) switch the tab to its terminal view here; Ctrl+Alt+T opens a terminal on most Linux desktops.

@@ -319,7 +319,7 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(within(header).getByRole("button", { name: "Workspace details" })).toBeTruthy();
     expect(within(header).queryByRole("tablist")).toBeNull();
     // The row of tabs is right under the title bar, and the + ends it.
-    const row = header.nextElementSibling as HTMLElement;
+    const row = screen.getByTestId("workspace-tab-strip");
     expect(row.getAttribute("data-testid")).toBe("workspace-tab-strip");
     const strip = within(row).getByRole("tablist", { name: "Workspace tabs" });
     expect(within(strip).getAllByRole("tab").map((item) => item.getAttribute("aria-label"))).toEqual(["Investigate", "Write the fix"]);
