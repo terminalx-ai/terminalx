@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { GitSource } from "@/lib/gitSource";
+import type { CommitInfo } from "@/types/session";
 import type { AgentEvent } from "@/types/events";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => { throw new Error(`A source-backed panel called ${command}`); }) }));
@@ -26,8 +27,8 @@ function fakeSource(key: string): GitSource & { changesBetween: ReturnType<typeo
     changesBetween: vi.fn(async () => [{ path: "src/turn.ts", status: "modified" as const, additions: 3, deletions: 1 }]),
     fileContentsAt: vi.fn(async () => ({ before: "old", after: "new" })),
     workStatus: unused,
-    logCommits: unused,
-    branches: unused,
+    logCommits: vi.fn(async () => []),
+    branches: vi.fn(async () => [{ name: "main", current: false, remote: false }, { name: "origin/release", current: false, remote: true }]),
     commit: unused,
     push: unused,
     pull: unused,
@@ -321,4 +322,70 @@ it("refetches file statistics with the whitespace choice in every scope", async 
   await waitFor(() => expect(source.workingChanges).toHaveBeenLastCalledWith(true));
   view.unmount();
   setPrefs({ diffHideWhitespace: false });
+});
+
+const commitSha = "a".repeat(40), parentSha = "b".repeat(40);
+const selectedCommit: CommitInfo = { sha: commitSha, parent: parentSha, tree: "commit-tree", shortSha: "aaaaaaa", subject: "A selected commit", body: "", author: "Author", email: "author@example.com", date: "2026-01-01T00:00:00Z" };
+
+it("selects and restores a commit's exact range and returns to the saved workspace target", async () => {
+  const source = fakeSource("commit-scope");
+  vi.mocked(source.logCommits).mockImplementation(async (from) => from === parentSha ? [{ ...selectedCommit, sha: parentSha, parent: null, tree: "parent-tree" }] : [selectedCommit]);
+  const props = { source, events, version: 2, active: true, live: false };
+  const view = render(<ChangesPanel {...props} />);
+  await screen.findByText(/Against main/);
+  const target = screen.getByRole("combobox", { name: "Comparison target" });
+  const suggestions = document.getElementById(target.getAttribute("list")!)!;
+  expect([...suggestions.querySelectorAll("option")].map((option) => option.value)).toEqual(["main", "origin/release"]);
+  fireEvent.change(target, { target: { value: "origin/release" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await screen.findByText(/Against origin\/release/);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "commit" } });
+  await screen.findByText("Choose a commit to review its changes.");
+  await screen.findByRole("option", { name: "aaaaaaa · A selected commit" });
+  fireEvent.change(screen.getByLabelText("Commit to review"), { target: { value: commitSha } });
+  await screen.findByText("Commit changes · 1 file");
+  expect(source.changesBetween).toHaveBeenLastCalledWith("parent-tree", "commit-tree", false);
+  fireEvent.click(screen.getByRole("button", { name: /turn.ts/ }));
+  await screen.findByTestId("diff");
+  expect(source.fileContentsAt).toHaveBeenLastCalledWith("src/turn.ts", "parent-tree", "commit-tree");
+  view.unmount();
+  render(<ChangesPanel {...props} />);
+  expect(screen.getByLabelText("Changes scope")).toHaveProperty("value", "commit");
+  await screen.findByText("Commit changes · 1 file");
+  fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
+  await screen.findByText(/Against origin\/release/);
+  expect(screen.getByLabelText("Comparison target")).toHaveProperty("value", "origin/release");
+});
+
+it("discards an in-flight commit response when the scope changes", async () => {
+  const source = fakeSource("commit-race");
+  let resolve!: (value: typeof selectedCommit[]) => void;
+  vi.mocked(source.logCommits).mockImplementation((from) => from ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "commit" } });
+  await screen.findByRole("option", { name: "aaaaaaa · A selected commit" });
+  fireEvent.change(screen.getByLabelText("Commit to review"), { target: { value: commitSha } });
+  await waitFor(() => expect(resolve).toBeDefined());
+  fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
+  await screen.findByText(/Against main/);
+  await act(async () => resolve([{ ...selectedCommit, parent: null }]));
+  expect(screen.queryByText("Commit changes · 1 file")).toBeNull();
+  expect(screen.getByText(/Against main/)).toBeTruthy();
+});
+
+it("refreshes viewed identities in Uncommitted after a terminal edit", async () => {
+  const source = fakeSource("uncommitted-viewed");
+  const dirty = { path: "dirty.ts", status: "modified", additions: 1, deletions: 0, blobHash: "old" };
+  source.workingChanges.mockResolvedValue({ head: "work-head", files: [dirty] });
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  fireEvent.click(await screen.findByLabelText("Viewed dirty.ts"));
+  expect(screen.getByText("1 of 1 viewed")).toBeTruthy();
+  source.workingChanges.mockResolvedValue({ head: "work-head", files: [{ ...dirty, blobHash: "new" }] });
+  // Wait for the refresh effect after the initial range resolves.
+  await waitFor(() => expect(source.changesBetween).toHaveBeenCalledWith("work-head", "snapshot", false));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  fireEvent(window, new Event("focus"));
+  await screen.findByText("Changed since viewed");
+  expect(screen.getByLabelText("Viewed dirty.ts")).toHaveProperty("checked", false);
 });

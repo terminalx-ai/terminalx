@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, RotateCcw, TriangleAlert } from "@/icons";
+import { commitRange } from "@/lib/changesScope";
 import { useGitWorkingChanges } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
@@ -11,7 +12,7 @@ import type { ChangedFile, CommitInfo } from "@/types/session";
 import { FileDiff } from "./FileDiff";
 import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
-import { FileList } from "./FileList";
+import { ReviewFileList } from "./ReviewFileList";
 
 export type RepoView = "uncommitted" | "history";
 
@@ -21,7 +22,7 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false }: {
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0 }: {
   cwd?: string;
   source?: GitSource;
   active: boolean;
@@ -31,12 +32,14 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   author?: string | null;
   /** Inside the Changes tab, whose scope picks the view: no switch of its own. */
   embedded?: boolean;
+  onReviewCommit?: (sha: string) => void;
+  revision?: number;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
-  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick, hideWhitespace);
+  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick + revision, hideWhitespace);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -63,7 +66,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
     return () => {
       cancelled = true;
     };
-  }, [source, active, tick]);
+  }, [source, active, tick, revision]);
 
   useEffect(() => {
     if (!active || sub !== "history") return;
@@ -187,14 +190,15 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             </div>
           </div>}
           <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
-            <FileList
+            <ReviewFileList
+              workspace={source.key}
               files={files}
               selected={selected}
               onSelect={(p) => setSelected((s) => (s === p ? null : p))}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
-                <span
-                  role="button"
+                <button
+                  type="button"
                   aria-label="Discard changes"
                   title="Discard changes to this file"
                   onClick={(e) => {
@@ -204,12 +208,12 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                   className="hidden shrink-0 rounded p-0.5 text-faint hover:bg-veil-strong hover:text-destructive group-hover:inline-flex"
                 >
                   <RotateCcw className="size-3" />
-                </span>
+                </button>
               )}
             />
           </div>
           {current && head && <div className="min-h-0 flex-1">
-            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} />
+            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} />
           </div>}
         </>
       )}
@@ -222,7 +226,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             <div className="px-2 py-4 text-xs text-muted-foreground">No commits yet.</div>
           ) : null}
           {(commits ?? []).map((c) => (
-            <CommitRow key={c.sha} source={source} commit={c} open={openCommit === c.sha} onToggle={() => setOpenCommit((o) => (o === c.sha ? null : c.sha))} />
+            <CommitRow key={c.sha} source={source} commit={c} onReview={onReviewCommit} open={openCommit === c.sha} onToggle={() => setOpenCommit((o) => (o === c.sha ? null : c.sha))} />
           ))}
         </div>
       )}
@@ -230,22 +234,21 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   );
 }
 
-function CommitRow({ source, commit, open, onToggle }: { source: GitSource; commit: CommitInfo; open: boolean; onToggle: () => void }) {
+function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSource; commit: CommitInfo; open: boolean; onToggle: () => void; onReview?: (sha: string) => void }) {
   const { hideWhitespace } = useDiffOptions();
   const [files, setFiles] = useState<ChangedFile[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [base, setBase] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const current = files.find((file) => file.path === selected);
-  const EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     (async () => {
-      const parentTree = commit.parent ? (await source.logCommits(commit.parent, 1))[0]?.tree ?? EMPTY : EMPTY;
-      const f = await source.changesBetween(parentTree, commit.tree, hideWhitespace);
+      const range = await commitRange(source, commit.sha);
+      const f = await source.changesBetween(range.base, range.head, hideWhitespace);
       if (!cancelled) {
-        setBase(parentTree);
+        setBase(range.base);
         setError(null);
         setFiles(f);
         setSelected((previous) => f.some((file) => file.path === previous) ? previous : f[0]?.path ?? null);
@@ -273,7 +276,8 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
       {open && (
         <div className="ml-3 border-l border-hairline">
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
-          <FileList files={files} selected={selected} onSelect={setSelected} empty="No files." />
+          {onReview && <Button size="xs" variant="ghost" onClick={() => onReview(commit.sha)}>Review this commit</Button>}
+          <ReviewFileList workspace={source.key} files={files} selected={selected} onSelect={setSelected} empty="No files." />
           {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
           {current && base && <div className="h-96 border-t border-hairline">
             <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />
