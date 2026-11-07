@@ -196,7 +196,10 @@ const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.
 
 function sameLayout(a: TabLayout, b: TabLayout): boolean {
   const titles = Object.keys(a.titles);
-  return JSON.stringify(a.panes) === JSON.stringify(b.panes) && a.focusedPane === b.focusedPane && a.splitRatio === b.splitRatio && sameList(a.order, b.order) && sameList(a.pinned, b.pinned) && sameList(a.muted, b.muted) && titles.length === Object.keys(b.titles).length && titles.every((key) => a.titles[key] === b.titles[key]);
+  const panes = a.panes ?? [];
+  const other = b.panes ?? [];
+  const samePanes = panes.length === other.length && panes.every((pane, index) => pane.id === other[index].id && pane.active === other[index].active && sameList(pane.tabs, other[index].tabs));
+  return samePanes && a.focusedPane === b.focusedPane && a.splitRatio === b.splitRatio && sameList(a.order, b.order) && sameList(a.pinned, b.pinned) && sameList(a.muted, b.muted) && titles.length === Object.keys(b.titles).length && titles.every((key) => a.titles[key] === b.titles[key]);
 }
 
 /** Save a workspace's layout: shown at once here, then kept for every window and device. */

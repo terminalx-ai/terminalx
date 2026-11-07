@@ -19,10 +19,11 @@ import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
 
 /** Stable, keyed tab bodies share a grid: moving a tab never remounts its chat,
  * composer or xterm. Both visible terminals observe their own changing boxes. */
-export function WorkspacePanes({ session, selected, strip, continuationOpen }: {
+export function WorkspacePanes({ session, selected, strip, selectionRequested, continuationOpen }: {
   session: SessionEntry;
   selected: SelectedSessionTab | null;
   strip: boolean;
+  selectionRequested: boolean;
   continuationOpen: boolean;
 }) {
   const row = useTabRow(session);
@@ -44,8 +45,8 @@ export function WorkspacePanes({ session, selected, strip, continuationOpen }: {
   // as the strips. Keep the other pane's active tab when following one.
   useLayoutEffect(() => {
     const { row, keys, selectedKey } = latest.current;
-    if (selectedKey && row.layout.panes?.length) saveTabLayout(row.workspace, selectPaneTab(row.layout, keys, selectedKey));
-  }, [session.id, selectedKey]);
+    if (selectionRequested && selectedKey && row.layout.panes?.length) saveTabLayout(row.workspace, selectPaneTab(row.layout, keys, selectedKey));
+  }, [session.id, selectedKey, selectionRequested]);
 
   useEffect(() => { setResizing(null); }, [row.workspace]);
 

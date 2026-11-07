@@ -145,6 +145,12 @@ try {
     const ratio = await separator.getAttribute("aria-valuenow");
     assert(Number(ratio) > 50);
     if (shots) await page.screenshot({ path: join(shots, `${colorScheme}-terminals.png`) });
+    await page.reload();
+    await page.getByTestId("conversation-list").getByRole("button", { name: "main, 2 sessions", exact: true }).click();
+    await separator.waitFor();
+    assert.equal(await separator.getAttribute("aria-valuenow"), ratio);
+    await page.locator('[id="session-terminal-panel-s-a%3Aone"][aria-hidden="false"]').waitFor({ state: "visible" });
+    await page.locator('[id="session-terminal-panel-s-a%3Atwo"][aria-hidden="false"]').waitFor({ state: "visible" });
     // Moving the focused terminal back with the shortcut removes the split.
     await page.keyboard.press(`${mod}+Alt+Shift+o`);
     await separator.waitFor({ state: "detached" });

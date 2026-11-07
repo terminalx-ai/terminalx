@@ -193,7 +193,7 @@ it("confirms only the tabs in the menu's pane", async () => {
   render(<TabsHarness />);
   await ask("all", "agent:a3");
   expect(within(dialog()).getByText("Close 1 tab?")).toBeTruthy();
-  fireEvent.click(within(dialog()).getByRole("button", { name: "Close 1 tab", exact: true }));
+  fireEvent.click(within(dialog()).getByRole("button", { name: "Close 1 tab" }));
   await flush();
   expect(closed()).toEqual(["agent:a3"]);
 });

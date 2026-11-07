@@ -59,12 +59,12 @@ const stopControl = () => screen.getByTestId("composer-stop");
 /** Let a resolved command's `then` run. */
 const settle = () => act(async () => void (await Promise.resolve()));
 
-function Harness({ backend }: { backend?: SessionBackend }) {
+function Harness({ backend, focused = true }: { backend?: SessionBackend; focused?: boolean }) {
   const store = useSessionStore();
   const current = store.sessions.find((s) => s.id === session.id)!;
   return (
     <TooltipProvider>
-      <TabView session={current} tab={current.tabs[0]} active backend={backend} />
+      <TabView session={current} tab={current.tabs[0]} active focused={focused} backend={backend} />
     </TooltipProvider>
   );
 }
@@ -90,6 +90,17 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("Escape in the chat", () => {
+  it("does not interrupt a visible pane until that pane takes focus", async () => {
+    const view = render(<Harness focused={false} />);
+    expect(escape()).toBe(true);
+    await settle();
+    expect(called("interrupt_turn")).toEqual([]);
+    view.rerender(<Harness focused />);
+    expect(escape()).toBe(false);
+    await settle();
+    expect(called("interrupt_turn")).toEqual([{ sessionId: session.id, tabId: tabId() }]);
+  });
+
   it("interrupts the running turn and stops nothing: no kill, no banner", async () => {
     render(<Harness />);
     emit({ type: "user_message", text: "Refactor the parser", queued: false });
