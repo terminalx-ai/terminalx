@@ -41,6 +41,43 @@ other PRs still using the old workflow. Do not count reruns of one attempt as
 independent first-attempt observations or fill the after table with local test
 durations.
 
+## Supported manual publication route (2026-11-07)
+
+The installed app is now 0.2.24. Its guide still exposes no partial-publication
+CLI command, and its pipeline `advance` retains the behavior above. The earlier
+checkpoint missed a separate, supported **manual PR form** in the desktop app.
+Checking that release's `PrPanel.tsx`, `commands::pr_create`,
+`github::create_pr` and `pr_associations::record_local` confirms that the form
+passes the supplied title/body/draft flag through and records a session PR
+association. It does not advance the issue pipeline, add a closing reference,
+change tracker status, or start an agent.
+
+The person can publish Step 1 as follows, without any Hetzner setup:
+
+1. Open the existing PRO-267 session/workspace, on branch
+   `raccoon/pro-267-run-ci-s-linux-tests-on-our-own`.
+2. In the right panel, choose **Repo → Uncommitted → Push**. The app handles
+   setting the upstream for a branch that has not been published.
+3. Choose **PR → Create pull request**. Copy the title and body from
+   [the prepared Step 1 PR text](CI-RUNNERS-STEP1-PR.md), choose **main** as
+   the base, check **Draft**, and press **Create**.
+4. Leave PRO-267 open and its pipeline hold intact. Share the PR URL so its
+   actual CI results can be collected. The draft needs independent review and
+   the ordinary merge gates before it can land; publication is not approval
+   to merge or activate runners. Do not use pipeline `advance` to adopt the
+   draft: that path would add the closing reference again.
+
+These are person-operated app controls. The installed CLI does not expose
+this manual form or its Push action, and its guide says TerminalX's computer
+use cannot operate TerminalX's own windows (`own_app_protected`). No direct
+push, undocumented RPC, UI automation workaround, or approval bypass was used.
+No runtime refusal was triggered. The next action is the person's **Push** and
+**Create** in the app, rather than a missing Hetzner credential.
+
+Read-only GitHub queries on 2026-11-07 still found no PR and no CI runs for this
+branch: the after sample remains **0/10**. Earlier validations stand; no broad
+suite or helper was restarted for this documentation-only follow-up.
+
 ## Method
 
 Whole-run duration is `run_started_at` to the last successful job’s
