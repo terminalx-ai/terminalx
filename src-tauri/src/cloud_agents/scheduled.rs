@@ -733,6 +733,7 @@ impl Agent for ManagerAgent {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
+                section_id: None,
                 project_path: self.root.clone(),
                 title: Some(title.to_string()),
                 use_worktree: false,

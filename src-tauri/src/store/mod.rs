@@ -14,6 +14,7 @@ pub mod conversation_titles;
 pub mod projects;
 pub mod quick;
 pub mod settings;
+pub mod environment;
 // Dormant transactional journal primitive; no live event publisher uses it.
 #[allow(dead_code)]
 pub(crate) mod batch_journal;

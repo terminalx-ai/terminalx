@@ -176,6 +176,7 @@ pub(super) struct Parts {
     /// The process group the pane's program leads, which stopping it signals.
     pub group: Option<u32>,
     pub explicit_command: bool,
+    pub environment: crate::store::environment::Stamp,
     pub cwd: String,
     pub created: String,
     pub scrollback: VecDeque<u8>,
@@ -194,6 +195,7 @@ pub(crate) struct FrozenPane {
     pub pid: Option<u32>,
     pub group: Option<u32>,
     pub explicit_command: bool,
+    pub environment: crate::store::environment::Stamp,
     pub cwd: String,
     pub created: String,
     /// The program's side of the terminal, by which its processes are listed.
@@ -291,6 +293,7 @@ impl Terminals {
                 pid: pane.pid,
                 group: pane.group.pid(),
                 explicit_command: pane.explicit_command,
+                environment: pane.environment.clone(),
                 cwd: pane.cwd.clone(),
                 created: pane.created.clone(),
                 tty: pane.master.tty_name(),
@@ -312,7 +315,7 @@ impl Terminals {
     /// program goes on in the same terminal, and its output from where the
     /// handover left it.
     pub(crate) fn adopt(&self, sink: Arc<dyn EventSink>, pane: FrozenPane) -> Result<()> {
-        let FrozenPane { id, master, pid, group, explicit_command, cwd, created, tty, cols, rows, scrollback, printed, screen, quiet, title, renamed } = pane;
+        let FrozenPane { id, master, pid, group, explicit_command, environment, cwd, created, tty, cols, rows, scrollback, printed, screen, quiet, title, renamed } = pane;
         if self.panes.lock().unwrap().contains_key(&id) {
             bail!("a terminal named {id} is already open");
         }
@@ -331,6 +334,7 @@ impl Terminals {
             pid,
             group,
             explicit_command,
+            environment,
             cwd,
             created,
             scrollback: back,

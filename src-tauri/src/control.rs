@@ -309,6 +309,12 @@ impl WindowControl {
 
     #[cfg(unix)]
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        if command == "environment.snapshot" {
+            let key = params["key"].as_str().ok_or_else(|| ControlError::invalid("Environment scope required."))?;
+            let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Environment revision required."))?;
+            return crate::store::environment::desktop_snapshot(key, revision)
+                .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
+        }
         if let Some(action) = command.strip_prefix("share.") {
             let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
             let session = params["sessionId"].as_str().ok_or_else(|| ControlError::internal("Session id required."))?;
@@ -863,7 +869,7 @@ impl ControlService {
             None => {
                 // The title a quick chat started from the window gets: the prompt's first line.
                 let title = p.title.or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
-                let quick = crate::session_ops::NewQuickChat { title, cwd: p.cwd, tab: Some(first_tab) };
+                let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab) };
                 crate::session_ops::create_quick_chat_blocking(&*self.sink, quick).map_err(ControlError::invalid)?
             }
             Some(selector) => {
@@ -879,6 +885,7 @@ impl ControlService {
                 crate::session_ops::create_named_session_blocking(
                     &*self.sink,
                     NewSession {
+                        section_id: None,
                         project_path: project.path,
                         title: p.title,
                         use_worktree: p.use_worktree,
@@ -1790,6 +1797,7 @@ mod tests {
         })).unwrap()).unwrap();
         // Pointed at the project's own folder: still not one of the project's sessions.
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            section_id: None,
             title: Some("Quick question".into()), cwd: Some(project.path.clone()), tab: None,
         }).unwrap();
         let (service, _sink) = headless_service();
@@ -1900,6 +1908,7 @@ mod tests {
             "projectPath": other.path, "title": "Another project's", "useWorktree": false, "cwd": cwd,
         })).unwrap()).unwrap();
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            section_id: None,
             title: Some("Quick look".into()), cwd: Some(cwd.clone()), tab: None,
         }).unwrap();
         let everyone: std::collections::BTreeSet<String> = [&own, &foreign, &quick].iter().map(|s| s.id.clone()).collect();
