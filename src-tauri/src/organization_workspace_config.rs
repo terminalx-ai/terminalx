@@ -45,6 +45,11 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_secret_not_found"
             | "cloud_workspace_secret_binding_conflict"
             | "cloud_workspace_config_unavailable"
+            | "organization_mcp_invalid"
+            | "organization_mcp_conflict"
+            | "organization_mcp_not_found"
+            | "organization_mcp_oauth_failed"
+            | "organization_mcp_unavailable"
     )
 }
 
@@ -78,7 +83,10 @@ struct Client {
 
 impl Client {
     fn new(base: Url, timeout: Duration) -> Self {
-        Self { base, agent: ureq::AgentBuilder::new().timeout(timeout).redirects(0).build() }
+        Self {
+            base,
+            agent: ureq::AgentBuilder::new().timeout(timeout).redirects(0).build(),
+        }
     }
 
     /// `body` is serialized JSON, in a buffer wiped once sent: it can hold a
@@ -128,7 +136,11 @@ fn http_error(status: u16, response: ureq::Response) -> ConfigError {
         .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_owned))
         .filter(|code| known_error_code(code))
         .unwrap_or_else(|| UNAVAILABLE.into());
-    ConfigError { code, status: Some(status), retry_after_seconds: None }
+    ConfigError {
+        code,
+        status: Some(status),
+        retry_after_seconds: None,
+    }
 }
 
 fn json_body(value: &impl serde::Serialize) -> Result<Zeroizing<Vec<u8>>, ConfigError> {
@@ -168,12 +180,18 @@ pub struct WorkspaceConfigService {
 
 impl WorkspaceConfigService {
     pub fn new(account: Arc<AccountManager>) -> Self {
-        Self { account, client: Client::new(Url::parse(&crate::account::api_base_url()).expect("valid account service URL"), REQUEST_TIMEOUT) }
+        Self {
+            account,
+            client: Client::new(Url::parse(&crate::account::api_base_url()).expect("valid account service URL"), REQUEST_TIMEOUT),
+        }
     }
 
     #[cfg(test)]
     fn for_test(account: Arc<AccountManager>, base: &str) -> Self {
-        Self { account, client: Client::new(Url::parse(base).unwrap(), Duration::from_secs(2)) }
+        Self {
+            account,
+            client: Client::new(Url::parse(base).unwrap(), Duration::from_secs(2)),
+        }
     }
 
     fn run(&self, expected_revision: Option<&str>, method: Method, tail: &[&str], body: Option<Zeroizing<Vec<u8>>>) -> Result<Value, ConfigError> {
@@ -194,6 +212,31 @@ impl WorkspaceConfigService {
         let mut payload = result?;
         payload.insert("contextRevision".into(), Value::String(revision));
         Ok(Value::Object(payload))
+    }
+
+    pub fn mcp_servers(&self) -> Result<Value, ConfigError> {
+        self.run(None, Method::Get, &["mcp-servers"], None)
+    }
+
+    pub fn mcp_action(&self, action: &str, id: Option<&str>, input: &Value, revision: &str) -> Result<Value, ConfigError> {
+        if id.is_some_and(|value| !is_path_segment(value)) {
+            return Err(local(INVALID));
+        }
+        let mut tail = vec!["mcp-servers"];
+        if let Some(id) = id {
+            tail.push(id);
+        }
+        let method = match (action, id.is_some()) {
+            ("save", false) => Method::Post,
+            ("save", true) => Method::Put,
+            ("delete", true) => Method::Delete,
+            ("sign-in", true) => {
+                tail.push("sign-in");
+                Method::Post
+            }
+            _ => return Err(local(INVALID)),
+        };
+        self.run(Some(revision), method, &tail, Some(json_body(input)?))
     }
 
     pub fn organization(&self) -> Result<Value, ConfigError> {

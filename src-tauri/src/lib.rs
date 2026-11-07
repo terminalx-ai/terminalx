@@ -29,6 +29,7 @@ pub mod cloud_agents;
 mod cloud_github;
 mod agent_route_check;
 mod cloud_config;
+mod cloud_mcp_probe;
 mod cloud_grants;
 #[cfg(feature = "desktop")]
 pub mod browser;
@@ -60,6 +61,7 @@ mod organization_compute;
 mod organization_environment;
 #[cfg(feature = "desktop")]
 mod organization_workspace_config;
+mod organization_mcp_import;
 #[cfg(feature = "desktop")]
 pub mod computer;
 mod control;
@@ -455,6 +457,9 @@ pub fn run() {
             commands::organization_environment_recipe_propose,
             commands::organization_environment_recipe_apply,
             commands::organization_environment_recipe_dismiss,
+            commands::organization_mcp_servers,
+            commands::organization_mcp_action,
+            commands::organization_mcp_import,
             commands::workspace_config_organization,
             commands::workspace_config_organization_update,
             commands::workspace_config_repository_update,

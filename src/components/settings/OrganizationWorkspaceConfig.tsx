@@ -1,3 +1,4 @@
+import { OrganizationMcpServers } from "@/components/settings/OrganizationMcpServers";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -53,7 +54,7 @@ function LayerFields({ label, draft, disabled, onChange }: { label: string; draf
         <textarea aria-label={`${label} prompt`} {...textProps} className={areaClass} value={draft.prompt} maxLength={16384} disabled={disabled} onChange={(event) => onChange({ ...draft, prompt: event.target.value })} />
       </label>
       <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
-        MCP servers (JSON array)
+        Advanced legacy MCP servers (JSON array)
         <textarea aria-label={`${label} MCP servers`} className={areaClass} value={draft.mcp} disabled={disabled} onChange={(event) => onChange({ ...draft, mcp: event.target.value })} />
       </label>
     </div>
@@ -263,6 +264,8 @@ export function OrganizationWorkspaceConfig({ contextRevision }: { contextRevisi
           </p>
         )}
       </section>
+
+      <OrganizationMcpServers contextRevision={contextRevision} />
 
       <section className="mt-3 flex flex-col gap-2" aria-label="Repository configuration">
         <div className="text-xs font-medium text-muted-foreground">Repositories</div>

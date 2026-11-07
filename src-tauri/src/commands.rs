@@ -424,6 +424,23 @@ async fn config_call(
 }
 
 #[tauri::command]
+pub async fn organization_mcp_servers(state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, |service| service.mcp_servers()).await
+}
+
+#[tauri::command]
+pub async fn organization_mcp_action(action: String, id: Option<String>, input: serde_json::Value, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    config_call(state, move |service| service.mcp_action(&action, id.as_deref(), &input, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_mcp_import() -> ComputeResult {
+    tauri::async_runtime::spawn_blocking(crate::organization_mcp_import::read_candidates)
+        .await
+        .map_err(|_| crate::organization_compute::OrganizationComputeError::local("organization_mcp_import_failed"))?
+}
+
+#[tauri::command]
 pub async fn workspace_config_organization(state: tauri::State<'_, crate::AppState>) -> ComputeResult {
     config_call(state, |service| service.organization()).await
 }

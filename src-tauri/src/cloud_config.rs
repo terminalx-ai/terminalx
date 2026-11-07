@@ -114,9 +114,7 @@ const RESERVED_PREFIXES: &[&str] = &["TERMINALX_", "RACCOON_", "GIT_", "LD_", "D
 /// True for a name configuration may set on an agent process.
 pub fn is_injectable_name(name: &str) -> bool {
     let mut chars = name.chars();
-    let valid = name.len() <= 128
-        && chars.next().is_some_and(|first| first.is_ascii_uppercase() || first == '_')
-        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    let valid = name.len() <= 128 && chars.next().is_some_and(|first| first.is_ascii_uppercase() || first == '_') && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
     valid && !RESERVED_NAMES.contains(&name) && !RESERVED_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
@@ -171,6 +169,8 @@ pub struct SecretEnv {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fetched {
+    #[serde(default)]
+    pub mcp_probes: Vec<McpProbe>,
     pub v: u8,
     pub workspace_id: String,
     pub runtime_generation: u64,
@@ -192,6 +192,13 @@ pub struct Fetched {
     pub secrets: Option<SealedGrant>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpProbe {
+    pub id: String,
+    pub name: String,
+    pub version: u64,
+}
+
 #[derive(Deserialize)]
 struct SecretsPlaintext {
     v: u8,
@@ -211,9 +218,17 @@ impl Drop for SecretsPlaintext {
 /// The server call; a trait so tests can stand in for the server.
 pub trait ConfigApi {
     fn fetch_config(&self, key_thumbprint: &str) -> Result<Value, GrantCallError>;
+    fn report_mcp(&self, _thumbprint: &str, _results: Vec<Value>) -> Result<(), GrantCallError> {
+        Ok(())
+    }
 }
 
 impl ConfigApi for HttpGrantApi {
+    fn report_mcp(&self, thumbprint: &str, results: Vec<Value>) -> Result<(), GrantCallError> {
+        let _: Value = self.post("/v1/cloud-workspace-bootstrap/mcp-status", json!({ "v": 1, "keyThumbprint": thumbprint, "results": results }))?;
+        Ok(())
+    }
+
     fn fetch_config(&self, key_thumbprint: &str) -> Result<Value, GrantCallError> {
         self.post(CONFIG_PATH, json!({ "v": 1, "keyThumbprint": key_thumbprint }))
     }
@@ -235,6 +250,7 @@ impl std::fmt::Debug for Secrets {
 
 #[derive(Debug, Clone, Default)]
 struct Resolved {
+    mcp_probes: Vec<McpProbe>,
     revision: String,
     env: BTreeMap<String, String>,
     prompts: Vec<String>,
@@ -273,6 +289,7 @@ impl std::fmt::Debug for LaunchConfig {
 pub struct ConfigStore {
     grants: Arc<GrantStore>,
     state: Mutex<State>,
+    syncing: Mutex<()>,
 }
 
 fn quote(s: &str) -> String {
@@ -292,7 +309,11 @@ fn header_var(index: usize) -> String {
 
 impl ConfigStore {
     pub fn new(grants: Arc<GrantStore>) -> Self {
-        Self { grants, state: Mutex::new(State::default()) }
+        Self {
+            grants,
+            state: Mutex::new(State::default()),
+            syncing: Mutex::new(()),
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -319,6 +340,7 @@ impl ConfigStore {
 
     /// Fetch and apply; returns how long to wait before the next fetch.
     pub fn sync(&self, grant_api: &dyn GrantApi, api: &dyn ConfigApi, received: Instant, wall: u64) -> Result<Duration, GrantCallError> {
+        let _syncing = self.syncing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let outcome = self.sync_inner(grant_api, api, received);
         match &outcome {
             Err(GrantCallError::Rejected) => self.drop_all("the configuration API rejected the runtime credential"),
@@ -374,7 +396,10 @@ impl ConfigStore {
             bail!("the sealed configuration does not match revision {}", fetched.revision);
         }
         let values = plaintext.values.iter().map(|(name, value)| (name.clone(), Zeroizing::new(value.clone()))).collect();
-        Ok(Secrets { values, usable_until: received + (lifetime - SKEW_ALLOWANCE) })
+        Ok(Secrets {
+            values,
+            usable_until: received + (lifetime - SKEW_ALLOWANCE),
+        })
     }
 
     fn apply(&self, fetched: Fetched, thumbprint: &str, generation: u64, received: Instant) -> Result<Duration> {
@@ -387,7 +412,7 @@ impl ConfigStore {
         if fetched.key_thumbprint != thumbprint || fetched.runtime_generation != generation {
             bail!("the server answered for another key or runtime generation");
         }
-        if fetched.env.len() > MAX_ENTRIES || fetched.mcp_servers.len() > MAX_ENTRIES || fetched.secret_env.len() > MAX_ENTRIES {
+        if fetched.mcp_probes.len() > MAX_ENTRIES || fetched.env.len() > MAX_ENTRIES || fetched.mcp_servers.len() > MAX_ENTRIES || fetched.secret_env.len() > MAX_ENTRIES {
             bail!("the workspace configuration lists too many entries");
         }
         let secrets = match &fetched.secrets {
@@ -422,6 +447,7 @@ impl ConfigStore {
             }
         }
         let resolved = Resolved {
+            mcp_probes: fetched.mcp_probes.clone(),
             revision: fetched.revision.clone(),
             env,
             prompts: fetched.prompts.iter().map(|prompt| prompt.text.clone()).filter(|text| !text.trim().is_empty()).collect(),
@@ -449,6 +475,39 @@ impl ConfigStore {
         state.config = Some(resolved);
         state.secrets = secrets;
         Ok(wait.clamp(MIN_REFRESH, MAX_REFRESH))
+    }
+
+    fn probe(&self, api: &HttpGrantApi) {
+        let now = Instant::now();
+        let tasks: Vec<_> = {
+            let state = self.state();
+            let Some(config) = &state.config else {
+                return;
+            };
+            config
+                .mcp_probes
+                .iter()
+                .filter_map(|probe| {
+                    let server = config.mcp_servers.iter().find(|server| server.name == probe.name)?;
+                    let url = server.url.clone()?;
+                    let mut headers = BTreeMap::new();
+                    for (key, value) in server.headers.iter().flatten() {
+                        headers.insert(key.clone(), Zeroizing::new(value.clone()));
+                    }
+                    for (key, name) in server.secret_headers.iter().flatten() {
+                        headers.insert(key.clone(), self.secret(&state, name, now)?);
+                    }
+                    Some((probe.clone(), url, headers))
+                })
+                .collect()
+        };
+        let Ok((thumbprint, _)) = self.grants.enrollment(api, false) else {
+            return;
+        };
+        for (probe, url, headers) in tasks {
+            let status = crate::cloud_mcp_probe::check(&url, &headers);
+            let _ = api.report_mcp(&thumbprint, vec![json!({ "id": probe.id, "version": probe.version, "status": status })]);
+        }
     }
 
     fn secret(&self, state: &State, name: &str, now: Instant) -> Option<Zeroizing<String>> {
@@ -695,6 +754,7 @@ fn step(store: &ConfigStore, grant_api: &dyn GrantApi, api: &dyn ConfigApi, reje
 /// Keep the configuration fresh at the server's `refreshAfter`, before sealed
 /// secrets expire, with backoff on errors.
 pub fn spawn_sync_loop(store: Arc<ConfigStore>, api: Arc<HttpGrantApi>, rejected: impl Fn() -> bool + Send + 'static) {
+    let _ = API.set(api.clone());
     let spawned = std::thread::Builder::new().name("cloud-workspace-config".into()).spawn(move || {
         let mut backoff = BACKOFF_START;
         loop {
@@ -704,7 +764,8 @@ pub fn spawn_sync_loop(store: Arc<ConfigStore>, api: Arc<HttpGrantApi>, rejected
             if store.env_names() != before {
                 crate::cloud_grants::sign_in_may_have_changed();
             }
-            std::thread::sleep(wait);
+            store.probe(&api);
+            std::thread::sleep(wait.min(Duration::from_secs(30)));
         }
     });
     if let Err(error) = spawned {
@@ -714,6 +775,7 @@ pub fn spawn_sync_loop(store: Arc<ConfigStore>, api: Arc<HttpGrantApi>, rejected
 
 // ------------------------------------------------------------ the hooks
 
+static API: OnceLock<Arc<HttpGrantApi>> = OnceLock::new();
 static STORE: OnceLock<Arc<ConfigStore>> = OnceLock::new();
 
 pub fn install(store: Arc<ConfigStore>) {
@@ -724,7 +786,15 @@ pub fn install(store: Arc<ConfigStore>) {
 
 /// Configuration for a new agent session; empty outside a cloud workspace.
 pub fn launch_config(harness: &str, launch: &str) -> LaunchConfig {
-    STORE.get().map(|store| store.launch_config(harness, launch, Instant::now())).unwrap_or_default()
+    STORE
+        .get()
+        .map(|store| {
+            if let Some(api) = API.get() {
+                let _ = store.sync(api.as_ref(), api.as_ref(), Instant::now(), crate::cloud_grants::now_ms());
+            }
+            store.launch_config(harness, launch, Instant::now())
+        })
+        .unwrap_or_default()
 }
 
 /// The names of the variables the workspace configuration gives a new agent
@@ -817,7 +887,10 @@ mod tests {
     }
 
     fn fake(grants: &Arc<GrantStore>, respond: impl FnMut(&str) -> Result<Value, GrantCallError> + Send + 'static) -> FakeServer {
-        FakeServer { grants: grants.clone(), response: Mutex::new(Box::new(respond)) }
+        FakeServer {
+            grants: grants.clone(),
+            response: Mutex::new(Box::new(respond)),
+        }
     }
 
     fn synced(workspace: &str, env: Value, secrets: Option<Value>, root: Option<PathBuf>) -> Arc<ConfigStore> {
