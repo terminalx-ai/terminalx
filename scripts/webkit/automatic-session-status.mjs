@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// PRO-159: the same status on all three desktop surfaces, using actual WebKit layout.
+// PRO-159: the same status on desktop surfaces, using actual WebKit layout.
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -51,6 +51,8 @@ try {
     await page.getByRole("button", { name: /^Dashboard/ }).click();
     await check(page.locator("main"), "dashboard");
     if (screenshots && width === 1360) await page.screenshot({ path: join(screenshots, `dashboard-${colorScheme}.png`) });
+    await page.getByRole("button", { name: "Table", exact: true }).click();
+    await check(page.getByRole("table", { name: "Sessions", exact: true }), "dashboard table");
     await page.getByRole("button", { name: "local-0 overview", exact: true }).click();
     await check(page.getByTestId("project-overview"), "overview");
     await page.getByTestId("project-overview").evaluate((element) => { element.scrollTop = 0; });
