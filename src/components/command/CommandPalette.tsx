@@ -1,3 +1,5 @@
+import { conversationTitle } from "@/lib/sessions";
+import { openSectionDialog } from "@/lib/localSections";
 import {
   useCallback,
   useDeferredValue,
@@ -480,6 +482,8 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:settings:search", group: "commands" as const, primary: "Search settings…", secondary: "Find a settings section", recentAt: 2, icon: Settings, keepOpen: true, run: () => { setScope("settings"); setQuery(""); setSelected(0); } }, ["preferences options configure"]),
       indexPaletteItem({ id: "command:new-issue", group: "commands" as const, primary: "New issue…", secondary: "Create a GitHub or Linear issue for the project", recentAt: 2, icon: CircleDot, run: () => openNewIssue() }, ["issue create new bug feature github linear ticket"]),
       indexPaletteItem({ id: "command:worktree-cleanup", group: "commands" as const, primary: "Clean up worktrees…", secondary: "Review and remove safe worktrees across open projects, here and on cloud workspaces", recentAt: 2, icon: Trash2, run: () => openWorktreeCleanup() }, ["worktree workspace cleanup disk space remove delete prune"]),
+      indexPaletteItem({ id: "command:local-section:create", group: "commands" as const, primary: "New local section…", secondary: "Group sessions across local projects", recentAt: 2, icon: FolderPlus, run: () => openSectionDialog({ kind: "create" }) }, ["create sidebar section"]),
+      ...(selectedSession && !store.selectedCloudWorkspace ? [indexPaletteItem({ id: "command:local-section:move", group: "commands" as const, primary: "Move to section…", secondary: conversationTitle(selectedSession), recentAt: 3, icon: FolderPlus, run: () => openSectionDialog({ kind: "move", sessionIds: [selectedSession.id] }) }, ["move session sidebar section"])] : []),
       // The start screen's three ways to a project, for after the first one exists.
       ...START_ACTIONS.map((action, index) =>
         indexPaletteItem({
@@ -503,7 +507,7 @@ export function CommandPalette({
         : []),
     ];
     return [...shortcutEntries, ...extras];
-  }, [cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [selectedSession, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({

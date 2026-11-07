@@ -1,3 +1,4 @@
+import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SessionPipelineControls } from "./SessionPipelineControls";
 import { LocalShareButton } from "./ShareSessionDialog";
@@ -801,6 +802,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "agent" || t.id !== selected.id}
                   className={cn("flex min-h-0 flex-1 flex-col", (selected?.kind !== "agent" || t.id !== selected.id) && "hidden")}
                 >
+                  {!cloud && <EnvironmentNotice id={t.pane ?? `tab:${t.id}`} active={selected?.kind === "agent" && t.id === selected.id && !activeInTerminal} />}
                   <TabView
                     session={session}
                     tab={t}
