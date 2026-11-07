@@ -22,17 +22,33 @@ pub async fn environment_reveal(project_path: Option<String>, name: String) -> C
 }
 
 #[tauri::command]
-pub async fn environment_save(
-    project_path: Option<String>,
-    inputs: Vec<environment::Input>,
-    previous: Option<String>,
-) -> CmdResult<()> {
-    blocking(move || environment::save(project_path.as_deref(), inputs, previous.as_deref())).await
+pub async fn environment_copy(project_path: Option<String>, name: String) -> CmdResult<()> {
+    blocking(move || crate::secret_clipboard::copy(&environment::reveal(project_path.as_deref(), &name)?)).await
 }
 
 #[tauri::command]
-pub async fn environment_delete(project_path: Option<String>, name: String) -> CmdResult<()> {
-    blocking(move || environment::delete(project_path.as_deref(), &name)).await
+pub async fn environment_save(
+    state: tauri::State<'_, crate::AppState>,
+    project_path: Option<String>,
+    inputs: Vec<environment::Input>,
+    previous: Option<String>,
+) -> CmdResult<bool> {
+    let runtime = state.runtime();
+    blocking(move || {
+        environment::save(project_path.as_deref(), inputs, previous.as_deref())?;
+        Ok(runtime.and_then(|runtime| runtime.terminals().ok())
+            .is_some_and(|terminals| terminals.environment_ready(project_path.as_deref()).unwrap_or(false)))
+    }).await
+}
+
+#[tauri::command]
+pub async fn environment_delete(state: tauri::State<'_, crate::AppState>, project_path: Option<String>, name: String) -> CmdResult<bool> {
+    let runtime = state.runtime();
+    blocking(move || {
+        environment::delete(project_path.as_deref(), &name)?;
+        Ok(runtime.and_then(|runtime| runtime.terminals().ok())
+            .is_some_and(|terminals| terminals.environment_ready(project_path.as_deref()).unwrap_or(false)))
+    }).await
 }
 
 #[tauri::command]

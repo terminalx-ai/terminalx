@@ -7,8 +7,9 @@ export interface EnvironmentInput { name: string; value: string }
 export const environment = {
   list: (projectPath: string | null) => invoke<EnvironmentRow[]>("environment_list", { projectPath }),
   reveal: (projectPath: string | null, name: string) => invoke<string>("environment_reveal", { projectPath, name }),
-  save: (projectPath: string | null, inputs: EnvironmentInput[], previous: string | null = null) => invoke<void>("environment_save", { projectPath, inputs, previous }),
-  delete: (projectPath: string | null, name: string) => invoke<void>("environment_delete", { projectPath, name }),
+  copy: (projectPath: string | null, name: string) => invoke<void>("environment_copy", { projectPath, name }),
+  save: (projectPath: string | null, inputs: EnvironmentInput[], previous: string | null = null) => invoke<boolean>("environment_save", { projectPath, inputs, previous }),
+  delete: (projectPath: string | null, name: string) => invoke<boolean>("environment_delete", { projectPath, name }),
   readFile: (projectPath: string, path: string) => invoke<string>("environment_read_file", { projectPath, path }),
   changed: (id: string) => invoke<{ changed: boolean; unavailable: boolean }>("environment_changed", { id }),
 };

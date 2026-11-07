@@ -18,6 +18,9 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
     }
     if let Some(method) = command.strip_prefix("runtime.pty.") {
         let terminals = manager.terminals();
+        if method == "environmentReady" {
+            return Ok(json!(crate::store::environment::wait_ready(params["projectPath"].as_str())));
+        }
         if method == "mobileDrivers" { return Ok(serde_json::to_value(manager.mobile.driven_tabs())?); }
         if method == "shells" { return Ok(serde_json::to_value(terminals.shells())?); }
         if method == "stats" { return Ok(serde_json::to_value(terminals.stats())?); }

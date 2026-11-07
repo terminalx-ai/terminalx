@@ -1,8 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const { invoke, copyText, open } = vi.hoisted(() => ({ invoke: vi.fn(), copyText: vi.fn(), open: vi.fn() }));
+const { invoke, open } = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn() }));
 vi.mock("@/lib/api", () => ({ invoke, errorMessage: (e: unknown) => String(e) }));
-vi.mock("@/lib/clipboard", () => ({ copyText }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: [{ name: "App", path: "/repo", kind: "git" }, { name: "Remote", path: "cloud:org:repo", kind: "git" }] }) }));
 import { EnvironmentSettings } from "./EnvironmentSettings";
@@ -18,11 +17,12 @@ beforeEach(() => {
         ...Object.keys(values[scope]).map((name) => ({ name, scope: scope === "user" ? "user" : "repository", overridden: false })),
       ];
       case "environment_reveal": return values[scope][args.name];
+      case "environment_copy": return;
       case "environment_save":
         if (args.previous) delete values[scope][args.previous];
         for (const { name, value } of args.inputs) values[scope][name] = value;
-        return;
-      case "environment_delete": delete values[scope][args.name]; return;
+        return true;
+      case "environment_delete": delete values[scope][args.name]; return true;
       case "environment_read_file": return "FROM_FILE=loaded";
       default: throw new Error(`Unexpected command ${command}`);
     }
@@ -42,7 +42,8 @@ describe("environment settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Hide API_KEY" }));
     expect(screen.queryByText("private-value")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Copy API_KEY" }));
-    await waitFor(() => expect(copyText).toHaveBeenCalledWith("private-value"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("environment_copy", { projectPath: null, name: "API_KEY" }));
+    expect(invoke.mock.calls.filter(([command]) => command === "environment_reveal")).toHaveLength(1);
     await waitFor(() => expect((screen.getByRole("button", { name: "Delete API_KEY" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Delete API_KEY" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Reveal API_KEY" })).toBeNull());
@@ -109,5 +110,35 @@ describe("environment settings", () => {
     fireEvent.click(dialog.getByRole("button", { name: "Save variable" }));
     await waitFor(() => expect(dialog.getByRole("alert").textContent).toBe("Keychain unavailable"));
     expect(values.user.KEY).toBeUndefined();
+  });
+  it("waits for the runtime revision before reporting a save as ready", async () => {
+    await ready();
+    const original = invoke.getMockImplementation()!;
+    let finish!: (ready: boolean) => void;
+    invoke.mockImplementation(async (command, args) => {
+      const result = await original(command, args);
+      return command === "environment_save" ? new Promise<boolean>((resolve) => { finish = resolve; }) : result;
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    const dialog = within(screen.getByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "KEY" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Save variable" }));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect((dialog.getByRole("button", { name: "Save variable" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("status")).toBeNull();
+    finish(true);
+    await screen.findByRole("button", { name: "Reveal KEY" });
+    expect(screen.getByRole("status").textContent).toContain("Restart to apply");
+  });
+  it("distinguishes a successful save from an unavailable runtime cache", async () => {
+    await ready();
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, args) => {
+      const result = await original(command, args);
+      return command === "environment_delete" ? false : result;
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Delete API_KEY" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Reveal API_KEY" })).toBeNull());
+    expect(screen.getByRole("status").textContent).toContain("Saved, but environment overrides are not ready");
   });
 });

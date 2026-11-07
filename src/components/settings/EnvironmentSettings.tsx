@@ -4,7 +4,6 @@ import { RegisteredSetting, resolveSetting } from "./settingsRegistry";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useSessionStore } from "@/lib/sessions";
-import { copyText } from "@/lib/clipboard";
 import { errorMessage } from "@/lib/api";
 import { environment, environmentNameError, parseLocalEnv, type EnvironmentRow } from "@/lib/localEnvironment";
 
@@ -55,9 +54,9 @@ function EnvironmentTable({ project }: { project: string | null }) {
     setBusy(true); setError(null); setNotice(null);
     try { await run(); } catch (e) { setError(errorMessage(e)); } finally { setBusy(false); }
   };
-  const changed = async () => {
+  const changed = async (ready: boolean) => {
     // Clear all revealed values after any edit by replacing the table's rows.
-    setNotice("Saved. Running tabs: Restart to apply. Nothing restarts automatically.");
+    setNotice(ready ? "Saved. Running tabs: Restart to apply. Nothing restarts automatically." : "Saved, but environment overrides are not ready for new tabs yet. Check Keychain access and the local runtime before starting a new tab. Running tabs are unchanged.");
     window.dispatchEvent(new Event("local-environment-changed"));
     await refresh();
   };
@@ -77,13 +76,13 @@ function EnvironmentTable({ project }: { project: string | null }) {
     {rows === null ? <p className="text-sm text-muted-foreground">Loading variables…</p> : <div className="overflow-x-auto rounded-lg border border-hairline">
       <table className="w-full text-left text-sm" aria-label="Environment variables">
         <thead className="border-b border-hairline text-muted-foreground"><tr><th className="p-3">Name</th><th className="p-3">Value</th><th className="p-3">Scope</th><th className="p-3"><span className="sr-only">Actions</span></th></tr></thead>
-        <tbody>{rows.map((row) => <VariableRow key={`${row.scope}:${row.name}`} row={row} reset={rows} project={project} disabled={busy} editable={row.scope === ownScope} run={action} edit={(value) => setSheet({ previous: row.name, name: row.name, value })} remove={async () => { await environment.delete(project, row.name); await changed(); }} />)}</tbody>
+        <tbody>{rows.map((row) => <VariableRow key={`${row.scope}:${row.name}`} row={row} reset={rows} project={project} disabled={busy} editable={row.scope === ownScope} run={action} edit={(value) => setSheet({ previous: row.name, name: row.name, value })} remove={async () => { const ready = await environment.delete(project, row.name); await changed(ready); }} />)}</tbody>
       </table>
       {!rows.length && <p className="p-4 text-sm text-muted-foreground">No variables in this scope.</p>}
     </div>}
     {sheet && <Dialog open onOpenChange={(open) => { if (!open && !busy) setSheet(null); }}><DialogContent>
       <DialogHeader><DialogTitle>{sheet.previous ? "Edit variable" : "Add variable"}</DialogTitle><DialogDescription>{project ? "Repository" : "User"} scope · stored in Keychain</DialogDescription></DialogHeader>
-      <form onSubmit={(e) => { e.preventDefault(); if (!busy && !nameError) void action(async () => { await environment.save(project, [{ name: sheet.name, value: sheet.value }], sheet.previous); setSheet(null); await changed(); }); }}>
+      <form onSubmit={(e) => { e.preventDefault(); if (!busy && !nameError) void action(async () => { const ready = await environment.save(project, [{ name: sheet.name, value: sheet.value }], sheet.previous); setSheet(null); await changed(ready); }); }}>
         <label className="mb-3 flex flex-col gap-2 text-sm">Name<input autoFocus autoComplete="off" spellCheck={false} className={inputClass} value={sheet.name} onChange={(e) => setSheet({ ...sheet, name: e.target.value })} /></label>
         <label className="flex flex-col gap-2 text-sm">Value<input type="password" autoComplete="new-password" className={inputClass} value={sheet.value} onChange={(e) => setSheet({ ...sheet, value: e.target.value })} /></label>
         {sheet.name && nameError && <p role="alert" className="mt-2 text-sm text-destructive">{nameError}</p>}
@@ -97,7 +96,7 @@ function EnvironmentTable({ project }: { project: string | null }) {
       <p className="mt-2 text-sm">{parsed.inputs.length} valid variables</p>
       {parsed.errors.length > 0 && <ul role="alert" className="mt-2 max-h-32 overflow-y-auto text-sm text-destructive">{parsed.errors.map((e) => <li key={e}>{e}</li>)}</ul>}
       {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
-      <DialogFooter><Button variant="outline" disabled={busy} onClick={() => setPaste(null)}>Cancel</Button><Button disabled={busy || !parsed.inputs.length} onClick={() => void action(async () => { await environment.save(project, parsed.inputs); setPaste(null); await changed(); })}>Import {parsed.inputs.length} valid variables</Button></DialogFooter>
+      <DialogFooter><Button variant="outline" disabled={busy} onClick={() => setPaste(null)}>Cancel</Button><Button disabled={busy || !parsed.inputs.length} onClick={() => void action(async () => { const ready = await environment.save(project, parsed.inputs); setPaste(null); await changed(ready); })}>Import {parsed.inputs.length} valid variables</Button></DialogFooter>
     </DialogContent></Dialog>}
   </div>;
 }
@@ -116,7 +115,7 @@ function VariableRow({ row, project, editable, disabled, reset, run, edit, remov
     <td className="p-3">{row.scope === "user" ? "User" : "Repository"}</td>
     <td className="p-2"><div className="flex flex-wrap gap-1">
       <Button size="sm" variant="ghost" disabled={disabled} aria-label={`${revealed === null ? "Reveal" : "Hide"} ${row.name}`} onClick={() => { if (revealed !== null) setRevealed(null); else void run(async () => setRevealed(await environment.reveal(scope, row.name))); }}>{revealed === null ? "Reveal" : "Hide"}</Button>
-      <Button size="sm" variant="ghost" disabled={disabled} aria-label={`Copy ${row.name}`} onClick={() => void run(async () => copyText(await environment.reveal(scope, row.name)))}>Copy</Button>
+      <Button size="sm" variant="ghost" disabled={disabled} title="Copy for 30 seconds" aria-label={`Copy ${row.name}`} onClick={() => void run(async () => environment.copy(scope, row.name))}>Copy</Button>
       {editable && <><Button size="sm" variant="ghost" disabled={disabled} aria-label={`Edit ${row.name}`} onClick={() => void run(async () => edit(await environment.reveal(scope, row.name)))}>Edit</Button><Button size="sm" variant="ghost" disabled={disabled} aria-label={`Delete ${row.name}`} onClick={() => void run(remove)}>Delete</Button></>}
     </div></td>
   </tr>;

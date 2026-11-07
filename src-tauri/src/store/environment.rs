@@ -424,10 +424,24 @@ pub(crate) fn desktop_snapshot(key: &str, revision: &str) -> Result<Snapshot> {
     store()?.snapshot(key, revision)
 }
 
+struct Retry {
+    after: std::time::Instant,
+    delay: Duration,
+}
+
+impl Retry {
+    fn failed(previous: Option<&Self>, now: std::time::Instant) -> Self {
+        let delay = previous.map_or(Duration::from_secs(5), |retry| {
+            (retry.delay * 2).min(Duration::from_secs(300))
+        });
+        Self { after: now + delay, delay }
+    }
+}
+
 fn refresh_cache(
     cache: &std::sync::Mutex<Cache>,
     store: &Store<'_>,
-    attempts: &mut BTreeMap<String, std::time::Instant>,
+    attempts: &mut BTreeMap<String, Retry>,
     fetch: impl Fn(&str, &str) -> Result<Snapshot>,
 ) -> Result<()> {
     let index = store.index()?;
@@ -448,15 +462,22 @@ fn refresh_cache(
     for (key, revision) in pending {
         if attempts
             .get(&revision)
-            .is_some_and(|last| last.elapsed() < Duration::from_secs(5))
+            .is_some_and(|retry| std::time::Instant::now() < retry.after)
         {
             continue;
         }
-        attempts.insert(revision.clone(), std::time::Instant::now());
         // This may wait for desktop consent. No runtime/cache/store lock is held.
-        if let Ok(snapshot) = fetch(&key, &revision) {
+        let installed = if let Ok(snapshot) = fetch(&key, &revision) {
             let current = store.index()?;
-            let _ = cache.lock().unwrap().install(&key, snapshot, &current);
+            cache.lock().unwrap().install(&key, snapshot, &current).is_ok()
+        } else {
+            false
+        };
+        if installed {
+            attempts.remove(&revision);
+        } else {
+            let retry = Retry::failed(attempts.get(&revision), std::time::Instant::now());
+            attempts.insert(revision, retry);
         }
     }
     Ok(())
@@ -521,6 +542,50 @@ pub fn launch(_cwd: &str) -> Launch {
         })
 }
 
+fn wait_until_ready(mut ready: impl FnMut() -> bool, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if ready() { return true; }
+        let now = std::time::Instant::now();
+        if now >= deadline { return false; }
+        std::thread::sleep((deadline - now).min(Duration::from_millis(25)));
+    }
+}
+
+/// Wait only for the in-memory cache, outside launch/tab/store locks. The
+/// desktop worker alone performs Keychain reads. A save can wait for its new
+/// revision before telling the user that new launches are ready.
+pub fn wait_ready(project: Option<&str>) -> bool {
+    let repo = project.and_then(|cwd| repository(Path::new(cwd)));
+    wait_until_ready(|| {
+        let index = store().and_then(|store| store.index());
+        !cache().lock().unwrap().resolve(index.as_ref().ok(), repo.clone()).stamp.unavailable
+    }, Duration::from_secs(2))
+}
+
+/// Unattended work must report a missing configuration in its run result,
+/// instead of silently sending a prompt with different credentials/endpoints.
+pub fn prepare_unattended(cwd: &str, running: Option<Status>) -> Result<()> {
+    if let Some(status) = running {
+        ensure!(!status.unavailable, "This agent started without environment overrides. Restart the agent after restoring Keychain access, then retry this run. No prompt was sent.");
+        return Ok(());
+    }
+    check_unattended(prepare_launch(cwd))
+}
+
+#[cfg(not(test))]
+fn prepare_launch(cwd: &str) -> bool { wait_ready(Some(cwd)) }
+
+// Process-level fixtures never consult the developer's saved environment.
+// The readiness wait and failure policy are exercised with isolated stores.
+#[cfg(test)]
+fn prepare_launch(_cwd: &str) -> bool { true }
+
+fn check_unattended(ready: bool) -> Result<()> {
+    ensure!(ready, "Environment overrides are unavailable. Open TerminalX Settings → Environment, unlock Keychain if requested, then retry this run. No prompt was sent.");
+    Ok(())
+}
+
 pub fn list(project: Option<&str>) -> Result<Vec<Row>> {
     let key = scope_key(project)?;
     let index = store()?.index()?;
@@ -579,7 +644,7 @@ pub fn read_env_file(project: &str, path: &str) -> Result<String> {
         .canonicalize()
         .context("Choose an existing .env file.")?;
     ensure!(
-        path.starts_with(root)
+        path.starts_with(&root)
             && path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -587,15 +652,7 @@ pub fn read_env_file(project: &str, path: &str) -> Result<String> {
         "Choose a .env or .env.* file inside this repository."
     );
     use std::io::Read;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
-    }
-    let file = options
-        .open(&path)
+    let file = open_env_file(&root, &path)
         .map_err(|_| anyhow::anyhow!("Could not open the .env file."))?;
     ensure!(file.metadata()?.is_file(), "Choose a regular .env file.");
     let mut bytes = Vec::new();
@@ -607,6 +664,50 @@ pub fn read_env_file(project: &str, path: &str) -> Result<String> {
         "The .env file must be at most 1 MiB."
     );
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("The .env file must be UTF-8 text."))
+}
+
+#[cfg(unix)]
+fn open_env_file(root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    let before = root.metadata()?;
+    // root was canonicalized too: reject a symlink swapped into any of its
+    // ancestors, rather than following one while opening the root descriptor.
+    let directory = open_env_relative(std::fs::File::open("/")?,
+        root.strip_prefix("/").map_err(std::io::Error::other)?)?;
+    let opened = directory.metadata()?;
+    if before.dev() != opened.dev() || before.ino() != opened.ino() {
+        return Err(std::io::Error::other("Repository directory changed."));
+    }
+    let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
+    open_env_relative(directory, relative)
+}
+
+#[cfg(unix)]
+fn open_env_relative(mut directory: std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(std::io::Error::other("Invalid environment path."));
+        };
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(std::io::Error::other)?;
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK
+            | if components.peek().is_some() { libc::O_DIRECTORY } else { 0 };
+        // SAFETY: directory is an owned, open fd and name is NUL-terminated.
+        // Every component is resolved against the previous fd with no symlinks,
+        // so replacing a parent after canonicalization cannot escape the root.
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        // SAFETY: openat returned a new descriptor, owned only by this File.
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(directory)
+}
+
+#[cfg(not(unix))]
+fn open_env_file(_root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 #[cfg(test)]
@@ -621,6 +722,78 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn readiness_waits_for_a_fill_and_unattended_failure_is_actionable() {
+        let mut checks = 0;
+        assert!(wait_until_ready(|| { checks += 1; checks == 2 }, Duration::from_secs(1)));
+        assert!(!wait_until_ready(|| false, Duration::ZERO));
+        check_unattended(true).unwrap();
+        let error = check_unattended(false).unwrap_err().to_string();
+        assert!(error.contains("Environment overrides are unavailable"));
+        assert!(error.contains("No prompt was sent"));
+    }
+
+    #[test]
+    fn a_running_agent_keeps_its_environment_but_an_unconfigured_launch_cannot_run_unattended() {
+        // Even after edits or a runtime restart, this process keeps the values
+        // with which it launched; no cache fill is needed for a follow-up.
+        prepare_unattended("/unused", Some(Status { changed: true, unavailable: false })).unwrap();
+        let error = prepare_unattended("/unused", Some(Status { changed: true, unavailable: true })).unwrap_err().to_string();
+        assert!(error.contains("Restart the agent"));
+        assert!(error.contains("No prompt was sent"));
+    }
+
+    #[test]
+    fn failed_reads_back_off_but_new_revisions_retry_immediately() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let store = Store { root: root.path().into(), secrets: &secrets };
+        add(&store, USER, "KEY", "secret");
+        let cache = std::sync::Mutex::new(Cache::default());
+        let mut attempts = BTreeMap::new();
+        let calls = std::cell::Cell::new(0);
+        let denied = |_: &str, _: &str| -> Result<Snapshot> { calls.set(calls.get() + 1); bail!("denied") };
+        refresh_cache(&cache, &store, &mut attempts, denied).unwrap();
+        refresh_cache(&cache, &store, &mut attempts, denied).unwrap();
+        assert_eq!(calls.get(), 1);
+        for seconds in [10, 20, 40, 80, 160, 300, 300] {
+            attempts.values_mut().next().unwrap().after = std::time::Instant::now();
+            refresh_cache(&cache, &store, &mut attempts, denied).unwrap();
+            assert_eq!(attempts.values().next().unwrap().delay, Duration::from_secs(seconds));
+        }
+        let before = calls.get();
+        add(&store, USER, "OTHER", "new-secret");
+        refresh_cache(&cache, &store, &mut attempts, denied).unwrap();
+        assert_eq!(calls.get(), before + 1);
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts.values().next().unwrap().delay, Duration::from_secs(5));
+        attempts.values_mut().next().unwrap().after = std::time::Instant::now();
+        refresh_cache(&cache, &store, &mut attempts, |key, revision| store.snapshot(key, revision)).unwrap();
+        assert!(attempts.is_empty());
+        assert!(!cache.lock().unwrap().resolve(Some(&store.index().unwrap()), None).stamp.unavailable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn importing_rejects_a_parent_replaced_by_a_symlink_after_canonicalization() {
+        use std::io::Read;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let parent = root.path().join("nested");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(parent.join(".env"), "KEY=inside").unwrap();
+        std::fs::write(outside.path().join(".env"), "KEY=outside").unwrap();
+        let path = parent.join(".env").canonicalize().unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let pinned = std::fs::File::open(&parent).unwrap();
+        std::fs::rename(&parent, root.path().join("original")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+        assert!(open_env_file(&canonical_root, &path).is_err());
+        let mut inside = String::new();
+        open_env_relative(pinned, Path::new(".env")).unwrap().read_to_string(&mut inside).unwrap();
+        assert_eq!(inside, "KEY=inside");
     }
 
     #[test]

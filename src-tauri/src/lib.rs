@@ -101,6 +101,8 @@ mod installation;
 mod keychain;
 #[cfg(feature = "desktop")]
 mod environment_commands;
+#[cfg(feature = "desktop")]
+mod secret_clipboard;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
@@ -402,6 +404,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             environment_commands::environment_list,
             environment_commands::environment_reveal,
+            environment_commands::environment_copy,
             environment_commands::environment_save,
             environment_commands::environment_delete,
             environment_commands::environment_read_file,

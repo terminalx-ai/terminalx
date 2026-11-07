@@ -54,6 +54,10 @@ impl Terminals {
         self.0.quick("runtime.pty.environmentChanged", json!({"id":id}))
     }
 
+    pub fn environment_ready(&self, project: Option<&str>) -> Result<bool> {
+        self.0.quick("runtime.pty.environmentReady", json!({"projectPath":project}))
+    }
+
     pub fn shells(&self) -> Result<Vec<crate::pty::ShellPane>> {
         self.0.quick("runtime.pty.visibleShells", json!({}))
     }
