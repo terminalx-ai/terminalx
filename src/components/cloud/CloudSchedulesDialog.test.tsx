@@ -414,3 +414,18 @@ describe("fresh workspace run history", () => {
     expect(screen.getByText(/Retained after personal use/)).toBeTruthy();
   });
 });
+
+
+describe("fresh run workspace allocation", () => {
+  it.each(["queued", "creating", "skipped", "failed"])("does not show a template link for an unallocated %s run", async (state) => {
+    const run = { id: "unallocated", scheduledFor: Date.now(), trigger: "schedule" as const, state };
+    listed = [schedule({ workspaceMode: "new", lastRun: run })];
+    mocks.get.mockResolvedValue({ schedule: listed[0], runs: [run] });
+    open();
+    await row();
+    expect(screen.queryByRole("button", { name: "Open last run workspace" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show run history" }));
+    await screen.findByRole("list", { name: "Runs for Nightly triage" });
+    expect(screen.queryByRole("button", { name: "Open workspace" })).toBeNull();
+  });
+});
