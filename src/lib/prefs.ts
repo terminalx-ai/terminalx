@@ -1,3 +1,4 @@
+import { dashboardPreferences, DEFAULT_DASHBOARD_PREFERENCES, type DashboardPreferences } from "@terminalx/portable/dashboard";
 import { useSyncExternalStore } from "react";
 import { FIRST_RUN_PERMISSION_MODE } from "@terminalx/portable/agentSettings";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
@@ -10,6 +11,7 @@ import type { IssuePipelineSettings } from "@/types/issuePipeline";
  * ~/.raccoon/settings.json instead (see store/settings.rs).
  */
 export interface Prefs {
+  dashboard: DashboardPreferences;
   linkBrowser: "terminalx" | "system" | "ask";
   /** The reader used Settings or remembered a browser choice, rather than inheriting a default. */
   linkBrowserChosen: boolean;
@@ -128,6 +130,7 @@ export interface Prefs {
 const CLOUD_ISSUE_PIPELINES_VERSION = 1;
 
 const DEFAULTS: Prefs = {
+  dashboard: DEFAULT_DASHBOARD_PREFERENCES,
   linkBrowser: "ask",
   linkBrowserChosen: false,
   linkActions: true,
@@ -209,6 +212,7 @@ function load(): Prefs {
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw);
     const prefs = { ...DEFAULTS, ...parsed };
+    prefs.dashboard = dashboardPreferences(prefs.dashboard);
     prefs.hiddenOrganizations = Array.isArray(prefs.hiddenOrganizations) ? [...new Set(prefs.hiddenOrganizations.filter((id: unknown) => typeof id === "string"))] : [];
     prefs.organizationDisplay = prefs.organizationDisplay === "one" ? "one" : "all";
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
