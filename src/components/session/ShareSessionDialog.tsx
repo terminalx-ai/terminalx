@@ -231,7 +231,7 @@ function SecretLink({ link, edit, revoke }: { link: ShareLink; edit: () => void;
 function ShareTerm({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
   return (
     <li className="flex items-start gap-3 px-3.5 py-3">
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-veil-raised text-muted-foreground [&_svg]:size-3.5" aria-hidden>
+      <span className="flex h-5 w-4 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-4" aria-hidden>
         {icon}
       </span>
       <span className="flex min-w-0 flex-col gap-0.5">
