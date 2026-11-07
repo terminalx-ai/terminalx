@@ -521,13 +521,13 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 /* The designer: waits at the right, goes to the prompt in their turn, then back. */
 /* The designer: not there until they join (29%), then takes the prompt in their turn. */
 @keyframes cs-cursor-designer {
-  0%, 28% { left: 90%; top: 30%; opacity: 0; transform: none; }
-  32%, 35% { left: 84%; top: 24%; opacity: 1; transform: none; }
+  0%, 28% { left: 80%; top: 30%; opacity: 0; transform: none; }
+  32%, 35% { left: 74%; top: 24%; opacity: 1; transform: none; }
   43% { left: 30%; top: 73%; transform: none; }
   44% { transform: scale(0.82); }
   45%, 60% { left: 30%; top: 73%; transform: none; }
-  72%, 94% { left: 82%; top: 40%; opacity: 1; }
-  98%, 100% { left: 84%; top: 40%; opacity: 0; }
+  72%, 94% { left: 72%; top: 40%; opacity: 1; }
+  98%, 100% { left: 74%; top: 40%; opacity: 0; }
 }
 /* Joined notices under the prompt: the agent's at the start, the designer's just before they appear. */
 .cs-joined { animation: 9s ease-out infinite both; }
@@ -542,5 +542,5 @@ body:has([role="alertdialog"]) [data-star-reminder] {
   .cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply, .cs-dot, .cs-joined { animation: none; }
   .cs-typing, .cs-ring, .cs-think { opacity: 0; }
   .cs-cursor-me { left: 0%; top: 58%; }
-  .cs-cursor-designer { left: 84%; top: 44%; }
+  .cs-cursor-designer { left: 72%; top: 40%; }
 }

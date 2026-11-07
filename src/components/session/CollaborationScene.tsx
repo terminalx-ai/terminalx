@@ -55,7 +55,7 @@ export function CollaborationScene({ className }: { className?: string }) {
 /** Input: a prompt as the transcript draws it, a card, with who sent it and a line of their words. */
 function Prompt({ className, color, who, width }: { className: string; color: string; who: string; width: string }) {
   return (
-    <span className={cn("cs-row flex h-5 items-center gap-2 rounded-md bg-veil-raised px-1.5", className)}>
+    <span className={cn("cs-row flex h-5 items-center gap-2 px-1.5", className)}>
       <Tag color={color}>{who}</Tag>
       <span className="h-1.5 rounded-full bg-foreground/30" style={{ width } as CSSProperties} />
     </span>
