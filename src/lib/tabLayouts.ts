@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, type ClosedTab, type TabLayout, type TabState } from "@/lib/api";
+import { api, type ClosedTab, type TabLayout, type TabPane, type TabState } from "@/lib/api";
 import { conversationBranch } from "@/lib/checkout";
 import type { Prefs } from "@/lib/prefs";
 import type { SessionEntry, Workspace } from "@/types/session";
@@ -138,10 +138,10 @@ export function getTabState(): TabStore {
 export function layoutOf(tabs: TabState, workspace: string): TabLayout {
   const saved = tabs.workspaces[workspace];
   if (!saved) return NO_LAYOUT;
-  return { order: saved.order ?? [], pinned: saved.pinned ?? [], muted: saved.muted ?? [], titles: saved.titles ?? {} };
+  return { ...saved, order: saved.order ?? [], pinned: saved.pinned ?? [], muted: saved.muted ?? [], titles: saved.titles ?? {} };
 }
 
-const names = (layout: TabLayout, key: string) => layout.order.includes(key) || layout.pinned.includes(key) || layout.muted.includes(key) || key in layout.titles;
+const names = (layout: TabLayout, key: string) => layout.order.includes(key) || layout.pinned.includes(key) || layout.muted.includes(key) || key in layout.titles || !!layout.panes?.some((pane) => pane.tabs.includes(key));
 
 /**
  * A layout as it stands for these sessions. A shell an agent was started in
@@ -165,7 +165,9 @@ export function followedLayout(layout: TabLayout, sessions: readonly Pick<Sessio
   const titles: Record<string, string> = {};
   for (const [key, title] of Object.entries(layout.titles)) if (!became.has(key)) titles[key] = title;
   for (const [key, title] of Object.entries(layout.titles)) if (became.has(key)) titles[became.get(key)!] ??= title;
-  return { order: renamed(layout.order), pinned: renamed(layout.pinned), muted: renamed(layout.muted), titles };
+  return { ...layout, order: renamed(layout.order), pinned: renamed(layout.pinned), muted: renamed(layout.muted), titles,
+    ...(layout.panes ? { panes: layout.panes.map((pane) => ({ ...pane, tabs: renamed(pane.tabs), active: pane.active ? became.get(pane.active) ?? pane.active : null })) } : {}),
+  };
 }
 
 function receive(next: TabState | null | undefined) {
@@ -194,7 +196,7 @@ const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.
 
 function sameLayout(a: TabLayout, b: TabLayout): boolean {
   const titles = Object.keys(a.titles);
-  return sameList(a.order, b.order) && sameList(a.pinned, b.pinned) && sameList(a.muted, b.muted) && titles.length === Object.keys(b.titles).length && titles.every((key) => a.titles[key] === b.titles[key]);
+  return JSON.stringify(a.panes) === JSON.stringify(b.panes) && a.focusedPane === b.focusedPane && a.splitRatio === b.splitRatio && sameList(a.order, b.order) && sameList(a.pinned, b.pinned) && sameList(a.muted, b.muted) && titles.length === Object.keys(b.titles).length && titles.every((key) => a.titles[key] === b.titles[key]);
 }
 
 /** Save a workspace's layout: shown at once here, then kept for every window and device. */
@@ -256,17 +258,98 @@ export function mergeOrder(saved: readonly string[], visible: readonly string[])
 /** A layout with every trace of the keys `gone` says are closed for good taken out, in the order `visible` gives. */
 export function settleLayout(layout: TabLayout, visible: readonly string[], gone: (key: string) => boolean): TabLayout {
   const kept = (key: string) => !gone(key);
-  return {
+  const next: TabLayout = {
+    ...layout,
+    ...(layout.panes ? { panes: layout.panes.map((pane) => {
+      const tabs = pane.tabs.filter(kept);
+      return { ...pane, tabs, active: pane.active && kept(pane.active) ? pane.active : tabs[0] ?? null };
+    }).filter((pane) => pane.tabs.length) } : {}),
     order: mergeOrder(layout.order.filter(kept), visible),
     pinned: layout.pinned.filter(kept),
     muted: layout.muted.filter(kept),
     titles: Object.fromEntries(Object.entries(layout.titles).filter(([key]) => kept(key))),
   };
+  if (next.panes?.length === 1) {
+    next.panes = [{ ...next.panes[0], id: "left" }];
+    next.focusedPane = "left";
+  }
+  return next;
 }
 
 /** True when this agent tab raises nothing: the reader muted it. */
 export function isTabMuted(session: SessionEntry, tabId: string, chatsPath: string | null = null): boolean {
   return followedLayout(layoutOf(state, workspaceKey(session, chatsPath)), [session]).muted.includes(tabKey("agent", tabId));
+}
+
+// ---------------------------------------------------------------- panes
+
+/** A projection of the saved panes onto this row. Missing tabs may be another
+ * branch's or not loaded yet: reading never deletes them from the saved layout.
+ * The row's order (including pins) remains the ordering within each pane. */
+export function panesOf(layout: TabLayout, keys: readonly string[], selected: string | null = null): TabPane[] {
+  const seen = new Set<string>();
+  const panes: TabPane[] = [];
+  for (const saved of layout.panes ?? []) {
+    if ((saved.id !== "left" && saved.id !== "right") || panes.some((pane) => pane.id === saved.id)) continue;
+    const tabs = keys.filter((key) => saved.tabs.includes(key) && !seen.has(key));
+    tabs.forEach((key) => seen.add(key));
+    panes.push({ id: saved.id, tabs, active: tabs.includes(saved.active ?? "") ? saved.active : tabs[0] ?? null });
+  }
+  if (!panes.length) panes.push({ id: "left", tabs: [], active: null });
+  const target = panes.find((pane) => pane.id === layout.focusedPane) ?? panes[0];
+  target.tabs = keys.filter((key) => target.tabs.includes(key) || !seen.has(key));
+  target.active ??= target.tabs[0] ?? null;
+  if (selected) {
+    const pane = panes.find((pane) => pane.tabs.includes(selected));
+    if (pane) pane.active = selected;
+  }
+  const visible = panes.filter((pane) => pane.tabs.length || panes.every((other) => !other.tabs.length) && pane === panes[0]);
+  if (visible.length === 1) visible[0].id = "left";
+  return visible;
+}
+
+/** Save just the visible row's assignments, retaining tabs not listed here. */
+function withPanes(layout: TabLayout, keys: readonly string[], panes: TabPane[], focusedPane: TabPane["id"]): TabLayout {
+  const visible = new Set(keys);
+  const merged = panes.map((pane) => ({ ...pane, tabs: mergeOrder(layout.panes?.find((saved) => saved.id === pane.id)?.tabs.filter((key) => !visible.has(key)) ?? [], pane.tabs) }));
+  for (const saved of layout.panes ?? []) {
+    if (merged.some((pane) => pane.id === saved.id)) continue;
+    const tabs = saved.tabs.filter((key) => !visible.has(key));
+    if (tabs.length) merged.push({ ...saved, tabs, active: tabs.includes(saved.active ?? "") ? saved.active : tabs[0] });
+  }
+  if (merged.length === 1) {
+    merged[0] = { ...merged[0], id: "left" };
+    focusedPane = "left";
+  }
+  return { ...layout, panes: merged, focusedPane };
+}
+
+export function selectPaneTab(layout: TabLayout, keys: readonly string[], key: string): TabLayout {
+  const panes = panesOf(layout, keys, key);
+  const pane = panes.find((pane) => pane.tabs.includes(key));
+  return pane ? withPanes(layout, keys, panes, pane.id) : layout;
+}
+
+/** Move, never clone, a tab. A single tab cannot split itself. Empty panes disappear. */
+export function moveToPane(layout: TabLayout, keys: readonly string[], key: string, target: TabPane["id"], selected: string | null = null): TabLayout {
+  const panes = panesOf(layout, keys, selected);
+  const source = panes.find((pane) => pane.tabs.includes(key));
+  if (!source || source.id === target || (panes.length === 1 && source.tabs.length < 2)) return layout;
+  let destination = panes.find((pane) => pane.id === target);
+  if (!destination) {
+    destination = { id: target, tabs: [], active: null };
+    panes.push(destination);
+  }
+  const index = source.tabs.indexOf(key);
+  source.tabs = source.tabs.filter((tab) => tab !== key);
+  if (source.active === key) source.active = source.tabs[Math.min(index, source.tabs.length - 1)] ?? null;
+  destination.tabs.push(key);
+  destination.active = key;
+  return withPanes(layout, keys, panes.filter((pane) => pane.tabs.length).sort((a, b) => a.id.localeCompare(b.id)), target);
+}
+
+export function paneRatio(layout: TabLayout): number {
+  return Number.isFinite(layout.splitRatio) ? Math.max(0.2, Math.min(0.8, layout.splitRatio!)) : 0.5;
 }
 
 // ---------------------------------------------------------------- closed tabs

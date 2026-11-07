@@ -118,6 +118,7 @@ describe("a tab's right-click menu", () => {
       "Share…",
       "Link to issue…",
       "Delete…",
+      "Split right",
       "Move tab",
       "Move tab left",
       "Move tab right",

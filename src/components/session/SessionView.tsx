@@ -22,6 +22,7 @@ import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { TabView } from "./TabView";
+import { WorkspacePanes } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
@@ -475,6 +476,8 @@ export function SessionView({
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const baseNote = session.worktreeBase && !session.worktreeBase.warning ? `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}` : null;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
+  // Sibling sessions share mounted pane bodies. Session-specific dialogs still reset.
+  useEffect(() => { setContinuationSource(null); setPipelineOpen(false); }, [session.id]);
   // The title-bar button and workspace menu carry the open tab into the same continuation dialog.
   const continueTab = activeTab && local ? () => setContinuationSource(activeTab) : null;
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -771,7 +774,7 @@ export function SessionView({
           </div>
         </header>
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
-        {stripRow && (
+        {stripRow && compact && (
           <WorkspaceTabStrip
             session={session}
             selected={selected}
@@ -791,6 +794,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
+              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
@@ -896,6 +900,7 @@ export function SessionView({
                   )}
                 </div>
               )}
+              </>}
             </div>
             {hasEditors && <EditorSplit sessionId={session.id} active />}
           </div>

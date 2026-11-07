@@ -68,6 +68,8 @@ import { EditorSplit } from "@/components/editor/EditorSplit";
 import { openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
+import { workspaceKey, branchSessionsAsTabs } from "@/lib/tabLayouts";
+import { conversationBranch } from "@/lib/checkout";
 import { stepVisibleSession } from "@/lib/sessionNavigation";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
@@ -285,7 +287,7 @@ export function AppShell() {
               </main>
             ) : selected ? (
               <main className={MAIN}>
-                <ErrorBoundary key={selected.id} label="the session">
+                <ErrorBoundary key={branchSessionsAsTabs(prefs) ? `${workspaceKey(selected, store.chatsPath)}:${conversationBranch(selected, store.chatsPath, store.workspaces)}` : selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main> ) : behind ? (

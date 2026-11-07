@@ -8,7 +8,7 @@ import { addTab, getSessionStore, openWelcome, reopenTab, selectSession } from "
 import { activatePeer, agentTabsOf, endPeer, isShellPeer, noteClosed, offerUndoFor, offersUndo, openPeer, peerIsLive, peerPaneId, peerShell, peerStatus, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { forgetCloseUndoFor } from "@/lib/closeUndo";
 import { isByHand } from "@/lib/tabFront";
-import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveKey, refreshTabState, rememberClosed, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
+import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveToPane, panesOf, moveKey, refreshTabState, rememberClosed, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
 import { startTabAgent } from "@/lib/tabViews";
 import { openTerminal, type SelectedSessionTab } from "@/lib/terminal";
 
@@ -66,6 +66,19 @@ export function moveTab(row: TabRow, tab: PeerTab, to: number) {
   const target = landingIndex(row, tab, to);
   if (from < 0 || from === target) return;
   arrange(row, {}, moveKey(keys, tab.key, target));
+}
+
+/** Split or transfer a tab using the full workspace row, even from a pane menu. */
+export function moveTabToPane(row: TabRow, tab: PeerTab, target: "left" | "right", selected: SelectedSessionTab | null = null) {
+  const now = fresh(row);
+  const layout = moveToPane(now.layout, now.tabs.map((peer) => peer.key), tab.key, target, selected ? tabKey(selected.kind, selected.id) : null);
+  if (layout === now.layout) return;
+  saveTabLayout(now.workspace, layout);
+  openPeer(now.session.id, tab);
+}
+
+export function otherPane(row: TabRow, tab: PeerTab): "left" | "right" {
+  return panesOf(row.layout, row.tabs.map((peer) => peer.key)).find((pane) => pane.tabs.includes(tab.key))?.id === "right" ? "left" : "right";
 }
 
 export type TabMove = "left" | "right" | "start" | "end";
@@ -258,7 +271,7 @@ export async function closeTabs(row: TabRow, closing: readonly PeerTab[], select
   const stays = (tab: PeerTab | undefined) => !!tab && !gone.has(tab.key);
   let next: PeerTab | undefined;
   if (shown >= 0 && gone.has(row.tabs[shown].key)) {
-    next = row.tabs.slice(shown + 1).find(stays) ?? row.tabs.slice(0, shown).reverse().find(stays);
+    next = row.tabs.slice(shown + 1).find(stays) ?? row.tabs.slice(0, shown).reverse().find(stays) ?? fresh(row).tabs.find(stays);
   }
   // Read before they close: the sessions whose last running agent this stops.
   const undo = offersUndo(agentTabsOf(closing));
@@ -270,6 +283,9 @@ export async function closeTabs(row: TabRow, closing: readonly PeerTab[], select
   for (const tab of ordered) {
     await endPeer(row.session.id, tab).catch((error) => console.error("closing a tab failed", error));
   }
+  const now = fresh(row);
+  const kept = new Set(now.tabs.map((tab) => tab.key));
+  saveTabLayout(now.workspace, settleLayout(now.layout, [...kept], (key) => gone.has(key) && !kept.has(key)));
   offerUndoFor(undo);
   if (getSessionStore().selectedSessionId === row.session.id && !fresh(row).tabs.length) openWelcome(row.session.id);
 }

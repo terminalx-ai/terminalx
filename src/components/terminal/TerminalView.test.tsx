@@ -102,3 +102,28 @@ it("recovers on focus without replacing the terminal or stealing input focus", (
   expect(inst.term.dispose).not.toHaveBeenCalled();
   vi.useRealTimers();
 });
+
+
+it("keeps both pane terminals visible while only the focused one takes keyboard focus", () => {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  const first = instance();
+  const second = instance();
+  const frame = () => act(() => { frames.splice(0).forEach((callback) => callback(0)); });
+  const view = render(<><TerminalView id="p1" visible focused create={() => first} fit={false} /><TerminalView id="p2" visible focused={false} create={() => second} fit={false} /></>);
+  try {
+    frame();
+    expect(first.term.focus).toHaveBeenCalledOnce();
+    expect(second.term.focus).not.toHaveBeenCalled();
+    view.rerender(<><TerminalView id="p1" visible focused={false} create={() => first} fit={false} /><TerminalView id="p2" visible focused create={() => second} fit={false} /></>);
+    frame();
+    expect(first.el.isConnected && second.el.isConnected).toBe(true);
+    expect(first.term.focus).toHaveBeenCalledOnce();
+    expect(second.term.focus).toHaveBeenCalledOnce();
+  } finally {
+    view.unmount();
+    disposeInstance("p2");
+    vi.unstubAllGlobals();
+  }
+});
