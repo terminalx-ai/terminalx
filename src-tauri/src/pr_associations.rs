@@ -1,12 +1,12 @@
 //! Session PR identities, independent of the session index and checkout lifetime.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-
-static LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -38,10 +38,23 @@ pub fn identity(raw: &str) -> Result<String> {
 
 type Associations = BTreeMap<String, BTreeMap<String, Association>>;
 
+fn transaction<T>(path: &Path, change: impl FnOnce() -> Result<T>) -> Result<T> {
+    // The desktop and local runtime share this cache. Protect the registry and
+    // its checkpoints with one stable OS lock, including explicit PR recordings.
+    crate::store::transaction::run(&path.with_extension("lock"), Duration::from_secs(30), change)
+}
+
 fn update(path: &Path, session: &str, additions: Vec<Association>) -> Result<Vec<Association>> {
     if session.is_empty() { bail!("A session is required to associate a pull request"); }
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut all: Associations = crate::store::read_json(path)?.unwrap_or_default();
+    transaction(path, || {
+        let mut all: Associations = crate::store::read_json(path)?.unwrap_or_default();
+        let changed = merge(&mut all, session, additions)?;
+        if changed { crate::store::write_json(path, &all)?; }
+        Ok(all.get(session).into_iter().flat_map(|entries| entries.values().cloned()).collect())
+    })
+}
+
+fn merge(all: &mut Associations, session: &str, additions: Vec<Association>) -> Result<bool> {
     let saved = all.entry(session.to_string()).or_default();
     let mut changed = false;
     for mut entry in additions {
@@ -65,9 +78,7 @@ fn update(path: &Path, session: &str, additions: Vec<Association>) -> Result<Vec
             }
         }
     }
-    let result = saved.values().cloned().collect();
-    if changed { crate::store::write_json(path, &all)?; }
-    Ok(result)
+    Ok(changed)
 }
 
 pub fn record_local(session: &str, cwd: &Path, url: &str, head: &str) -> Result<()> {
@@ -82,31 +93,36 @@ pub fn record_local(session: &str, cwd: &Path, url: &str, head: &str) -> Result<
 /// The normalized journal is written even with no panel mounted. Recover only
 /// successful creation tool calls, never PR links in prose, reviews or reads.
 /// Reading it here also repairs associations after a crash or an older version.
-fn creation_evidence(events: impl IntoIterator<Item = crate::events::AgentEvent>, session: &str, cwd: &str) -> Vec<Association> {
+type CreationCalls = BTreeSet<(String, Option<String>, String)>;
+
+fn observe(calls: &mut CreationCalls, event: crate::events::AgentEvent, session: &str, cwd: &str) -> Option<Association> {
     use crate::events::{Payload, ToolType};
-    let mut calls = BTreeMap::new();
-    let mut found = Vec::new();
-    for event in events {
-        if event.session_id != session { continue; }
-        let key = |id: &str| (event.tab_id.clone(), event.subagent.as_ref().map(|s| s.id.clone()), id.to_string());
-        match event.payload {
-            Payload::ToolCallStarted { call_id, tool_type: ToolType::Shell, input, .. } => {
-                let command = input.get("cmd").or_else(|| input.get("command")).and_then(|v| v.as_str()).unwrap_or_default();
-                if creates_pr(command) { calls.insert(key(&call_id), ()); }
-            }
-            Payload::ToolCallCompleted { call_id, result } if calls.remove(&key(&call_id)).is_some() && !result.is_error && result.exit_code.is_none_or(|code| code == 0) => {
-                // gh prints the created URL on its own line. Do not extract
-                // arbitrary links from a command's echoed arguments or prose.
-                let urls: std::collections::BTreeSet<_> = result.text.lines().filter_map(|line| identity(line.trim()).ok()).collect();
-                if urls.len() == 1 {
-                    let url = urls.into_iter().next().unwrap();
-                    found.push(Association { number: url.rsplit('/').next().unwrap().parse().unwrap(), url, head: String::new(), scope: Scope::Local { cwd: cwd.into() } });
-                }
-            }
-            _ => {}
+    if event.session_id != session { return None; }
+    let key = |id: &str| (event.tab_id.clone(), event.subagent.as_ref().map(|s| s.id.clone()), id.to_string());
+    match event.payload {
+        Payload::ToolCallStarted { call_id, tool_type, input, .. } => {
+            // Harnesses can reuse call ids after an interrupted conversation.
+            calls.remove(&key(&call_id));
+            let command = input.get("cmd").or_else(|| input.get("command")).and_then(|v| v.as_str()).unwrap_or_default();
+            if tool_type == ToolType::Shell && creates_pr(command) { calls.insert(key(&call_id)); }
         }
+        Payload::ToolCallCompleted { call_id, result } if calls.remove(&key(&call_id)) && !result.is_error && result.exit_code.is_none_or(|code| code == 0) => {
+            // Only a successful creation's standalone URL is ownership evidence.
+            let urls: BTreeSet<_> = result.text.lines().filter_map(|line| identity(line.trim()).ok()).collect();
+            if urls.len() == 1 {
+                let url = urls.into_iter().next().unwrap();
+                return Some(Association { number: url.rsplit('/').next().unwrap().parse().unwrap(), url, head: String::new(), scope: Scope::Local { cwd: cwd.into() } });
+            }
+        }
+        _ => {}
     }
-    found
+    None
+}
+
+#[cfg(test)]
+fn creation_evidence(events: impl IntoIterator<Item = crate::events::AgentEvent>, session: &str, cwd: &str) -> Vec<Association> {
+    let mut calls = CreationCalls::new();
+    events.into_iter().filter_map(|event| observe(&mut calls, event, session, cwd)).collect()
 }
 
 /// Recognize a shell command, not quoted documentation or an echo of one.
@@ -146,41 +162,150 @@ fn creates_pr(command: &str) -> bool {
     false
 }
 
-fn journal_associations(session: &str) -> Result<Vec<Association>> {
-    let Ok(entry) = crate::store::index::get(session) else { return Ok(Vec::new()); };
-    let mut found = Vec::new();
-    for file in std::fs::read_dir(crate::store::session_dir(session)?)? {
-        let path = file?.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") { continue; }
-        let events: Vec<crate::events::AgentEvent> = crate::store::read_lines(&path)?;
-        found.extend(creation_evidence(events, session, &entry.cwd));
+/// Persist scan positions and in-flight creation calls, including across restarts.
+/// Journals are append-only. A replacement/truncation starts a new stream while
+/// previously recorded ownership survives journal pruning.
+#[derive(Default, Serialize, Deserialize)]
+struct JournalCursor {
+    offset: u64,
+    #[serde(default)]
+    observed_len: u64,
+    file_id: String,
+    calls: CreationCalls,
+}
+type JournalIndex = BTreeMap<String, BTreeMap<String, JournalCursor>>;
+
+fn file_id(metadata: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}", metadata.dev(), metadata.ino())
     }
-    Ok(found)
+    #[cfg(not(unix))]
+    { format!("{:?}", metadata.created().ok()) }
 }
 
-pub fn for_session(session: &str, mut additions: Vec<Association>) -> Result<Vec<Association>> {
-    // A synthetic cloud key names only this desktop's cache. Its journal and
-    // pipelines live on the runtime and must never be looked up locally.
-    if session.starts_with("cloud:") {
-        return update(&crate::store::root()?.join("session-pr-associations.json"), session, additions);
+fn read_new_events(path: &Path, cursor: &mut JournalCursor, session: &str, cwd: &str, found: &mut Vec<Association>) -> Result<u64> {
+    let metadata = std::fs::metadata(path)?;
+    let id = file_id(&metadata);
+    if cursor.file_id != id || cursor.offset > metadata.len() || cursor.observed_len > metadata.len() {
+        *cursor = JournalCursor { file_id: id, ..Default::default() };
     }
-    additions.extend(journal_associations(session)?);
-    // Read existing author evidence, never infer authorship from a shared cwd
-    // or import the reviewer's PRs. Retain it beyond pipeline history pruning.
-    for pipeline in crate::issue_pipeline::store::list()?.into_iter().filter(|p| p.author.session_id == session) {
-        let urls = pipeline.pr.iter().map(|pr| pr.url.as_str()).chain(
-            pipeline.events.iter().filter(|event| event.kind == "pullRequest").filter_map(|event| event.url.as_deref()),
-        );
-        for url in urls {
-            let canonical = identity(url)?;
-            let number = canonical.rsplit('/').next().unwrap().parse()?;
-            additions.push(Association {
-                url: canonical, number, head: pipeline.branch.clone(),
-                scope: Scope::Local { cwd: pipeline.project_path.clone() },
-            });
+    // Even a torn final record is read only once until more bytes arrive.
+    if cursor.offset == metadata.len() || cursor.observed_len == metadata.len() { return Ok(0); }
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(cursor.offset))?;
+    // Bound the snapshot even while a writer keeps appending. Incomplete JSON
+    // stays unconsumed; a complete last event survives a crash before its newline.
+    let mut reader = BufReader::new(file.take(metadata.len() - cursor.offset));
+    let mut line = Vec::new();
+    let mut bytes = 0;
+    loop {
+        line.clear();
+        let count = reader.read_until(b'\n', &mut line)?;
+        bytes += count as u64;
+        if count == 0 { break; }
+        let terminated = line.last() == Some(&b'\n');
+        let event = serde_json::from_slice(&line);
+        if !terminated && event.is_err() { break; }
+        cursor.offset += count as u64;
+        if let Ok(event) = event {
+            found.extend(observe(&mut cursor.calls, event, session, cwd));
+        }
+        if !terminated { break; }
+    }
+    cursor.observed_len = metadata.len();
+    Ok(bytes)
+}
+
+/// One batch loads each small registry once. Only journal suffixes that have
+/// arrived since the durable checkpoint are read; an unchanged refresh reads
+/// zero transcript bytes. The first read backfills older app versions once.
+fn refresh(
+    root: &Path, sessions: &[String],
+    load_cwds: impl FnOnce() -> Result<BTreeMap<String, String>>,
+    load_pipelines: impl FnOnce() -> Result<Vec<crate::issue_pipeline::Pipeline>>,
+    additions: BTreeMap<String, Vec<Association>>,
+) -> Result<(BTreeMap<String, Vec<Association>>, u64)> {
+    transaction(&root.join("session-pr-associations.json"), || refresh_locked(root, sessions, load_cwds, load_pipelines, additions))
+}
+
+fn refresh_locked(
+    root: &Path, sessions: &[String],
+    load_cwds: impl FnOnce() -> Result<BTreeMap<String, String>>,
+    load_pipelines: impl FnOnce() -> Result<Vec<crate::issue_pipeline::Pipeline>>,
+    additions: BTreeMap<String, Vec<Association>>,
+) -> Result<(BTreeMap<String, Vec<Association>>, u64)> {
+    let path = root.join("session-pr-associations.json");
+    let index_path = root.join("session-pr-journal-index-v1.json");
+    let mut all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
+    let local = sessions.iter().any(|session| !session.starts_with("cloud:"));
+    let mut index: JournalIndex = if local { crate::store::read_json(&index_path)?.unwrap_or_default() } else { BTreeMap::new() };
+    let before = serde_json::to_vec(&index)?;
+    // As before, missing/unreadable session metadata only prevents journal
+    // discovery. It must not hide ownership retained in the separate cache.
+    let cwds = if local { load_cwds().unwrap_or_default() } else { BTreeMap::new() };
+    let mut pipeline_rows: BTreeMap<String, Vec<Association>> = BTreeMap::new();
+    if local {
+        // Parse the pipelines file once per refresh, not once per session.
+        let requested: BTreeSet<_> = sessions.iter().collect();
+        for pipeline in load_pipelines()?.into_iter().filter(|pipeline| requested.contains(&pipeline.author.session_id)) {
+            let urls = pipeline.pr.iter().map(|pr| pr.url.as_str()).chain(
+                pipeline.events.iter().filter(|event| event.kind == "pullRequest").filter_map(|event| event.url.as_deref()),
+            );
+            for url in urls {
+                let canonical = identity(url)?;
+                let number = canonical.rsplit('/').next().unwrap().parse()?;
+                pipeline_rows.entry(pipeline.author.session_id.clone()).or_default().push(Association {
+                    url: canonical, number, head: pipeline.branch.clone(),
+                    scope: Scope::Local { cwd: pipeline.project_path.clone() },
+                });
+            }
         }
     }
-    update(&crate::store::root()?.join("session-pr-associations.json"), session, additions)
+    let mut changed = false;
+    let mut bytes = 0;
+    for session in sessions.iter().collect::<BTreeSet<_>>() {
+        if session.is_empty() { bail!("A session is required to associate a pull request"); }
+        // Preserve the caller's live locator ahead of historical backfill,
+        // matching the single-session API's original precedence.
+        let mut found: Vec<_> = additions.get(session).into_iter().flatten().cloned().collect();
+        if !session.starts_with("cloud:") {
+            if let Some(cwd) = cwds.get(session) {
+                let dir = root.join("sessions").join(session);
+                if dir.is_dir() {
+                    for entry in std::fs::read_dir(dir)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") { continue; }
+                        let cursor = index.entry(session.clone()).or_default().entry(entry.file_name().to_string_lossy().into_owned()).or_default();
+                        bytes += read_new_events(&path, cursor, session, cwd, &mut found)?;
+                    }
+                }
+            }
+            found.extend(pipeline_rows.remove(session).unwrap_or_default());
+        }
+        changed |= merge(&mut all, session, found)?;
+    }
+    // Write identities before advancing checkpoints: a crash can repeat evidence,
+    // but can never skip a creation that has not yet been saved.
+    if changed { crate::store::write_json(&path, &all)?; }
+    if serde_json::to_vec(&index)? != before { crate::store::write_json(&index_path, &index)?; }
+    let rows = sessions.iter().map(|id| (id.clone(), all.get(id).into_iter().flat_map(|entries| entries.values().cloned()).collect())).collect();
+    Ok((rows, bytes))
+}
+
+fn load_cwds() -> Result<BTreeMap<String, String>> {
+    Ok(crate::store::index::load()?.into_iter().map(|session| (session.id, session.cwd)).collect())
+}
+
+pub fn for_sessions(sessions: &[String]) -> Result<BTreeMap<String, Vec<Association>>> {
+    refresh(&crate::store::root()?, sessions, load_cwds, crate::issue_pipeline::store::list, BTreeMap::new()).map(|(rows, _)| rows)
+}
+
+pub fn for_session(session: &str, additions: Vec<Association>) -> Result<Vec<Association>> {
+    let (mut rows, _) = refresh(&crate::store::root()?, &[session.into()], load_cwds, crate::issue_pipeline::store::list, BTreeMap::from([(session.into(), additions)]))?;
+    Ok(rows.remove(session).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -189,6 +314,142 @@ mod tests {
 
     fn entry(repo: &str, number: u64, head: &str) -> Association {
         Association { url: format!("https://github.com/acme/{repo}/pull/{number}"), number, head: head.into(), scope: Scope::Local { cwd: "/fixture".into() } }
+    }
+
+    fn journal_event(session: &str, payload: serde_json::Value) -> String {
+        serde_json::json!({ "id": "event", "sessionId": session, "tabId": "tab", "harness": "codex", "seq": 1, "ts": "", "payload": payload }).to_string()
+    }
+    fn start(session: &str) -> String {
+        journal_event(session, serde_json::json!({ "type": "tool_call_started", "callId": "create", "name": "exec_command", "toolType": "shell", "input": { "cmd": "gh pr create" } }))
+    }
+    fn completed(session: &str, number: u64) -> String {
+        journal_event(session, serde_json::json!({ "type": "tool_call_completed", "callId": "create", "result": { "text": format!("https://github.com/acme/api/pull/{number}"), "isError": false, "exitCode": 0 } }))
+    }
+
+    #[test]
+    fn refresh_holds_an_os_transaction_lock_until_registry_and_checkpoint_are_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-pr-associations.json");
+        let folder = dir.path().join("sessions/one");
+        std::fs::create_dir_all(&folder).unwrap();
+        crate::store::append_line(&folder.join("tab.jsonl"), &start("one")).unwrap();
+        let check_lock = || {
+            // An independent descriptor uses the same OS exclusion as another
+            // desktop/runtime process; a process-local mutex cannot satisfy it.
+            let competing = File::open(path.with_extension("lock")).unwrap();
+            assert!(matches!(competing.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        };
+        refresh(dir.path(), &["one".into()],
+            || { check_lock(); Ok(BTreeMap::from([("one".into(), "/fixture".into())])) },
+            || { check_lock(); Ok(vec![]) },
+            BTreeMap::from([("one".into(), vec![entry("api", 1, "first")])])).unwrap();
+        assert!(dir.path().join("session-pr-journal-index-v1.json").is_file());
+        // Explicit recordings use the same transaction and preserve the batch.
+        update(&path, "two", vec![entry("api", 2, "second")]).unwrap();
+        let saved: Associations = crate::store::read_json(&path).unwrap().unwrap();
+        assert_eq!(saved["one"].len(), 1);
+        assert_eq!(saved["two"].len(), 1);
+    }
+
+    #[test]
+    fn refresh_reads_no_old_transcripts_and_parses_pipelines_once_for_the_batch() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = vec!["one".to_string(), "two".to_string()];
+        let pipeline_reads = Cell::new(0);
+        let read = || refresh(dir.path(), &sessions,
+            || Ok(sessions.iter().map(|id| (id.clone(), "/fixture".into())).collect()),
+            || { pipeline_reads.set(pipeline_reads.get() + 1); Ok(vec![]) }, BTreeMap::new()).unwrap();
+        for session in &sessions {
+            let folder = dir.path().join("sessions").join(session);
+            std::fs::create_dir_all(&folder).unwrap();
+            crate::store::append_line(&folder.join("tab.jsonl"), &start(session)).unwrap();
+        }
+        let (_, first_bytes) = read();
+        assert!(first_bytes > 0);
+        assert_eq!(pipeline_reads.get(), 1);
+        // Every call reloads checkpoints from disk, just like reopening the app.
+        let (_, bytes) = read();
+        assert_eq!(bytes, 0, "refresh must not reopen or parse unchanged journals");
+        assert_eq!(pipeline_reads.get(), 2, "one pipeline read per batch, not per session");
+        let line = completed("one", 12);
+        let journal = dir.path().join("sessions/one/tab.jsonl");
+        crate::store::append_line(&journal, &line).unwrap();
+        let (rows, bytes) = read();
+        assert_eq!(bytes, line.len() as u64 + 1, "only new events are read");
+        assert_eq!(rows["one"][0].number, 12, "creation calls survive across refreshes/restarts");
+        assert!(rows["two"].is_empty());
+        assert_eq!(read().1, 0);
+        std::fs::remove_file(journal).unwrap();
+        assert_eq!(read().0["one"][0].number, 12, "ownership survives journal pruning");
+    }
+
+    #[test]
+    fn partial_records_and_replaced_journals_do_not_lose_creation_evidence() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("tab.jsonl");
+        crate::store::append_line(&journal, &start("one")).unwrap();
+        let mut cursor = JournalCursor::default();
+        let mut found = vec![];
+        read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap();
+        let offset = cursor.offset;
+        let completion = completed("one", 2);
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&journal).unwrap();
+        let split = completion.len() / 2;
+        writer.write_all(&completion.as_bytes()[..split]).unwrap();
+        read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap();
+        assert_eq!(cursor.offset, offset);
+        assert!(found.is_empty());
+        assert_eq!(read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap(), 0);
+        writer.write_all(&completion.as_bytes()[split..]).unwrap();
+        writer.write_all(b"\n").unwrap();
+        read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap();
+        assert_eq!(found[0].number, 2);
+        crate::store::write_atomic(&journal, format!("{}\n{}", start("one"), completed("one", 3)).as_bytes()).unwrap();
+        read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap();
+        assert_eq!(found[1].number, 3);
+        assert_eq!(read_new_events(&journal, &mut cursor, "one", "/fixture", &mut found).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_reused_call_id_cannot_turn_a_read_into_creation_evidence() {
+        let events = [start("one"), journal_event("one", serde_json::json!({ "type": "tool_call_started", "callId": "create", "name": "exec_command", "toolType": "shell", "input": { "cmd": "gh pr view 2" } })), completed("one", 2)];
+        assert!(creation_evidence(events.iter().map(|line| serde_json::from_str(line).unwrap()), "one", "/fixture").is_empty());
+    }
+
+    #[test]
+    fn a_cloud_only_batch_uses_the_cache_without_local_journals_or_pipelines() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "cloud:org:workspace:session".to_string();
+        update(&dir.path().join("session-pr-associations.json"), &id, vec![entry("api", 2, "feature")]).unwrap();
+        std::fs::write(dir.path().join("session-pr-journal-index-v1.json"), "unreadable local checkpoints").unwrap();
+        let (rows, bytes) = refresh(dir.path(), std::slice::from_ref(&id), || panic!("no local sessions"), || panic!("no local pipelines"), BTreeMap::new()).unwrap();
+        assert_eq!(rows[&id][0].number, 2);
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn cached_ownership_survives_an_unreadable_session_index() {
+        let dir = tempfile::tempdir().unwrap();
+        update(&dir.path().join("session-pr-associations.json"), "one", vec![entry("api", 2, "feature")]).unwrap();
+        let (rows, bytes) = refresh(dir.path(), &["one".into()], || Err(anyhow::anyhow!("unreadable index")), || Ok(vec![]), BTreeMap::new()).unwrap();
+        assert_eq!(rows["one"][0].number, 2);
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn an_explicit_live_locator_takes_precedence_over_journal_backfill() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("sessions/one");
+        std::fs::create_dir_all(&folder).unwrap();
+        crate::store::append_line(&folder.join("tab.jsonl"), &start("one")).unwrap();
+        crate::store::append_line(&folder.join("tab.jsonl"), &completed("one", 2)).unwrap();
+        let mut reference = entry("api", 2, "live-branch");
+        reference.scope = Scope::Local { cwd: "/live-worktree".into() };
+        let (rows, _) = refresh(dir.path(), &["one".into()], || Ok(BTreeMap::from([("one".into(), "/old-worktree".into())])), || Ok(vec![]), BTreeMap::from([("one".into(), vec![reference])])).unwrap();
+        assert_eq!(rows["one"][0].head, "live-branch");
+        assert!(matches!(&rows["one"][0].scope, Scope::Local { cwd } if cwd == "/live-worktree"));
     }
 
     #[test]
