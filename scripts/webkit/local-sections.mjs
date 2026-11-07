@@ -20,7 +20,11 @@ const extra = (layout) => `(() => {
   answers.local_sections = () => structuredClone(state);
   answers.edit_local_section = ({ edit }) => {
     const target = state.sections.find((section) => section.id === edit.id);
-    if (edit.kind === 'create') state.sections.push({ id: 'created-' + state.revision, name: edit.name.trim(), emoji: edit.emoji, sessions: edit.sessionIds || [] });
+    if (edit.kind === 'create') {
+      const ids = edit.sessionIds || [];
+      for (const section of state.sections) section.sessions = section.sessions.filter((id) => !ids.includes(id));
+      state.sections.push({ id: 'created-' + state.revision, name: edit.name.trim(), emoji: edit.emoji, sessions: ids });
+    }
     if (edit.kind === 'rename') target.name = edit.name.trim();
     if (edit.kind === 'emoji') target.emoji = edit.emoji;
     if (edit.kind === 'delete') state.sections = state.sections.filter((section) => section.id !== edit.id);
@@ -71,10 +75,12 @@ try {
     await page.getByRole("dialog").waitFor({ state: "detached" });
     assert.equal(await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the section heading");
     assert.equal(await page.getByTestId("conversation-list").evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the sidebar");
-    await page.getByRole("button", { name: "New section…", exact: true }).click();
+    await section("Release").getByText("Fix retry handling", { exact: true }).click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Move to section", exact: true }).hover();
+    await page.getByRole("menuitem", { name: "New section…", exact: true }).click();
     await page.getByLabel("Section name", { exact: true }).fill("Refactor");
     await page.getByRole("button", { name: "Create", exact: true }).click();
-    await section("Refactor").waitFor();
+    await section("Refactor").getByText("Fix retry handling", { exact: true }).waitFor();
     await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).click();
     await page.reload();
     await section("Fixes").waitFor();

@@ -114,7 +114,7 @@ const fits = (layout) => ({
     };
   });
   const dictation = () => page.evaluate(() => window.__dictation.join(","));
-  const sidebarShown = () => page.locator('[data-testid="sidebar-rail"]').isVisible();
+  const sidebarShown = () => page.locator('[data-testid="panel-presence"][data-side="left"][data-state="open"] [data-testid="sidebar-rail"]').isVisible();
 
   // A changed shortcut works at the next keypress.
   await openShortcuts(page);
@@ -128,10 +128,10 @@ const fits = (layout) => ({
   await page.waitForTimeout(150);
   const afterOld = await sidebarShown();
   await page.keyboard.press("Meta+Shift+Y");
-  await page.waitForTimeout(150);
+  await page.getByTestId("sidebar-rail").waitFor({ state: "detached" });
   const afterNew = await sidebarShown();
   await page.keyboard.press("Meta+Shift+Y");
-  await sidebar(page);
+  await page.locator('[data-testid="panel-presence"][data-side="left"][data-state="open"]').waitFor();
   // The command palette shows the keys in force.
   await page.keyboard.press("Meta+K");
   await page.getByRole("dialog").locator("input").fill("Toggle sidebar");
