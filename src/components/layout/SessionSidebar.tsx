@@ -838,7 +838,7 @@ function BranchGlyph({ merged }: { merged: boolean }) {
   return (
     <span className="flex shrink-0" title="Merged: its commits are in the default branch">
       <GitBranch className="size-4 text-muted-foreground">
-        <path d="M9.25 12.25l1.75 1.75 3.5-3.75" className="text-info" />
+        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className="text-info" />
       </GitBranch>
       <span className="sr-only">merged</span>
     </span>
