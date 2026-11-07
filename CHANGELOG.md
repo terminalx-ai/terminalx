@@ -9,6 +9,11 @@
   `settings.json`. Unknown keys and `$schema` survive saves, and an invalid
   field no longer resets valid credentials, permission choices, or other
   settings when the app starts. (Part of PRO-140)
+
+## 0.2.25
+
+### Getting started
+
 - Install Claude Code or Codex and sign in to it without opening Terminal.
   **Install and sign in**, on the welcome screen, in Settings → Agents and in
   the new-session view, runs the provider's official native installer in an
@@ -20,42 +25,34 @@
   failed installer each get their own explanation and **Try again**; Cancel
   stops a step without leaving an error. The welcome screen also offers this
   when every installed agent is signed out. The commands to run by hand are
-  still shown, now the native installers instead of `npm install`. (PRO-152)
-- New chat opens the same composer from the sidebar and project menus, and
-  creates nothing until the first prompt is sent. Both use the same saved
-  agent, model, effort and permission mode, preferring an agent with a local
-  login. When neither agent is signed in, setup keeps the draft ready. (PRO-173)
-- Show the diff inside file-edit approvals. A Codex `apply_patch` request, and
-  Claude Code's Edit, MultiEdit and Write, now list each file with its lines
-  added and removed and the changed lines, marking new, deleted and renamed
-  files. Long files fold behind **Show all N lines**, and the diff scrolls on
-  its own so Allow and Deny stay in view. A patch that cannot be read exactly
-  is quoted whole instead of by its first line. (PRO-156)
-- Show each permission request once, and retire it as soon as Allow or Deny
-  is confirmed, including answers from the terminal or another card. Late
-  duplicate requests stay retired; clicking a stale card explains that the
-  request was already answered without submitting another decision. (PRO-160)
-- Stop a Codex command from showing two identical approval cards when the
-  model runs it again while its first card is still waiting. Codex hands the
-  turn back to the model once a script has waited for its yield time (30
-  seconds by default). The repeat now files no card, whichever approval it
-  or the waiting command has reached and however the model words its reason.
-  Codex is told the command is already waiting, and the command runs once.
-  (PRO-160)
-- Ask separately before a Codex command leaves its sandbox. In Ask every
-  time, allowing a command no longer also allows Codex to run it outside the
-  sandbox. That request gets its own card, which says so and shows Codex's
-  reason. Each run of a command is asked about, instead of a repeat in the
-  same turn reusing the first answer. (PRO-160)
+  still shown, now the native installers instead of `npm install`.
+  (PRO-152, #799)
 - Keep local agent installation and login status current when returning to the
   app, after an embedded sign-in command exits, and every two minutes while
   Settings → Agents is open. Each card's badge and setup instructions now use
   the same readiness check, so they cannot disagree about installation or
   login. The new-chat composer also picks up installation and login changes
-  on return, even when its cached agent list still says not installed. (PRO-170)
+  on return, even when its cached agent list still says not installed. (PRO-170,
+  #778, #787, #802)
 - Return to the welcome screen with **Home** in either sidebar layout or ⌘K,
   even after opening projects or sessions. Open local project, Open GitHub
-  project and Quick start remain available there. (PRO-183)
+  project and Quick start remain available there. (PRO-183, #777,
+  #788)
+- New chat opens the same composer from the sidebar and project menus, and
+  creates nothing until the first prompt is sent. Both use the same saved
+  agent, model, effort and permission mode, preferring an agent with a local
+  login. When neither agent is signed in, setup keeps the draft ready.
+  (PRO-173, #780)
+- Show the "Enjoying TerminalX?" GitHub-star prompt only after three full
+  days and finished work in three different sessions, both counted across
+  restarts and updates. It used to appear after the first finished turn of a
+  new install. Installs that update to this version wait the same three days.
+  The prompt now sits in the sidebar's footer, so it never covers the composer
+  or an approval card, and it stays out of the way while the sidebar is
+  hidden. (PRO-190, #798)
+
+### Permissions and approvals
+
 - Start new chats in **Ask every time** until you pick another permission
   mode; after that, new chats start in the mode you last picked, as before. A
   mode you already use, Bypass included, is kept. The phone's New Session also
@@ -67,7 +64,163 @@
   a link. Someone waiting to be admitted shows on the session's Share button
   and raises a notice that opens Share. Automations keep Bypass, as does
   `terminalx sessions create` without `--mode` in a project on this Mac; in a
-  cloud project it takes your saved mode, as New Session does. (PRO-162)
+  cloud project it takes your saved mode, as New Session does. (PRO-162, #791)
+- Run read-only discovery commands without an approval card in **Ask every
+  time**: `ls`, `cat`, `rg`, `grep`, `pwd`, and `git status`, `diff` and
+  `log`, for Claude Code and Codex. Every command in a chain or pipe has to
+  qualify; redirects, shell expansions, unknown options and commands that can
+  run helpers still ask, and so does a Codex command that leaves its sandbox.
+  **Allow read-only commands in Ask mode** in Settings → Agents turns this
+  off. A command's card can also allow that exact command for the session, in
+  its directory, until TerminalX restarts. (PRO-198, #796)
+- Show the diff inside file-edit approvals. A Codex `apply_patch` request, and
+  Claude Code's Edit, MultiEdit and Write, now list each file with its lines
+  added and removed and the changed lines, marking new, deleted and renamed
+  files. Long files fold behind **Show all N lines**, and the diff scrolls on
+  its own so Allow and Deny stay in view. A patch that cannot be read exactly
+  is quoted whole instead of by its first line. (PRO-156, #784)
+- Show each permission request once, and retire it as soon as Allow or Deny
+  is confirmed, including answers from the terminal or another card. Late
+  duplicate requests stay retired; clicking a stale card explains that the
+  request was already answered without submitting another decision.
+  (PRO-160, #779)
+- Stop a Codex command from showing two identical approval cards when the
+  model runs it again while its first card is still waiting. Codex hands the
+  turn back to the model once a script has waited for its yield time (30
+  seconds by default). The repeat now files no card, whichever approval it
+  or the waiting command has reached and however the model words its reason.
+  Codex is told the command is already waiting, and the command runs once.
+  (PRO-160, #797)
+- Ask separately before a Codex command leaves its sandbox. In Ask every
+  time, allowing a command no longer also allows Codex to run it outside the
+  sandbox. That request gets its own card, which says so and shows Codex's
+  reason. Each run of a command is asked about, instead of a repeat in the
+  same turn reusing the first answer. (PRO-160, #797)
+- Say when a card in Bypass comes from Claude Code's own safety check. Claude
+  Code still asks about some calls in Bypass, which looked as if TerminalX
+  ignored the mode. The card, the call's tool row and folded summary, the
+  phone's card and the background notification now say that Claude Code's
+  safety check asked, and mark the description as the agent's. Nothing is
+  approved automatically. (#775, #783)
+
+### Chat
+
+- A design pass on the chat. The prompt map scrolls instead of squeezing its
+  marks, fades at an edge with more beyond it, follows the prompt being read
+  and shows each prompt's send time. The transcript scrolls behind the
+  see-through composer. Each turn has one header for its work ("Worked for
+  14s · 2 tool calls") and one footer row with its time, and Copy on hover;
+  a time line opens a new sitting ("Yesterday, 5:21 PM"). The model chip sets
+  the alias tag and the effort apart from the model name. (#790)
+- Show the pictures an agent makes. A Codex image generation is a tool call
+  with its saved picture, a picture a tool made is drawn in its turn even
+  while tool calls are folded, and a picture, video or sound file on this Mac
+  that a message names is shown under the message. The phone names these
+  files instead, since they are on the computer. (#800)
+- Codex file citations (`:codex-file-citation{…}`) are links to their files
+  on the desktop and the phone instead of raw text: a file chip for a file
+  Codex made, an inline link for a source. A citation in code, or one that
+  cannot be read, is left as written. The session header's Automation button
+  no longer runs under Share in narrow windows. (#776, #782)
+- "Edited" rows for a Codex patch count the lines it adds and removes instead
+  of showing +0 −0, so they match the file chips and the turn's totals.
+  (PRO-180, #789)
+
+### Browser
+
+- A browser inside the app. Chromium runs headless, and its pages show in the
+  app: a **Browser** tab in the side panel shows the workspace's pages beside
+  the chat. It is the same browser the agent drives, scoped to the same
+  worktree, and picking a page makes it the agent's current page. Clicks,
+  drags, double clicks, scrolling, keys and paste reach the page, laid out at
+  the panel's size. **Open in browser** hands the address to the default
+  browser, and `TERMINALX_BROWSER_HEADED=1` shows the Chromium window again
+  for debugging. Not yet: a page's `alert` or `confirm` stalls input until it
+  times out, ⌘C and ⌘X copy inside the page only (paste works), and Tab and
+  Escape go to the page while it has focus. (#790)
+
+### Branch and changes
+
+- The Branch tab is built around the next step. It reads top down: the
+  branch, the one thing to do next in plain words (resolve, pull, commit,
+  push, then open, ready or merge the pull request), its pull request, and its
+  commits against the branch it came from, each with its author's picture.
+  The Repo and PR tabs fold into Branch, and their shortcuts now name it.
+  What others pushed is fetched when the tab opens and every five minutes, and
+  a project with no remote can merge its branch locally. Uncommitted changes
+  and history move to the Changes tab with the commit box; during a merge it
+  leads to the merge view (Commit merge, Abort). A worktree records the ref it
+  was made from, and its branch is compared with that. (#800)
+
+### Issues
+
+- Starting a session from the Issues page, for a GitHub or a Linear issue,
+  stays on Issues instead of opening the session, so several issues can be
+  started in a row. A **Session started** notice names the issue and opens
+  the session when clicked, one notice per start; the issue's panel shows the
+  new session with **Open session**, and the row stays in a filtered list
+  until it is refreshed. Cloud projects work the same way. A failed start
+  shows its error on the panel, as before. (#785, #801)
+
+### Dashboard
+
+- A chat that was never started is under **Not started** instead of Done.
+  (PRO-180, #789)
+
+### Settings
+
+- Settings groups its pages under Personal, Agents & environment,
+  Repositories, Admin and More. Repositories lists the open projects: a Git
+  project shows its workspace-cleanup override, and a folder project says why
+  Git cleanup does not apply. A link to a setting selects and reveals its row,
+  organization pages and per-project settings included. (PRO-123, #805)
+- Search Settings by section, in Settings (⌘F) and in ⌘K, where **Search
+  settings…** narrows the palette to settings and Backspace or **Search
+  everything** widens it again. Arrows and Enter open a section; Escape clears
+  the search before it closes Settings. (PRO-127, #806)
+- Account starts with the essentials; what this Mac shares (its host ID,
+  public key and capabilities) is under **Advanced**. The Organizations page
+  offers **Create organization** when there is none, with the same setup as
+  Account. (PRO-193, #793)
+
+### Menus
+
+- The menu bar has the app's commands. The app menu: About TerminalX,
+  Settings… and Check for Updates…. File: New Chat, New Window, Add Project…,
+  Open Recent, Close Tab and Close Window. View: the sidebar, right panel and
+  terminal, Switch Chat / Terminal, zoom and full screen. Go: Dashboard,
+  Issues, Automations and the next and previous session. Help: Documentation,
+  Keyboard Shortcuts and Report an Issue…. Each item runs the same action as
+  its shortcut and shows your binding, and follows it when you change it.
+  (PRO-177, #794)
+- Right-click a project, session, tab or file-tree row for the same menu as
+  its ⋯ button; Shift+F10 or the context-menu key opens it from the keyboard.
+  Elsewhere in the app, right-click no longer shows the web view's Reload
+  menu, and text fields keep their editing menu. (PRO-187, #792)
+
+### Relay and terminal
+
+- The relay status in the sidebar explains itself: clicking it says what
+  Relay is for and why it is unavailable, reconnecting or not configured,
+  with **Retry**. Local terminals and LAN pairing keep working without it.
+  Resizing a terminal no longer repeats its prompt line. (PRO-196, #795)
+
+### Command line
+
+- `terminalx sessions create --issue` works with the background runtime.
+  It was refused ("Sessions are started from an issue in the desktop
+  app"), so sessions an agent started for an issue had no pipeline: no
+  review, merge when green or conflict resolution. `--resolve-conflicts` and
+  `--no-resolve-conflicts` set automatic conflict resolution apart from Merge
+  when green, and `terminalx pipelines resolve-conflicts <pipeline> on|off`
+  changes it later; both switches record who changed them in the pipeline's
+  history. (#786, #803)
+
+### Development
+
+- Editors for a repository's actions and preview URLs, with a searchable icon
+  picker. They are not in Settings yet: they wait for per-repository settings
+  (PRO-131) and the action runner. (PRO-155, #809)
 
 ## 0.2.24
 
