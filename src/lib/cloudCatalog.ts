@@ -419,7 +419,12 @@ export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot, requestedAt
   const orgId = snapshot.workspace.orgId;
   const current = state.orgs[orgId];
   if (!current) return;
-  const item: CloudWorkspaceListItem = { workspace: snapshot.workspace, latestOperation: snapshot.operation };
+  // Operation snapshots omit list-only display metadata. Keep it while a
+  // restart is polled so support IDs and the open card do not disappear.
+  // Access/authority always comes from the new response, never this cache.
+  const previous = current.workspaces.find((row) => row.workspace.id === snapshot.workspace.id)?.workspace;
+  const workspace = { number: previous?.number, details: previous?.details, repositories: previous?.repositories, createdBy: previous?.createdBy, ...snapshot.workspace };
+  const item: CloudWorkspaceListItem = { workspace, latestOperation: snapshot.operation };
   const known = current.workspaces.some((row) => row.workspace.id === item.workspace.id);
   const workspaces = known ? current.workspaces.map((row) => (row.workspace.id === item.workspace.id ? item : row)) : [item, ...current.workspaces];
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces } } });

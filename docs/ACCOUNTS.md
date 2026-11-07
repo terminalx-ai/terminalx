@@ -508,6 +508,38 @@ closes. The builder reads nothing else: no connection history, cache or outbox.
 organizations and for none, hands the builder all of them, and asserts that
 none of the other organization's ids appears.
 
+## Workspace details and explicit restart (PRO-212)
+
+The workspace and session headers offer a **Workspace details** popover with
+repository, creator, pinned environment version, provider, runtime version,
+CPU count and host one-minute load, memory, and disk. It samples the existing
+connected runtime's `lifecycle.resources` every 10 seconds while mounted.
+Opening the card never connects or wakes a stopped workspace; missing readings
+show “Unavailable”. CPU is additive to resources v1: `{count, load1}`, where
+`count` is scheduling capacity available to the process and `load1` is the
+Linux host load average, not container CPU utilization or a percentage.
+
+The shared workspace menu offers **Restart workspace** to lifecycle managers
+on a ready workspace. It calls `POST /v1/desktop/orgs/:orgId/cloud-workspaces/
+:workspaceId/restart` with an empty body and polls the returned operation.
+“Restarted workspace” appears only after success. The app retains its connection
+leases so the existing supervisors and tab restoration follow the new runtime
+generation. The server refuses active agent work and uses its checkpoint,
+in-place stop/start and fenced-runtime path; it never recreates the machine.
+
+**Copy machine ID** copies the provider resource ID returned in list metadata.
+**Copy workspace info** uses an explicit allowlist: organization name and ID,
+workspace ID and number, provider, machine ID, runtime and environment versions.
+It does not serialize provider state, credentials, transcripts or diagnostics.
+Workspace numbering is supplied by PRO-163; older servers show “Unavailable”.
+**Open provisioning log** uses the existing organization console redirect with
+a workspace selector and opens that row's operation log.
+
+Roll out the paired server API and restart operation constraint before this
+app/runtime version. The server change is additive and old resource reporters
+remain supported. Apply the migration only after the coordinator reconciles
+its reserved position with the other in-flight migrations.
+
 ## Would require a server change (out of scope)
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “User-scoped

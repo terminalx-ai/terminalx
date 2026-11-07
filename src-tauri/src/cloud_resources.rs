@@ -1,13 +1,13 @@
-//! How much memory and disk the machine under a workspace has left, as its
+//! CPU capacity/load and how much memory and disk a workspace has left, as its
 //! runtime sees it (`lifecycle.resources`, PRO-33).
 //!
 //! A full disk and exhausted memory both end work in ways that look like
 //! something else: a save that fails, an agent that stops mid-turn. The
 //! runtime reports the numbers and the client decides what to say, so the
 //! thresholds can change without a new runtime. Reading them costs one small
-//! file and one `statvfs`, never wakes anything and holds no state.
+//! memory and load files and one `statvfs`, never wakes anything and holds no state.
 //!
-//! `{"v":1,"memory":{"totalBytes","availableBytes"}|null,
+//! `{"v":1,"cpu":{"count","load1"}|null,"memory":{"totalBytes","availableBytes"}|null,
 //!   "storage":{"totalBytes","availableBytes","totalInodes","availableInodes"}|null,
 //!   "observedAt":<ms>}`
 //!
@@ -32,10 +32,25 @@ pub fn observe(root: &Path) -> Value {
     let memory = within_limit(host, cgroup_limit());
     json!({
         "v": 1,
+        "cpu": cpu(),
         "memory": memory.map(|(total, available)| json!({ "totalBytes": total, "availableBytes": available })),
         "storage": storage(root),
         "observedAt": crate::cloud_agents::now_ms(),
     })
+}
+
+/// Scheduling capacity available to this process, and the host's one-minute
+/// load average. Load is runnable/waiting work, not a utilization percentage;
+/// in a container Linux reports host load rather than cgroup utilization.
+fn cpu() -> Option<Value> {
+    let count = std::thread::available_parallelism().ok()?.get();
+    let load = std::fs::read_to_string("/proc/loadavg").ok().and_then(|text| load_average(&text));
+    Some(json!({ "count": count, "load1": load }))
+}
+
+fn load_average(text: &str) -> Option<f64> {
+    let value: f64 = text.split_whitespace().next()?.parse().ok()?;
+    (value.is_finite() && value >= 0.0).then_some(value)
 }
 
 /// `(MemTotal, MemAvailable)` in bytes from `/proc/meminfo`. A kernel too
@@ -170,6 +185,16 @@ fn storage(_path: &Path) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_load_is_a_finite_nonnegative_average_not_a_percentage() {
+        assert_eq!(load_average("2.34 1.12 0.85 3/240 108\n"), Some(2.34));
+        for value in ["", "NaN", "inf", "-1", "unknown"] {
+            assert_eq!(load_average(value), None);
+        }
+        let observed = cpu().unwrap();
+        assert!(observed["count"].as_u64().unwrap() > 0);
+    }
 
     #[test]
     fn memory_is_read_in_bytes_and_never_guessed() {

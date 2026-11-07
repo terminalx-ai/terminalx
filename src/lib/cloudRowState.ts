@@ -74,6 +74,7 @@ export function deriveCloudActivity(item: CloudWorkspaceListItem, input: Activit
   }
   // 3
   if (isOpen(operation) && operation?.action === "suspend") return idle("Stopping", "changing");
+  if (isOpen(operation) && operation?.action === "restart") return idle("Restarting", "changing");
   if (isOpen(operation) && operation?.action === "resume") return idle("Resuming", "changing");
   // 4
   if (state === "provisioning" || (launch && !settled(phase))) {

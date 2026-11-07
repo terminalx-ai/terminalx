@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getPrefs } from "@/lib/prefs";
-import { getSessions, selectSession, subscribeSessions } from "@/lib/sessions";
+import { getSessions, selectSession, selectCloudWorkspace, subscribeSessions } from "@/lib/sessions";
 import { isTabMuted } from "@/lib/tabLayouts";
 import { isUnread, sessionColumn } from "@/lib/dashboard";
 import { createCloudAttentionTracker, getCloudDashboard, openCloudSession, subscribeCloudDashboard, type CloudAttention } from "@/lib/cloudDashboard";
@@ -42,7 +42,7 @@ export interface Notice {
   body: string;
   at: number;
   /** Opened, it also opens this on the session: Share, for someone waiting to be admitted. */
-  opens?: "share";
+  opens?: "share" | "workspace";
 }
 
 let notices: Notice[] = [];
@@ -69,7 +69,8 @@ export function dismissNotice(id: string) {
 
 export function openNotice(n: Notice) {
   // A cloud session opens on the tab that asked, and only looks: nothing wakes its workspace.
-  if (isCloudKey(n.sessionId)) openCloudSession(n.sessionId, n.tabId);
+  if (n.opens === "workspace") selectCloudWorkspace(n.sessionId);
+  else if (isCloudKey(n.sessionId)) openCloudSession(n.sessionId, n.tabId);
   else selectSession(n.sessionId);
   if (n.opens === "share") openSessionShare(n.sessionId);
   dismissNotice(n.id);
@@ -82,6 +83,15 @@ export function noteSessionStarted(sessionId: string, tabId: string, harness: st
   notices = [...notices.filter((n) => !(n.sessionId === sessionId && n.tabId === tabId)), {
     id, sessionId, tabId, kind: "started", harness, title: "Session started", body, at,
   }];
+  emit();
+  window.setTimeout(() => dismissNotice(id), 8000);
+}
+
+/** A completed explicit workspace action, without a desktop notification. */
+export function noteWorkspaceAction(workspaceKey: string, title: string, body: string) {
+  const at = Date.now();
+  const id = `workspace:${workspaceKey}:${at}`;
+  notices = [...notices, { id, sessionId: workspaceKey, tabId: "", kind: "done", title, body, at, opens: "workspace" }];
   emit();
   window.setTimeout(() => dismissNotice(id), 8000);
 }

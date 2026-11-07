@@ -52,7 +52,7 @@ export function resuming(item: Pick<CloudWorkspaceListItem, "latestOperation">):
 /** The machine runs as far as the list knows: ready, with no stop, archive or delete taking it down. */
 export function machineRunning(item: CloudWorkspaceListItem): boolean {
   const operation = item.latestOperation;
-  const goingDown = isOpen(operation) && (operation?.action === "suspend" || operation?.action === "archive" || operation?.action === "delete");
+  const goingDown = isOpen(operation) && (operation?.action === "suspend" || operation?.action === "restart" || operation?.action === "archive" || operation?.action === "delete");
   return item.workspace.state === "ready" && !goingDown;
 }
 

@@ -365,6 +365,23 @@ describe("merging and tombstones", () => {
     }
   });
 
+  it("keeps display metadata through lifecycle snapshots without retaining authority", async () => {
+    signIn();
+    const listed = item("w1");
+    listed.workspace.number = 42;
+    listed.workspace.details = { machineId: "machine", environmentVersion: 3, environmentVersionId: "version" };
+    listed.workspace.authority = "manage";
+    mocks.api.cloudWorkspaces.mockResolvedValueOnce({ workspaces: [listed] });
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    const { authority: _authority, ...workspace } = item("w1").workspace;
+    applyCloudSnapshot({ workspace, operation: { id: "op", action: "restart", state: "running" } as never });
+    const current = getCloudCatalog().orgs[ORG]!.workspaces[0]!.workspace;
+    expect(current.number).toBe(42);
+    expect(current.details).toEqual(listed.workspace.details);
+    expect(current.authority).toBeUndefined();
+  });
+
   it("a snapshot is as old as its request: one asked for before a stop never makes a connection attach", async () => {
     const { retainCloudConnection, resetCloudConnections } = await import("./cloudConnections");
     const attached: { emit(state: unknown): void; close: ReturnType<typeof vi.fn> }[] = [];

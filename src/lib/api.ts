@@ -430,6 +430,10 @@ export const api = {
   cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeed>("cloud_catalog_feed", { cursor: cursor ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceRestart: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_restart", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceLogOpen: (workspaceId: string, orgId: string) =>
+    invoke<void>("cloud_workspace_log_open", { workspaceId, orgId }),
   cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceRelease: (workspaceId: string, orgId?: string | null) =>
@@ -1132,6 +1136,8 @@ export interface CloudWorkspaceQuote {
 }
 
 export interface CloudWorkspace {
+  number?: number | null;
+  details?: { machineId: string | null; environmentVersionId: string | null; environmentVersion: number | null } | null;
   id: string;
   orgId: string;
   name: string;
@@ -1376,7 +1382,7 @@ export interface CloudWorkspaceOperation {
   id: string;
   workspaceId: string;
   type: "create";
-  action: "suspend" | "resume" | "archive" | "delete" | null;
+  action: "suspend" | "resume" | "restart" | "archive" | "delete" | null;
   state: "queued" | "running" | "cancel-requested" | "succeeded" | "failed" | "canceled";
   stage: "queued" | "preflight" | "creating-machine" | "bootstrapping" | "connecting-relay" | "cleanup" | "ready";
   cancelable: boolean;

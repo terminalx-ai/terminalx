@@ -674,6 +674,10 @@ pub enum WorkspaceAccessMode {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspace {
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub details: Option<WorkspaceDetails>,
     pub id: String,
     pub org_id: String,
     pub name: String,
@@ -729,6 +733,14 @@ pub struct CloudWorkspace {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacePreparation {
     pub stop_after: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDetails {
+    pub machine_id: Option<String>,
+    pub environment_version_id: Option<String>,
+    pub environment_version: Option<u64>,
 }
 
 /// `you` on a workspace list item (§21.2).
@@ -874,6 +886,7 @@ pub enum OperationStage {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperationAction {
+    Restart,
     Suspend,
     Resume,
     Archive,
@@ -2621,6 +2634,7 @@ impl CloudWorkspaceService {
             ));
         }
         let action_path = match action {
+            OperationAction::Restart => "restart",
             OperationAction::Suspend => "suspend",
             OperationAction::Resume => "resume",
             OperationAction::Archive => "archive",
@@ -4984,6 +4998,8 @@ mod tests {
         let list = CloudWorkspaceList {
             workspaces: vec![CloudWorkspaceListItem {
                 workspace: CloudWorkspace {
+                    number: None,
+                    details: None,
                     id: "workspace-1".into(),
                     org_id: "another-org".into(),
                     name: "one".into(),
@@ -5018,6 +5034,23 @@ mod tests {
                 .code,
             "cloud_workspace_invalid_response"
         );
+    }
+
+    #[test]
+    fn restart_uses_the_explicit_endpoint_and_keeps_optional_details() {
+        let mut reply: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        reply["operation"]["action"] = json!("restart");
+        reply["workspace"]["number"] = json!(42);
+        reply["workspace"]["details"] = json!({ "machineId": "machine-1", "environmentVersionId": "env-1", "environmentVersion": 3 });
+        let (base, _, request) = serve_once(response("202 Accepted", &reply.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let result = service.lifecycle(None, "workspace-1", OperationAction::Restart).unwrap();
+        assert!(matches!(result.operation.action, Some(OperationAction::Restart)));
+        assert_eq!(result.workspace.number, Some(42));
+        assert_eq!(result.workspace.details.unwrap().machine_id.as_deref(), Some("machine-1"));
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/restart HTTP/1.1"));
+        assert!(captured.text.ends_with("{}"));
     }
 
     #[test]

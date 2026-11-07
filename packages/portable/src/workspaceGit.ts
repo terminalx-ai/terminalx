@@ -156,6 +156,8 @@ export async function dispositionFacts(client: WorkspaceRpcClient): Promise<Disp
 /** What the machine under a workspace has left (`lifecycle.resources`, PRO-33). */
 export interface RuntimeResources {
   v: 1;
+  /** Available logical CPUs and host one-minute load; absent on older runtimes. */
+  cpu?: { count: number; load1: number | null } | null;
   /** Null where the machine does not report it (not Linux). */
   memory: { totalBytes: number; availableBytes: number } | null;
   /** The disk that holds the workspace; null when it could not be asked. */

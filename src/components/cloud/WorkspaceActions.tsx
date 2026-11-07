@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, CalendarClock, Lock, Pause, Play, Trash2, Users } from "@/icons";
+import { Archive, ArchiveRestore, CalendarClock, Copy, ExternalLink, Lock, Pause, Play, RotateCcw, Trash2, Users } from "@/icons";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
 import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { openSchedulesDialog } from "@/components/cloud/CloudSchedulesDialog";
 import { openShareDialog } from "@/components/cloud/CloudShareDialog";
-import type { CloudWorkspaceListItem } from "@/lib/api";
+import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { applyCloudSnapshot, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
 import { closeCloudConnection } from "@/lib/cloudConnections";
@@ -12,6 +12,7 @@ import { lifecycleErrorMessage, noteCloudWorkspaceDeleted } from "@/lib/cloudLif
 import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { useSchedulesOffer } from "@/lib/cloudSchedules";
 import { errorCode } from "@/lib/cloudTerminals";
+import { restartCloudWorkspace, workspaceInfo } from "@/lib/cloudWorkspaceDetails";
 import { selectCloudWorkspace } from "@/lib/sessions";
 
 /**
@@ -105,6 +106,9 @@ export function WorkspaceActionItems({
           <Play /> Resume
         </DropdownMenuItem>
       )}
+      {lifecycle && workspace.state === "ready" && !archived && (
+        <DropdownMenuItem disabled={busy} onSelect={() => run(() => restartCloudWorkspace(item))}><RotateCcw /> Restart workspace</DropdownMenuItem>
+      )}
       {lifecycle && actions.includes("stop") && !archived && (
         <DropdownMenuItem disabled={busy} onSelect={() => onLifecycle({ item, action: "stop" })}>
           <Pause /> Stop
@@ -129,6 +133,10 @@ export function WorkspaceActionItems({
           </DropdownMenuItem>
         </>
       )}
+      <DropdownMenuSeparator />
+      <DropdownMenuItem disabled={!workspace.details?.machineId} onSelect={() => run(() => navigator.clipboard.writeText(workspace.details!.machineId!))}><Copy /> Copy machine ID</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => run(() => navigator.clipboard.writeText(workspaceInfo(item)))}><Copy /> Copy workspace info</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => run(() => api.cloudWorkspaceLogOpen(workspace.id, workspace.orgId))}><ExternalLink /> Open provisioning log</DropdownMenuItem>
       {/* Destructive items are hidden, not disabled; one line says who has them, so the menu is never empty or silent. */}
       {!lifecycle && offersLifecycle && (
         <DropdownMenuItem disabled data-testid="cloud-lifecycle-locked">

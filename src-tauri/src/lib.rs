@@ -497,6 +497,8 @@ pub fn run() {
             commands::cloud_catalog_feed,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,
+            commands::cloud_workspace_restart,
+            commands::cloud_workspace_log_open,
             commands::cloud_workspace_release,
             commands::cloud_workspace_archive,
             commands::cloud_workspace_delete,

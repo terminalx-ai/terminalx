@@ -1458,6 +1458,16 @@ pub(crate) fn organization_console_url(organization_id: &str) -> Result<Url> {
     Ok(url)
 }
 
+pub(crate) fn workspace_console_url(organization_id: &str, workspace_id: &str) -> Result<Url> {
+    if workspace_id.is_empty() || workspace_id.len() > 128 {
+        anyhow::bail!("invalid workspace id");
+    }
+    let mut url = organization_console_url(organization_id)?;
+    url.query_pairs_mut().append_pair("workspace", workspace_id);
+    url.set_fragment(Some("cloud-machines"));
+    Ok(url)
+}
+
 fn endpoint(path: &str) -> String {
     format!("{}{path}", api_base_url())
 }
@@ -1661,6 +1671,15 @@ mod tests {
         assert_eq!(encoded.fragment(), None);
         assert!(organization_console_url(" ").is_err());
         assert!(organization_console_url(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn provisioning_log_link_encodes_the_workspace_without_changing_the_origin() {
+        let url = workspace_console_url("org_1", "ws/1?another=value#fragment").unwrap();
+        assert_eq!(url.origin(), organization_console_url("org_1").unwrap().origin());
+        assert_eq!(url.query_pairs().collect::<Vec<_>>(), vec![("workspace".into(), "ws/1?another=value#fragment".into())]);
+        assert_eq!(url.fragment(), Some("cloud-machines"));
+        assert!(workspace_console_url("org_1", "").is_err());
     }
 
     #[test]

@@ -106,6 +106,7 @@ interface Entry {
   users: number;
   /** How many of the users are showing a running agent turn. */
   turns: number;
+  details: number;
   timer: ReturnType<typeof setInterval> | null;
   unsubscribe: (() => void) | null;
   /** The client last asked, and whether it answered that it does not report resources. */
@@ -138,7 +139,7 @@ function publish(entry: Entry, resources: RuntimeResources | null) {
 /** Ask at the turn's pace while one runs, and at the idle pace otherwise. */
 function pace(key: string, entry: Entry) {
   if (entry.timer) clearInterval(entry.timer);
-  entry.timer = setInterval(() => void sample(key), entry.turns > 0 ? TURN_SAMPLE_MS : SAMPLE_MS);
+  entry.timer = setInterval(() => void sample(key), entry.turns > 0 || entry.details > 0 ? TURN_SAMPLE_MS : SAMPLE_MS);
 }
 
 async function sample(key: string) {
@@ -172,26 +173,31 @@ async function sample(key: string) {
   }
 }
 
-function retain(key: string, turn: boolean): () => void {
+function retain(key: string, turn: boolean, details: boolean): () => void {
   let entry = entries.get(key);
   if (!entry) {
-    entry = { snapshot: NOTHING, lowStreak: 0, users: 0, turns: 0, timer: null, unsubscribe: null, client: null, unsupported: false, reading: false };
+    entry = { snapshot: NOTHING, lowStreak: 0, users: 0, turns: 0, details: 0, timer: null, unsubscribe: null, client: null, unsupported: false, reading: false };
     entries.set(key, entry);
   }
   const held = entry;
   held.users += 1;
   if (turn) held.turns += 1;
+  if (details) held.details += 1;
   // Asked again as soon as it connects, and forgotten as soon as it does not.
   held.unsubscribe ??= subscribeCloudConnections(() => {
     if (connectedCloudClient(key) !== held.client) void sample(key);
   });
   // The first view, or a turn that just started: asked now, then at that pace.
-  if (held.users === 1 || (turn && held.turns === 1)) {
+  if (held.users === 1 || (turn && held.turns === 1) || (details && held.details === 1)) {
     pace(key, held);
     void sample(key);
   }
   return () => {
     held.users -= 1;
+    if (details) {
+      held.details -= 1;
+      pace(key, held);
+    }
     if (turn) {
       held.turns -= 1;
       if (held.turns === 0) {
@@ -223,8 +229,8 @@ function subscribe(listener: () => void): () => void {
  * report. `turn` says an agent turn is running where this is shown: the
  * machine is then asked more often, and memory that stays low is a warning.
  */
-export function useCloudResources(workspaceKey: string | null, turn = false): CloudResourcesSnapshot {
-  useEffect(() => (workspaceKey ? retain(workspaceKey, turn) : undefined), [workspaceKey, turn]);
+export function useCloudResources(workspaceKey: string | null, turn = false, details = false): CloudResourcesSnapshot {
+  useEffect(() => (workspaceKey ? retain(workspaceKey, turn, details) : undefined), [workspaceKey, turn, details]);
   return useSyncExternalStore(
     subscribe,
     () => (workspaceKey ? (entries.get(workspaceKey)?.snapshot ?? NOTHING) : NOTHING),

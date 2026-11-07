@@ -1413,6 +1413,22 @@ pub async fn cloud_workspace_suspend(
 }
 
 #[tauri::command]
+pub async fn cloud_workspace_restart(
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+    workspace_id: String,
+) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_workspace_lifecycle(state, org_id, workspace_id, crate::cloud_workspaces::OperationAction::Restart).await
+}
+
+#[tauri::command]
+pub fn cloud_workspace_log_open(app: AppHandle, org_id: String, workspace_id: String) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = crate::account::workspace_console_url(&org_id, &workspace_id).map_err(err)?;
+    app.opener().open_url(url.as_str(), None::<&str>).map_err(err)
+}
+
+#[tauri::command]
 pub async fn cloud_workspace_resume(
     workspace_id: String,
     state: tauri::State<'_, crate::AppState>,

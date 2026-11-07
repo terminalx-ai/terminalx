@@ -1,3 +1,4 @@
+import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SessionPipelineControls } from "./SessionPipelineControls";
@@ -351,6 +352,7 @@ function CloudLocation({
           {chip}
         </span>
       )}
+      {item && <CloudWorkspaceDetails item={item} />}
       {error && (
         <span className="ml-1 truncate text-[11px] text-destructive" role="alert">
           {error}

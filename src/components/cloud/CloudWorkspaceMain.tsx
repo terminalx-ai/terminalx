@@ -1,3 +1,4 @@
+import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Cloud, Loader2, PanelLeft, Play } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
@@ -173,6 +174,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         )}
         <Cloud className="size-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 truncate text-sm font-medium">{item?.workspace.name ?? "Cloud workspace"}</span>
+        {item && <CloudWorkspaceDetails item={item} />}
         {item && <ExecutionLocation provider={item.workspace.provider} name={item.workspace.name} />}
         <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground" data-testid="cloud-connection-state" title={item ? describeWorkspace(item, Date.now(), agentRan) : undefined}>
           {rowState?.label}

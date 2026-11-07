@@ -66,6 +66,7 @@ export interface CloudLease {
 
 /** What a workspace's connection looks like to the rows. */
 export interface CloudConnectionInfo {
+  runtimeVersion?: string;
   state: WorkspaceConnectionState["state"];
   /** Capabilities the runtime granted on its last connect; kept while reconnecting. */
   capabilities: string[] | null;
@@ -197,7 +198,7 @@ function watch(entry: Entry, connection: CloudWorkspaceConnection) {
       entry.connectedAt = clock();
       entry.retryAt = 0;
       entry.retryDelay = 0;
-      setInfo(entry, { state: state.state, capabilities: state.capabilities, authority: state.authority, reattaching: false, connects: entry.info.connects + 1 });
+      setInfo(entry, { runtimeVersion: state.runtimeVersion, state: state.state, capabilities: state.capabilities, authority: state.authority, reattaching: false, connects: entry.info.connects + 1 });
       // Every connect, reconnects included: lists are re-read after time away.
       runDisconnected(entry.key);
       const cleanups: (() => void)[] = [];
