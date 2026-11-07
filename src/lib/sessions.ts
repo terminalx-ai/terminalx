@@ -65,6 +65,8 @@ interface State {
   newSessionQuick: boolean;
   /** A keyboard request to show Start from in the new-session form. */
   startFromRequest: number;
+  /** Personal local section chosen from its header; cleared on leaving the composer. */
+  newSessionSectionId: string | null;
   /**
    * A new-session form for a cloud project (`cloud:<orgId>:<identity>`),
    * from the project row's `+`. Cleared by the same navigation that clears
@@ -100,6 +102,7 @@ let state: State = {
   newSessionPreset: null,
   newSessionQuick: false,
   startFromRequest: 0,
+  newSessionSectionId: null,
   cloudSessionPreset: null,
   selectedCloudProject: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
@@ -123,6 +126,7 @@ function set(patch: Partial<State>) {
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
   if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionQuick = patch.newSessionQuick ?? false;
+  if (next.view !== "new" || next.selectedSessionId || patch.cloudSessionPreset) next.newSessionSectionId = null;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
   if (next.view !== "new" || next.selectedSessionId) {
@@ -327,7 +331,7 @@ export function openWelcome(closedWorkspaceSessionId: string | null = null) {
 
 export function selectSession(id: string | null) {
   const selected = id ? state.sessions.find((session) => session.id === id) : null;
-  const patch: Partial<State> = { selectedSessionId: id, view: id ? "welcome" : "new", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
+  const patch: Partial<State> = { selectedSessionId: id, view: id ? "welcome" : "new", newSessionPreset: null, newSessionSectionId: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
   // A quick chat has no project to focus: the one in focus stays as it is.
   if (selected && selected.kind !== "quick") focusProject(selected.projectPath, patch);
   else set(patch);
@@ -355,7 +359,7 @@ async function refreshProjects() {
  * wakes the workspace. Local project focus is left as it is.
  */
 export function selectCloudSession(key: string) {
-  set({ selectedSessionId: key, view: "welcome", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+  set({ selectedSessionId: key, view: "welcome", newSessionPreset: null, newSessionSectionId: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 /** The issues browser takes the workspace; no session stays selected. */
@@ -438,7 +442,7 @@ export function selectProjectInSidebar(path: string | null) {
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null, fromBranch?: string) {
-  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionSectionId: null, newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -610,6 +614,12 @@ export async function startChat(place?: { projectPath: string; cwd?: string; fro
   const back = returnHere();
   selectSession(null);
   set({ newSessionReturn: back, newSessionQuick: true });
+}
+
+export function startSessionInSection(sectionId: string) {
+  const back = returnHere();
+  selectSession(null);
+  set({ newSessionReturn: back, newSessionQuick: true, newSessionSectionId: sectionId });
 }
 
 export async function removeProject(path: string) {

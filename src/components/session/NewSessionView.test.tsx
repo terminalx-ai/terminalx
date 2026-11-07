@@ -48,6 +48,7 @@ const harness = { id: "claude", name: "Claude", available: true, installHint: ""
 const store = {
   projects: [project] as Project[], selectedProject: project.path as string | null,
   harnesses: [harness], newSessionQuick: false,
+  newSessionSectionId: null as string | null,
   newSessionPreset: null as { projectPath: string; cwd: string | null; fromBranch?: string } | null,
 };
 const { createQuickChat, selectSession } = vi.hoisted(() => ({ createQuickChat: vi.fn(), selectSession: vi.fn() }));
@@ -88,6 +89,7 @@ beforeEach(() => {
   store.projects = [project];
   store.harnesses = [harness];
   store.newSessionQuick = false;
+  store.newSessionSectionId = null;
   store.newSessionPreset = null;
   store.selectedProject = project.path;
   project.kind = "git";
@@ -460,7 +462,8 @@ describe("one new-chat composer (PRO-173)", () => {
   });
 });
 
-it("starts a selected PR in its own worktree and keeps the user's first prompt", async () => {
+it.each([null, "release"])("starts a selected PR in its own worktree and keeps the prompt and section (%s)", async (sectionId) => {
+  store.newSessionSectionId = sectionId;
   Element.prototype.scrollIntoView = vi.fn();
   invoke.mockImplementation(async (command: string) => {
     if (command === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
@@ -481,6 +484,7 @@ it("starts a selected PR in its own worktree and keeps the user's first prompt",
   fireEvent.click(screen.getByRole("button", { name: "Create" }));
   await waitFor(() => expect(onCreated).toHaveBeenCalled());
   expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ checkoutPr: 12, checkoutBranch: null, baseRef: null, cwd: null, useWorktree: true }) });
+  expect(invoke.mock.calls.find(([command]) => command === "create_session")?.[1].req.sectionId).toBe(sectionId ?? undefined);
   expect(onCreated.mock.calls[0][2]).toBe("Check the edge cases\n\nContinue work on pull request #12: Fix parser\nhttps://github.com/acme/app/pull/12");
 });
 
@@ -526,4 +530,19 @@ it.each([false, true])("waits for PR context before creating a session, unless E
   await waitFor(() => expect(onCreated).toHaveBeenCalled());
   expect(onCreated.mock.calls[0][2]).toBe(cancel ? "Review #12" : "Review @/context/pr-12.md ");
   if (cancel) await act(async () => finish("/context/pr-12.md"));
+});
+
+describe("new sessions in a personal section", () => {
+  it.each([false, true])("includes the section in the creation request (quick=%s)", async (quick) => {
+    store.newSessionSectionId = "release";
+    store.newSessionQuick = quick;
+    const { onCreated } = renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Ship the release" } });
+    const send = screen.getByRole("button", { name: quick ? "Ask" : "Create" });
+    await waitFor(() => expect(send.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(send);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    if (quick) expect(createQuickChat).toHaveBeenCalledWith(expect.objectContaining({ sectionId: "release" }));
+    else expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({ sectionId: "release" }) }));
+  });
 });
