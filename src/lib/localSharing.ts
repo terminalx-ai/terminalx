@@ -144,12 +144,21 @@ export async function copyShareLink(sessionId: string) {
  * host to admit them. Driving the session, or joining unseen, is for the host
  * to turn on for a link, never what a forwarded link does by default.
  */
+/**
+ * The longest a link may last: the host accepts an expiry up to 24 hours out
+ * (local_sharing.rs), less a minute for the request to reach it. Sharing ends
+ * when TerminalX restarts in any case.
+ */
+export function longestShareExpiry(now = Date.now()): number {
+  return now + 24 * 3_600_000 - 60_000;
+}
+
 export function defaultShareSettings(): ShareSettings {
   return {
     audience: "anyone",
     role: "viewer",
     people: [],
-    expiresAt: Date.now() + 3_600_000,
+    expiresAt: longestShareExpiry(),
     approveEachPerson: true,
     canApprove: false,
     maximumPeople: 8,

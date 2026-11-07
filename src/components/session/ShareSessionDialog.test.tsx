@@ -31,8 +31,13 @@ describe("Share session", () => {
     expect(screen.getByText(/They see the transcript and terminal so far/)).toBeTruthy();
     // The form shows the defaults it will send.
     expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer");
-    expect((screen.getByLabelText("Approve each person") as HTMLInputElement).checked).toBe(true);
-    expect((screen.getByLabelText("Guests may approve permissions") as HTMLInputElement).checked).toBe(false);
+    // Who, how and how long are out every time; the rest waits folded under More settings.
+    const more = screen.getByTestId("share-more-settings") as HTMLDetailsElement;
+    expect(more.open).toBe(false);
+    expect(more.contains(screen.getByRole("switch", { name: "Approve each person" }))).toBe(true);
+    expect(more.contains(screen.getByLabelText("Who can join"))).toBe(false);
+    expect(screen.getByRole("switch", { name: "Approve each person" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("switch", { name: "Guests may approve permissions" }).getAttribute("aria-checked")).toBe("false");
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -53,7 +58,9 @@ describe("Share session", () => {
     );
     const settings = mocks.invoke.mock.calls.find(([command]) => command === "session_share_create")![1].settings;
     expect(settings.expiresAt).toBeGreaterThan(Date.now());
-    expect(settings.expiresAt).toBeLessThanOrEqual(Date.now() + 3_600_000);
+    // Finite (PRO-162): as long as the host allows, never past its 24 hours.
+    expect(settings.expiresAt).toBeLessThanOrEqual(Date.now() + 24 * 3_600_000);
+    expect(settings.expiresAt).toBeGreaterThan(Date.now() + 23 * 3_600_000);
   });
   it("sends per-account roles and the separate permission grant chosen by the host", async () => {
     await open();
@@ -61,7 +68,7 @@ describe("Share session", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add account" }));
     fireEvent.change(screen.getByLabelText("Account email 1"), { target: { value: "guest@example.com" } });
     fireEvent.change(screen.getByLabelText("Access for account 1"), { target: { value: "viewer" } });
-    fireEvent.click(screen.getByLabelText("Guests may approve permissions"));
+    fireEvent.click(screen.getByRole("switch", { name: "Guests may approve permissions" }));
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -79,7 +86,7 @@ describe("Share session", () => {
   it("lets the host make a driver link that admits people unasked, and starts the next link from the defaults again", async () => {
     await open();
     fireEvent.change(screen.getByLabelText("Default access"), { target: { value: "driver" } });
-    fireEvent.click(screen.getByLabelText("Approve each person"));
+    fireEvent.click(screen.getByRole("switch", { name: "Approve each person" }));
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -88,7 +95,7 @@ describe("Share session", () => {
       ),
     );
     await waitFor(() => expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer"));
-    expect((screen.getByLabelText("Approve each person") as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("switch", { name: "Approve each person" }).getAttribute("aria-checked")).toBe("true");
   });
   it("shows on the session's Share button who waits to be admitted, not only inside Share (PRO-162)", async () => {
     const guest = (userId: string, displayName: string, admitted: boolean): ShareState["people"][number] => ({
