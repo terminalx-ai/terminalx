@@ -1219,7 +1219,7 @@ mod tests {
         let status = |tab_status: &str| json!({"pid": 100, "appVersion": "0.2.21",
             "runningTabs": [{"sessionId": "s1", "tabId": "t1", "harness": "claude", "status": tab_status}]});
         let shell = |exited: bool| crate::pty::ShellPane { id: "s1:1".into(), session_id: "s1".into(), title: Some("npm run dev".into()),
-            renamed: false, cwd: "/p".into(), exited, created: "2026-11-01T00:00:00Z".into() };
+            renamed: false, docked: None, cwd: "/p".into(), exited, created: "2026-11-01T00:00:00Z".into() };
         let table = |extra: &str| super::super::idle::parse(&format!("1 1 1 launchd\n100 1 100 terminalx-serve\n\
             200 100 200 claude\n201 200 200 npm exec @playwright/mcp\n202 201 200 node\n203 200 200 cua\n150 100 150 -zsh\n{extra}")).unwrap();
         // The runtime (100) runs an agent (200) with its MCP servers, and a terminal's shell (150).

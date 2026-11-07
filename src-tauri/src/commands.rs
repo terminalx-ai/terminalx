@@ -3051,6 +3051,20 @@ pub async fn pty_rename(state: State<'_, AppState>, id: String, title: String) -
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.rename(&id, &title)).await.map_err(err)?.map_err(err)
 }
 
+/// Move an existing shell between the dock and tabs in every window.
+#[tauri::command]
+pub async fn pty_set_docked(state: State<'_, AppState>, id: String, docked: bool) -> CmdResult<crate::pty::ShellPane> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.set_docked(&id, docked)).await.map_err(err)?.map_err(err)
+}
+
+/// Save selected terminal output privately alongside this session's attachments.
+#[tauri::command]
+pub async fn save_terminal_selection(state: State<'_, AppState>, session_id: String, tab_id: String, text: String) -> CmdResult<String> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.save_terminal_selection(&session_id, &tab_id, &text)).await.map_err(err)?.map_err(err)
+}
+
 #[tauri::command]
 pub async fn pty_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;

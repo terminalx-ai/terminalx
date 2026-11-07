@@ -52,6 +52,10 @@ impl Sessions {
         self.call("runtime.session.workspace", json!({"operation":operation,"params":params}))
     }
 
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
+    }
+
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
     }
