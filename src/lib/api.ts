@@ -209,6 +209,7 @@ export interface NewSession {
   worktreeName?: string | null;
   /** An existing branch to check out in the new worktree, instead of a new branch. */
   checkoutBranch?: string | null;
+  checkoutPr?: number | null;
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
@@ -2142,6 +2143,8 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  search: (cwd: string, query: string) => invoke<PullRequest[]>("pr_search", { cwd, query }),
+  attach: (cwd: string, number: number) => invoke<string>("pr_attach", { cwd, number }),
   reviewFiles: (url: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile[]>("pr_review_files", { url, head, base }),
   reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
   resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),

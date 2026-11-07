@@ -19,7 +19,7 @@ import { insertNewLine } from "@/components/chat/Composer";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
-import { api, errorMessage, type ImageInput, type Issue } from "@/lib/api";
+import { api, errorMessage, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
 import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
 import { clearNewSessionPreset, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -28,8 +28,8 @@ import { useSessionAgent } from "@/lib/useSessionAgent";
 import { readinessBlock, useAgentReadinessList } from "@/lib/agentReadiness";
 import { AgentSetup } from "./AgentSetup";
 import { AgentMenu } from "./AgentMenu";
-import { BranchPicker, type BranchTarget } from "./BranchPicker";
-import { IssuePicker } from "./IssuePicker";
+import { StartFromPicker, type BranchTarget } from "./StartFromPicker";
+import { usePrMention } from "@/components/chat/usePrMention";
 import { SessionOptions } from "./SessionOptions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { usePromptTextProps } from "@/lib/autocorrect";
@@ -112,6 +112,10 @@ export function NewSessionView({
   const [checkoutBranch, setCheckoutBranch] = useState<string | null>(null);
   /** The issue the session starts from: its prompt, branch name and link. */
   const [issue, setIssue] = useState<Issue | null>(null);
+  const [pullRequest, setPullRequest] = useState<PullRequest | null>(null);
+  const [startFromOpen, setStartFromOpen] = useState(!!store.startFromRequest);
+  useEffect(() => { if (store.startFromRequest) setStartFromOpen(true); }, [store.startFromRequest]);
+  const [caret, setCaret] = useState(0);
 
   const preset = store.newSessionPreset;
   // The rail is what the reader last pointed at, so it beats the project they
@@ -120,7 +124,7 @@ export function NewSessionView({
   const project = quick ? null : (store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null);
   // A quick chat cuts no worktree, whatever the folder it is pointed at.
   const isGit = quick ? false : cloud ? true : project?.kind !== "folder";
-  const useWorktree = isGit && (!!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
+  const useWorktree = isGit && (!!pullRequest || !!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
@@ -172,6 +176,7 @@ export function NewSessionView({
   /** An issue names the branch after itself, as a session started from the Issues list does. */
   const pickIssue = (picked: Issue) => {
     setIssue(picked);
+    setPullRequest(null);
     if (!project || preset?.cwd || !useWorktree) return;
     api
       .previewWorkspaceName(project.path, issueWorktreeName(picked.identifier, picked.title))
@@ -187,6 +192,7 @@ export function NewSessionView({
   useEffect(() => {
     setIssue(null);
     setCheckoutBranch(null);
+    setPullRequest(null);
   }, [project?.path, !!cloud, quick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const branchTarget: BranchTarget = preset?.cwd
@@ -198,11 +204,21 @@ export function NewSessionView({
         : { kind: "open", cwd: project?.path ?? "" };
   const pickBranch = (next: BranchTarget) => {
     if (!project) return;
+    setPullRequest(null);
     setCheckoutBranch(next.kind === "existing" ? next.branch : null);
     if (next.kind === "open" && next.cwd !== project.path) return startSessionIn(project.path, next.cwd);
     clearNewSessionPreset();
     setUseWorktree(next.kind !== "open");
   };
+
+  const pickPr = (pr: PullRequest) => {
+    clearNewSessionPreset();
+    setCheckoutBranch(null);
+    setIssue(null);
+    setUseWorktree(true);
+    setPullRequest(pr);
+  };
+  const prMention = usePrMention(!cloud && !quick && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { inline: true });
 
   const pickProject = async () => {
     try {
@@ -227,8 +243,8 @@ export function NewSessionView({
         ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected && cloud.mayStart === true
         : quick
           ? !!harness && available && (text.trim().length > 0 || hasImages) && !busy
-          : !!project && !!harness && available && (text.trim().length > 0 || hasImages || !!issue) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
-    [cloud, quick, project, harness, available, text, hasImages, issue, useWorktree, preset?.cwd, workspaceName, busy, confirm],
+          : !!project && !!harness && available && (text.trim().length > 0 || hasImages || !!issue || !!pullRequest) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy && !prMention.attaching,
+    [cloud, quick, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching, confirm],
   );
 
   const cloudRequest = (): CloudSessionRequest => ({
@@ -347,11 +363,11 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       // The backend names an untitled session itself, so an image-only prompt
       // sends an empty title rather than inventing one here.
-      const title = (text.trim().split("\n")[0] || issue?.title || "").slice(0, 60);
+      const title = (text.trim().split("\n")[0] || issue?.title || pullRequest?.title || "").slice(0, 60);
       const images = attach.images;
       // Named for the work: the issue's name when there is one, else the prompt's words; the drawn name when they say nothing.
       // An existing branch's worktree is named after the branch.
-      const named = checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
+      const named = pullRequest ? `pr-${pullRequest.number}-${pullRequest.title}` : checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
       const worktreeName = named ? await api.previewWorkspaceName(project.path, named).catch(() => workspaceName) : workspaceName;
       const s = await api.createSession({
         ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}),
@@ -361,12 +377,13 @@ export function NewSessionView({
         onMain: !preset?.cwd && !useWorktree,
         worktreeName: !preset?.cwd && useWorktree ? worktreeName : null,
         checkoutBranch: !preset?.cwd && useWorktree ? checkoutBranch : null,
+        ...(pullRequest ? { checkoutPr: pullRequest.number } : {}),
         baseRef: !preset?.cwd && useWorktree ? preset?.fromBranch ?? null : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
       });
       upsertSession(s);
-      let first = text;
+      let first = pullRequest ? [text.trim(), `Continue work on pull request #${pullRequest.number}: ${pullRequest.title}\n${pullRequest.url}`].filter(Boolean).join("\n\n") : text;
       if (issue) {
         const ref = { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url };
         // The link is a convenience; a session that could not be linked still starts.
@@ -526,7 +543,9 @@ export function NewSessionView({
                 </DropdownMenu>
               )}
               {localGit && project ? (
-                <BranchPicker projectPath={project.path} defaultBranch={preset?.fromBranch ?? status?.defaultBranch ?? "main"} target={branchTarget} onChange={pickBranch} />
+                <StartFromPicker projectPath={project.path} defaultBranch={preset?.fromBranch ?? status?.defaultBranch ?? "main"}
+                  label={pullRequest ? `PR #${pullRequest.number}` : issue ? issue.identifier : branchTarget.kind === "new" ? "New branch" : branchTarget.kind === "existing" ? branchTarget.branch : workspace?.branch ?? status?.branch ?? "Current checkout"}
+                  open={startFromOpen} onOpenChange={setStartFromOpen} onBranch={pickBranch} onIssue={pickIssue} onPr={pickPr} onSession={selectSession} disabled={busy} />
               ) : (
                 branchInfo
               )}
@@ -541,12 +560,10 @@ export function NewSessionView({
                 />
               )}
               {!quick && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
-              <div className="ml-auto flex shrink-0 items-center">
-                {localGit && project && <IssuePicker projectPath={project.path} picked={issue} onPick={pickIssue} disabled={busy} />}
-              </div>
             </div>
 
-            <div className="px-4 pt-3">
+            <div className="relative px-4 pt-3">
+              {prMention.menu}
               {issue && (
                 <div className="mb-2 flex max-w-full items-center gap-1.5 self-start rounded-md bg-veil-raised py-1 pl-2 pr-1 text-xs" data-testid="picked-issue">
                   {issue.provider === "github" ? <Github className="size-3.5 shrink-0" /> : <LogoLinear className="size-3.5 shrink-0" />}
@@ -557,6 +574,13 @@ export function NewSessionView({
                   </button>
                 </div>
               )}
+              {pullRequest && (
+                <div className="mb-2 flex items-center gap-1.5 rounded-md bg-veil-raised py-1 pl-2 pr-1 text-xs" data-testid="picked-pr">
+                  <span className="shrink-0 font-mono text-muted-foreground">PR #{pullRequest.number}</span>
+                  <span className="min-w-0 flex-1 truncate">{pullRequest.title}</span>
+                  <button type="button" aria-label="Remove pull request" onClick={() => setPullRequest(null)} className="shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground"><X className="size-3" /></button>
+                </div>
+              )}
               <AttachmentThumbs attach={attach} />
               <textarea
                 ref={ref}
@@ -564,9 +588,11 @@ export function NewSessionView({
                 data-new-session-prompt
                 {...textProps}
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }}
+                onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
                 onKeyDown={(e) => {
                   if (e.nativeEvent.isComposing) return;
+                  if (prMention.onKeyDown(e)) return;
                   if (matchesShortcut(e.nativeEvent, "composer.send")) {
                     e.preventDefault();
                     void create();

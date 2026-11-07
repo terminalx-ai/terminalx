@@ -56,6 +56,7 @@ vi.mock("@/lib/sessions", () => ({
   useSessionStore: () => ({ ...store, workspaces: {} }),
   createQuickChat,
   refreshHarnesses: vi.fn(async () => {}),
+  refreshWorkspaces: vi.fn(async () => {}),
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
   linkSessionIssue: vi.fn(async () => {}),
@@ -230,7 +231,7 @@ describe("folder projects", () => {
       if (cmd === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
     });
     render(<NewSessionView />);
-    expect(screen.getByRole("button", { name: "Branch" }).textContent).toContain("New branch");
+    expect(screen.getByRole("button", { name: "Start from" }).textContent).toContain("New branch");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_workspace_name", expect.anything()));
     expect(screen.queryByText("No Git")).toBeNull();
   });
@@ -369,8 +370,9 @@ it("starts a branch with both switches off, and one started from an issue picked
   expect(switches()).toEqual(["false", "false"]);
   closeOptions();
 
-  fireEvent.click(screen.getByRole("button", { name: "Start from an issue" }));
-  fireEvent.click(await screen.findByText("Merge issue sessions when green"));
+  fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "Issues" }), { button: 0 });
+  fireEvent.click(await screen.findByRole("option", { name: /Merge issue sessions when green/ }));
   await screen.findByTestId("picked-issue");
   expect(switches()).toEqual(["true", "true"]);
   closeOptions();
@@ -458,6 +460,76 @@ describe("one new-chat composer (PRO-173)", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
     expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ projectPath: project.path, baseRef: "feature/login", useWorktree: true, cwd: null }) });
   });
+});
+
+it.each([null, "release"])("starts a selected PR in its own worktree and keeps the prompt and section (%s)", async (sectionId) => {
+  store.newSessionSectionId = sectionId;
+  Element.prototype.scrollIntoView = vi.fn();
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
+    if (command === "preview_workspace_name") return "pr-12-parser";
+    if (command === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
+    if (command === "list_branches") return [];
+    if (command === "pr_search") return [{ number: 12, title: "Fix parser", author: "alice", state: "OPEN", url: "https://github.com/acme/app/pull/12" }];
+    if (command === "create_session") return created;
+    throw new Error(`Unexpected command ${command}`);
+  });
+  const onCreated = vi.fn();
+  render(<NewSessionView onCreated={onCreated} />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Check the edge cases" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "Pull requests" }), { button: 0 });
+  fireEvent.click(await screen.findByRole("option", { name: /#12 Fix parser/ }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ checkoutPr: 12, checkoutBranch: null, baseRef: null, cwd: null, useWorktree: true }) });
+  expect(invoke.mock.calls.find(([command]) => command === "create_session")?.[1].req.sectionId).toBe(sectionId ?? undefined);
+  expect(onCreated.mock.calls[0][2]).toBe("Check the edge cases\n\nContinue work on pull request #12: Fix parser\nhttps://github.com/acme/app/pull/12");
+});
+
+it("allows Tab and starts with the literal issue number on Enter when PR search has no match", async () => {
+  Element.prototype.scrollIntoView = vi.fn();
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "pr_search" ? Promise.resolve([]) : original(command, args));
+  const { onCreated } = renderView();
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "fix #45" } });
+  await screen.findByText("No matching pull requests");
+  expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+  expect(onCreated).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.keyDown(field, { key: "Enter" });
+  await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+  expect(onCreated.mock.calls[0][2]).toBe("fix #45");
+  expect(invoke.mock.calls.some(([command]) => command === "pr_attach")).toBe(false);
+});
+
+it.each([false, true])("waits for PR context before creating a session, unless Escape cancels it (cancel=%s)", async (cancel) => {
+  Element.prototype.scrollIntoView = vi.fn();
+  let finish!: (path: string) => void;
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => {
+    if (command === "pr_search") return Promise.resolve([{ number: 12, title: "Fix parser", author: "alice", state: "OPEN" }]);
+    if (command === "pr_attach") return new Promise<string>((resolve) => { finish = resolve; });
+    return original(command, args);
+  });
+  const { onCreated } = renderView();
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "Review #12" } });
+  fireEvent.mouseDown(await screen.findByRole("option", { name: /#12 Fix parser/ }));
+  expect(invoke).toHaveBeenCalledWith("pr_attach", expect.objectContaining({ number: 12 }));
+  const start = screen.getByRole("button", { name: "Create" });
+  expect(start.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(start);
+  expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  if (cancel) fireEvent.keyDown(field, { key: "Escape" });
+  else await act(async () => finish("/context/pr-12.md"));
+  await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(start);
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(onCreated.mock.calls[0][2]).toBe(cancel ? "Review #12" : "Review @/context/pr-12.md ");
+  if (cancel) await act(async () => finish("/context/pr-12.md"));
 });
 
 describe("new sessions in a personal section", () => {

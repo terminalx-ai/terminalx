@@ -206,6 +206,7 @@ export function AppShell() {
   useShortcut("app.togglePanel", togglePanel);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
+  useShortcut("app.startFrom", () => { setSettingsOpen(false); openNewSession(true); });
   useShortcut("app.home", showHome);
   useShortcut("app.issues", showIssues);
   useShortcut("app.agentDashboard", showAgents);

@@ -554,8 +554,9 @@ export function CommandPalette({
         projectPath: item.project.path,
         title: `${identifier} ${item.title}`.slice(0, 80),
         useWorktree: true,
+        ...(item.pullRequest ? { checkoutPr: item.number } : {}),
         worktreeName: issueWorktreeName(identifier, item.title),
-        issue: { provider: "github", id: item.issue?.id ?? String(item.number), identifier, title: item.title, url: item.url },
+        ...(item.issue ? { issue: { provider: "github" as const, id: item.issue.id, identifier, title: item.title, url: item.url } } : {}),
         tab: {
           harness: harness.id,
           model: prefs.lastModel[harness.id] ?? "",

@@ -55,7 +55,8 @@ describe("settings registry", () => {
   });
 });
 
-it("keeps standard settings rows in the registry; organization internals register as sections", () => {
+it("keeps global settings rows in the registry", () => {
+  // Custom organization fields register as a section.
   // PRO-155's controlled action editor is not mounted in Settings yet (see
   // docs/repository-action-editors.md). Its dialog switches edit an unsaved
   // action draft; registering them would advertise row links that cannot open.

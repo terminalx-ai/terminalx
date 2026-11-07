@@ -2449,6 +2449,7 @@ impl WorkspaceRpc {
                 on_main: !p.use_worktree,
                 base_ref: None,
                 checkout_branch: None,
+                checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
                 issue: p.issue.clone(),
                 automation: None,

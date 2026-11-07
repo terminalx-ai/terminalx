@@ -125,6 +125,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.app.commandPalette",
   "shortcuts.app.home",
   "shortcuts.app.newSession",
+  "shortcuts.app.startFrom",
   "shortcuts.app.issues",
   "shortcuts.app.agentDashboard",
   "shortcuts.app.stats",

@@ -34,6 +34,7 @@ import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
+import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
@@ -338,7 +339,8 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
+  const prMention = usePrMention(!remote && !disabled && dismissedToken !== tokenKey ? cwd ?? null : null, draft, caret, onDraftChange, ref, setCaret);
+  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
@@ -406,7 +408,7 @@ export function Composer({
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || disabled) return;
+    if ((!text && !attachments.length) || disabled || prMention.attaching) return;
     const previews = attachments.map((a) => ({ url: a.previewUrl, name: a.name }));
     const operation = beginComposerSend(sendScope, { text, images: previews, pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
@@ -436,9 +438,11 @@ export function Composer({
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, attachments, attach, disabled, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, attachments, attach, disabled, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
+    if (prMention.onKeyDown(e)) return;
     if (pickerOpen && items.length) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -462,8 +466,7 @@ export function Composer({
       }
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
-    if (!pickerOpen && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
-    if (e.nativeEvent.isComposing) return;
+    if (!pickerOpen && !prMention.open && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
     if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
@@ -518,6 +521,7 @@ export function Composer({
             note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
+        {prMention.menu}
         <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
@@ -680,7 +684,7 @@ export function Composer({
                   variant={draft.trim() || attachments.length ? "accent" : "secondary"}
                   aria-label={sending ? "Sending" : "Send"}
                   aria-busy={sending}
-                  disabled={disabled || sending || (!draft.trim() && !attachments.length)}
+                  disabled={disabled || sending || prMention.attaching || (!draft.trim() && !attachments.length)}
                   onClick={() => void send()}
                 >
                   <ArrowUp />
