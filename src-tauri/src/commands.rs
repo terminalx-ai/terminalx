@@ -2976,7 +2976,7 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 
 #[tauri::command]
 pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github::PullRequest>> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2986,7 +2986,7 @@ pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
 
 #[tauri::command]
 pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdResult<crate::github::PullRequest> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::associated_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
