@@ -641,6 +641,7 @@ pub fn run() {
             commands::tab_pane,
             commands::cancel_queued,
             commands::send_queued_now,
+            commands::change_held_queue,
             commands::list_queued,
             commands::respond_permission,
             commands::answer_questions,

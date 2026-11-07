@@ -373,14 +373,33 @@ control becomes "Stop session" and the next press is the hard stop: the way
 out for an agent that does not answer an interrupt. The next turn's Stop is
 an interrupt again.
 
-**The queue is the CLI's.** A message sent mid-turn is typed into the CLI at
-once and held by it; the app keeps no queue for these tabs. Checked against
-the real CLIs with a message queued behind a running turn:
+**By default, the queue is the CLI's.** With Settings → Agents → “Follow-ups
+while the agent works” set to “Send to the agent now”, a message sent mid-turn
+is typed into the CLI at once and held by it. Checked against the real CLIs
+with a message queued behind a running turn:
 
 | CLI | Escape with a message queued | Escape with nothing queued |
 | --- | --- | --- |
 | Claude Code 2.1.296 | The turn is interrupted and the queued message is sent at once as the next prompt. The transcript reads `queue-operation` dequeue, the partial reply, `[Request interrupted by user]`, then the prompt. | The turn is interrupted: "Interrupted · What should Claude do instead?" |
 | Codex 0.153.4 | The same: its queue line reads "press esc to interrupt and send immediately", and it then says "Model interrupted to submit steer instructions". The rollout has `turn_aborted` (`interrupted`), then a new `task_started` with the prompt. | "Conversation interrupted", and `turn_aborted`. |
+
+**Held follow-ups belong to the app (PRO-254).** “Hold until the turn ends”
+keeps local composer messages in the tray above the input. They are not read
+mid-turn. The tray can collapse, edit, delete, drag or move items with buttons,
+and pause/resume delivery. Editing pauses the queue. Successful `Stop`/turn
+completion dispatches one item through normal prompt delivery; a failed turn
+or ordinary interrupt does not drain it. “Send now” selects one held item,
+interrupts the current turn, then sends that item once the turn ends, even
+when the queue is paused. Cmd+Enter chooses the opposite of the setting:
+hold under “now”, interrupt-and-send under “hold”. The default remains “now”.
+
+`held_queue` snapshots in the tab log preserve order, edits, archived image
+references and pause state. Delivery claims are recorded before sending; a
+claim interrupted before its prompt is logged is restored paused. Once the
+normal user-message event exists, restart does not resend it. A hard Stop
+pauses and retains held items. After reopening an idle tab, Resume/Send next
+starts the queue; otherwise its next finished turn does. Cloud mailboxes and
+messages already typed into the CLI retain their existing behavior.
 
 So the chat keeps expecting a queued message when its turn is stopped. When
 the CLI's record of it arrives it becomes the prompt of the next turn, which
@@ -999,9 +1018,9 @@ rule at click time rather than trusting the rendered row.
   receipt.
 - **Images by path.** An attachment is archived as today and its *path* is
   pasted for the CLI to pick up, rather than base64 bytes on a wire.
-- **Queueing.** A prompt sent mid-turn is written immediately — the CLI queues
-  typed input itself. The chat shows it as queued until the CLI takes it and the
-  transcript says so; the app keeps no queue of its own for these tabs. What
+- **Queueing.** With the default “Send to the agent now”, a prompt sent
+  mid-turn is written immediately — the CLI queues typed input itself. The
+  chat shows it as queued until the CLI takes it and the transcript says so. Opt-in held follow-ups use the app queue above. What
   Escape does with that queue is the CLI's to decide (see "Escape interrupts;
   only Stop ends the process"). "Send now" flushes available acceptance records,
   then sends one Escape for the provider to deliver its queue in its own order.

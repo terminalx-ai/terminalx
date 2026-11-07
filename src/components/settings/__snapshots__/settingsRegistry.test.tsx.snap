@@ -12,6 +12,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "account.organizations",
   "account.sharing",
   "agents.skills",
+  "agents.followUps",
   "agents.idleStop",
   "agents.archiveIdle",
   "agents.readOnlyCommands",

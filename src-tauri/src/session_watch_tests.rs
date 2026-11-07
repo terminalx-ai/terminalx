@@ -248,6 +248,7 @@ impl Rig {
             }),
             pending: HashMap::new(),
             queued: Vec::new(),
+            held_queue: Default::default(),
             turn_open: false,
             turn_opener: None,
             compact_completed: false,

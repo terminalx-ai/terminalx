@@ -42,6 +42,8 @@ use crate::{git, pty, store};
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_held.rs"]
+pub mod held;
 #[path = "session_unsent.rs"]
 mod unsent;
 #[path = "session_retire.rs"]
@@ -881,6 +883,7 @@ pub struct TabRuntime {
     pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
     pub queued: Vec<QueuedMessage>,
+    pub held_queue: held::Queue,
     pub turn_open: bool,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
@@ -1808,6 +1811,7 @@ impl SessionManager {
                 engine: Engine::None,
                 pending: HashMap::new(),
                 queued: Vec::new(),
+                held_queue: held::Queue::restore(&log_path)?,
                 turn_open: false,
                 turn_opener: None,
                 compact_completed: false,
@@ -2075,6 +2079,12 @@ impl SessionManager {
         latest.extend(events.into_iter().filter(|event| !seen.contains(&event.id)));
         latest.sort_by_key(|event| event.seq);
         events = latest;
+        // A live claim can have published its prompt but not yet its final
+        // snapshot. A history read must never write that item back after it.
+        if rt.held_queue.sending.is_none() && held::Queue::replay(&events) != rt.held_queue {
+            let queue = rt.held_queue.clone();
+            events.push(self.save_held(&mut rt, queue)?);
+        }
         self.reconcile_input_waits(&mut rt, &mut events);
         self.reconcile_compactions(&mut rt, &mut events)?;
         for event in &mut events { recovery::sanitize(&mut event.payload); }
@@ -2161,7 +2171,7 @@ impl SessionManager {
             status: rt.status,
             asks: !rt.pending.is_empty(),
             recovery: rt.recovery,
-            queued: held || !rt.queued.is_empty(),
+            queued: held || !rt.queued.is_empty() || !rt.held_queue.items.is_empty(),
             running: rt.child.is_some() || pane_running,
         }
     }
@@ -2852,6 +2862,12 @@ impl SessionManager {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
+        // A turn may have begun in the terminal after the queue claimed an
+        // idle boundary. Held input must still never be typed mid-turn.
+        if rt.held_queue.sending.is_some() && (rt.turn_open_for_prompts() || !rt.pending.is_empty()
+            || (rt.held_queue.paused && rt.held_queue.next.is_none())) {
+            bail!("The agent started another turn or the queue was paused. The follow-up is still held.");
+        }
         // A CLI the reader started by hand is theirs to drive: it runs with
         // whatever permissions they gave it, which no share was checked
         // against. And a terminal is the host's to start an agent in.
@@ -3311,6 +3327,7 @@ impl SessionManager {
             || rt.stdio_starting
             || !rt.pending.is_empty()
             || !rt.queued.is_empty()
+            || !rt.held_queue.items.is_empty()
             || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting);
         if busy {
             return None;
@@ -3352,6 +3369,7 @@ impl SessionManager {
         self.mobile.invalidate_tab(session_id, tab_id);
         let key = key_of(session_id, tab_id);
         let rt_arc = self.runtime(session_id, tab_id)?;
+        self.pause_held_for_stop(&mut rt_arc.lock().unwrap());
         if matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(_)) {
             return self.stop_codex_stdio(&rt_arc, keep_unread);
         }
@@ -4629,6 +4647,7 @@ impl SessionManager {
         if let (Engine::Cli(p), Some(now)) = (&mut rt.engine, now) {
             if p.harness == CliKind::Codex && p.launched_for.is_none() { p.launched_for = Some(now); }
         }
+        self.schedule_held(&rt);
         Ok(())
     }
 
@@ -6569,6 +6588,7 @@ impl SessionManager {
                 }
             }
             self.set_status(rt, if rt.recovery.is_some() { TabStatus::Waiting } else if aborted { TabStatus::Idle } else { TabStatus::Completed });
+            if main && (worked || (aborted && rt.held_queue.next.is_some())) { self.schedule_held(rt); }
         }
     }
 

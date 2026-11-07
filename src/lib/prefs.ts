@@ -48,6 +48,7 @@ export interface Prefs {
    * notes beside them (see `@/lib/autocorrect`). Off unless the reader turned it on.
    */
   autocorrect: boolean;
+  followUps: "now" | "hold";
   lastProject: string | null;
   lastAgent: string;
   lastModel: Record<string, string>;
@@ -149,6 +150,7 @@ const DEFAULTS: Prefs = {
   turnChanges: true,
   promptMap: true,
   autocorrect: false,
+  followUps: "now",
   lastProject: null,
   lastAgent: "claude",
   lastModel: {},
@@ -215,6 +217,7 @@ function load(): Prefs {
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
     prefs.autocorrect = prefs.autocorrect === true;
+    prefs.followUps = prefs.followUps === "hold" ? "hold" : "now";
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     prefs.issueCloudProject = typeof prefs.issueCloudProject === "string" && prefs.issueCloudProject.startsWith("cloud:") ? prefs.issueCloudProject : null;
     const pipelines = prefs.cloudIssuePipelines;
