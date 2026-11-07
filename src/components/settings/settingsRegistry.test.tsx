@@ -56,6 +56,9 @@ describe("settings registry", () => {
 });
 
 it("keeps standard settings rows in the registry; organization internals register as sections", () => {
-  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx"], { query: "?raw", import: "default", eager: true });
+  // Per-item editors have their own fields, rather than global settings rows.
+  // RepositoryActionsSettings edits one action's draft in a dialog, just as
+  // WorkStatusSettings edits individual statuses inside its registered section.
+  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });
