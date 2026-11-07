@@ -28,7 +28,7 @@ const open = async () => {
 describe("Share session", () => {
   it("creates signed-in driver access with permission approval explicitly off and a finite expiry", async () => {
     await open();
-    expect(screen.getByText(/Guests can see the existing transcript/)).toBeTruthy();
+    expect(screen.getByText(/Guests see the transcript and terminal so far/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -75,7 +75,16 @@ describe("Share session", () => {
     mocks.signedIn = false;
     render(<ShareSessionDialogHost />);
     act(() => openSessionShare("signed-out-session"));
-    expect(await screen.findByRole("button", { name: "Sign in to share" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Create share link" })).toBeNull();
+  });
+  it("does not repeat the server's sign-in refusal as an error while signed out", async () => {
+    mocks.signedIn = false;
+    mocks.invoke.mockRejectedValue("Sign in to share a session.");
+    render(<ShareSessionDialogHost />);
+    act(() => openSessionShare("signed-out-session"));
+    expect(await screen.findByTestId("share-sign-in")).toBeTruthy();
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalled());
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

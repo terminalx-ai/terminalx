@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Plus, QrCode, Share2 } from "@/icons";
+import { Copy, Eye, Link2, Plus, QrCode, Share2, Terminal, Users } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -226,6 +226,18 @@ function SecretLink({ link, edit, revoke }: { link: ShareLink; edit: () => void;
     </div>
   );
 }
+/** One line of what sharing allows, behind its icon. */
+function ShareTerm({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-2.5">
+      <span className="mt-px flex size-4 shrink-0 items-center justify-center text-faint [&_svg]:size-3.5" aria-hidden>
+        {icon}
+      </span>
+      <span className="min-w-0">{children}</span>
+    </li>
+  );
+}
+
 export function ShareSessionDialogHost() {
   const session = useShareDialog();
   return session ? <ShareSessionDialog key={session} sessionId={session} /> : null;
@@ -262,17 +274,26 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
       }}
     >
       <DialogContent width="max-w-[42rem]" className="max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Share session</DialogTitle>
-          <DialogDescription>Invite people to this session. Sharing ends when TerminalX restarts.</DialogDescription>
+        <DialogHeader className="flex-row items-start gap-3 pr-8">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-veil-raised text-muted-foreground" aria-hidden>
+            <Users className="size-4" />
+          </span>
+          <span className="flex min-w-0 flex-col gap-0.5">
+            <DialogTitle>Share session</DialogTitle>
+            <DialogDescription>Invite people into this conversation. Sharing ends when TerminalX restarts.</DialogDescription>
+          </span>
         </DialogHeader>
-        <p className="mb-4 rounded-md bg-veil-raised p-3 text-sm">
-          Guests can see the existing transcript and terminal content. A driver can ask the agent to change files and
-          run commands on this machine. Anyone signed in who receives a forwarded link can join; use named accounts or
-          approval to control this.
-        </p>
+        {/* What sharing gives away, one fact a line, so it is read rather than skimmed. */}
+        <ul className="mb-5 flex flex-col gap-2.5 text-[13px] text-muted-foreground" data-testid="share-terms">
+          <ShareTerm icon={<Eye />}>Guests see the transcript and terminal so far.</ShareTerm>
+          <ShareTerm icon={<Terminal />}>A driver can have the agent change files and run commands on this computer.</ShareTerm>
+          <ShareTerm icon={<Link2 />}>Anyone signed in with the link can join. Use named accounts or approval to limit who.</ShareTerm>
+        </ul>
         {status.state !== "signed-in" ? (
-          <Button onClick={() => void signIn()}>Sign in to share</Button>
+          <div className="flex items-center gap-3 rounded-lg bg-well px-3 py-2.5" data-testid="share-sign-in">
+            <span className="min-w-0 flex-1 text-[13px] text-muted-foreground">Sign in to create a share link.</span>
+            <Button size="sm" onClick={() => void signIn()}>Sign in</Button>
+          </div>
         ) : (
           <fieldset disabled={busy} className="space-y-4">
             <SettingsForm value={settings} set={setSettings} />
@@ -321,7 +342,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
             </div>
           </fieldset>
         )}
-        {error && (
+        {error && status.state === "signed-in" && (
           <p role="alert" className="mt-3 text-sm text-destructive">
             {error}
           </p>
