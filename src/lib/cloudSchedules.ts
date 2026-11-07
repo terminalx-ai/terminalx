@@ -108,7 +108,9 @@ export function costLines(estimate: CloudScheduleEstimate, maxRunMinutes: number
   const bounded = typeof estimate.perRunMaxMinutes === "number" && estimate.perRunMaxMinutes >= maxRunMinutes;
   const upTo = bounded ? "up to" : "about";
   const lines = [
-    bounded
+    estimate.createsPerRun === 1
+      ? `Each run creates a new workspace and branch, including up to ${estimate.createMinutes} minutes to create it: up to ${formatMicros(estimate.perRunMaxMicros, currency)} for ${estimate.perRunMaxMinutes} minutes at ${rate}. Stopping time and retained storage are additional.`
+      : bounded
       ? `Each run wakes this workspace and can keep it on for up to ${estimate.perRunMaxMinutes} minutes (starting it, the ${maxRunMinutes}-minute limit, and ending the run): up to ${formatMicros(estimate.perRunMaxMicros, currency)} at ${rate}. The moment it takes to stop afterwards is not counted.`
       : `Each run wakes this workspace and costs about ${formatMicros(estimate.perRunMaxMicros, currency)} (${maxRunMinutes} minutes at ${rate}). Starting and stopping the workspace can add up to 25 minutes to a run, which is not in these figures.`,
   ];
@@ -164,6 +166,7 @@ export function pausedText(schedule: Pick<CloudSchedule, "state" | "pausedReason
 
 const RUN_STATE: Record<string, string> = {
   queued: "Waiting to start",
+  creating: "Creating workspace",
   provisioning: "Starting the workspace",
   working: "Running",
   completed: "Completed",
@@ -187,6 +190,8 @@ const RUN_CATEGORY: Record<string, string> = {
   "agent-failed": "the agent reported an error",
   "agent-exited": "the agent exited",
   "project-unavailable": "the project folder is missing",
+  "workspace-create-timeout": "the new workspace did not become ready in time",
+  "workspace-create-refused": "the new workspace could not be created",
   "runtime-error": "the workspace's runtime restarted or failed",
   "runtime-unsupported": "the workspace's runtime cannot run scheduled tasks",
   canceled: "its turn was stopped",
@@ -231,6 +236,9 @@ export function scheduleErrorMessage(code: string): string {
 }
 
 export interface ScheduleForm {
+  workspaceMode: "existing" | "new";
+  archiveAfterDays: number;
+  archiveOnPrMerge: boolean;
   name: string;
   prompt: string;
   agent: string;
@@ -267,6 +275,9 @@ export function timezones(): string[] {
 
 export function blankScheduleForm(): ScheduleForm {
   return {
+    workspaceMode: "existing",
+    archiveAfterDays: 7,
+    archiveOnPrMerge: false,
     name: "",
     prompt: "",
     agent: "claude",
@@ -299,8 +310,9 @@ export function validRunMinutes(minutes: number): boolean {
 }
 
 /** What is wrong with the form, by field; empty when it can be sent. Checked here so the person is told before anything is sent. */
-export function scheduleFormErrors(form: ScheduleForm): Partial<Record<"name" | "prompt" | "time" | "weekdays" | "maxRunMinutes" | "mode", string>> {
+export function scheduleFormErrors(form: ScheduleForm): Partial<Record<"name" | "prompt" | "time" | "weekdays" | "maxRunMinutes" | "mode" | "archiveAfterDays", string>> {
   const errors: ReturnType<typeof scheduleFormErrors> = {};
+  if (form.workspaceMode === "new" && (!Number.isInteger(form.archiveAfterDays) || form.archiveAfterDays < 1 || form.archiveAfterDays > 90 || form.completionPolicy !== "suspend")) errors.archiveAfterDays = "Choose 1 to 90 days and suspend after each run.";
   const name = form.name.trim();
   if (!name) errors.name = "Give the task a name.";
   else if ([...name].length > SCHEDULE_LIMITS.nameChars) errors.name = `At most ${SCHEDULE_LIMITS.nameChars} characters.`;
@@ -322,6 +334,7 @@ export function scheduleInput(form: ScheduleForm, workspaceId: string): CloudSch
   if (!schedule || Object.keys(scheduleFormErrors(form)).length > 0) return null;
   return {
     workspaceId,
+    ...(form.workspaceMode === "new" ? { workspaceMode: "new", archiveAfterDays: form.archiveAfterDays, archiveOnPrMerge: form.archiveOnPrMerge } as const : {}),
     name: form.name.trim(),
     agent: form.agent,
     ...(form.model ? { model: form.model } : {}),

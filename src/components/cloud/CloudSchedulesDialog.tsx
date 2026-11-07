@@ -1,9 +1,10 @@
+import { selectCloudWorkspace } from "@/lib/sessions";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { CalendarClock, Loader2, Pause, Play, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { api, type CloudSchedule, type CloudScheduleQuote } from "@/lib/api";
+import { api, type CloudSchedule, type CloudScheduleRun, type CloudScheduleQuote } from "@/lib/api";
 import {
   PRESETS,
   SCHEDULE_LIMITS,
@@ -201,6 +202,8 @@ export function CloudSchedulesDialog({ orgId, workspaceId, name, onClose }: Sche
                 <ScheduleRow
                   key={schedule.id}
                   schedule={schedule}
+                  orgId={orgId}
+                  onOpenWorkspace={(id) => { onClose(); selectCloudWorkspace(`cloud:${orgId}:${id}`); }}
                   busy={busy !== null}
                   resumeBlocked={resumeBlocked(schedule, runtimeSupported)}
                   confirming={confirming && "id" in confirming && confirming.id === schedule.id ? confirming.kind : null}
@@ -222,6 +225,8 @@ export function CloudSchedulesDialog({ orgId, workspaceId, name, onClose }: Sche
 
 function ScheduleRow({
   schedule,
+  orgId,
+  onOpenWorkspace,
   busy,
   resumeBlocked: blocked,
   confirming,
@@ -233,6 +238,8 @@ function ScheduleRow({
   onCancel,
 }: {
   schedule: CloudSchedule;
+  orgId: string;
+  onOpenWorkspace: (id: string) => void;
   busy: boolean;
   /** Why Resume would only be refused, or null. */
   resumeBlocked: string | null;
@@ -244,6 +251,12 @@ function ScheduleRow({
   onDelete: () => void;
   onCancel: () => void;
 }) {
+  const [runs, setRuns] = useState<CloudScheduleRun[] | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
+  const loadRuns = async () => {
+    try { setRuns((await api.cloudSchedule(schedule.id, orgId)).runs); setRunsError(null); }
+    catch (error) { setRunsError(scheduleErrorMessage(errorCode(error))); }
+  };
   const paused = pausedText(schedule);
   const next = whenText(schedule.nextRunAt);
   const last = schedule.lastRun;
@@ -284,6 +297,17 @@ function ScheduleRow({
         {next && !paused ? `Next run ${next}. ` : ""}
         {last ? `Last run ${whenText(last.scheduledFor)}: ${runText(last)}.` : "It has not run yet."}
       </p>
+      {schedule.workspaceMode === "new" && <p className="text-muted-foreground">New workspace per run · archive {schedule.archiveAfterDays} days after completion{schedule.archiveOnPrMerge ? " or when its PR merges" : ""}. Workspaces used by a person are retained.</p>}
+      {last?.workspaceId && <button type="button" className="self-start text-primary underline" onClick={() => onOpenWorkspace(last.workspaceId!)}>Open last run workspace</button>}
+      <button type="button" className="self-start text-primary underline" onClick={() => void loadRuns()}>{runs ? "Refresh run history" : "Show run history"}</button>
+      {runsError && <p role="alert">{runsError}</p>}
+      {runs && <ul aria-label={`Runs for ${schedule.name}`} className="flex flex-col gap-1">
+        {runs.map((run) => <li key={run.id} className="flex flex-wrap items-center gap-2">
+          <span>{whenText(run.scheduledFor)} · {runText(run)}{run.cleanupState === "archived" ? " · Workspace archived" : run.cleanupState === "retained" ? " · Retained after personal use" : ""}</span>
+          {run.workspaceId && <button type="button" className="text-primary underline" onClick={() => onOpenWorkspace(run.workspaceId!)}>Open workspace</button>}
+          {run.workBranch && <code className="text-faint">{run.workBranch}</code>}
+        </li>)}
+      </ul>}
       <ul className="text-faint">
         {costLines(schedule.estimate, schedule.maxRunMinutes)
           .slice(0, 2)
@@ -304,7 +328,7 @@ function ScheduleRow({
       )}
       {confirming === "delete" && (
         <p className="flex flex-wrap items-center gap-2 rounded-md bg-well/40 px-2 py-1.5" data-testid="cloud-schedule-delete-confirm">
-          <span>Delete this task, its prompt and its run history? The workspace itself is not touched.</span>
+          <span>{schedule.workspaceMode === "new" ? "Delete this task? Its run history and workspace cleanup policy are retained." : "Delete this task, its prompt and its run history? The workspace itself is not touched."}</span>
           <Button size="xs" variant="destructive" disabled={busy} onClick={onDelete}>
             Delete
           </Button>
@@ -346,14 +370,14 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
   // again when one of those changes, after the form has rested a moment.
   const timing = timingOf(form);
   const timingKey = timing ? JSON.stringify(timing) : null;
-  const { completionPolicy, maxRunMinutes } = form;
-  const quoteKey = timingKey && validRunMinutes(maxRunMinutes) ? JSON.stringify([timingKey, completionPolicy, maxRunMinutes]) : null;
+  const { completionPolicy, maxRunMinutes, workspaceMode, archiveAfterDays, archiveOnPrMerge } = form;
+  const quoteKey = timingKey && validRunMinutes(maxRunMinutes) ? JSON.stringify([timingKey, completionPolicy, maxRunMinutes, workspaceMode, archiveAfterDays, archiveOnPrMerge]) : null;
   useEffect(() => {
     if (!timingKey || !quoteKey) return;
     let stale = false;
     const timer = setTimeout(() => {
       api
-        .cloudScheduleEstimate({ workspaceId, schedule: JSON.parse(timingKey), completionPolicy, maxRunMinutes }, orgId)
+        .cloudScheduleEstimate({ workspaceId, schedule: JSON.parse(timingKey), completionPolicy, maxRunMinutes, ...(workspaceMode === "new" ? { workspaceMode, archiveAfterDays, archiveOnPrMerge } : {}) }, orgId)
         .then(
           (answer) => {
             if (stale) return;
@@ -371,11 +395,11 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
       stale = true;
       clearTimeout(timer);
     };
-  }, [orgId, workspaceId, timingKey, quoteKey, completionPolicy, maxRunMinutes]);
+  }, [orgId, workspaceId, timingKey, quoteKey, completionPolicy, maxRunMinutes, workspaceMode, archiveAfterDays, archiveOnPrMerge]);
   const quote = answered && answered.key === quoteKey ? answered.quote : null;
   const failed = quoteError && quoteError.key === quoteKey ? quoteError.message : null;
 
-  const unsupported = quote?.supported === false;
+  const unsupported = quote?.supported === false || (workspaceMode === "new" && quote?.freshWorkspacesSupported !== true);
   // What a create would be refused for whatever the form says: said with
   // the cost, before anyone agrees to it.
   const refusal = quote?.refusal ?? null;
@@ -408,6 +432,19 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
       }}
     >
       <p className="font-medium">New scheduled task</p>
+      <label className="flex items-center gap-2">
+        <input type="checkbox" checked={form.workspaceMode === "new"} onChange={(event) => setForm((current) => ({ ...current, workspaceMode: event.target.checked ? "new" : "existing", completionPolicy: "suspend" }))} />
+        New workspace per run
+      </label>
+      {form.workspaceMode === "new" && <div className="flex flex-col gap-2 rounded-md bg-well/40 p-2">
+        <p className="text-muted-foreground">Each run copies this workspace's repository refs and machine settings, creates a unique branch, and uses the organization's published environment. It waits for checkout before sending the prompt and suspends after the run.</p>
+        <label className="flex items-center gap-2">Archive after
+          <input aria-label="Archive after days" type="number" min={1} max={90} className={`${inputClass} w-16`} value={form.archiveAfterDays} onChange={(event) => update("archiveAfterDays", Number(event.target.value))} /> days after completion
+        </label>
+        <label className="flex items-center gap-2"><input type="checkbox" checked={form.archiveOnPrMerge} onChange={(event) => update("archiveOnPrMerge", event.target.checked)} />Or when the run's PR merges</label>
+        <p className="text-faint">PR cleanup verifies the run's repository and branch with the organization's GitHub App. A workspace used or shared by a person is retained. Archived storage follows the workspace's retention policy and can still incur charges.</p>
+        {shown.archiveAfterDays && <p role="alert">{shown.archiveAfterDays}</p>}
+      </div>}
       <label className="flex flex-col gap-1">
         <span className="font-medium">Name</span>
         <input aria-label="Name" className={inputClass} maxLength={SCHEDULE_LIMITS.nameChars} placeholder="Nightly triage" value={form.name} onChange={(event) => update("name", event.target.value)} />
@@ -540,7 +577,7 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
           <span className="font-medium">After a run</span>
           <select aria-label="After a run" className={inputClass} value={form.completionPolicy} onChange={(event) => update("completionPolicy", event.target.value as ScheduleForm["completionPolicy"])}>
             <option value="suspend">Stop the workspace again</option>
-            <option value="keep">Leave it running</option>
+            <option value="keep" disabled={workspaceMode === "new"}>Leave it running</option>
           </select>
         </label>
         <label className="flex flex-col gap-1">

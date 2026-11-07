@@ -236,6 +236,8 @@ pub struct Claim {
     /// before it: a terminal tab, as before.
     #[serde(default)]
     pub native_codex: bool,
+    #[serde(default)]
+    pub checkout_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -432,6 +434,20 @@ pub struct Store {
 impl Store {
     pub fn open(dir: &Path) -> Self {
         Self { path: dir.join(FILE), checkout_path: dir.join(CHECKOUT_FILE) }
+    }
+
+    pub(super) fn scheduled_project(&self, launch_id: &str, branch: &str, root: &Path) -> Option<PathBuf> {
+        if !valid_branch(branch) { return None; }
+        let Record::Done { outcome, .. } = self.get(launch_id)? else { return None };
+        if outcome.outcome != "started" { return None; }
+        let paths: Vec<PathBuf> = if outcome.branches.is_empty() {
+            vec![root.to_path_buf()]
+        } else {
+            if outcome.branches.iter().any(|entry| entry.branch != branch) { return None; }
+            outcome.branches.iter().map(|entry| PathBuf::from(&entry.path)).collect()
+        };
+        if paths.iter().any(|path| crate::git::current_branch(path).as_deref() != Some(branch)) { return None; }
+        paths.first()?.canonicalize().ok()
     }
 
     fn set_up(&self) -> Vec<String> {
@@ -700,6 +716,9 @@ impl Launcher {
         if let Some(state) = self.api.phase(&claim.launch_id, "starting-agent")? {
             return Err(CallError::Settled(state));
         }
+        if claim.checkout_only {
+            return Ok(self.finish(claim, Outcome { outcome: "started".into(), category: None, session_id: None, tab_id: None, branches }));
+        }
         if !self.starter.available(&claim.agent) {
             return Ok(self.finish(claim, Outcome::failed("agent-unavailable", branches)));
         }
@@ -756,6 +775,9 @@ fn checkout_retry_delay(attempt: usize) -> Duration {
 
 /// `repositories` are the claim's, each at the root's own spelling (`at_root`).
 fn validate(claim: &Claim, repositories: &[Repository], root: &Path) -> Result<()> {
+    if claim.checkout_only && claim.prompt.is_some() {
+        bail!("checkout-only launch cannot carry a prompt");
+    }
     if !valid_branch(&claim.work_branch) {
         bail!("invalid work branch");
     }

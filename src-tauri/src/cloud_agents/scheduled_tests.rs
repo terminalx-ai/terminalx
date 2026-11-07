@@ -16,6 +16,9 @@ fn run(id: &str) -> Run {
         prompt: PROMPT.into(),
         max_run_minutes: 1,
         target: None,
+        launch_id: None,
+        work_branch: None,
+        project_path: None,
     }
 }
 
@@ -105,6 +108,7 @@ struct FakeAgent {
     /// be stopped.
     obeys_interrupt: bool,
     started: Mutex<Vec<crate::session_ops::NewTab>>,
+    projects: Mutex<Vec<Option<String>>>,
     interrupts: AtomicUsize,
     stops: AtomicUsize,
     ended: AtomicBool,
@@ -143,6 +147,7 @@ impl FakeAgent {
             script: Mutex::new(script.iter().copied().collect()),
             obeys_interrupt: true,
             started: Mutex::default(),
+            projects: Mutex::default(),
             interrupts: AtomicUsize::new(0),
             stops: AtomicUsize::new(0),
             ended: AtomicBool::new(false),
@@ -176,6 +181,7 @@ impl Agent for FakeAgent {
             return Err(StartError::NotStarted(anyhow!("no session")));
         }
         self.started.lock().unwrap().push(new_tab(run));
+        self.projects.lock().unwrap().push(run.project_path.clone());
         *self.record.lock().unwrap() = self.record_path.lock().unwrap().as_ref().and_then(|path| std::fs::read_to_string(path).ok());
         Ok(("session-1".into(), "tab-1".into()))
     }
@@ -800,4 +806,33 @@ fn a_claim_names_the_tab_of_a_message_and_a_run_without_one_starts_a_tab() {
     assert_eq!((target.session_id.as_str(), target.tab_id.as_str()), ("s-1", "t-1"));
     let run: Run = serde_json::from_value(json!({ "runId": "run_1", "agent": "claude", "prompt": "p", "maxRunMinutes": 5 })).unwrap();
     assert!(run.target.is_none());
+}
+#[test]
+fn fresh_run_requires_its_durable_completed_launch_before_any_prompt() {
+    for (launch_id, work_branch) in [(Some("launch_1"), Some("terminalx/fresh-123456789abc")), (None, Some("terminalx/fresh-123456789abc")), (Some("launch_1"), None)] {
+        let fresh = Run { launch_id: launch_id.map(String::from), work_branch: work_branch.map(String::from), ..run("fresh-run") };
+        let rig = rig(vec![fresh], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
+        rig.runner.pass().unwrap();
+        assert!(rig.agent.started.lock().unwrap().is_empty());
+        assert_eq!(rig.api.reports()[0].0, "failed");
+    }
+}
+
+#[test]
+fn fresh_run_uses_the_receipted_repository_and_never_replays_after_restart() {
+    let branch = "terminalx/fresh-123456789abc";
+    let fresh = Run { launch_id: Some("launch_1".into()), work_branch: Some(branch.into()), ..run("fresh-run") };
+    let rig = rig(vec![fresh.clone(), fresh], FakeAgent::new(&[Turn::Ended(TurnStatus::Ok)]));
+    let project = rig.runner.root.join("nested-repository");
+    std::fs::create_dir_all(&project).unwrap();
+    for args in [vec!["init", "-q", "-b", branch], vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "fixture"]] {
+        assert!(std::process::Command::new("git").args(args).current_dir(&project).status().unwrap().success());
+    }
+    let receipt = json!({ "stage": "done", "launch_id": "launch_1", "outcome": { "outcome": "started", "branches": [{ "path": project, "branch": branch }] } });
+    std::fs::write(rig.dir.path().join("state/launch.json"), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    rig.runner.pass().unwrap();
+    rig.runner.pass().unwrap();
+    assert_eq!(*rig.agent.projects.lock().unwrap(), vec![Some(project.canonicalize().unwrap().to_string_lossy().into_owned())]);
+    assert_eq!(rig.agent.started.lock().unwrap().len(), 1);
+    assert_eq!(rig.api.reports()[0].0, "completed");
 }

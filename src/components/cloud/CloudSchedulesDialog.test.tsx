@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   setActive: vi.fn(),
   remove: vi.fn(),
   pauseAll: vi.fn(),
+  get: vi.fn(),
+  select: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({
   api: {
@@ -18,8 +20,10 @@ vi.mock("@/lib/api", () => ({
     cloudScheduleSetActive: mocks.setActive,
     cloudScheduleDelete: mocks.remove,
     cloudSchedulesPauseAll: mocks.pauseAll,
+    cloudSchedule: mocks.get,
   },
 }));
+vi.mock("@/lib/sessions", () => ({ selectCloudWorkspace: mocks.select }));
 vi.mock("@/lib/models", async (original) => ({ ...(await original<typeof import("@/lib/models")>()), useModels: () => [] }));
 
 import { CloudSchedulesDialog, CloudSchedulesDialogHost, openSchedulesDialog } from "./CloudSchedulesDialog";
@@ -370,5 +374,43 @@ describe("the scheduled tasks dialog host", () => {
     expect((await screen.findByTestId("cloud-schedules-dialog")).textContent).toContain("Scheduled tasks for Docs site");
     act(() => openSchedulesDialog(null));
     expect(screen.queryByTestId("cloud-schedules-dialog")).toBeNull();
+  });
+});
+
+describe("fresh cloud workspaces", () => {
+  it("invalidates spend consent when the destination and cleanup policy change", async () => {
+    mocks.estimate.mockResolvedValue(quote({ freshWorkspacesSupported: true }));
+    open();
+    await fillForm();
+    const agreement = screen.getByRole("checkbox", { name: /billed compute/ });
+    fireEvent.click(agreement);
+    fireEvent.click(screen.getByRole("checkbox", { name: "New workspace per run" }));
+    expect((agreement as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("button", { name: "Create scheduled task" }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(mocks.estimate).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceMode: "new", archiveAfterDays: 7, completionPolicy: "suspend" }), "org-1"));
+    fireEvent.change(screen.getByLabelText("Archive after days"), { target: { value: "3" } });
+    await waitFor(() => expect(mocks.estimate).toHaveBeenLastCalledWith(expect.objectContaining({ archiveAfterDays: 3 }), "org-1"));
+  });
+
+  it("shows creating state and a link to the exact run workspace", async () => {
+    listed = [schedule({ workspaceMode: "new", archiveAfterDays: 7, lastRun: { id: "run-new", scheduledFor: Date.now(), trigger: "schedule", state: "creating", workspaceId: "workspace-new" } })];
+    open();
+    expect((await row()).textContent).toContain("Creating workspace");
+    fireEvent.click(screen.getByRole("button", { name: "Open last run workspace" }));
+    expect(mocks.select).toHaveBeenCalledWith("cloud:org-1:workspace-new");
+  });
+});
+
+
+describe("fresh workspace run history", () => {
+  it("links historical runs to their own workspaces and preserves cleanup state", async () => {
+    listed = [schedule({ workspaceMode: "new", archiveAfterDays: 7 })];
+    mocks.get.mockResolvedValue({ schedule: listed[0], runs: [{ id: "run-historical", scheduledFor: Date.now(), trigger: "schedule", state: "completed", workspaceId: "older-workspace", workBranch: "terminalx/older-run", cleanupState: "retained" }] });
+    open();
+    fireEvent.click(await screen.findByRole("button", { name: "Show run history" }));
+    const link = await screen.findByRole("button", { name: "Open workspace" });
+    fireEvent.click(link);
+    expect(mocks.select).toHaveBeenCalledWith("cloud:org-1:older-workspace");
+    expect(screen.getByText(/Retained after personal use/)).toBeTruthy();
   });
 });

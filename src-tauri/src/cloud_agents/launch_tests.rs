@@ -134,6 +134,7 @@ impl Starter for FakeStarter {
 
 fn claim(repositories: Vec<Repository>) -> Claim {
     Claim {
+        checkout_only: false,
         launch_id: "launch_1".into(),
         state: "deliver".into(),
         redelivery: false,
@@ -1407,4 +1408,33 @@ fn the_checkout_report_goes_to_its_route_and_an_older_server_is_not_an_error() {
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!({ "v": 1, "repositories": [{ "path": "/var/lib/terminalx/workspace/app", "state": "failed", "category": "repository-access-denied" }] }));
     assert!(serve("404 Not Found").0.is_ok(), "a server from before the report");
     assert!(serve("503 Service Unavailable").0.is_err());
+}
+
+#[test]
+fn scheduled_checkout_prepares_and_recovers_without_starting_an_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = repository(dir.path(), "scheduled");
+    let mut launch = claim(vec![repository.clone()]);
+    launch.checkout_only = true;
+    launch.prompt = None;
+    let branch = launch.work_branch.clone();
+    let api = FakeApi::new(Some(launch));
+    let starter = Arc::new(FakeStarter::default());
+    let launcher = make(dir.path(), api.clone(), starter.clone(), "incarnation-aaaaaaaaaaaa");
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    assert!(starter.starts.lock().unwrap().is_empty());
+    assert_eq!(launcher.store.scheduled_project("launch_1", &branch, &launcher.root), Some(PathBuf::from(&repository.path).canonicalize().unwrap()));
+    assert!(launcher.store.scheduled_project("different-launch", &branch, &launcher.root).is_none());
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    assert!(starter.starts.lock().unwrap().is_empty());
+    git(Path::new(&repository.path), &["switch", "-q", "main"]);
+    assert!(launcher.store.scheduled_project("launch_1", &branch, &launcher.root).is_none(), "a user's branch is never changed back by a scheduled prompt");
+}
+
+#[test]
+fn checkout_only_intent_refuses_prompt_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut intent = claim(Vec::new());
+    intent.checkout_only = true;
+    assert!(validate(&intent, &[], dir.path()).is_err());
 }

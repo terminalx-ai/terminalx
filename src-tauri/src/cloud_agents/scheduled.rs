@@ -81,6 +81,12 @@ pub struct Run {
     /// server sends it only to a runtime of protocol 3 or later.
     #[serde(default)]
     pub target: Option<Target>,
+    #[serde(default)]
+    pub launch_id: Option<String>,
+    #[serde(default)]
+    pub work_branch: Option<String>,
+    #[serde(skip)]
+    pub project_path: Option<String>,
 }
 
 #[derive(Clone, Deserialize, PartialEq)]
@@ -172,7 +178,7 @@ pub trait ScheduledApi: Send + Sync {
 
 impl ScheduledApi for HttpMailboxApi {
     fn claim(&self) -> Result<Claimed, CallError> {
-        match self.call("POST", CLAIM_PATH, Some(json!({ "v": 1 }))) {
+        match self.call_with("POST", CLAIM_PATH, Some(json!({ "v": 1 })), &[("x-terminalx-scheduled-capabilities", "fresh-workspace-v1")]) {
             Ok((200, body)) => match body.get("run") {
                 None | Some(Value::Null) => Ok(Claimed::None),
                 Some(run) => match serde_json::from_value::<Run>(run.clone()) {
@@ -452,6 +458,17 @@ impl Runner {
             log::error!("record the scheduled run: {error:#}");
             return self.finish(failed(&run.run_id, RUNTIME_ERROR, None));
         }
+        let mut execution = run.clone();
+        match (&run.launch_id, &run.work_branch) {
+            (None, None) => {},
+            (Some(launch_id), Some(branch)) if run.target.is_none() => {
+                let store = super::launch::Store::open(self.store.path.parent().unwrap());
+                let Some(project) = store.scheduled_project(launch_id, branch, &self.root) else { return self.finish(failed(&run.run_id, PROJECT_UNAVAILABLE, None)) };
+                execution.project_path = Some(project.to_string_lossy().into_owned());
+            },
+            _ => return self.finish(failed(&run.run_id, RUNTIME_ERROR, None)),
+        }
+        let run = &execution;
         if let Some(category) = self.refusal(run) {
             log::warn!("scheduled run {}: not started: {category}", run.run_id);
             return self.finish(failed(&run.run_id, category, None));
@@ -569,10 +586,11 @@ impl Runner {
         if !run.mode.as_deref().is_some_and(|mode| MODES.contains(&mode)) {
             return Some(RUNTIME_ERROR);
         }
-        if !self.root.is_dir() {
+        let root = run.project_path.as_deref().map(Path::new).unwrap_or(&self.root);
+        if !root.is_dir() {
             return Some(PROJECT_UNAVAILABLE);
         }
-        if let Err(refusal) = super::slash::check(&run.prompt, &run.agent, Some(&self.root)) {
+        if let Err(refusal) = super::slash::check(&run.prompt, &run.agent, Some(root)) {
             return Some(refusal.category());
         }
         if !self.agent.available(&run.agent, run.model.as_deref().unwrap_or_default()) {
@@ -730,11 +748,15 @@ impl Agent for ManagerAgent {
     }
 
     fn start(&self, run: &Run, title: &str) -> Result<(String, String), StartError> {
+        let project = run.project_path.as_deref().unwrap_or(&self.root);
+        if run.work_branch.as_ref().is_some_and(|branch| crate::git::current_branch(Path::new(project)).as_ref() != Some(branch)) {
+            return Err(StartError::NotStarted(anyhow!("scheduled workspace branch changed")));
+        }
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
                 section_id: None,
-                project_path: self.root.clone(),
+                project_path: project.to_string(),
                 title: Some(title.to_string()),
                 use_worktree: false,
                 on_main: true,

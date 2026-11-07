@@ -1250,6 +1250,8 @@ export interface CloudScheduleTiming {
 
 /** Upper bounds on what a scheduled task costs and occupies, from the workspace's own rate. */
 export interface CloudScheduleEstimate {
+  createsPerRun?: number;
+  createMinutes?: number;
   currency: string;
   hourlyMicros: number;
   /** The longest a run can keep the workspace on: starting it, the time limit, and ending the run. Absent from a server that priced the time limit alone. */
@@ -1265,6 +1267,9 @@ export interface CloudScheduleEstimate {
 }
 
 export interface CloudScheduleRun {
+  workspaceId?: string;
+  workBranch?: string;
+  cleanupState?: string;
   id: string;
   scheduledFor: number;
   trigger: string;
@@ -1278,7 +1283,7 @@ export interface CloudScheduleRun {
 }
 
 /** A scheduled task. Its prompt is never returned. */
-export interface CloudSchedule {
+export interface CloudSchedule extends CloudScheduleWorkspacePolicy {
   id: string;
   workspaceId: string;
   name: string;
@@ -1306,6 +1311,7 @@ export interface CloudScheduleDetail {
 }
 
 export interface CloudScheduleQuote {
+  freshWorkspacesSupported?: boolean;
   estimate: CloudScheduleEstimate;
   nextRunAt?: number;
   /** The refusal a create would get now, whatever the form says. */
@@ -1314,7 +1320,13 @@ export interface CloudScheduleQuote {
   supported: boolean;
 }
 
-export interface CloudScheduleEstimateInput {
+export interface CloudScheduleWorkspacePolicy {
+  workspaceMode?: "existing" | "new";
+  archiveAfterDays?: number;
+  archiveOnPrMerge?: boolean;
+}
+
+export interface CloudScheduleEstimateInput extends CloudScheduleWorkspacePolicy {
   workspaceId: string;
   schedule: CloudScheduleTiming;
   completionPolicy: "suspend" | "keep";

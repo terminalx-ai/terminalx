@@ -115,3 +115,16 @@ command, and the other modes end at the first thing they have to ask for.
 `cloud_schedule_delete`, `cloud_schedules_pause_all`. Like every cloud
 command they act in the named organization, check ids before a URL is
 built, and check that an answer is about what was asked for.
+
+
+## New workspace per run (PRO-228)
+
+The form's **New workspace per run** option uses the selected workspace as a template for repository refs and machine settings. Each run gets a new workspace, a unique work branch and the organization's published environment. It shows **Creating workspace** until checkout is complete, then delivers the prompt through the existing unattended permission checks. Run history and the last run link to the exact workspace.
+
+Fresh runs suspend after completion. Choose archive after 1–90 days (default 7), or earlier when the associated PR merges. The server verifies the recorded repository and branch with GitHub; no runtime-provided PR URL is trusted. A workspace used or shared by a person is retained. Archive preserves run history and follows ordinary retained-storage policy. Removing a fresh schedule clears its prompt and stops new runs while existing cleanup and audit history survive.
+
+The estimate includes one create per run and its 30-minute creation bound. Storage can still be billed after compute stops. Changing workspace or cleanup policy clears spend consent. A server must advertise `freshWorkspacesSupported`; an older server cannot silently save this as an existing-workspace schedule.
+
+The native scheduled runner advertises `fresh-workspace-v1`, reads the completed launch receipt to choose the repository directory, and verifies the expected branch before starting a session. It never accepts a network-supplied working-directory path. Checkout-only launches do not open an empty agent tab. Existing schedules and ordinary launch prompts keep their existing contracts.
+
+Server and runtime changes are paired with this desktop change. See server `apps/api/docs/fresh-scheduled-workspaces.md` for ownership, retry, cleanup, PRO-195/PRO-171 shared seams, provisional migration ordering and the required real local-Docker API integration gate. PRO-252 flags and PRO-244 privacy foundations remain owned by their authors; use their landed shared interfaces without duplicating them.

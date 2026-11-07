@@ -215,3 +215,22 @@ describe("scheduled tasks: whether they are offered", () => {
     expect(schedulesOffer("org-1")).toBe("offered");
   });
 });
+
+describe("fresh cloud run policy", () => {
+  it("includes creation in cost wording and preserves the uncapped per-run total", () => {
+    const lines = costLines(estimate({ createsPerRun: 1, createMinutes: 30, perRunMaxMinutes: 115, perRunMaxMicros: 230_000, monthlyMaxMicros: 6_900_000 }), 60);
+    expect(lines[0]).toContain("creates a new workspace and branch");
+    expect(lines[0]).toContain("30 minutes to create");
+    expect(lines[0]).toContain("retained storage");
+  });
+
+  it("sends a bounded cleanup policy only for fresh runs", () => {
+    const form = { ...blankScheduleForm(), name: "Bump", prompt: "Update dependencies", workspaceMode: "new" as const, archiveAfterDays: 4, archiveOnPrMerge: true };
+    expect(scheduleInput(form, "template")).toMatchObject({ workspaceId: "template", workspaceMode: "new", archiveAfterDays: 4, archiveOnPrMerge: true });
+    expect(scheduleInput({ ...form, completionPolicy: "keep" }, "template")).toBeNull();
+    expect(scheduleInput({ ...form, archiveAfterDays: 0 }, "template")).toBeNull();
+    expect(scheduleInput({ ...form, archiveAfterDays: 91 }, "template")).toBeNull();
+    expect(scheduleInput({ ...form, workspaceMode: "existing" }, "template")).not.toHaveProperty("archiveAfterDays");
+    expect(runText({ state: "creating" })).toBe("Creating workspace");
+  });
+});

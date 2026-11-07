@@ -1436,6 +1436,10 @@ pub struct CloudScheduleEstimate {
     pub running_slots: u32,
     /// The most runs the schedule starts in any 24 hours.
     pub max_runs_per_day: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creates_per_run: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_minutes: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1458,6 +1462,12 @@ pub struct CloudScheduleRun {
     pub started_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_state: Option<String>,
 }
 
 /// A scheduled task as the API shows it. The prompt is never returned:
@@ -1494,6 +1504,12 @@ pub struct CloudSchedule {
     pub estimate: CloudScheduleEstimate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<CloudScheduleRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_after_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_on_pr_merge: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1526,6 +1542,8 @@ pub struct CloudScheduleQuote {
     /// The refusal a create would get now, whatever the schedule says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
+    #[serde(default)]
+    pub fresh_workspaces_supported: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1541,6 +1559,12 @@ pub struct CloudScheduleEstimateInput {
     pub schedule: CloudScheduleTiming,
     pub completion_policy: String,
     pub max_run_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_after_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_on_pr_merge: Option<bool>,
 }
 
 /// A new scheduled task. The spend is confirmed by the person in the window
@@ -1561,6 +1585,12 @@ pub struct CloudScheduleCreateInput {
     pub missed_run_policy: String,
     pub completion_policy: String,
     pub max_run_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_after_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_on_pr_merge: Option<bool>,
 }
 
 /// The modes a schedule may start its agent in: every launch mode but
@@ -1573,6 +1603,14 @@ const SCHEDULE_RUN_MINUTES: std::ops::RangeInclusive<u32> = 5..=240;
 
 /// The `schedule` object as the server's strict parser takes it, or `None`
 /// for times it would refuse.
+fn schedule_workspace_policy(mode: Option<&str>, days: Option<u32>, merged: Option<bool>, completion: &str) -> Option<Value> {
+    match mode {
+        None | Some("existing") if days.is_none() && merged.is_none() => Some(json!({})),
+        Some("new") if completion == "suspend" && (1..=90).contains(&days.unwrap_or(7)) => Some(json!({ "workspaceMode": "new", "archiveAfterDays": days.unwrap_or(7), "archiveOnPrMerge": merged.unwrap_or(false) })),
+        _ => None,
+    }
+}
+
 fn schedule_timing_body(timing: &CloudScheduleTiming) -> Option<Value> {
     let preset = timing.preset.as_str();
     let weekly = preset == "weekly";
@@ -2897,7 +2935,9 @@ impl CloudWorkspaceService {
         let (Some(timing), true) = (timing, valid_resource_id(&input.workspace_id) && valid_schedule_policies(None, &input.completion_policy, input.max_run_minutes)) else {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         };
-        let body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
+        let Some(policy) = schedule_workspace_policy(input.workspace_mode.as_deref(), input.archive_after_days, input.archive_on_pr_merge, &input.completion_policy) else { return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false)) };
+        let mut body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
+        body.as_object_mut().unwrap().extend(policy.as_object().unwrap().clone());
         self.run_in(org, RequestRisk::Read, |client, context| {
             client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read).map_err(|mut error: CloudWorkspaceClientError| {
                 // A 404 that names no refusal is a server without the route
@@ -2916,6 +2956,7 @@ impl CloudWorkspaceService {
     /// is always sent and is never bypass permissions.
     pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudSchedule, CloudWorkspaceClientError> {
         let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
+        let Some(policy) = schedule_workspace_policy(input.workspace_mode.as_deref(), input.archive_after_days, input.archive_on_pr_merge, &input.completion_policy) else { return invalid("cloud_workspace_request_invalid") };
         let name = input.name.trim();
         let Some(timing) = schedule_timing_body(&input.schedule) else { return invalid("cloud_workspace_request_invalid") };
         // As the server reads it: printable ASCII, no space.
@@ -2948,6 +2989,7 @@ impl CloudWorkspaceService {
             "maxRunMinutes": input.max_run_minutes,
             "confirmProviderSpend": true,
         });
+        body.as_object_mut().unwrap().extend(policy.as_object().unwrap().clone());
         if let Some(model) = input.model.as_deref() {
             body["model"] = json!(model);
         }
@@ -6068,6 +6110,32 @@ mod tests {
         assert_eq!(change(|input| input.prompt = "x".repeat(MAX_PROMPT_BYTES + 1)), "cloud_workspace_prompt_too_long");
         // A body with a key this build does not know is not a schedule.
         assert!(serde_json::from_value::<CloudScheduleCreateInput>(json!({ "organizationId": "org-2" })).is_err());
+    }
+
+    #[test]
+    fn fresh_schedule_policy_round_trips_and_refuses_unsafe_cleanup_before_network() {
+        let body = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let mut input = schedule_input();
+        input.workspace_mode = Some("new".into());
+        input.archive_after_days = Some(3);
+        input.archive_on_pr_merge = Some(true);
+        service.schedule_create(None, &input).unwrap();
+        let sent = sent_body(&request.join().unwrap());
+        assert_eq!(sent["workspaceMode"], "new");
+        assert_eq!(sent["archiveAfterDays"], 3);
+        assert_eq!(sent["archiveOnPrMerge"], true);
+        let (_, service) = test_service("http://127.0.0.1:1");
+        input.completion_policy = "keep".into();
+        assert_eq!(service.schedule_create(None, &input).unwrap_err().code, "cloud_workspace_request_invalid");
+        input.completion_policy = "suspend".into();
+        input.archive_after_days = Some(0);
+        assert_eq!(service.schedule_create(None, &input).unwrap_err().code, "cloud_workspace_request_invalid");
+        input.workspace_mode = None;
+        assert_eq!(service.schedule_create(None, &input).unwrap_err().code, "cloud_workspace_request_invalid");
+        let run: CloudScheduleRun = serde_json::from_value(json!({ "id": "run-1", "scheduledFor": 1, "trigger": "schedule", "state": "creating", "workspaceId": "workspace-new", "workBranch": "terminalx/run-1", "cleanupState": "pending" })).unwrap();
+        assert_eq!(serde_json::to_value(run).unwrap()["workspaceId"], "workspace-new");
     }
 
     #[test]
