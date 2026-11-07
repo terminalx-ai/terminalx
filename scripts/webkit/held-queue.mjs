@@ -41,7 +41,8 @@ if (screenshots) await mkdir(screenshots, { recursive: true });
 let browser;
 try {
   browser = await webkit.launch({ headless: true });
-  const page = await open(browser, server.url, { cloud:false, localProjects:1, localSession:true }, { width:1100, height:800 }, { extra });
+  for (const colorScheme of ["light", "dark"]) {
+  const page = await open(browser, server.url, { cloud:false, localProjects:1, localSession:true }, { width:1100, height:800 }, { extra, colorScheme });
   await openConversation(page, "claude tab");
   await tab(page, "gemini tab").click();
   const tray = page.getByRole("region", { name:"Held follow-ups" }).filter({ visible: true });
@@ -54,7 +55,7 @@ try {
         buttons:[...el.querySelectorAll('button')].every(button=>{const b=button.getBoundingClientRect(); return b.left>=rect.left && b.right<=rect.right+1;}) };
     });
     assert.ok(bounds.x>=0 && bounds.right<=bounds.viewport+1 && bounds.bottom<=800 && bounds.overflow<=1 && bounds.buttons,JSON.stringify(bounds));
-    if(screenshots) await page.screenshot({path:screenshots+"/held-queue-"+width+".png"});
+    if(screenshots) await page.screenshot({path:screenshots+"/held-queue-"+colorScheme+"-"+width+".png"});
   }
   await tray.getByRole("button",{name:"3 held follow-ups",exact:true}).click();
   assert.equal(await tray.getByText("First, fix the typo in the heading.").count(),0);
@@ -77,5 +78,6 @@ try {
   await composer.press("Meta+Enter");
   await page.waitForFunction(()=>window.__lastQueueChange?.type==="enqueue" && window.__lastQueueChange.sendNow===true);
   await page.close();
-  console.log("Held queue: layout at 1100/760px, collapse, edit, attachments, reorder, delete, pause/resume and Cmd+Enter passed.");
+  }
+  console.log("Held queue: light/dark layout at 1100/760px, collapse, edit, attachments, reorder, delete, pause/resume and Cmd+Enter passed.");
 } finally { await browser?.close(); server.close(); }
