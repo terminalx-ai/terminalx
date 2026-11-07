@@ -20,7 +20,7 @@
 //! the reader pressed; the runtime says what it raised, cleared and admitted.
 //! A summary never reads a click or a success into a warning that went away:
 //! an incident nothing more is known of is `unresolved` at the end of the log.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -159,10 +159,30 @@ impl Agent {
     }
 }
 
+/// What a name that is a file's location is kept as.
+pub const PATH: &str = "[path]";
+
 /// A model, effort, harness or build name as a line keeps it: letters,
-/// digits and `._:/-` only, at most 64 of them.
+/// digits and `._:/-` only, at most 64 of them. A name can be configured as
+/// a file (a local model's weights, `/Users/<name>/models/x.gguf`), and no
+/// line keeps a file's location: such a name is kept as [`PATH`]. An id
+/// with a provider or a host in front (`openai/gpt-6-astra`,
+/// `hf.co/org/model`) is a name, not a location, and is kept.
 pub fn name(text: &str) -> String {
+    if is_path(text.trim()) { return PATH.to_owned(); }
     text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect()
+}
+
+/// Whether `text` names a place on disk rather than a thing: absolute, in a
+/// home folder, explicitly relative, written with Windows separators or a
+/// drive, deeper than a host, an owner and a name, or a file with a model's
+/// or a configuration's extension.
+fn is_path(text: &str) -> bool {
+    const FILES: &[&str] = &["gguf", "ggml", "bin", "safetensors", "onnx", "pt", "pth", "ckpt", "mlx", "mlmodel", "json", "yaml", "yml", "toml"];
+    let drive = text.len() >= 2 && text.as_bytes()[0].is_ascii_alphabetic() && text.as_bytes()[1] == b':';
+    let file = text.rsplit_once('.').is_some_and(|(_, extension)| FILES.contains(&extension.to_ascii_lowercase().as_str()));
+    text.starts_with(['/', '~', '.']) || text.contains('\\') || drive || text.matches('/').count() > 2 || file
+        || text.split('/').any(|part| part == ".." || part == "." || part.is_empty() && text.contains('/'))
 }
 
 /// The tab a line is about, and what it was doing.
@@ -722,6 +742,14 @@ pub fn pseudonymized(mut lines: Vec<Value>, salt: &str) -> Vec<Value> {
         for key in ["session", "tab", "targetSession", "targetTab"] {
             if let Some(id) = line[key].as_str().map(hide) { line[key] = json!(id); }
         }
+        // Names as this build keeps them, whatever the build that wrote the
+        // line kept: an export never carries a file's location.
+        for key in ["harness", "transport", "model", "effort"] {
+            if let Some(kept) = line["agent"][key].as_str().map(name) { line["agent"][key] = json!(kept); }
+        }
+        for key in ["runtime", "appBuild"] {
+            if let Some(kept) = line[key].as_str().map(name) { line[key] = json!(kept); }
+        }
     }
     lines
 }
@@ -741,8 +769,6 @@ struct Seen {
     visible_ms: u64,
     actions: Vec<(String, String)>,
     outcome: Option<String>,
-    /// Raised by refusing a send while a turn ran (before #815).
-    refused_busy: bool,
 }
 
 /// Aggregates of `lines` by reason, runtime build and transport, each with
@@ -755,19 +781,15 @@ pub fn summarize(lines: &[Value]) -> Value {
     let mut sends: BTreeMap<String, u64> = BTreeMap::new();
     let mut busy_while_working = 0u64;
     let mut lost = 0u64;
-    // A refusal's error row right before a raise, in the same tab (old builds).
-    let mut last_send: HashMap<(String, String), (String, u64)> = HashMap::new();
     for line in lines {
         lost += line["lost_before"].as_u64().unwrap_or(0);
         let kind = line["kind"].as_str().unwrap_or_default();
-        let tab = (line["session"].as_str().unwrap_or_default().to_owned(), line["tab"].as_str().unwrap_or_default().to_owned());
         let id = line["incident"].as_str().map(str::to_owned);
         match kind {
             "send_attempt" => {
                 let key = format!("{}:{}", line["origin"].as_str().unwrap_or("?"), line["admission"].as_str().unwrap_or("?"));
                 *sends.entry(key).or_default() += 1;
                 if line["admission"] == "busy" && line["found"]["turn_open"] == true { busy_while_working += 1; }
-                last_send.insert(tab.clone(), (line["admission"].as_str().unwrap_or_default().to_owned(), line["mono_ms"].as_u64().unwrap_or(0)));
             }
             "recovery_raised" | "recovery_changed" => {
                 let Some(id) = id else { continue };
@@ -782,7 +804,6 @@ pub fn summarize(lines: &[Value]) -> Value {
                 if line["recurred_after_ms"].is_u64() { seen.recurred += 1; }
                 let progress_age = line["last_progress"]["age_ms"].as_u64();
                 if line["state"]["turn_open"] == true && progress_age.is_some_and(|age| age < millis(ACTIVE_WITHIN)) { seen.active = true; }
-                if seen.source == "request_refused" && last_send.get(&tab).is_some_and(|(admission, _)| admission == "busy") { seen.refused_busy = true; }
             }
             "recovery_cleared" => {
                 let Some(seen) = id.and_then(|id| incidents.get_mut(&id)) else { continue };
@@ -873,7 +894,6 @@ fn outcome(seen: &Seen) -> String {
 /// Why a person should look at an incident as a warning that may not have
 /// been owed, if they should.
 fn suspicion(seen: &Seen) -> Option<&'static str> {
-    if seen.refused_busy { return Some("raised by refusing a send while the turn ran"); }
     let watcher = matches!(seen.reason.as_str(), "timeout" | "delivery_unconfirmed") && matches!(seen.source.as_str(), "watcher" | "delivery");
     if watcher && seen.active { return Some("raised while the agent had shown progress within the last minute"); }
     if watcher && seen.actions.is_empty() && seen.cleared.iter().any(|(cause, _)| cause == "progress") { return Some("cleared by the agent's own progress with no action taken"); }
