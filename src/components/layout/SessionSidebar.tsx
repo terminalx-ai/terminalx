@@ -643,7 +643,7 @@ function ProjectGroup({
       >
         <div className="-mx-2 min-h-0 overflow-hidden px-2">
       {/* Rows run the full width, so a selection spans it; their content is indented by `--indent` instead. */}
-      <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:21px] [--indent-2:40px]">
+      <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:10px] [--indent-2:24px]">
         {shown.map(row)}
         {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint">No chats yet</li>}
         {more && (
