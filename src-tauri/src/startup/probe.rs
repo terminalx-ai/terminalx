@@ -100,16 +100,7 @@ pub(super) fn capture_with_exit(command: &mut Command, exited: impl FnOnce(Optio
 fn record(directory: &Path) -> Result<()> {
     // The recorder only takes the directory minted by the app; no arbitrary
     // commands or environment are accepted by this mode.
-    let metadata = std::fs::symlink_metadata(directory)?;
-    if !metadata.is_dir() || uuid::Uuid::parse_str(directory.file_name().and_then(|name| name.to_str()).unwrap_or_default()).is_err() {
-        bail!("invalid startup probe directory");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions.
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 { bail!("probe directory is not private"); }
-    }
+    recorder::private_directory(directory)?;
     let mut shell = Command::new("/bin/sh");
     shell.args(["-c", "exec /usr/bin/true"]);
     let shell = capture(shell);
@@ -126,6 +117,10 @@ fn record(directory: &Path) -> Result<()> {
 pub fn probe_cli() -> bool {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() == 4 && args[0] == "--startup-validation-recorder" {
+        if recorder::supervise(Path::new(&args[1]), "--startup-validation-worker", &args[1..]).is_err() { std::process::exit(1); }
+        return true;
+    }
+    if args.len() == 4 && args[0] == "--startup-validation-worker" {
         if super::validation::record(Path::new(&args[1]), Path::new(&args[2]), &args[3]).is_err() { std::process::exit(1); }
         return true;
     }
@@ -134,6 +129,10 @@ pub fn probe_cli() -> bool {
         return true;
     }
     if args.len() == 2 && args[0] == "--startup-recorder" {
+        if recorder::supervise(Path::new(&args[1]), "--startup-health-worker", &args[1..]).is_err() { std::process::exit(1); }
+        return true;
+    }
+    if args.len() == 2 && args[0] == "--startup-health-worker" {
         if record(Path::new(&args[1])).is_err() { std::process::exit(1); }
         return true;
     }
@@ -169,7 +168,7 @@ pub(super) fn start(directory: &Path) -> Result<()> {
     }
     let child = recorder.spawn().map_err(|error| { recorder::spawn_failed(&path, &error); error })
         .context("Could not start health recorder; its spawn failure is retained")?;
-    recorder::retain_recorder(child, path);
+    recorder::reap_supervisor(child);
     Ok(())
 }
 

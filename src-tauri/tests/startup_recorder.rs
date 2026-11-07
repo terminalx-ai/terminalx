@@ -4,7 +4,8 @@
 
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -18,19 +19,25 @@ struct Recorder {
 
 impl Recorder {
     fn start(command: Option<&str>) -> Self {
+        Self::start_with(command, |_, _| {})
+    }
+
+    fn start_with(command: Option<&str>, configure: impl FnOnce(&Path, &mut Command)) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let directory = temporary.path().join(uuid::Uuid::new_v4().to_string());
         fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
         let mut process = Command::new(env!("CARGO_BIN_EXE_raccoon"));
-        process.env_clear().env("PATH", "/usr/bin:/bin")
-            .env("TERMINALX_HOME", temporary.path().join("unused-home"))
-            .stdin(Stdio::null()).stdout(Stdio::null())
-            .stderr(fs::File::create(directory.join("recorder.stderr")).unwrap());
         if let Some(command) = command {
             process.arg("--startup-validation-recorder").arg(&directory).arg(&directory).arg(command);
         } else {
             process.arg("--startup-recorder").arg(&directory);
         }
+        configure(&directory, &mut process);
+        process.env_clear().env("PATH", "/usr/bin:/bin")
+            .env("TERMINALX_HOME", temporary.path().join("unused-home"))
+            .stdin(Stdio::null()).stdout(Stdio::null())
+            .stderr(fs::File::create(directory.join("recorder.stderr")).unwrap())
+            .process_group(0);
         Self { child: process.spawn().unwrap(), temporary: Some(temporary), directory }
     }
 
@@ -71,6 +78,9 @@ fn production_health_recorder_runs_shell_and_native_without_starting_an_app() {
     let mut recorder = Recorder::start(None);
     let result = recorder.wait_for("result.json");
     assert!(recorder.finish().success());
+    assert_eq!(recorder.wait_for("owner-exit.json")["exitCode"], 0);
+    assert_eq!(recorder.wait_for("supervisor.json")["pid"], recorder.child.id());
+    assert_ne!(recorder.wait_for("owner.json")["pid"], recorder.child.id());
     assert_eq!(result["shell"]["exitCode"], 0);
     assert_eq!(result["native"]["exitCode"], 0);
     assert_eq!(result["native"]["stdout"], "terminalx-startup-ready\n");
@@ -136,36 +146,76 @@ fn signaled_child_is_never_recorded_as_exit_zero() {
 #[test]
 fn production_recorder_owner_failure_is_retained_when_its_final_file_cannot_be_written() {
     for validation in [false, true] {
-        let temporary = tempfile::tempdir().unwrap();
-        let directory = temporary.path().join(uuid::Uuid::new_v4().to_string());
-        fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
         // Both real production modes must report their own exit separately
         // when a filesystem failure prevents a complete child result.
-        fs::create_dir(directory.join(if validation { "validation.json" } else { "shell.json" })).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_raccoon"));
-        command.env_clear().env("PATH", "/usr/bin:/bin")
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        if validation { command.arg("--startup-validation-recorder").arg(&directory).arg(&directory).arg("exit 0"); }
-        else { command.arg("--startup-recorder").arg(&directory); }
-        let child = command.spawn().unwrap();
-        let pid = child.id();
-        raccoon_lib::startup::retain_recorder(child, directory.clone());
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let exit = loop {
-            if let Ok(bytes) = fs::read(directory.join("owner-exit.json")) {
-                break serde_json::from_slice::<raccoon_lib::startup::RecorderExit>(&bytes).unwrap();
-            }
-            if Instant::now() >= deadline {
-                panic!("owner {pid} remains unresolved; preserved {}", temporary.keep().display());
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        assert_eq!(exit.exit_code, Some(1));
-        assert_eq!(exit.signal, None);
-        assert_eq!(exit.failure, None);
-        let owner: Value = serde_json::from_slice(&fs::read(directory.join("owner.json")).unwrap()).unwrap();
-        assert_eq!(owner["pid"], pid);
-        assert!(!directory.join("result.json").exists());
-        assert_eq!(fs::metadata(directory.join("owner-exit.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        let mut recorder = Recorder::start_with(validation.then_some("exit 0"), |directory, _| {
+            fs::create_dir(directory.join(if validation { "validation.json" } else { "shell.json" })).unwrap();
+        });
+        let exit = recorder.wait_for("owner-exit.json");
+        assert_eq!(recorder.finish().code(), Some(1));
+        assert_eq!(exit["exitCode"], 1);
+        assert_eq!(exit["signal"], Value::Null);
+        assert_eq!(exit["failure"], Value::Null);
+        assert_ne!(recorder.wait_for("owner.json")["pid"], recorder.child.id());
+        assert_eq!(recorder.wait_for("supervisor.json")["pid"], recorder.child.id());
+        assert!(!recorder.directory.join("result.json").exists());
+        assert_eq!(fs::metadata(recorder.directory.join("owner-exit.json")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn durable_wait_survives_observer_quit_and_exec_while_the_worker_is_pending() {
+    // The shell stands in only for the short-lived observer. It launches the
+    // actual production supervisor/worker; neither the observer nor this test
+    // writes owner-exit.json. Both barriers must release explicitly to pass.
+    for transition in ["quit", "exec"] {
+        let mut observer = Recorder::start_with(Some(r#"
+            printf '{}' > worker-pending.tmp
+            mv worker-pending.tmp worker-pending.json
+            i=0; while [ ! -f worker-release ] && [ "$i" -lt 2000 ]; do
+                sleep 0.01; i=$((i + 1));
+            done
+            [ -f worker-release ] || exit 98
+            printf '{"fixture":true}'
+            printf fixture-stderr >&2
+            exit 23
+        "#), |directory, process| {
+            let recorder = std::mem::replace(process, Command::new("/bin/sh"));
+            process.args(["-c", r#"
+                transition=$1; shift
+                "$@" &
+                printf '{"pid":%s}' "$!" > observer-child.tmp
+                mv observer-child.tmp observer-child.json
+                i=0; while [ ! -f observer-release ] && [ "$i" -lt 2000 ]; do
+                    sleep 0.01; i=$((i + 1));
+                done
+                [ -f observer-release ] || exit 97
+                if [ "$transition" = exec ]; then exec /usr/bin/true; fi
+                exit 0
+            "#, "observer", transition]).arg(recorder.get_program()).args(recorder.get_args()).current_dir(directory);
+        });
+        observer.wait_for("worker-pending.json");
+        let owner = observer.wait_for("owner.json");
+        let supervisor = observer.wait_for("supervisor.json");
+        assert_eq!(supervisor["pid"], observer.wait_for("observer-child.json")["pid"]);
+        assert_ne!(owner["pid"], supervisor["pid"]);
+        assert_ne!(supervisor["pid"], observer.child.id());
+        assert!(observer.child.try_wait().unwrap().is_none());
+        fs::write(observer.directory.join("observer-release"), []).unwrap();
+        assert!(observer.finish().success(), "observer must really exit before child completion");
+        assert!(!observer.directory.join("validation.json").exists());
+        assert!(!observer.directory.join("owner-exit.json").exists());
+
+        // Reopening needs no wait-handle adoption from the now-dead observer.
+        fs::write(observer.directory.join("worker-release"), []).unwrap();
+        let recorded = observer.wait_for("validation.json");
+        let exit = observer.wait_for("owner-exit.json");
+        assert_eq!(recorded["result"]["exitCode"], 23);
+        assert_eq!(recorded["result"]["stdout"], "{\"fixture\":true}");
+        assert_eq!(recorded["result"]["stderr"], "fixture-stderr");
+        assert_eq!(exit["exitCode"], 0, "recorder success is distinct from fixture exit 23");
+        assert_eq!(exit["signal"], Value::Null);
+        assert_eq!(exit["failure"], Value::Null);
+        assert_eq!(observer.wait_for("owner.json"), owner);
     }
 }

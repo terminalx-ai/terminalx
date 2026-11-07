@@ -14,7 +14,7 @@ mod macos;
 mod probe;
 mod recorder;
 mod validation;
-pub use recorder::{retain_recorder, RecorderExit, RecorderFailure, RecorderIdentity};
+pub use recorder::{RecorderExit, RecorderFailure, RecorderIdentity};
 pub use validation::{run_validation, ValidationHeld};
 pub use validation::validation_pending;
 #[cfg(feature = "desktop")]

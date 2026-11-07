@@ -179,3 +179,35 @@ fn dead_probe_owner_is_retained_after_reopen_without_recovery_or_duplicate_child
     assert!(probe::start(directory.path()).unwrap_err().to_string().contains("no duplicate probe"));
     assert!(reopened.active().is_some());
 }
+
+#[test]
+fn completed_probe_needs_the_durable_wait_after_reopening() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    state.launches[0].phase = Phase::Unobserved;
+    state.observation_lost_at = Some(125_000);
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = crate::store::ensure_dir(directory.path().join(&id)).unwrap();
+    state.incidents[0].probe = Some(probe::Probe { id, started_at: 130_000, observation_timed_out: true,
+        result: None, shell: None, owner: None, owner_exit: None });
+    let shell = probe::Captured { exit_code: Some(0), signal: None, spawn_failed: false,
+        stdout: String::new(), stderr: String::new(), stdout_truncated: false, stderr_truncated: false };
+    let native = probe::Captured { stdout: "terminalx-startup-ready\n".into(), ..shell.clone() };
+    crate::store::write_json(&path.join("result.json"), &probe::ProbeResult { finished_at: 150_000, shell, native }).unwrap();
+    crate::store::write_json(&directory.path().join("incidents.json"), &state).unwrap();
+    // Completed child files without the supervisor's actual wait are not a
+    // pass or permission to retry, even if no process identity is available.
+    update_at(directory.path(), |state| probe::refresh(directory.path(), state, 160_000)).unwrap();
+    assert!(probe::start(directory.path()).unwrap_err().to_string().contains("pending health recorder"));
+    let reopened: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert_eq!(probe::export(reopened.active().unwrap().probe.as_ref().unwrap())["status"], "recorderPending");
+    // The independent supervisor can publish after the observer has reopened.
+    // Only this exact completion plus fresh health and complete census recovers.
+    crate::store::write_json(&path.join("owner-exit.json"), &recorder_exit(0, 170_000)).unwrap();
+    update_at(directory.path(), |state| probe::refresh(directory.path(), state, 180_000)).unwrap();
+    let reopened: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert!(reopened.active().is_none());
+    assert_eq!(reopened.incidents[0].probe.as_ref().unwrap().owner_exit.as_ref().unwrap().exit_code, Some(0));
+    assert_eq!(reopened.launches[0].exit_code, None, "health does not invent a lost child's outcome");
+}

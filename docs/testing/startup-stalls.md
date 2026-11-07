@@ -49,7 +49,9 @@ gate bypass.
 
 ## Durable results and recovery
 
-Run one health probe from the incident. A detached recorder runs the fixed
+Run one health probe from the incident. A detached supervisor starts a recorder
+worker and retains its actual wait independently of the observing desktop or
+runtime. The worker runs the fixed
 basic-shell probe (`/bin/sh -c 'exec /usr/bin/true'`) and the native TerminalX
 `--startup-probe` entry point. The latter runs before configuration, logging,
 hooks or application startup and writes a fixed readiness marker.
@@ -61,13 +63,19 @@ writes the shell result before starting the native step. The eventual exit
 codes, signals, truncation flags and output are kept in an owner-private UUID
 directory. Late success, nonzero application exit and an unresolved recorder
 are distinct. A process not known to have exited is never called successful.
-The runtime separately saves the recorder's PID/birth identity and its exact
-owner exit code, signal or typed spawn/wait error. Reopening reads this evidence
+The supervisor separately saves its identity in `supervisor.json`, the worker's
+PID/birth identity in `owner.json`, and its actual wait outcome in
+`owner-exit.json`: exact exit code, signal or typed spawn/wait error.
+An app quit/relaunch or runtime exec cannot destroy that wait handle. The
+observer only reaps the supervisor while it is alive; it writes no worker exit.
+Reopening reads this evidence
 even when no final child-result file exists. A known failed spawn can be retried
 by the person because no child started. A dead recorder with unknown child work
-is shown as a recorder failure, with ownership still held. A lost parent wait
-handle after an app restart remains unknown; PID disappearance cannot invent
-an exit code. No automatic retry assumes surviving children are gone.
+is shown as a recorder failure, with ownership still held. If the independent
+supervisor itself dies before saving the wait, the outcome remains unknown;
+PID disappearance cannot invent an exit code. Old interrupted recorders with
+no saved exit likewise remain unknown. No automatic retry assumes surviving
+children are gone.
 
 Configured local validation also uses a detached recorder with bounded output.
 It records the leader's exit before waiting for output EOF, so an inherited pipe
@@ -156,7 +164,11 @@ its output pipe, bounded real stdout/stderr, and signal termination. A macOS
 kernel census regression verifies that a recorded owner includes its actual
 child, rather than only testing synthetic observations.
 Production recorder-owner failures before final result publication are retained
-separately. UI regressions distinguish known owner failure from pending work
+separately. A production subprocess regression uses explicit child/observer
+barriers to end or exec the observer before releasing pending work, then reads
+the exact worker and command outcomes. A state regression requires the durable
+wait after reopening before fresh health may recover; no wait means no retry.
+UI regressions distinguish known owner failure from pending work
 and offer a retry only when the saved outcome proves that no recorder started.
 
 Run the four checks in `CONTRIBUTING.md` before review/merge. A launcher, build

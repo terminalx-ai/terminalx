@@ -1,8 +1,9 @@
-//! The observing runtime retains the recorder's own wait status separately
-//! from results written by its children. Losing a recorder never certifies
-//! that its descendants exited or that validation succeeded.
-use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
+//! A detached supervisor owns the recorder's wait independently of the desktop
+//! or runtime observer. Losing either process never certifies child completion.
+use std::ffi::OsString;
+use std::path::Path;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -47,28 +48,57 @@ impl RecorderExit {
     }
 }
 
-fn save_exit(directory: &Path, outcome: &RecorderExit) {
-    if let Err(error) = crate::store::write_json(&directory.join("owner-exit.json"), outcome) {
-        log::error!("persist recorder owner exit {outcome:?}: {error:#}");
-    }
+fn save_exit(directory: &Path, outcome: &RecorderExit) -> Result<()> {
+    crate::store::write_json(&directory.join("owner-exit.json"), outcome)
 }
 
 pub(super) fn spawn_failed(directory: &Path, error: &std::io::Error) {
-    save_exit(directory, &RecorderExit { finished_at: super::now(), exit_code: None, signal: None,
-        failure: Some(RecorderFailure::Spawn), os_error: error.raw_os_error() });
+    if let Err(error) = save_exit(directory, &RecorderExit { finished_at: super::now(), exit_code: None, signal: None,
+        failure: Some(RecorderFailure::Spawn), os_error: error.raw_os_error() }) {
+        log::error!("persist recorder spawn failure: {error:#}");
+    }
 }
 
-/// Take responsibility for an already-owned recorder. Its private directory
-/// was reserved before spawn; neither a detached observer nor a UI timeout
-/// may throw away a wait result. An app restart can read these sidecars.
-pub fn retain_recorder(mut child: Child, directory: PathBuf) {
+pub(super) fn private_directory(directory: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(directory)?;
+    ensure!(metadata.is_dir() && directory.file_name().and_then(|name| name.to_str()).is_some_and(|name| uuid::Uuid::parse_str(name).is_ok()), "invalid startup recorder directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        ensure!(metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0, "startup recorder directory is not private");
+    }
+    Ok(())
+}
+
+/// Runs in the detached production CLI process, before application startup.
+/// Only this process writes the worker's wait outcome. Desktop quit or runtime
+/// exec cannot destroy its Child handle, and reopening just reads the files.
+pub(super) fn supervise(directory: &Path, mode: &str, args: &[OsString]) -> Result<()> {
+    private_directory(directory)?;
+    let pid = std::process::id();
+    crate::store::write_json(&directory.join("supervisor.json"), &RecorderIdentity {
+        pid, birth: super::process_identity(Some(pid)),
+    })?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command.arg(mode).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|error| { spawn_failed(directory, &error); error })?;
     let owner = RecorderIdentity { pid: child.id(), birth: super::process_identity(Some(child.id())) };
     if let Err(error) = crate::store::write_json(&directory.join("owner.json"), &owner) {
-        // The complete reservation still holds ownership if identity cannot
-        // be saved. Keep the Child handle and preserve its eventual outcome.
+        // The prior reservation still holds. An identity write failure must
+        // not discard the already-spawned worker's wait handle.
         log::error!("persist recorder identity: {error:#}");
     }
-    std::thread::spawn(move || { save_exit(&directory, &RecorderExit::waited(child.wait())); });
+    let outcome = RecorderExit::waited(child.wait());
+    save_exit(directory, &outcome)?;
+    ensure!(!outcome.failed(), "recorder owner failed: {outcome:?}");
+    Ok(())
+}
+
+/// Best-effort zombie reaping only. This observer thread is deliberately not
+/// an outcome writer: its loss cannot prevent the supervisor saving the wait.
+pub(super) fn reap_supervisor(mut child: Child) {
+    std::thread::spawn(move || { let _ = child.wait(); });
 }
 
 pub(super) fn refresh(directory: &Path, owner: &mut Option<RecorderIdentity>, exit: &mut Option<RecorderExit>) -> anyhow::Result<()> {

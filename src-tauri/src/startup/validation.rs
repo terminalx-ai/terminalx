@@ -25,14 +25,7 @@ struct Recorded { finished_at: i64, result: probe::Captured }
 struct LeaderExit { exit_code: Option<i32>, signal: Option<i32> }
 
 pub(super) fn record(directory: &Path, cwd: &Path, command: &OsStr) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(directory)?;
-    anyhow::ensure!(metadata.is_dir() && directory.file_name().and_then(|name| name.to_str()).is_some_and(|name| uuid::Uuid::parse_str(name).is_ok()), "invalid validation recorder directory");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions.
-        anyhow::ensure!(metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0, "validation recorder directory is not private");
-    }
+    super::recorder::private_directory(directory)?;
     let mut child = Command::new("/bin/sh");
     child.arg("-c").arg(command).current_dir(cwd);
     let result = probe::capture_with_exit(&mut child, |exit_code, signal| {
@@ -85,9 +78,9 @@ fn spawn_reserved(monitor: &Arc<Monitor>, pane: &str, pipeline: &str, recorder: 
         Err(error) => { super::recorder::spawn_failed(path, &error); ticket.exited(None); return Err(error.into()); }
     };
     ticket.spawned(Some(child.id()));
-    // An owner exit is retained independently; it cannot certify that every
-    // validation descendant exited or supply the missing final result.
-    super::recorder::retain_recorder(child, path.to_path_buf());
+    // The detached supervisor, not this observer, retains the recorder wait.
+    // A missing child result still keeps validation ownership held.
+    super::recorder::reap_supervisor(child);
     Ok(ticket)
 }
 
