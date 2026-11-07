@@ -44,6 +44,11 @@ try {
   const search = page.getByRole("textbox", { name: "Search projects" });
   await search.waitFor();
   await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Search projects");
+  const allProjects = page.getByRole("menuitemradio", { name: "All projects", exact: true });
+  await allProjects.hover();
+  assert.equal(await allProjects.evaluate((item) => item === document.activeElement), true);
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await search.evaluate((input) => input === document.activeElement), true);
   await page.keyboard.type("local-0");
   assert.equal(await page.getByRole("menuitemradio", { name: "local-1", exact: true }).count(), 0);
   await page.getByRole("menuitemradio", { name: "local-0", exact: true }).hover();

@@ -16,7 +16,10 @@ function useMenuState({ open, defaultOpen = false, onOpenChange }: { open?: bool
   return { open: open ?? ownOpen, onOpenChange: change, close };
 }
 
-export function DropdownMenu(props: React.ComponentProps<typeof Prim.Root>) {
+export const DropdownMenu = Prim.Root;
+
+/** Opt in only when an action must close its menu after asynchronous work. */
+export function AsyncDropdownMenu(props: React.ComponentProps<typeof Prim.Root>) {
   const { close, ...state } = useMenuState(props);
   return <Prim.Root {...props} {...state}><CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider></Prim.Root>;
 }
@@ -129,7 +132,9 @@ export function MenuShortcut({ keys }: { keys: string[] }) {
 
 // ---- Context menus share the dropdown's look; only the trigger differs.
 
-export function ContextMenu(props: React.ComponentProps<typeof Ctx.Root>) {
+export const ContextMenu = Ctx.Root;
+
+export function AsyncContextMenu(props: React.ComponentProps<typeof Ctx.Root>) {
   const { close, ...state } = useMenuState(props);
   return <Ctx.Root {...props} {...state}><CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider></Ctx.Root>;
 }

@@ -7,6 +7,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
+  AsyncDropdownMenu,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -601,7 +602,7 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
         )}
         {manage && !renaming && (
           <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
-            <DropdownMenu {...menu.root}>
+            <AsyncDropdownMenu {...menu.root}>
               <DropdownMenuTrigger asChild {...menu.trigger}>
                 <Button variant="ghost" size="icon-xs" aria-label={`Session menu for ${row.title}`}>
                   <Ellipsis />
@@ -628,7 +629,7 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
                   <Trash2 /> Delete session…
                 </DropdownMenuItem>
               </DropdownMenuContent>
-            </DropdownMenu>
+            </AsyncDropdownMenu>
           </RowActions>
         )}
       </div>

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ContextMenu, ContextMenuContent, ContextMenuTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/menu";
+import { AsyncContextMenu as ContextMenu, ContextMenuContent, ContextMenuTrigger, AsyncDropdownMenu as DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/menu";
 import { ManualStatusIcon, ManualStatusMenu } from "./ManualStatus";
 
 const invoke = vi.hoisted(() => vi.fn());

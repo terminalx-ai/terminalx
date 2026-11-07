@@ -7,6 +7,8 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
+  AsyncContextMenu,
+  AsyncDropdownMenu,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -1060,8 +1062,8 @@ function ConversationRow({
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
     <li>
-      <DropdownMenu>
-        <ContextMenu>
+      <AsyncDropdownMenu>
+        <AsyncContextMenu>
         <ContextMenuTrigger asChild>
         <div
           className={cn(
@@ -1128,11 +1130,11 @@ function ConversationRow({
         </div>
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
-        </ContextMenu>
+        </AsyncContextMenu>
         <DropdownMenuContent align="end" className="w-56">
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
-      </DropdownMenu>
+      </AsyncDropdownMenu>
     </li>
   );
 }

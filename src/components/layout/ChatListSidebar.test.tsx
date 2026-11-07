@@ -330,12 +330,17 @@ describe("status grouping and view controls (PRO-164)", () => {
     fireEvent.keyDown(trigger, { key: "ArrowRight" });
     const search = await screen.findByRole("textbox", { name: "Search projects" });
     await waitFor(() => expect(document.activeElement).toBe(search));
+    const all = screen.getByRole("menuitemradio", { name: "All projects" });
+    // With no query, mouse users still get the usual highlighted result.
+    fireEvent.pointerMove(all, { pointerType: "mouse" });
+    expect(document.activeElement).toBe(all);
+    fireEvent.keyDown(all, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search);
     fireEvent.change(search, { target: { value: "web" } });
     expect(screen.queryByRole("menuitemradio", { name: "other" })).toBeNull();
     fireEvent.pointerMove(screen.getByRole("menuitemradio", { name: "web" }), { pointerType: "mouse" });
     expect(document.activeElement).toBe(search);
     fireEvent.keyDown(search, { key: "ArrowDown" });
-    const all = screen.getByRole("menuitemradio", { name: "All projects" });
     expect(document.activeElement).toBe(all);
     fireEvent.keyDown(all, { key: "ArrowUp" });
     expect(document.activeElement).toBe(search);

@@ -7,7 +7,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { ContextMenu, ContextMenuTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/menu";
+import { AsyncContextMenu, AsyncDropdownMenu, ContextMenuTrigger, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
@@ -203,8 +203,8 @@ function ChatRow({
   const agent = showAgent ? conversationAgent(session) : null;
   return (
     <li>
-      <DropdownMenu>
-        <ContextMenu>
+      <AsyncDropdownMenu>
+        <AsyncContextMenu>
         <ContextMenuTrigger asChild>
         <div
           className={cn(actionRow, "relative flex items-center gap-3 rounded-lg py-1.5 pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50", picked && "bg-info/12 ring-1 ring-inset ring-info/45")}
@@ -255,11 +255,11 @@ function ChatRow({
         </div>
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
-        </ContextMenu>
+        </AsyncContextMenu>
         <DropdownMenuContent align="end" className="w-56">
           <ConversationMenuItems session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </DropdownMenuContent>
-      </DropdownMenu>
+      </AsyncDropdownMenu>
     </li>
   );
 }

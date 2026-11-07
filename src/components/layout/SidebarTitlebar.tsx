@@ -186,8 +186,8 @@ function ProjectFilterMenu() {
   }}>
     <DropdownMenuSubTrigger><Search /> Filter by project{sidebarProject && <Check className="ml-auto" />}</DropdownMenuSubTrigger>
     <DropdownMenuSubContent ref={content} className="w-64" onPointerMoveCapture={(event) => {
-      // Hover must not take the input away while somebody types. Clicking a result still selects it.
-      if (document.activeElement === search.current) event.preventDefault();
+      // Keep a typed query focused; an empty search still allows normal mouse highlighting.
+      if (query && document.activeElement === search.current) event.preventDefault();
     }} onKeyDown={(event) => {
       if (event.key === "ArrowUp" && event.target === content.current?.querySelector('[role="menuitemradio"]')) {
         event.preventDefault(); search.current?.focus();
