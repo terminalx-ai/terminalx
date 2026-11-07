@@ -72,6 +72,27 @@ The code: `src/components/changes/BranchAutopilot.tsx`, placed by
   session (and the project's defaults stay there), wrong for "this branch,
   now".
 
+## Later: Branch's two views, Overview and Changes
+
+Soon after, Changes moved from the panel's top row to a second view of the
+Branch tab: **Branch → Overview · Changes**. This is not the nested-tabs
+idea rejected above, and the difference is the reasoning:
+
+- *Moved, not duplicated.* Changes left the top row, so there is still one
+  Changes and one place to find it. The objection was having two.
+- *No Settings tab.* Autopilot stays a section of Overview, visible.
+- *Both views are the same subject.* Overview is where the branch stands
+  and what happens next; Changes is what is in it. Grouping them under
+  Branch matches how the reader thinks about the work, and the top row
+  drops to Branch, Files, Browser, Computer.
+- *Depth paid for where it is cheap.* Changes is used after most turns,
+  so nothing that leads to it got slower: its shortcut, "Review & commit"
+  and every other link open Branch → Changes directly, and Branch reopens
+  on the view last shown. The second row is drawn like the Browser's and
+  Computer's, level with the chat's tabs, so it reads as the same pattern.
+- *The limit.* Changes has its own scope picker, so it is tab → view →
+  picker. Nothing further should be nested inside it.
+
 ## When to revisit
 
 If the Branch tab grows to hold several independent parts (reviews, checks,
