@@ -456,20 +456,6 @@ export const SETTINGS_ROWS = [
     searchTerms: ["repository", "setup", "archive", "scripts", "hooks"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts" }, layout: "content",
   }),
-  // PRO-155's standalone editor publishes through onChange; its native store
-  // and runner are pending dependencies. Register its existing controls too.
-  defineSetting({
-    id: "repositories.actionRunAfterSetup", section: "repositories", title: "Run after setup",
-    description: "Mark this action to run after workspace setup.", hideDescription: true,
-    searchTerms: ["repository", "action", "setup"], scope: "repository",
-    storage: { kind: "action", location: "RepositoryActionsSettings.onChange#runAfterSetup (store integration pending)" },
-  }),
-  defineSetting({
-    id: "repositories.actionConcurrent", section: "repositories", title: "Allow several at once",
-    description: "Allow concurrent runs of this repository action.", hideDescription: true,
-    searchTerms: ["repository", "action", "concurrent"], scope: "repository",
-    storage: { kind: "action", location: "RepositoryActionsSettings.onChange#concurrent (store integration pending)" },
-  }),
   defineSetting({
     id: "shortcuts.systemWide", section: "shortcuts", title: "System-wide shortcut",
     description: "Show or hide the floating chat window from any app.",

@@ -68,8 +68,6 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "organizations.create",
   "repositories.mergedCleanup",
   "repositories.scripts",
-  "repositories.actionRunAfterSetup",
-  "repositories.actionConcurrent",
   "shortcuts.systemWide",
   "shortcuts.reset",
   "storage.mergedCleanup",
