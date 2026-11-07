@@ -37,9 +37,10 @@ it("explains a drop on hover and retries through the native supervisor without o
   expect(screen.getByRole("button", { name: "Retrying…" }).matches(":disabled")).toBe(true);
   await act(async () => resolve({ ...offline, relay: { ...offline.relay, phase: "connecting", attempt: 13 } }));
   expect(screen.getByText(reason)).toBeTruthy();
+  // Back up, the sidebar has nothing to say about Relay: the line goes, and the entry is the name alone.
   publish(connected);
-  expect(screen.getByText(/Local terminals keep running/)).toBeTruthy();
   expect(screen.queryByText(reason)).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Relay/ })).toBeNull();
   expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
 });
 
@@ -55,12 +56,25 @@ it("supports keyboard access and shows retry errors with another retry", async (
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-it("keeps account navigation separate and explains an unconfigured relay", async () => {
-  publish({ ...connected, relay: { phase: "off", message: null, attempt: 0 } });
-  render(<AccountSidebarEntry onOpenAccount={mocks.open} />);
-  fireEvent.click(screen.getByRole("button", { name: "Ada" }));
-  expect(mocks.open).toHaveBeenCalledOnce();
-  fireEvent.click(screen.getByRole("button", { name: "Relay not configured" }));
-  expect(await screen.findByText(/Local terminals and LAN pairing are available without Relay/)).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+it("is one line, the name alone, while Relay is unconfigured or connected", async () => {
+  for (const relay of [{ phase: "off" as const, message: null, attempt: 0 }, connected.relay, { phase: "connecting" as const, message: null, attempt: 0 }]) {
+    publish({ ...connected, relay });
+    render(<AccountSidebarEntry onOpenAccount={mocks.open} />);
+    expect(screen.queryByRole("button", { name: /^Relay/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ada" }));
+    cleanup();
+  }
+  expect(mocks.open).toHaveBeenCalledTimes(3);
+});
+
+it("shows the person's picture from the sign-in service in place of their initial", async () => {
+  const { AccountAvatar } = await import("./AccountAvatar");
+  const { container, rerender } = render(<AccountAvatar identity={{ name: "Ada", email: "a@x.io", organization: null, picture: "https://img.example/ada.png" }} />);
+  const picture = screen.getByTestId("account-picture");
+  expect(picture.getAttribute("src")).toBe("https://img.example/ada.png");
+  // A picture that will not load falls back to the initial.
+  fireEvent.error(picture);
+  expect(container.textContent).toBe("A");
+  rerender(<AccountAvatar identity={{ name: "Ada", email: "a@x.io", organization: null }} />);
+  expect(screen.queryByTestId("account-picture")).toBeNull();
 });

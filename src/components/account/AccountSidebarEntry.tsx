@@ -3,26 +3,33 @@ import { Button } from "@/components/ui/button";
 import { openPasteLink, signIn, useAccount } from "@/lib/account";
 import { AccountAvatar } from "./AccountAvatar";
 import { RelayStatus } from "./RelayStatus";
+import { usePairing } from "@/lib/pairing";
+import { cn } from "@/lib/cn";
 
 export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => void }) {
   const account = useAccount();
+  // Dropped, or reconnecting after a drop (a retry is counted): the moments the line has something to say.
+  const { relay } = usePairing().status;
+  const relayDropped = relay.phase === "offline" || (relay.phase === "connecting" && relay.attempt > 0);
   const identity = account.status.identity;
   if (account.status.state === "signed-in" && identity) {
     return (
+      // One line, the picture and the name. Relay's state shows under it only when the relay has dropped, with its
+      // retry; connected, connecting or not configured is the normal case and lives in Settings → Devices.
       <div className="relative w-full min-w-0">
         <Button
           variant="ghost"
-          className="h-auto w-full min-w-0 justify-start gap-2 overflow-hidden px-2 py-1.5"
+          className={cn("w-full min-w-0 justify-start gap-2 overflow-hidden px-2", relayDropped && "h-auto py-1.5")}
           onClick={onOpenAccount}
           title={[identity.email, identity.organization].filter(Boolean).join(" · ")}
         >
           <AccountAvatar identity={identity} />
           <span className="min-w-0 flex-1 text-left">
             <span className="block truncate">{identity.name ?? identity.email}</span>
-            <span aria-hidden className="mt-0.5 block h-[15px]" />
+            {relayDropped && <span aria-hidden className="mt-0.5 block h-[15px]" />}
           </span>
         </Button>
-        <RelayStatus />
+        {relayDropped && <RelayStatus />}
       </div>
     );
   }

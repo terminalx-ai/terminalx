@@ -725,6 +725,8 @@ export interface AccountIdentity {
   organization: string | null;
   /** The active (default) organization's id. */
   organizationId?: string | null;
+  /** The person's picture from the sign-in service, an https: URL; absent when it sends none. */
+  picture?: string | null;
 }
 
 export interface AccountStatus {
