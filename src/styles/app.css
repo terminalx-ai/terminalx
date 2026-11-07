@@ -436,3 +436,114 @@ body:has([role="dialog"]) [data-star-reminder],
 body:has([role="alertdialog"]) [data-star-reminder] {
   visibility: hidden;
 }
+
+/* Dialogs ease in and out instead of appearing at once: the backdrop fades,
+   the dialog rises a touch and grows from 96%. The open is a little slower
+   than the close, so arriving reads as deliberate and leaving as quick. */
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes dialog-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(4px) scale(0.98); }
+}
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
+.animate-dialog-in { animation: dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-dialog-out { animation: dialog-out 140ms ease-in both; }
+.animate-overlay-in { animation: overlay-in 220ms ease-out both; }
+.animate-overlay-out { animation: overlay-out 140ms ease-in both; }
+
+/* The share dialog's collaboration scene (CollaborationScene.tsx), told at
+   the prompt over a nine-second loop:
+     0–25%  you go to the prompt, click, type, send (row 1);
+     28–37% the model thinks, then answers (row 2);
+     35–60% the designer goes to the prompt, clicks, types, sends (row 3);
+     63–72% the model thinks, then answers again (row 4);
+     74–82% the agent, which joined, types and sends its own prompt (row 5);
+     92%    the conversation clears for the next loop.
+   The conversation sits in a short window above the prompt: each row takes
+   no room until it arrives, so it pushes the earlier ones up, where they fade.
+   Under the prompt, "Agent joined" from the start and "Designer joined"
+   just before the designer's cursor appears. */
+.cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply { animation: 9s infinite both; }
+.cs-reply { transform-origin: left; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes cs-dot { 0%, 60%, 100% { opacity: 0.35; transform: none; } 30% { opacity: 1; transform: translateY(-1.5px); } }
+.cs-dot { animation: cs-dot 0.9s ease-in-out infinite; }
+/* A row takes no room until it arrives, so each new one pushes the ones above it up the window. */
+.cs-row { animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); overflow: hidden; }
+/* The window the conversation scrolls through: older rows fade out at its top. */
+.cs-window { mask-image: linear-gradient(to bottom, transparent, black 55%); }
+@keyframes cs-row-1 { 0%, 24% { opacity: 0; max-height: 0; transform: translateY(6px); } 28%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-agent-1 { 0%, 27% { opacity: 0; max-height: 0; transform: translateY(6px); } 30%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-row-3 { 0%, 59% { opacity: 0; max-height: 0; transform: translateY(6px); } 63%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-agent-2 { 0%, 62% { opacity: 0; max-height: 0; transform: translateY(6px); } 65%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-think-1 { 0%, 28% { opacity: 0; } 30%, 33% { opacity: 1; } 35%, 100% { opacity: 0; } }
+@keyframes cs-think-2 { 0%, 63% { opacity: 0; } 65%, 68% { opacity: 1; } 70%, 100% { opacity: 0; } }
+@keyframes cs-reply-1 { 0%, 33% { opacity: 0; transform: scaleX(0); } 38%, 100% { opacity: 1; transform: none; } }
+@keyframes cs-reply-2 { 0%, 68% { opacity: 0; transform: scaleX(0); } 73%, 100% { opacity: 1; transform: none; } }
+.cs-row-1 { animation-name: cs-row-1; }
+.cs-agent-1 { animation-name: cs-agent-1; }
+.cs-think-1 { animation-name: cs-think-1; }
+.cs-reply-1 { animation-name: cs-reply-1; }
+.cs-row-3 { animation-name: cs-row-3; }
+@keyframes cs-row-5 { 0%, 81% { opacity: 0; max-height: 0; transform: translateY(6px); } 85%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+.cs-row-5 { animation-name: cs-row-5; }
+@keyframes cs-ring-agent { 0%, 73% { opacity: 0; } 74%, 82% { opacity: 1; } 85%, 100% { opacity: 0; } }
+@keyframes cs-typing-agent { 0%, 74% { opacity: 0; width: 0; } 75% { opacity: 1; width: 0; } 81% { opacity: 1; width: 52%; } 82%, 100% { opacity: 0; width: 52%; } }
+.cs-ring-agent { animation-name: cs-ring-agent; }
+.cs-typing-agent { animation-name: cs-typing-agent; }
+.cs-agent-2 { animation-name: cs-agent-2; }
+.cs-think-2 { animation-name: cs-think-2; }
+.cs-reply-2 { animation-name: cs-reply-2; }
+
+@keyframes cs-typing-me { 0%, 10% { opacity: 0; width: 0; } 11% { opacity: 1; width: 0; } 23% { opacity: 1; width: 58%; } 25%, 100% { opacity: 0; width: 58%; } }
+@keyframes cs-typing-designer { 0%, 45% { opacity: 0; width: 0; } 46% { opacity: 1; width: 0; } 58% { opacity: 1; width: 48%; } 60%, 100% { opacity: 0; width: 48%; } }
+.cs-typing { animation-timing-function: steps(14, end); }
+.cs-typing-me { animation-name: cs-typing-me; }
+.cs-typing-designer { animation-name: cs-typing-designer; }
+
+@keyframes cs-ring-me { 0%, 9% { opacity: 0; } 10%, 25% { opacity: 1; } 28%, 100% { opacity: 0; } }
+@keyframes cs-ring-designer { 0%, 44% { opacity: 0; } 45%, 60% { opacity: 1; } 63%, 100% { opacity: 0; } }
+.cs-ring-me { animation-name: cs-ring-me; }
+.cs-ring-designer { animation-name: cs-ring-designer; }
+
+@keyframes cs-send { 0%, 23%, 27%, 58%, 62%, 80%, 84%, 100% { transform: none; opacity: 0.5; } 25%, 60%, 82% { transform: scale(1.25); opacity: 1; } }
+.cs-send { animation-name: cs-send; }
+
+.cs-cursor { animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1); will-change: left, top, transform; }
+/* You: from the top left to the prompt, a click, still while typing, then away. */
+@keyframes cs-cursor-me {
+  0%, 100% { left: 4%; top: 6%; transform: none; }
+  8% { left: 24%; top: 62%; transform: none; }
+  9% { transform: scale(0.82); }
+  10%, 25% { left: 24%; top: 62%; transform: none; }
+  36%, 90% { left: 0%; top: 30%; }
+}
+/* The designer: waits at the right, goes to the prompt in their turn, then back. */
+/* The designer: not there until they join (29%), then takes the prompt in their turn. */
+@keyframes cs-cursor-designer {
+  0%, 28% { left: 80%; top: 10%; opacity: 0; transform: none; }
+  32%, 35% { left: 74%; top: 6%; opacity: 1; transform: none; }
+  43% { left: 30%; top: 62%; transform: none; }
+  44% { transform: scale(0.82); }
+  45%, 60% { left: 30%; top: 62%; transform: none; }
+  72%, 94% { left: 72%; top: 18%; opacity: 1; }
+  98%, 100% { left: 74%; top: 18%; opacity: 0; }
+}
+/* Joined notices under the prompt: the agent's at the start, the designer's just before they appear. */
+.cs-joined { animation: 9s ease-out infinite both; }
+@keyframes cs-joined-agent { 0% { opacity: 0; transform: translateY(3px); } 4%, 94% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; } }
+@keyframes cs-joined-designer { 0%, 27% { opacity: 0; transform: translateY(3px); } 31%, 94% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; } }
+.cs-joined-agent { animation-name: cs-joined-agent; }
+.cs-joined-designer { animation-name: cs-joined-designer; }
+.cs-cursor-me { animation-name: cs-cursor-me; }
+.cs-cursor-designer { animation-name: cs-cursor-designer; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply, .cs-dot, .cs-joined { animation: none; }
+  .cs-typing, .cs-ring, .cs-think { opacity: 0; }
+  .cs-cursor-me { left: 0%; top: 30%; }
+  .cs-cursor-designer { left: 72%; top: 18%; }
+}

@@ -39,14 +39,20 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); });
 
-/** The panel opens on Branch; these are about Changes. */
-const openChanges = () => fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+/** The panel opens on Branch's Overview; these are about its Changes view. */
+const openChanges = () => fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
 
-it("opens on the Branch tab", () => {
+it("opens on the Branch tab's Overview, and reopens Branch on the view last shown", () => {
   render(<RightPanel cwd={cwd} branch="fix/test" />);
   expect(screen.getByText("Branch overview")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
   openChanges();
   expect(screen.queryByText("Branch overview")).toBeNull();
+  // Away to Files and back to Branch: Changes again.
+  fireEvent.click(screen.getByRole("button", { name: "Files" }));
+  expect(screen.queryByRole("tab", { name: "Changes" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Branch" }));
+  expect(screen.getByRole("tab", { name: "Changes" }).getAttribute("aria-selected")).toBe("true");
 });
 
 it("shows workspace work after a status-only turn, and commits from its Uncommitted scope", async () => {

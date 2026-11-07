@@ -57,7 +57,9 @@ async function submit(name: string) { fireEvent.click(within(screen.getByRole("d
 describe("personal local sections", () => {
   it.each(["simple", "list"] as const)("creates, renames, changes emoji and deletes without changing sessions in %s layout", async (sidebarLayout) => {
     prefs.setPrefs({ sidebarLayout }); mount();
-    fireEvent.click(screen.getByRole("button", { name: "New section…" }));
+    // The sidebar has no standing New section row; a section is made from the command palette or a chat's menu.
+    expect(screen.queryByRole("button", { name: "New section…" })).toBeNull();
+    act(() => local.openSectionDialog({ kind: "create" }));
     fireEvent.change(screen.getByLabelText("Section name"), { target: { value: "Release" } });
     fireEvent.change(screen.getByLabelText(/Emoji/), { target: { value: "🚀" } });
     nextSections = [{ ...section("release", [], "Release"), emoji: "🚀" }];
