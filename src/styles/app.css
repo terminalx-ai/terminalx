@@ -458,9 +458,10 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 /* The share dialog's collaboration scene (CollaborationScene.tsx), told at
    the prompt over a nine-second loop:
      0–25%  you go to the prompt, click, type, send (row 1);
-     28–37% the agent thinks, then adds its answer (row 2);
+     28–37% the model thinks, then answers (row 2);
      35–60% the designer goes to the prompt, clicks, types, sends (row 3);
-     63–72% the agent thinks, then answers again (row 4);
+     63–72% the model thinks, then answers again (row 4);
+     74–82% the agent, which joined, types and sends its own prompt (row 5);
      92%    the conversation clears for the next loop.
    Under the prompt, "Agent joined" from the start and "Designer joined"
    just before the designer's cursor appears. */
@@ -484,6 +485,12 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 .cs-think-1 { animation-name: cs-think-1; }
 .cs-reply-1 { animation-name: cs-reply-1; }
 .cs-row-3 { animation-name: cs-row-3; }
+@keyframes cs-row-5 { 0%, 81% { opacity: 0; transform: translateY(6px) scale(0.9); } 85%, 92% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+.cs-row-5 { animation-name: cs-row-5; }
+@keyframes cs-ring-agent { 0%, 73% { opacity: 0; } 74%, 82% { opacity: 1; } 85%, 100% { opacity: 0; } }
+@keyframes cs-typing-agent { 0%, 74% { opacity: 0; width: 0; } 75% { opacity: 1; width: 0; } 81% { opacity: 1; width: 52%; } 82%, 100% { opacity: 0; width: 52%; } }
+.cs-ring-agent { animation-name: cs-ring-agent; }
+.cs-typing-agent { animation-name: cs-typing-agent; }
 .cs-agent-2 { animation-name: cs-agent-2; }
 .cs-think-2 { animation-name: cs-think-2; }
 .cs-reply-2 { animation-name: cs-reply-2; }
@@ -499,26 +506,26 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 .cs-ring-me { animation-name: cs-ring-me; }
 .cs-ring-designer { animation-name: cs-ring-designer; }
 
-@keyframes cs-send { 0%, 23%, 27%, 58%, 62%, 100% { transform: none; opacity: 0.5; } 25%, 60% { transform: scale(1.25); opacity: 1; } }
+@keyframes cs-send { 0%, 23%, 27%, 58%, 62%, 80%, 84%, 100% { transform: none; opacity: 0.5; } 25%, 60%, 82% { transform: scale(1.25); opacity: 1; } }
 .cs-send { animation-name: cs-send; }
 
 .cs-cursor { animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1); will-change: left, top, transform; }
 /* You: from the top left to the prompt, a click, still while typing, then away. */
 @keyframes cs-cursor-me {
   0%, 100% { left: 6%; top: 8%; transform: none; }
-  8% { left: 24%; top: 66%; transform: none; }
+  8% { left: 24%; top: 73%; transform: none; }
   9% { transform: scale(0.82); }
-  10%, 25% { left: 24%; top: 66%; transform: none; }
-  36%, 90% { left: 0%; top: 52%; }
+  10%, 25% { left: 24%; top: 73%; transform: none; }
+  36%, 90% { left: 0%; top: 58%; }
 }
 /* The designer: waits at the right, goes to the prompt in their turn, then back. */
 /* The designer: not there until they join (29%), then takes the prompt in their turn. */
 @keyframes cs-cursor-designer {
   0%, 28% { left: 90%; top: 30%; opacity: 0; transform: none; }
   32%, 35% { left: 84%; top: 24%; opacity: 1; transform: none; }
-  43% { left: 30%; top: 66%; transform: none; }
+  43% { left: 30%; top: 73%; transform: none; }
   44% { transform: scale(0.82); }
-  45%, 60% { left: 30%; top: 66%; transform: none; }
+  45%, 60% { left: 30%; top: 73%; transform: none; }
   72%, 94% { left: 82%; top: 40%; opacity: 1; }
   98%, 100% { left: 84%; top: 40%; opacity: 0; }
 }
@@ -534,6 +541,6 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 @media (prefers-reduced-motion: reduce) {
   .cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply, .cs-dot, .cs-joined { animation: none; }
   .cs-typing, .cs-ring, .cs-think { opacity: 0; }
-  .cs-cursor-me { left: 0%; top: 52%; }
+  .cs-cursor-me { left: 0%; top: 58%; }
   .cs-cursor-designer { left: 84%; top: 44%; }
 }
