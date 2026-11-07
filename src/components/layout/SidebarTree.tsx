@@ -1,3 +1,5 @@
+import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { openSessionShare } from "@/lib/localSharing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -485,12 +487,13 @@ function NewTabButton({ session }: { session: SessionEntry }) {
 
 function SessionMenu({ session }: { session: SessionEntry }) {
   return (
-    <DropdownMenuContent align="end">
+    <DropdownMenuContent align="end" onCloseAutoFocus={keepFocusForNameField}>
       <RenameSessionItem session={session} />
       <DropdownMenuItem onSelect={() => void showFloatingWindow(session.id, session.activeTab)}>
         <PictureInPicture2 /> Open in floating window
       </DropdownMenuItem>
       <QuickChatMenuItems session={session} />
+      <MoveToLocalSectionItems sessionIds={[session.id]} />
       <DropdownMenuItem onSelect={() => openSessionShare(session.id)}>Share session…</DropdownMenuItem>
       <IssueLinkMenuItems session={session} />
       <DropdownMenuSeparator />

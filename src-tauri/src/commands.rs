@@ -1760,6 +1760,21 @@ pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
     store::conversation_titles::backfill().map_err(err)
 }
 
+/// Personal local section metadata, read independently of agent processes.
+#[tauri::command]
+pub async fn local_sections() -> CmdResult<index::local_sections::SectionState> {
+    tauri::async_runtime::spawn_blocking(|| index::local_sections::load().map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn edit_local_section(app: AppHandle, edit: index::local_sections::SectionEdit) -> CmdResult<index::local_sections::SectionState> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let saved = index::local_sections::edit(edit).map_err(err)?;
+        let _ = app.emit("local_sections_changed", &saved);
+        Ok(saved)
+    }).await.map_err(err)?
+}
+
 // ---------------------------------------------------------------- automations
 
 // Every command that asks the local runtime is a socket round trip that waits
@@ -3916,6 +3931,7 @@ mod command_tests {
         let before = git(&project, &["worktree", "list", "--porcelain"]);
 
         let session = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
             use_worktree: true,
@@ -3954,6 +3970,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let first = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
@@ -3973,6 +3990,7 @@ mod command_tests {
         })
         .unwrap();
         let second = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Second".into()),
             use_worktree: false,
@@ -4020,6 +4038,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let session = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
@@ -4070,6 +4089,7 @@ mod command_tests {
         git(&project, &["worktree", "add", "-q", "-b", "feature/attached", worktree.to_str().unwrap()]);
 
         let created = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Attached session".into()),
             use_worktree: true,
@@ -4095,6 +4115,7 @@ mod command_tests {
         })
         .unwrap();
         let companion = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Companion session".into()),
             use_worktree: true,
@@ -4109,6 +4130,7 @@ mod command_tests {
         })
         .unwrap();
         let bystander = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Session on main".into()),
             use_worktree: false,

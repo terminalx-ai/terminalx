@@ -846,6 +846,7 @@ fn start_run(
         let entry = crate::session_ops::create_session_blocking(
             app.sink().as_ref(),
             crate::session_ops::NewSession {
+                section_id: None,
                 project_path: automation.project_path.clone(),
                 title: Some(title),
                 use_worktree: automation.workspace == AutomationWorkspace::NewWorktree,
@@ -876,6 +877,7 @@ fn start_run(
             Ok(())
         })?;
         emit_run(app, &run);
+        crate::store::environment::prepare_unattended(&entry.cwd, None)?;
         let manager = app.sessions()?;
         let mut prompt = prompt;
         if let Some(options) = automation.pipeline.as_ref().filter(|options| options.auto_merge || options.resolve_conflicts) {

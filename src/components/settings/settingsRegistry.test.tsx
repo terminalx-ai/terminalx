@@ -56,8 +56,9 @@ describe("settings registry", () => {
 });
 
 it("keeps standard settings rows in the registry; organization internals register as sections", () => {
-  // The action dialog edits one repository record; its fields have no global
-  // setting IDs, like the per-status editor in WorkStatusSettings.
+  // PRO-155's controlled action editor is not mounted in Settings yet (see
+  // docs/repository-action-editors.md). Its dialog switches edit an unsaved
+  // action draft; registering them would advertise row links that cannot open.
   const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });
