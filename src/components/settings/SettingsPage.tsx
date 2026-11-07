@@ -106,10 +106,10 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     inputRef.current?.focus();
     inputRef.current?.select();
   }, { global: true });
-  const choose = (next: SettingsSection, path?: string) => {
+  const choose = (next: SettingsSection, path?: string, row: SettingId | null = null) => {
     setSection(next);
     setProjectPath(path);
-    setTarget(null);
+    setTarget(row);
     changeQuery("");
     setSelectionRequest((request) => request + 1);
   };
@@ -165,6 +165,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                 repositories.length ? repositories.map((repository, repositoryIndex) => {
                   const isExpanded = expanded.has(repository.path);
                   const selected = section === "repositories" && projectPath === repository.path;
+                  const page = repository.kind === "folder" ? "repositories.mergedCleanup"
+                    : target === "repositories.filesToCopy" || target === "repositories.mergedCleanup" ? target : "repositories.rootPath";
                   const childrenId = `settings-repository-${repositoryIndex}`;
                   return <div key={repository.path}>
                     <button type="button" aria-expanded={isExpanded} aria-controls={childrenId} title={repository.path} className={cn(navClass(false), "flex items-center gap-1.5")} onClick={() => setExpanded((previous) => {
@@ -176,7 +178,15 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                       <span className="truncate">{repository.name}</span>
                     </button>
                     <div id={childrenId} hidden={!isExpanded} className="pl-4">
-                      <button type="button" aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>Workspace cleanup</button>
+                      {([
+                        ...(repository.kind === "folder" ? [] : [
+                          { title: "General", entry: "repositories.rootPath" },
+                          { title: "Files to copy", entry: "repositories.filesToCopy" },
+                        ] as const),
+                        { title: "Workspace cleanup", entry: "repositories.mergedCleanup" },
+                      ] as const).map(({ title, entry }) => (
+                        <button key={entry} type="button" aria-current={selected && page === entry ? "page" : undefined} className={navClass(selected && page === entry)} onClick={() => choose("repositories", repository.path, entry)}>{title}</button>
+                      ))}
                     </div>
                   </div>;
                 }) : <p className="px-2.5 py-2 text-xs text-faint">No repositories added.</p>

@@ -6,6 +6,7 @@ import { OrganizationsTab } from "./OrganizationsTab";
 import { GeneralTab, AppearanceTab, AgentsTab, IntegrationsTab, AboutTab } from "./SettingsSections";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
+import { RepositoriesTab } from "./RepositoriesTab";
 import { StorageTab } from "./StorageTab";
 import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
@@ -30,7 +31,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
-  repositories: ({ projectPath }) => projectPath ? <MergedCleanupSettings projectPath={projectPath} /> : <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>,
+  repositories: ({ projectPath, row }) => <RepositoriesTab projectPath={projectPath} row={row} />,
   storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /><RecoveryIncidentSettings /></>,
   shortcuts: () => <ShortcutsTab />,
   experimental: () => <ExperimentalTab />,

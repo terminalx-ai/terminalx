@@ -11,6 +11,7 @@ export const SETTINGS_SECTIONS = [
   { id: "environment", title: "Environment", description: "User and repository variables for local agents and shells", terms: ["env dotenv secrets keychain overrides import"] },
   { id: "transcription", title: "Transcription", description: "Dictation, microphone and speech models", terms: ["voice recording audio mute noise personalization language download"] },
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
+  { id: "repositories", title: "Repositories", description: "Repository paths and files to copy into new workspaces", terms: ["git root worktrees ignored glob patterns env worktreeinclude"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
   { id: "shortcuts", title: "Shortcuts", description: "Customize keyboard shortcuts", terms: ["key bindings hotkeys"] },
   { id: "experimental", title: "Experimental", description: "Try Native Codex", terms: ["app server stdio"] },

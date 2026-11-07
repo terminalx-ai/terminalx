@@ -50,6 +50,23 @@ pub struct Project {
     /// branch with none goes by its own name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_labels: BTreeMap<String, String>,
+    /// Local repository choices; file-based layers are resolved separately.
+    #[serde(default)]
+    pub repository_settings: RepositorySettings,
+}
+
+/// Repository choices stored with the project, keyed by its canonical path.
+/// Keep this layer separate from effective settings supplied by repository files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RepositorySettings {
+    pub files_to_copy: Vec<String>,
+}
+
+pub fn repository_settings(path: &Path) -> Result<RepositorySettings> {
+    let canonical = canonical_directory(&path.to_string_lossy())?;
+    Ok(load()?.projects.into_iter().find(|p| p.path == canonical)
+        .map(|p| p.repository_settings).unwrap_or_default())
 }
 
 /// The kinds of change a project marks as always needing a person to merge.
@@ -199,6 +216,8 @@ pub struct ProjectPatch {
     pub agent_issue_updates: Option<bool>,
     #[serde(default)]
     pub branch_label: Option<BranchLabel>,
+    #[serde(default)]
+    pub repository_settings: Option<RepositorySettings>,
 }
 
 /// One branch's sidebar label; none, or a blank one, clears it.
@@ -215,6 +234,11 @@ fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<
 }
 
 pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
+    if let Some(settings) = &patch.repository_settings {
+        crate::worktree_files::validate_patterns(&settings.files_to_copy)?;
+        anyhow::ensure!(!crate::worktree_files::has_include_file(Path::new(path))?,
+            "Patterns come from this repository's .worktreeinclude");
+    }
     let mut f = load()?;
     let p = f.projects.iter_mut().find(|p| p.path == path).with_context(|| format!("project {path} is not attached"))?;
     if let Some(n) = patch.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
@@ -239,6 +263,9 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
         // Every default is stored as nothing, so a project nobody configured
         // follows the defaults of whichever build reads it.
         p.issue_pipeline = (v != IssuePipelineSettings::default()).then_some(v);
+    }
+    if let Some(v) = patch.repository_settings {
+        p.repository_settings = v;
     }
     if let Some(v) = patch.agent_issue_updates {
         p.agent_issue_updates = v;
@@ -419,7 +446,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), repository_settings: RepositorySettings::default() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -447,7 +474,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), repository_settings: RepositorySettings::default() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)

@@ -37,6 +37,7 @@ import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import type { RepositoryFilesPreview } from "@/types/repositorySettings";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -531,6 +532,7 @@ export const api = {
   setMachineName: (name: string | null) => invoke<MachineName>("set_machine_name", { name }),
 
   // projects
+  repositoryFilesPreview: (path: string, patterns?: string[], snapshot?: string) => invoke<RepositoryFilesPreview>("repository_files_preview", { path, patterns, snapshot }),
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
   addProject: (path: string) => invoke<Project>("add_project", { path }),
   chatsDir: () => invoke<string>("chats_dir"),

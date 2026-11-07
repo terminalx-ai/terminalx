@@ -1126,6 +1126,7 @@ fn phone_projects() -> Result<Vec<Value>> {
         "id": store::projects::public_id(&project.path),
         "name": project.name,
         "git": project.kind == store::projects::ProjectKind::Git,
+        "repositorySettings": project.repository_settings,
         "lastUsed": last.as_deref() == Some(project.path.as_str()),
     })).collect())
 }
@@ -2467,8 +2468,9 @@ mod tests {
         let repo = store::projects::add(root.join("repo").to_str().unwrap()).unwrap();
         let old = store::projects::add(root.join("old").to_str().unwrap()).unwrap();
         store::projects::update(&old.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
+        store::projects::update(&repo.path, store::projects::ProjectPatch { repository_settings: Some(store::projects::RepositorySettings { files_to_copy: vec![".env*".into()] }), ..Default::default() }).unwrap();
         let projects = phone_projects().unwrap();
-        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "lastUsed": false })]);
+        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "repositorySettings": {"filesToCopy": [".env*"]}, "lastUsed": false })]);
         assert!(!serde_json::to_string(&projects).unwrap().contains(&root.to_string_lossy().into_owned()));
         assert_eq!(store::projects::by_public_id(projects[0]["id"].as_str().unwrap()).unwrap().path, repo.path);
     }
