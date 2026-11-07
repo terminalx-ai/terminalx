@@ -2446,8 +2446,8 @@ pub async fn review_range(cwd: String, target: Option<String>, uncommitted: bool
 }
 
 #[tauri::command]
-pub async fn changes_between(cwd: String, base: String, head: Option<String>) -> CmdResult<Vec<git::ChangedFile>> {
-    tauri::async_runtime::spawn_blocking(move || git::changes_between(Path::new(&cwd), &base, head.as_deref()).map_err(err))
+pub async fn changes_between(cwd: String, base: String, head: Option<String>, hide_whitespace: Option<bool>) -> CmdResult<Vec<git::ChangedFile>> {
+    tauri::async_runtime::spawn_blocking(move || git::changes_between_options(Path::new(&cwd), &base, head.as_deref(), hide_whitespace.unwrap_or(false)).map_err(err))
         .await
         .map_err(err)?
 }
@@ -2457,6 +2457,11 @@ pub async fn changes_between(cwd: String, base: String, head: Option<String>) ->
 pub struct FilePair {
     pub before: Option<String>,
     pub after: Option<String>,
+}
+
+#[tauri::command]
+pub async fn diff_media_content(cwd: String, path: String, tree: Option<String>) -> CmdResult<Option<crate::git_media::MediaContent>> {
+    tauri::async_runtime::spawn_blocking(move || crate::git_media::read(Path::new(&cwd), &path, tree.as_deref(), 16 * 1024 * 1024).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2943,12 +2948,12 @@ pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<
 /// Uncommitted changes: HEAD's tree against a snapshot of the checkout. The
 /// snapshot (not `git diff <tree>`) is what makes untracked files count.
 #[tauri::command]
-pub async fn working_changes(cwd: String) -> CmdResult<(String, Vec<git::ChangedFile>)> {
+pub async fn working_changes(cwd: String, hide_whitespace: Option<bool>) -> CmdResult<(String, Vec<git::ChangedFile>)> {
     tauri::async_runtime::spawn_blocking(move || {
         let p = Path::new(&cwd);
         let head = git::head_tree(p).map_err(err)?;
         let snapshot = git::snapshot_tree(p).map_err(err)?;
-        let files = if head == snapshot { Vec::new() } else { git::changes_between(p, &head, Some(&snapshot)).map_err(err)? };
+        let files = if head == snapshot { Vec::new() } else { git::changes_between_options(p, &head, Some(&snapshot), hide_whitespace.unwrap_or(false)).map_err(err)? };
         Ok((head, files))
     })
     .await
@@ -2958,6 +2963,11 @@ pub async fn working_changes(cwd: String) -> CmdResult<(String, Vec<git::Changed
 #[tauri::command]
 pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_associations::Association>) -> CmdResult<Vec<crate::pr_associations::Association>> {
     tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_session(&session_key, additions).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_associations_batch(session_keys: Vec<String>) -> CmdResult<std::collections::BTreeMap<String, Vec<crate::pr_associations::Association>>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_sessions(&session_keys).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2988,6 +2998,26 @@ pub async fn pr_check_rerun(cwd: String, pr_url: String, check_url: String, fail
 #[tauri::command]
 pub async fn pr_check_fix_attachment(session_id: String, tab_id: String, pr_url: String) -> CmdResult<crate::github::checks::FixAttachment> {
     tauri::async_runtime::spawn_blocking(move || crate::github::checks::prepare_fix(&session_id, &tab_id, &pr_url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_threads(url: String) -> CmdResult<crate::github::reviews::ReviewThreads> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::list(&url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_files(url: String, head: String, base: String) -> CmdResult<Vec<crate::github::reviews::ReviewFile>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::files(&url, &head, &base).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_resolve(url: String, thread_id: String, resolved: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::resolve(&url, &thread_id, resolved).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_reply(url: String, thread_id: String, body: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::reply(&url, &thread_id, &body).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

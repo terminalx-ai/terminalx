@@ -18,6 +18,7 @@ import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { Deployments, PrChecks } from "./PrChecks";
 import { actionsRuns, checkCounts, checkSummary, isFailingCheck, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
 import { NextLine } from "./NextStep";
+import { ReviewThreads } from "./ReviewThreads";
 
 type WorkspaceCleanup = {
   projectPath: string;
@@ -326,10 +327,11 @@ export function PrPanel({
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
         const ready = mergeReadiness(pr);
+        const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} prState={pr.state} />;
         const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
           onRerun={(failedOnly) => rerun(pr, failedOnly)}
           onFix={onFixErrors && pr.state === "OPEN" ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
-        if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
+        if (inline) return <InlinePr reviews={reviews} key={row.identity} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -393,6 +395,7 @@ export function PrPanel({
                 </div>
               </div>
             )}
+            {reviews}
           </div>
         );
       })}
@@ -502,7 +505,7 @@ function reviewLabel(decision: string): string {
  * number and state, its checks folded into a count (unfolded when one fails),
  * then, unless the branch has a step first, what to do with it now.
  */
-function InlinePr({ pr, ready, held, actions, checks }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode }) {
+function InlinePr({ pr, ready, held, actions, checks, reviews }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode }) {
   const failing = pr.checks.filter(isFailingCheck).length;
   const [checksOpen, setChecksOpen] = useState(failing > 0);
   useEffect(() => {
@@ -539,6 +542,7 @@ function InlinePr({ pr, ready, held, actions, checks }: { pr: PullRequest; ready
           {checksOpen && <div className="mt-0.5">{checks}</div>}
         </div>
       )}
+      {reviews}
       <Deployments pr={pr} />
       {pr.detailsError && <p role="alert" className="text-xs text-destructive">Could not refresh merge details: {pr.detailsError}</p>}
       {pr.state === "OPEN" && held && pr.mergeQueueEntry && <p className="px-1 text-[11px] text-muted-foreground">{ready.label}</p>}

@@ -1,6 +1,8 @@
 //! Pull requests through the `gh` CLI, which already holds auth and host
 //! configuration. Absent `gh` is one readable line, not a broken panel.
 
+pub mod reviews;
+
 use std::path::{Path, PathBuf};
 use std::collections::BTreeSet;
 use std::process::Command;
