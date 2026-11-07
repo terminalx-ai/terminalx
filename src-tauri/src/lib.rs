@@ -82,6 +82,8 @@ mod media;
 mod media_types;
 mod branch_overview;
 mod git;
+#[cfg(feature = "desktop")]
+mod repo_mirror;
 mod git_media;
 mod github;
 mod unfinished_merge;
@@ -730,6 +732,9 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::repo_mirror_status,
+            commands::repo_mirror_start,
+            commands::repo_mirror_stop,
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::rename_branch,

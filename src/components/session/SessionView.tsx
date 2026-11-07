@@ -61,6 +61,7 @@ import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { copyText } from "@/lib/clipboard";
+import { RepoMirrorControl } from "./RepoMirrorControl";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -942,41 +943,44 @@ export function SessionView({
 /** The workspace's details, out of the title bar: the folder it lives in, the commit it started from, and a way to it. */
 function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session: SessionEntry; branch: string | null | undefined; folder: string | null; base: string | null; onContinue: (() => void) | null }) {
   return (
-    <DropdownMenu>
-      <WithTooltip label="Workspace">
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon-xs" aria-label="Workspace details" className="ml-0.5 shrink-0 text-faint hover:text-foreground">
-            <Ellipsis />
-          </Button>
-        </DropdownMenuTrigger>
-      </WithTooltip>
-      <DropdownMenuContent align="start" className="min-w-[15rem]">
-        {(folder || base) && (
-          <>
-            <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
-              {folder && <span className="flex items-center gap-1.5 text-foreground"><Folder className="size-3.5 text-faint" />{folder}</span>}
-              {base && <span className="text-[11px] text-muted-foreground">{base}</span>}
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-          </>
-        )}
-        {branch && (
-          <DropdownMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
-            <Copy /> Copy branch name
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
-          <FolderOpen /> Reveal in Finder
-        </DropdownMenuItem>
-        {onContinue && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onContinue}>
-              <SessionContinue /> Continue in New Session…
+    <>
+      <RepoMirrorControl key={session.id} session={session} />
+      <DropdownMenu>
+        <WithTooltip label="Workspace">
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-xs" aria-label="Workspace details" className="ml-0.5 shrink-0 text-faint hover:text-foreground">
+              <Ellipsis />
+            </Button>
+          </DropdownMenuTrigger>
+        </WithTooltip>
+        <DropdownMenuContent align="start" className="min-w-[15rem]">
+          {(folder || base) && (
+            <>
+              <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
+                {folder && <span className="flex items-center gap-1.5 text-foreground"><Folder className="size-3.5 text-faint" />{folder}</span>}
+                {base && <span className="text-[11px] text-muted-foreground">{base}</span>}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {branch && (
+            <DropdownMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
+              <Copy /> Copy branch name
             </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          )}
+          <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
+            <FolderOpen /> Reveal in Finder
+          </DropdownMenuItem>
+          {onContinue && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={onContinue}>
+                <SessionContinue /> Continue in New Session…
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
   );
 }
