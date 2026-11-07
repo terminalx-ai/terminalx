@@ -330,8 +330,8 @@ describe("chat scroll follow", () => {
   // through the turn holding its lower edge, so a reply taller than the
   // overscan never leaves the view empty, scrolling either way, right after
   // a step or once the reader holds still. Its 510 steps redraw a 200-turn
-  // chat four times each: about 2 s alone, 6–7 s in CI's full run, so it gets
-  // more than the default 5 s.
+  // chat four times each: about 2 s alone, 6–7 s in CI's full run, and over
+  // 30 s in a loaded shared VM. Allow for that without reducing the steps.
   it("never leaves the view over spacers while scrolling past turns taller than the overscan", () => {
     const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
     keys.forEach((key, index) => heights.set(key, tallTurn(index)));
@@ -355,7 +355,7 @@ describe("chat scroll follow", () => {
         expect(overSpacer(), `${run}, step ${step} (${delta} px) at ${top}: settled`).toBe(0);
       });
     }
-  }, 30_000);
+  }, 120_000);
 
   // #727: a turn scrolled far from the view is not drawn. What the reader
   // opened in it is the chat's to keep, so it comes back as they left it.

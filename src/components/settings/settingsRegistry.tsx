@@ -16,7 +16,7 @@ export const SETTINGS_SECTIONS = {
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
-  repositories: { title: "Workspace settings", group: "Repositories", entry: "repositories.setup" },
+  repositories: { title: "Repositories", group: "Repositories", entry: "repositories.mergedCleanup" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
   shortcuts: { title: "Shortcuts", group: "More", entry: "shortcuts.systemWide" },
@@ -452,16 +452,16 @@ export const SETTINGS_ROWS = [
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
-    id: "repositories.setup", section: "repositories", title: "Setup script",
-    description: "Run a setup script once in every new worktree.",
-    searchTerms: ["repositories", "workspace", "setup", "install", "scripts"], scope: "repository",
-    storage: { kind: "file", location: "terminalx.json#scripts.setup" }, layout: "content",
-  }),
-  defineSetting({
     id: "repositories.mergedCleanup", section: "repositories", title: "Workspace cleanup",
     description: "Override automatic merged-workspace cleanup for this repository.",
     searchTerms: ["repositories", "workspace", "cleanup"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#mergedCleanup.projects" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.scripts", section: "repositories", title: "Scripts",
+    description: "Save setup and archive scripts for this repository on this computer.",
+    searchTerms: ["repository", "setup", "archive", "scripts", "hooks"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts" }, layout: "content",
   }),
   defineSetting({
     id: "shortcuts.systemWide", section: "shortcuts", title: "System-wide shortcut",

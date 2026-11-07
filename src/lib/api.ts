@@ -307,6 +307,10 @@ export interface TabState {
 
 /** How a workspace is removed. */
 export interface WorkspaceRemoveOptions {
+  /** Receipt for the failed archive run the person explicitly chose to bypass. */
+  archiveFailure?: string;
+  /** Receipt for the failed run the person explicitly chose to retry. */
+  archiveRetry?: string;
   /** Settling: the conversations stay and move to the project. */
   keepSessions: boolean;
   deleteBranch: boolean;

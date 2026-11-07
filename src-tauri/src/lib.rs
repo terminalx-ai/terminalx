@@ -8,6 +8,7 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+mod archive_script;
 mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;

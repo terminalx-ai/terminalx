@@ -38,6 +38,11 @@ pub struct Launch {
 }
 
 impl Launch {
+    pub(crate) fn require_available(&self) -> Result<()> {
+        ensure!(!self.stamp.unavailable, "Environment overrides are unavailable. Open TerminalX Settings → Environment, restore Keychain access, then retry.");
+        Ok(())
+    }
+
     pub fn inject(&self, command: &mut portable_pty::CommandBuilder) {
         for (name, value) in &self.values {
             command.env(name, value);
@@ -1267,7 +1272,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn resolved_values_reach_shell_and_agent_ptys_literally() {
+    fn resolved_values_reach_shell_agent_and_archive_ptys_literally() {
         let dir = tempfile::tempdir().unwrap();
         let secrets = MemorySecrets::default();
         let store = Store {
@@ -1281,25 +1286,23 @@ mod tests {
             "TEST_KEY",
             "$(touch must-not-exist); 'quoted'\nsecond line",
         );
-        for id in ["session:1", "tab:agent"] {
+        for id in ["session:1", "tab:agent", "archive:1"] {
             let launch = store.resolve(Some("repo".into())).unwrap();
             let expected = launch.values["TEST_KEY"].clone();
             TEST_LAUNCH.with(|slot| *slot.borrow_mut() = Some(launch));
             let terminals = crate::pty::Terminals::new();
             let sink = std::sync::Arc::new(crate::sink::BroadcastSink::new(64));
-            terminals
-                .spawn(
-                    sink,
-                    id,
-                    crate::pty::PaneSpec {
-                        cwd: dir.path().to_str().unwrap(),
-                        cols: 80,
-                        rows: 24,
-                        command: Some("/usr/bin/printf '%s' \"$TEST_KEY\""),
-                        env: &[],
-                    },
-                )
-                .unwrap();
+            let spec = crate::pty::PaneSpec {
+                cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24,
+                command: Some("/usr/bin/printf '%s' \"$TEST_KEY\""), env: &[],
+            };
+            if id.starts_with("archive:") {
+                let file = dir.path().join("archive.sh");
+                std::fs::write(&file, spec.command.unwrap()).unwrap();
+                terminals.spawn_program(sink, id, spec, std::ffi::OsStr::new("/bin/sh"), &[file.as_os_str()], &|| {}).unwrap();
+            } else {
+                terminals.spawn(sink, id, spec).unwrap();
+            }
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             loop {
                 let output = String::from_utf8(terminals.read_output(id).unwrap_or_default())
@@ -1317,5 +1320,27 @@ mod tests {
             terminals.kill_all();
             assert!(!dir.path().join("must-not-exist").exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_does_not_start_without_its_configured_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        TEST_LAUNCH.with(|slot| *slot.borrow_mut() = Some(Launch {
+            values: Values::new(), stamp: Stamp { unavailable: true, ..Default::default() },
+        }));
+        let terminals = crate::pty::Terminals::new();
+        let started = std::cell::Cell::new(false);
+        let script = dir.path().join("archive.sh");
+        std::fs::write(&script, "touch archive-ran").unwrap();
+        let error = terminals.spawn_program(
+            std::sync::Arc::new(crate::sink::BroadcastSink::new(64)), "archive:unavailable",
+            crate::pty::PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: None, env: &[] },
+            std::ffi::OsStr::new("/bin/sh"), &[script.as_os_str()], &|| started.set(true),
+        ).unwrap_err();
+        assert!(format!("{error:#}").contains("Environment overrides are unavailable"));
+        assert!(!started.get());
+        assert!(!dir.path().join("archive-ran").exists());
+        assert!(terminals.panes().is_empty());
     }
 }
