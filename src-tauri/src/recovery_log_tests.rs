@@ -280,7 +280,9 @@ fn a_runtime_handover_keeps_the_incident() {
 #[test]
 fn a_name_that_is_a_file_location_is_never_kept() {
     for path in ["/Users/alice/models/x.gguf", "~/models/x.gguf", "./x.gguf", "../models/x", "models/x.gguf", "x.safetensors", "C:\\Users\\alice\\m.bin",
-        "c:/models/m", "a/b/c/d", "models//x", "/opt/llm", "home/alice/models/q"] {
+        "c:/models/m", "a/b/c/d", "models//x", "/opt/llm", "home/alice/models/q",
+        // What the character filter would turn into a location (#820 security review).
+        "x /Users/alice", "é/Users/alice", " ~/m", "x\tUsers/alice", "users/alice", "#/home/alice"] {
         assert_eq!(name(path), PATH, "{path}");
     }
     for id in ["gpt-6-astra", "openai/gpt-6-astra", "anthropic/claude-3.5-sonnet", "hf.co/org/model", "llama3:8b", "xhigh", "codex_stdio", "0.2.25"] {

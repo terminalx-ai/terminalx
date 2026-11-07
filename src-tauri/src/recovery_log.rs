@@ -169,8 +169,12 @@ pub const PATH: &str = "[path]";
 /// with a provider or a host in front (`openai/gpt-6-astra`,
 /// `hf.co/org/model`) is a name, not a location, and is kept.
 pub fn name(text: &str) -> String {
-    if is_path(text.trim()) { return PATH.to_owned(); }
-    text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect()
+    let kept: String = text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect();
+    // Judged as given and as kept: dropping a space or a mark can make a
+    // location of what did not read as one (`x /Users/alice` keeps as
+    // `x/Users/alice`).
+    if is_path(text.trim()) || is_path(&kept) { return PATH.to_owned(); }
+    kept
 }
 
 /// Whether `text` names a place on disk rather than a thing: absolute, in a
@@ -181,7 +185,9 @@ fn is_path(text: &str) -> bool {
     const FILES: &[&str] = &["gguf", "ggml", "bin", "safetensors", "onnx", "pt", "pth", "ckpt", "mlx", "mlmodel", "json", "yaml", "yml", "toml"];
     let drive = text.len() >= 2 && text.as_bytes()[0].is_ascii_alphabetic() && text.as_bytes()[1] == b':';
     let file = text.rsplit_once('.').is_some_and(|(_, extension)| FILES.contains(&extension.to_ascii_lowercase().as_str()));
-    text.starts_with(['/', '~', '.']) || text.contains('\\') || drive || text.matches('/').count() > 2 || file
+    // A home folder anywhere in it names its owner.
+    let home = text.split(|c: char| c == '/' || c == '\\' || c.is_whitespace()).any(|part| part.eq_ignore_ascii_case("users") || part.eq_ignore_ascii_case("home"));
+    text.starts_with(['/', '~', '.']) || text.contains('\\') || drive || home || text.matches('/').count() > 2 || file
         || text.split('/').any(|part| part == ".." || part == "." || part.is_empty() && text.contains('/'))
 }
 
