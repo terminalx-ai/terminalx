@@ -455,50 +455,85 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 .animate-overlay-in { animation: overlay-in 220ms ease-out both; }
 .animate-overlay-out { animation: overlay-out 140ms ease-in both; }
 
-/* The share dialog's collaboration scene (CollaborationScene.tsx): a canvas
-   of faint dots, bubbles that fill a conversation in turn, three cursors on
-   their own loops, and dots typing in the prompt. Six seconds a loop. */
-.cs-canvas {
-  background-image: radial-gradient(circle, color-mix(in oklab, var(--color-foreground) 9%, transparent) 1px, transparent 1px);
-  background-size: 14px 14px;
+/* The share dialog's collaboration scene (CollaborationScene.tsx), told at
+   the prompt over a nine-second loop:
+     0–25%  you go to the prompt, click, type, send (row 1);
+     28–37% the agent thinks, then adds its answer (row 2);
+     35–60% the designer goes to the prompt, clicks, types, sends (row 3);
+     63–72% the agent thinks, then answers again (row 4);
+     92%    the conversation clears for the next loop.
+   Under the prompt, "Agent joined" from the start and "Designer joined"
+   just before the designer's cursor appears. */
+.cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply { animation: 9s infinite both; }
+.cs-reply { transform-origin: left; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes cs-dot { 0%, 60%, 100% { opacity: 0.35; transform: none; } 30% { opacity: 1; transform: translateY(-1.5px); } }
+.cs-dot { animation: cs-dot 0.9s ease-in-out infinite; }
+.cs-row { animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+.cs-row.self-end { transform-origin: right; }
+.cs-row:not(.self-end) { transform-origin: left; }
+@keyframes cs-row-1 { 0%, 24% { opacity: 0; transform: translateY(6px) scale(0.9); } 28%, 92% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+@keyframes cs-agent-1 { 0%, 27% { opacity: 0; transform: translateY(6px); } 30%, 92% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+@keyframes cs-row-3 { 0%, 59% { opacity: 0; transform: translateY(6px) scale(0.9); } 63%, 92% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+@keyframes cs-agent-2 { 0%, 62% { opacity: 0; transform: translateY(6px); } 65%, 92% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+@keyframes cs-think-1 { 0%, 28% { opacity: 0; } 30%, 33% { opacity: 1; } 35%, 100% { opacity: 0; } }
+@keyframes cs-think-2 { 0%, 63% { opacity: 0; } 65%, 68% { opacity: 1; } 70%, 100% { opacity: 0; } }
+@keyframes cs-reply-1 { 0%, 33% { opacity: 0; transform: scaleX(0); } 38%, 100% { opacity: 1; transform: none; } }
+@keyframes cs-reply-2 { 0%, 68% { opacity: 0; transform: scaleX(0); } 73%, 100% { opacity: 1; transform: none; } }
+.cs-row-1 { animation-name: cs-row-1; }
+.cs-agent-1 { animation-name: cs-agent-1; }
+.cs-think-1 { animation-name: cs-think-1; }
+.cs-reply-1 { animation-name: cs-reply-1; }
+.cs-row-3 { animation-name: cs-row-3; }
+.cs-agent-2 { animation-name: cs-agent-2; }
+.cs-think-2 { animation-name: cs-think-2; }
+.cs-reply-2 { animation-name: cs-reply-2; }
+
+@keyframes cs-typing-me { 0%, 10% { opacity: 0; width: 0; } 11% { opacity: 1; width: 0; } 23% { opacity: 1; width: 58%; } 25%, 100% { opacity: 0; width: 58%; } }
+@keyframes cs-typing-designer { 0%, 45% { opacity: 0; width: 0; } 46% { opacity: 1; width: 0; } 58% { opacity: 1; width: 48%; } 60%, 100% { opacity: 0; width: 48%; } }
+.cs-typing { animation-timing-function: steps(14, end); }
+.cs-typing-me { animation-name: cs-typing-me; }
+.cs-typing-designer { animation-name: cs-typing-designer; }
+
+@keyframes cs-ring-me { 0%, 9% { opacity: 0; } 10%, 25% { opacity: 1; } 28%, 100% { opacity: 0; } }
+@keyframes cs-ring-designer { 0%, 44% { opacity: 0; } 45%, 60% { opacity: 1; } 63%, 100% { opacity: 0; } }
+.cs-ring-me { animation-name: cs-ring-me; }
+.cs-ring-designer { animation-name: cs-ring-designer; }
+
+@keyframes cs-send { 0%, 23%, 27%, 58%, 62%, 100% { transform: none; opacity: 0.5; } 25%, 60% { transform: scale(1.25); opacity: 1; } }
+.cs-send { animation-name: cs-send; }
+
+.cs-cursor { animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1); will-change: left, top, transform; }
+/* You: from the top left to the prompt, a click, still while typing, then away. */
+@keyframes cs-cursor-me {
+  0%, 100% { left: 6%; top: 8%; transform: none; }
+  8% { left: 24%; top: 66%; transform: none; }
+  9% { transform: scale(0.82); }
+  10%, 25% { left: 24%; top: 66%; transform: none; }
+  36%, 90% { left: 0%; top: 52%; }
 }
-@keyframes cs-bubble {
-  0% { opacity: 0; transform: translateY(4px) scaleX(0.6); }
-  8%, 82% { opacity: 1; transform: none; }
-  92%, 100% { opacity: 0; transform: none; }
+/* The designer: waits at the right, goes to the prompt in their turn, then back. */
+/* The designer: not there until they join (29%), then takes the prompt in their turn. */
+@keyframes cs-cursor-designer {
+  0%, 28% { left: 90%; top: 30%; opacity: 0; transform: none; }
+  32%, 35% { left: 84%; top: 24%; opacity: 1; transform: none; }
+  43% { left: 30%; top: 66%; transform: none; }
+  44% { transform: scale(0.82); }
+  45%, 60% { left: 30%; top: 66%; transform: none; }
+  72%, 94% { left: 82%; top: 40%; opacity: 1; }
+  98%, 100% { left: 84%; top: 40%; opacity: 0; }
 }
-.cs-bubble { animation: cs-bubble 6s cubic-bezier(0.16, 1, 0.3, 1) infinite both; transform-origin: right; }
-.cs-bubble:not(.self-end) { transform-origin: left; }
-@keyframes cs-dot { 0%, 60%, 100% { opacity: 0.35; transform: none; } 30% { opacity: 1; transform: translateY(-2px); } }
-.cs-dot { animation: cs-dot 1s ease-in-out infinite; }
-.cs-cursor { animation: 6s ease-in-out infinite; will-change: left, top; }
-@keyframes cs-path-a {
-  0%, 100% { left: 10%; top: 18%; }
-  15% { left: 40%; top: 74%; }
-  30% { left: 76%; top: 34%; }
-  60% { left: 68%; top: 26%; }
-  80% { left: 22%; top: 44%; }
-}
-@keyframes cs-path-b {
-  0%, 100% { left: 82%; top: 66%; }
-  35% { left: 84%; top: 28%; }
-  55% { left: 52%; top: 76%; }
-  75% { left: 74%; top: 52%; }
-}
-@keyframes cs-path-c {
-  0%, 100% { left: 56%; top: 12%; }
-  40% { left: 24%; top: 58%; }
-  72% { left: 58%; top: 76%; }
-  90% { left: 62%; top: 24%; }
-}
-.cs-path-a { animation-name: cs-path-a; }
-.cs-path-b { animation-name: cs-path-b; }
-.cs-path-c { animation-name: cs-path-c; }
+/* Joined notices under the prompt: the agent's at the start, the designer's just before they appear. */
+.cs-joined { animation: 9s ease-out infinite both; }
+@keyframes cs-joined-agent { 0% { opacity: 0; transform: translateY(3px); } 4%, 94% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; } }
+@keyframes cs-joined-designer { 0%, 27% { opacity: 0; transform: translateY(3px); } 31%, 94% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; } }
+.cs-joined-agent { animation-name: cs-joined-agent; }
+.cs-joined-designer { animation-name: cs-joined-designer; }
+.cs-cursor-me { animation-name: cs-cursor-me; }
+.cs-cursor-designer { animation-name: cs-cursor-designer; }
 
 @media (prefers-reduced-motion: reduce) {
-  .cs-bubble, .cs-dot, .cs-cursor { animation: none; }
-  .cs-path-a { left: 30%; top: 40%; }
-  .cs-path-b { left: 78%; top: 60%; }
-  .cs-path-c { left: 56%; top: 20%; }
-  .animate-dialog-in, .animate-dialog-out, .animate-overlay-in, .animate-overlay-out { animation-duration: 1ms; }
+  .cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply, .cs-dot, .cs-joined { animation: none; }
+  .cs-typing, .cs-ring, .cs-think { opacity: 0; }
+  .cs-cursor-me { left: 0%; top: 52%; }
+  .cs-cursor-designer { left: 84%; top: 44%; }
 }
