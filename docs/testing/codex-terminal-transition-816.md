@@ -26,6 +26,14 @@ Startup failure is returned to the view switch instead of being swallowed.
 A successful retry clears the view refusal; native owner cleanup clears
 its prior recovery state through the existing status path.
 
+A native thread must have a saved conversation before handoff. A missing
+rollout leaves its native owner running and explains why Terminal cannot open.
+After confirmed owner exit, handoff atomically copies the latest rollout into
+the terminal's home before persisting the new transport. Copy failures retain
+the native transport, so Chat can resume its thread. This avoids the general
+terminal launcher's missing-rollout fallback to a new conversation, including
+when a previous unsuccessful handoff left an older managed copy.
+
 ## Diagnostics
 
 `terminal_view_transition` version 1 records share the tab's existing private
@@ -55,7 +63,8 @@ that issue's broader recovery-visibility analytics or infer its root cause.
   cancellation, retained conversation and follow-up send.
 - `session::codex_stdio::tests::owned_stdio_lifecycle_is_process_bounded`:
   idle/active handoff, fence ordering, failed cleanup, confirmed owner exit,
-  thread identity, repeated handoffs, recovery clearing and diagnostic content.
+  thread identity, missing rollouts, refreshed saved work, repeated handoffs,
+  recovery clearing and diagnostic content.
 - `remote::server::tests::a_driver_who_may_start_its_terminal_moves_native_codex_there`:
   permission gates, active startup, interrupt, same-thread terminal resume,
   one terminal owner and no prompt replay.

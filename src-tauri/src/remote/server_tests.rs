@@ -2410,7 +2410,18 @@ async fn native_terminal_child() {
     assert_eq!(events().iter().filter(|event| matches!(event.payload, crate::events::Payload::UserMessage { .. })).count(), 1);
 
 
-    // A driver who may approve moves it, and its terminal starts.
+    // No terminal may silently start a new conversation when the native
+    // thread has not saved its rollout yet. The refusal keeps Chat usable.
+    let refused = move_as(alice.clone()).await.unwrap_err();
+    assert!(refused.1.contains("saved conversation is not available"), "{refused:?}");
+    assert_eq!((transport(), terminal_launches()), (Native, 0));
+    assert_eq!(index::get(&session).unwrap().tab(&tab).unwrap().provider_session_id.as_deref(), Some("thread-1"));
+    assert!(!events().iter().any(|event| matches!(event.payload, crate::events::Payload::Error { .. })));
+    let saved = home.join("user-codex/sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(saved, "{}\n").unwrap();
+
+    // A driver who may approve retries, and the same conversation starts.
     move_as(alice.clone()).await.unwrap();
     assert_eq!(transport(), Pty);
     let until = std::time::Instant::now() + Duration::from_secs(5);

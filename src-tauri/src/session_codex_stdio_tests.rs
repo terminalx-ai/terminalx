@@ -211,6 +211,18 @@ fn to_terminal_fixture(manager: &SessionManager) {
     assert!(!manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap(), "an active turn defers the switch without an error");
     assert!(matches!(rt.lock().unwrap().engine, Engine::CodexStdio(_)));
     rt.lock().unwrap().turn_open = false;
+    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
+    assert!(refused.to_string().contains("saved conversation is not available"), "{refused:#}");
+    assert!(matches!(rt.lock().unwrap().engine, Engine::CodexStdio(_)), "a missing rollout keeps the native owner usable");
+    assert_eq!(rt.lock().unwrap().recovery, None);
+    let relative = "sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl";
+    let source = codex::home::native_root().unwrap().join(relative);
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "{}\n").unwrap();
+    // A previous refused handoff's copy must not hide later native work.
+    let managed = codex::home::managed_root().unwrap().join(relative);
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, "").unwrap();
     // An exit Stop cannot confirm leaves the tab where it was, to retry.
     rt.lock().unwrap().stop_in_flight = true;
     assert!(manager.codex_stdio_to_terminal("stdio-owner", "tab").is_err());
@@ -223,6 +235,7 @@ fn to_terminal_fixture(manager: &SessionManager) {
     assert!(matches!(rt.lock().unwrap().engine, Engine::None) && rt.lock().unwrap().child.is_none());
     let tab = index::get("stdio-owner").unwrap().tab("tab").unwrap().clone();
     assert_eq!((tab.transport, tab.provider_session_id.as_deref()), (AgentTransport::Pty, Some("thread-1")));
+    assert_eq!(std::fs::read(&managed).unwrap(), std::fs::read(&source).unwrap(), "the terminal takes the latest saved conversation");
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
     assert_eq!(chat(), before, "the move adds no prompts, turns or errors to the chat");
     assert_eq!(rt.lock().unwrap().recovery, None, "the successful handoff clears the previous connection's warning");
@@ -231,6 +244,7 @@ fn to_terminal_fixture(manager: &SessionManager) {
         .filter(|line| line["type"] == "terminal_view_transition").collect();
     assert!(trace.iter().any(|line| line["report"]["stage"] == "waiting_for_turn" && line["turn_open"] == true && line["transport"] == "experimentalCodexStdio"));
     assert!(trace.iter().any(|line| line["report"]["errorCategory"] == "owner_cleanup"));
+    assert!(trace.iter().any(|line| line["report"]["errorCategory"] == "conversation_unavailable" && line["transport"] == "experimentalCodexStdio"));
     assert!(trace.iter().any(|line| line["report"]["stage"] == "transport_changed" && line["transport"] == "pty"));
     assert!(!serde_json::to_string(&trace).unwrap().contains("carry on"), "no conversation content in diagnostics");
 }

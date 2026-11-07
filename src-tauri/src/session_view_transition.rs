@@ -8,7 +8,7 @@ pub enum Stage { Requested, WaitingForTurn, StoppingOwner, TransportChanged, Sta
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ErrorCategory { Handoff, Start, Attach, ConnectionEnded, OwnerCleanup, Persistence }
+pub enum ErrorCategory { Handoff, Start, Attach, ConnectionEnded, OwnerCleanup, ConversationUnavailable, Persistence }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

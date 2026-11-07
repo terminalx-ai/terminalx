@@ -165,7 +165,7 @@ impl SessionManager {
         let result = (|| {
             self.accepting_work()?;
             let rt_arc = self.runtime(session_id, tab_id)?;
-            let (running, _switching) = {
+            let (running, resume, _switching) = {
                 // Inspect before fencing, under the same admission as sends and
                 // protocol writes. Fencing an active connection can reject its
                 // next approval/interrupt/start frame and falsely fail its turn.
@@ -182,12 +182,31 @@ impl SessionManager {
                     record(&rt, tab.transport, &report(Stage::WaitingForTurn, None));
                     return Ok(false);
                 }
-                (running, fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
+                (running, tab.provider_session_id.clone(), fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
             };
+            // The general PTY launcher can restart a missing conversation.
+            // A view switch must never take that fallback. Check before
+            // stopping, then copy after exit so the final writes are included.
+            category = ErrorCategory::ConversationUnavailable;
+            let saved = if let Some(id) = resume {
+                let managed = codex::home::managed_root()?;
+                let source = [codex::home::native_root_if_made(), codex::home::user_root()]
+                    .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
+                    .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?;
+                Some((id, managed, source))
+            } else { None };
             if running {
                 category = ErrorCategory::OwnerCleanup;
                 note(Stage::StoppingOwner, None);
                 self.stop_codex_stdio(&rt_arc, false)?;
+            }
+            category = ErrorCategory::ConversationUnavailable;
+            if let Some((id, managed, source)) = saved {
+                if source != managed {
+                    anyhow::ensure!(codex::home::copy_rollout(&managed, &source, &id)
+                        .context("Codex's saved conversation could not be copied for Terminal view. Chat is still available; retry after resolving the file access problem.")?,
+                        "Codex's saved conversation is no longer available for Terminal view. Chat is still available.");
+                }
             }
             category = ErrorCategory::Persistence;
             index::update_tab(session_id, tab_id, |tab| { tab.transport = AgentTransport::Pty; Ok(()) })?;
