@@ -56,12 +56,13 @@ export async function refreshWorkspaceSetup() {
   update({ runs: [...(runs ?? []).filter((run) => !changed(run.sessionId)), ...state.runs.filter((run) => changed(run.sessionId))] });
 }
 
-export function useWorkspaceSetups() {
-  useEffect(() => { void bootWorkspaceSetup(); }, []);
+export function useWorkspaceSetups(enabled = true) {
+  useEffect(() => { if (enabled) void bootWorkspaceSetup(); }, [enabled]);
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 export function useWorkspaceSetup(sessionId: string | null) {
-  return useWorkspaceSetups().runs.find((run) => run.sessionId === sessionId);
+  // Cloud tabs pass null: observing them must not contact the local runtime.
+  return useWorkspaceSetups(sessionId !== null).runs.find((run) => run.sessionId === sessionId);
 }
 export function dismissSetup(run: WorkspaceSetup) { update({ dismissed: [...state.dismissed, setupRunKey(run)] }); }
 export function revealSetup(sessionId: string) { update({ shown: { sessionId, request: (state.shown?.request ?? 0) + 1 } }); }
