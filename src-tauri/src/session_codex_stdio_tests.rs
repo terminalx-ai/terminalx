@@ -41,6 +41,65 @@ fn owned_stdio_lifecycle_is_process_bounded() {
     }
 }
 
+/// Exercise the actual stdout reader and watcher together: activity during a
+/// long turn must renew the silence deadline, and stale launch output cannot.
+#[test]
+fn codex_stdout_renews_activity_and_clears_only_watcher_timeouts() {
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-activity", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let rt = manager.runtime("stdio-activity", "tab").unwrap();
+    let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into(), None);
+    engine.thread = Some("thread".into());
+    engine.ready = true;
+    let launch = engine.launch.clone();
+    let sink = StdioSink { manager: manager.clone(), rt: rt.clone(), launch, startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
+    let patience = recovery::Patience::DEFAULT;
+    {
+        let mut rt = rt.lock().unwrap();
+        rt.engine = Engine::CodexStdio(engine);
+        rt.open_turn();
+        rt.status = TabStatus::InProgress;
+        rt.last_activity = Instant::now() - patience.stall - Duration::from_secs(1);
+    }
+    // A tool result, rather than assistant text, must count as activity too.
+    let frame = json!({"method":"item/completed", "params":{"threadId":"thread", "turnId":"turn",
+        "item":{"id":"tool", "type":"commandExecution", "status":"completed", "exitCode":0, "aggregatedOutput":"ok"}}}).to_string();
+    sink.stdout_line(frame.clone());
+    manager.watch_tabs(patience, Instant::now(), |_| None);
+    assert_eq!(rt.lock().unwrap().recovery, None, "recent native output must not be called a five-minute stall");
+    assert_eq!(rt.lock().unwrap().status, TabStatus::InProgress);
+
+    // Genuine silence still warns. The next tool result clears that guess
+    // immediately and starts a fresh deadline, without another user prompt.
+    let deadline = rt.lock().unwrap().last_activity + patience.stall;
+    manager.watch_tabs(patience, deadline, |_| None);
+    assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Timeout));
+    let stale = StdioSink { manager: manager.clone(), rt: rt.clone(), launch: Arc::new(()), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
+    let before = rt.lock().unwrap().last_activity;
+    stale.stdout_line(frame.clone());
+    assert_eq!(rt.lock().unwrap().last_activity, before);
+    assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Timeout));
+    sink.stdout_line(frame.clone());
+    assert_eq!(rt.lock().unwrap().recovery, None);
+    manager.watch_tabs(patience, Instant::now(), |_| None);
+    assert_eq!(rt.lock().unwrap().status, TabStatus::InProgress);
+
+    // An explicit provider failure is not a silence guess. Do not erase it
+    // just because more transport output arrives.
+    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut);
+    sink.stdout_line(frame);
+    assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::SignedOut));
+}
+
 struct GateSink {
     sink: StdioSink,
     entered: mpsc::Sender<()>,
