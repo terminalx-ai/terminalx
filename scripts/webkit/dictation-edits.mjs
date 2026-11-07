@@ -39,7 +39,10 @@ const VIEWPORT = { width: 1280, height: 760 };
 
 /** A page of the app with the recogniser stubbed: the microphone opens and closes, and the script says what is heard. */
 async function app(fixture, viewport = VIEWPORT) {
-  const page = await open(browser, server.url, fixture, viewport);
+  // Composer regressions start on a device that has already completed the intro.
+  const page = await open(browser, server.url, fixture, viewport, {
+    extra: `localStorage.setItem('terminalx.intro.v1', JSON.stringify({ step: 2, completed: true }));`,
+  });
   await page.evaluate(() => {
     const { answers, emit } = window.__PW_STUB__;
     answers.dictation_start = () => {

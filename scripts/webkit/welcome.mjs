@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // #445: synthetic bridge only; no installed app or real sessions.
+// These welcome/action fixtures represent a device that completed the intro.
 // Run after pnpm build: node scripts/webkit/welcome.mjs
 import assert from "node:assert/strict";
 import { launch, open, serve } from "./harness.mjs";
@@ -12,6 +13,7 @@ try {
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width, height: 650 }, {
         colorScheme,
         extra: `
+          localStorage.setItem('terminalx.intro.v1', JSON.stringify({ step: 2, completed: true }));
           window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Dev';
           localStorage.setItem('raccoon.prefs', JSON.stringify({ sidebarOpen: false, theme: '${colorScheme}', shortcuts: {
             'app.newSession': ['mod+shift+y'], 'app.commandPalette': [], 'app.quickChat': ['mod+shift+q']
@@ -40,7 +42,7 @@ try {
     }
   }
   const first = await open(browser, server.url, { cloud: false, localProjects: 0 }, { width: 420, height: 650 }, {
-    extra: `window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Legacy'; localStorage.setItem('raccoon.prefs', JSON.stringify({sidebarOpen: false}));`,
+    extra: `localStorage.setItem('terminalx.intro.v1', JSON.stringify({ step: 2, completed: true })); window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Legacy'; localStorage.setItem('raccoon.prefs', JSON.stringify({sidebarOpen: false}));`,
   });
   const start = first.getByTestId("start-screen");
   await start.getByRole("heading", { name: "TerminalX Legacy" }).waitFor();
@@ -49,7 +51,7 @@ try {
   }
   assert.equal(await start.evaluate((element) => element.scrollWidth <= element.clientWidth), true);
   await first.close();
-  console.log("ok first-run: shared branding and all three project actions");
+  console.log("ok post-intro empty workspace: shared branding and all three project actions");
 } finally {
   await browser.close();
   server.close();
