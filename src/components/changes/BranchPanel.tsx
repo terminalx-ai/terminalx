@@ -125,7 +125,7 @@ export function BranchPanel({
   if (error && !overview) return <p className="p-4 text-xs text-destructive">{error}</p>;
   if (!overview) {
     return (
-      <p role="status" className="flex items-center gap-1.5 p-4 text-xs text-faint">
+      <p role="status" className="animate-panel-content flex items-center gap-1.5 p-4 text-xs text-faint">
         <Loader2 className="size-3 animate-spin" aria-hidden /> Reading the branch…
       </p>
     );
@@ -197,7 +197,7 @@ export function BranchPanel({
   const landed = overview.ahead === 0 && !overview.onBase && !!started && !!overview.forkPoint && !overview.forkPoint.sha.startsWith(started) && !started.startsWith(overview.forkPoint.sha);
 
   return (
-    <div className={inline ? undefined : "h-full overflow-y-auto scrollbar-thin"} data-testid="branch-panel">
+    <div className={cn("animate-panel-content", !inline && "h-full overflow-y-auto scrollbar-thin")} data-testid="branch-panel">
       {/* One left edge for the tab, 24px from the panel: the branch icon, each box's own edge, the graph's dots and every row
           start on it. Only what is inside a box is indented. */}
       <div className="flex flex-col gap-3 px-6 py-4">

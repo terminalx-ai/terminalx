@@ -37,7 +37,7 @@ export function LocalSidebarSections({ groups, filtered, renderSession }: {
   const { error } = useLocalSections();
   return <>
     {groups.map(({ section, items }, index) => (!filtered || items.length > 0) && <Section key={section.id} section={section} sessions={items} index={index} count={groups.length} filtered={filtered} renderSession={renderSession} />)}
-    <button type="button" onClick={() => openSectionDialog({ kind: "create" })} className="mb-2 flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-faint hover:bg-selected/50 focus-visible:ring-2 focus-visible:ring-ring/40"><FolderPlus className="size-3.5" /> New section…</button>
+    {/* No standing "New section…" row: a section is made from a chat's menu, Move to section → New section…, where there is a chat to put in it. */}
     {error && <p role="alert" className="px-2 py-1 text-xs text-destructive">{error}</p>}
   </>;
 }

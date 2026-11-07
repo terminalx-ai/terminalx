@@ -205,10 +205,10 @@ function ChangesBody({
   };
   const totals = sumChanges(files);
 
-  if (!range) return <div role={error ? "alert" : "status"} className="px-3 py-4 text-xs text-muted-foreground">{error ?? noRange}</div>;
+  if (!range) return <div role={error ? "alert" : "status"} className="animate-panel-content px-3 py-4 text-xs text-muted-foreground">{error ?? noRange}</div>;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="animate-panel-content flex h-full min-h-0 flex-col">
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
         <span>{label} · {files.length} {files.length === 1 ? "file" : "files"}</span>
         <span className="font-mono tabular-nums">
