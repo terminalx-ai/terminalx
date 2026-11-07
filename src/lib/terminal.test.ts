@@ -22,6 +22,8 @@ async function loadTerminalStore() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Module resets restore saved selections; each test starts with a fresh desktop.
+  localStorage.removeItem("terminalx:selected-tabs:v1");
   listen.mockResolvedValue(() => {});
 });
 
