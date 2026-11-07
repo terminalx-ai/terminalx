@@ -49,7 +49,7 @@ it("diffs the turn's range and reads both sides through the given source", async
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
   fireEvent.click(await screen.findByRole("button", { name: /turn.ts/ }));
   expect((await screen.findByTestId("diff")).textContent).toBe("src/turn.ts:old->new");
-  expect(source.changesBetween).toHaveBeenCalledWith("base-tree", "head-tree");
+  expect(source.changesBetween).toHaveBeenCalledWith("base-tree", "head-tree", false);
   expect(source.fileContentsAt).toHaveBeenCalledWith("src/turn.ts", "base-tree", "head-tree");
   expect(invoke).not.toHaveBeenCalled();
 });
@@ -82,7 +82,7 @@ for (const cloud of [false, true]) {
     const props = { source, events, version: 2, active: true, live: false };
     const view = render(<ChangesPanel {...props} />);
     expect(await screen.findByText("All changes · 3 files")).toBeTruthy();
-    expect(source.changesBetween).toHaveBeenLastCalledWith("merge-base", "snapshot");
+    expect(source.changesBetween).toHaveBeenLastCalledWith("merge-base", "snapshot", false);
     expect(screen.getByText(/Against main/)).toBeTruthy();
     view.rerender(<ChangesPanel {...props} events={[]} version={3} />);
     expect(source.changesBetween).toHaveBeenCalledTimes(1);
@@ -320,4 +320,20 @@ it("opens local Changes rows in centre tabs with the chosen range and rename pat
   expect(screen.queryByTestId("diff")).toBeNull();
   expect(source.fileContentsAt).not.toHaveBeenCalled();
   dropEditors((e) => e.sessionId === "centre");
+});
+
+it("refetches file statistics with the whitespace choice in every scope", async () => {
+  const { setPrefs } = await import("@/lib/prefs");
+  setPrefs({ diffHideWhitespace: false });
+  const source = fakeSource("whitespace-stats");
+  const view = render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
+  await screen.findByRole("button", { name: /turn.ts/ });
+  fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
+  await waitFor(() => expect(source.changesBetween).toHaveBeenLastCalledWith("merge-base", "snapshot", true));
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
+  await waitFor(() => expect(source.changesBetween).toHaveBeenLastCalledWith("base-tree", "head-tree", true));
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  await waitFor(() => expect(source.workingChanges).toHaveBeenLastCalledWith(true));
+  view.unmount();
+  setPrefs({ diffHideWhitespace: false });
 });

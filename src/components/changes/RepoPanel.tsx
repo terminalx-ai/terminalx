@@ -7,8 +7,10 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { Segmented } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
-import type { CommitInfo, ChangedFile } from "@/types/session";
-import { DiffPane } from "./DiffPane";
+import type { ChangedFile, CommitInfo } from "@/types/session";
+import { FileDiff } from "./FileDiff";
+import { DiffOptions } from "./DiffOptions";
+import { useDiffOptions } from "@/lib/diffOptions";
 import { FileList } from "./FileList";
 
 export type RepoView = "uncommitted" | "history";
@@ -32,14 +34,14 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   embedded?: boolean;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
+  const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
-  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick);
+  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick, hideWhitespace);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pair, setPair] = useState<{ path: string; before: string; after: string; base?: string; originalPath?: string } | null>(null);
-  const selectedOldPath = files.find((f) => f.path === selected)?.oldPath;
+  const current = files.find((file) => file.path === selected);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,25 +74,6 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
       cancelled = true;
     };
   }, [source, active, sub, tick]);
-
-  useEffect(() => {
-    if (!selected || !head) {
-      setPair(null);
-      return;
-    }
-    let cancelled = false;
-    setPair(null);
-    source
-      .fileContentsAt(selected, head, null)
-      .then(async (r) => {
-        const before = selectedOldPath ? (await source.fileContentsAt(selectedOldPath, head, null)).before : r.before;
-        if (!cancelled) setPair({ path: selected, before: before ?? "", after: r.after ?? "", base: head, originalPath: selectedOldPath });
-      })
-      .catch((e) => !cancelled && setError(source.errorMessage(e)));
-    return () => {
-      cancelled = true;
-    };
-  }, [source, selected, selectedOldPath, head, tick]);
 
   const run = async (label: string, fn: () => Promise<string | null | void>) => {
     setBusy(label);
@@ -130,6 +113,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           {status && status.behind > 0 && <span className="text-faint">↓{status.behind}</span>}
         </div>
       </div>}
+      {!embedded && <DiffOptions />}
       {error && <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       {!error && readError != null && (
         <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div>
@@ -203,7 +187,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
               </div>
             </div>
           </div>}
-          <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", pair ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
+          <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
             <FileList
               files={files}
               selected={selected}
@@ -229,11 +213,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
               )}
             />
           </div>
-          {pair && (
-            <div className="min-h-0 flex-1">
-              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" base={pair.base} originalPath={pair.originalPath} />
-            </div>
-          )}
+          {current && head && <div className="min-h-0 flex-1">
+            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} />
+          </div>}
         </>
       )}
 
@@ -254,43 +236,30 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 }
 
 function CommitRow({ source, commit, open, onToggle }: { source: GitSource; commit: CommitInfo; open: boolean; onToggle: () => void }) {
-  const [files, setFiles] = useState<{ path: string; status: "added" | "modified" | "deleted" | "renamed"; oldPath?: string; additions: number; deletions: number }[]>([]);
+  const { hideWhitespace } = useDiffOptions();
+  const [files, setFiles] = useState<ChangedFile[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pair, setPair] = useState<{ path: string; before: string; after: string; base?: string; originalPath?: string } | null>(null);
+  const [base, setBase] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const current = files.find((file) => file.path === selected);
   const EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     (async () => {
       const parentTree = commit.parent ? (await source.logCommits(commit.parent, 1))[0]?.tree ?? EMPTY : EMPTY;
-      const f = await source.changesBetween(parentTree, commit.tree);
+      const f = await source.changesBetween(parentTree, commit.tree, hideWhitespace);
       if (!cancelled) {
+        setBase(parentTree);
+        setError(null);
         setFiles(f);
-        setSelected(f[0]?.path ?? null);
+        setSelected((previous) => f.some((file) => file.path === previous) ? previous : f[0]?.path ?? null);
       }
-    })().catch(() => {});
+    })().catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => {
       cancelled = true;
     };
-  }, [open, source, commit.sha]);
-  useEffect(() => {
-    if (!open || !selected) {
-      setPair(null);
-      return;
-    }
-    let cancelled = false;
-    setPair(null);
-    (async () => {
-      const parentTree = commit.parent ? (await source.logCommits(commit.parent, 1))[0]?.tree ?? EMPTY : EMPTY;
-      const r = await source.fileContentsAt(selected, parentTree, commit.tree);
-      const originalPath = files.find((f) => f.path === selected)?.oldPath;
-      const before = originalPath ? (await source.fileContentsAt(originalPath, parentTree, commit.tree)).before : r.before;
-      if (!cancelled) setPair({ path: selected, before: before ?? "", after: r.after ?? "", base: parentTree, originalPath });
-    })().catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [open, selected, source, commit.sha, files]);
+  }, [open, source, commit.sha, hideWhitespace]);
   return (
     <div className="mb-0.5">
       <button
@@ -310,11 +279,10 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
         <div className="ml-3 border-l border-hairline">
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
           <FileList files={files} selected={selected} onSelect={setSelected} empty="No files." />
-          {pair && (
-            <div className="h-72 border-t border-hairline">
-              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" base={pair.base} originalPath={pair.originalPath} />
-            </div>
-          )}
+          {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
+          {current && base && <div className="h-96 border-t border-hairline">
+            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />
+          </div>}
         </div>
       )}
     </div>

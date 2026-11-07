@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { MergeView, unifiedMergeView } from "@codemirror/merge";
+import { whitespaceDiff } from "@/lib/diffOptions";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 
 /**
@@ -10,13 +11,13 @@ import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
  * they highlight, collapse unchanged regions and never freeze the page on a
  * large file.
  */
-export function DiffPane({ path, before, after, mode }: { path: string; before: string; after: string; mode: "unified" | "split" | "entire" }) {
+export function DiffPane({ path, before, after, mode, wrap = true, hideWhitespace = false }: { wrap?: boolean; hideWhitespace?: boolean; path: string; before: string; after: string; mode: "unified" | "split" | "entire" }) {
   const host = useRef<HTMLDivElement>(null);
   const scroll = useRef({ top: 0, left: 0, outerTop: 0, outerLeft: 0 });
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    const common = [raccoonTheme, raccoonHighlight, languageFor(path), EditorView.editable.of(false), EditorState.readOnly.of(true), lineNumbers(), EditorView.lineWrapping];
+    const common = [raccoonTheme, raccoonHighlight, languageFor(path), EditorView.editable.of(false), EditorState.readOnly.of(true), lineNumbers(), ...(wrap ? [EditorView.lineWrapping] : [])];
     let dispose: () => void;
     let scroller: HTMLElement;
     if (mode === "split") {
@@ -25,6 +26,7 @@ export function DiffPane({ path, before, after, mode }: { path: string; before: 
         b: { doc: after, extensions: common },
         parent: el,
         collapseUnchanged: { margin: 3, minSize: 4 },
+        diffConfig: hideWhitespace ? { override: whitespaceDiff } : undefined,
         highlightChanges: true,
         gutter: true,
       });
@@ -37,7 +39,7 @@ export function DiffPane({ path, before, after, mode }: { path: string; before: 
           doc: after,
           extensions: [
             ...common,
-            ...(mode === "entire" ? [] : [unifiedMergeView({ original: before, mergeControls: false, collapseUnchanged: { margin: 3, minSize: 4 }, highlightChanges: true })]),
+            ...(mode === "entire" ? [] : [unifiedMergeView({ original: before, diffConfig: hideWhitespace ? { override: whitespaceDiff } : undefined, mergeControls: false, collapseUnchanged: { margin: 3, minSize: 4 }, highlightChanges: true })]),
           ],
         }),
       });
@@ -54,6 +56,6 @@ export function DiffPane({ path, before, after, mode }: { path: string; before: 
       scroll.current = { top: scroller.scrollTop, left: scroller.scrollLeft, outerTop: el.scrollTop, outerLeft: el.scrollLeft };
       dispose();
     };
-  }, [path, before, after, mode]);
+  }, [path, before, after, mode, wrap, hideWhitespace]);
   return <div ref={host} className="diff-pane h-full min-h-0 overflow-auto scrollbar-thin select-text" />;
 }
