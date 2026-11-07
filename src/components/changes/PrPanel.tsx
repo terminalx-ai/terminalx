@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { NextLine } from "./NextStep";
+import { ReviewThreads } from "./ReviewThreads";
 
 type WorkspaceCleanup = {
   projectPath: string;
@@ -271,7 +272,8 @@ export function PrPanel({
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
         const ready = mergeReadiness(pr);
-        if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
+        const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} />;
+        if (inline) return <InlinePr reviews={reviews} key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -345,6 +347,7 @@ export function PrPanel({
                 </div>
               </div>
             )}
+            {reviews}
           </div>
         );
       })}
@@ -457,7 +460,7 @@ function reviewLabel(decision: string): string {
  * number and state, its checks folded into a count (unfolded when one fails),
  * then, unless the branch has a step first, what to do with it now.
  */
-function InlinePr({ pr, ready, held, actions }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode }) {
+function InlinePr({ pr, ready, held, actions, reviews }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; reviews: ReactNode }) {
   const failing = pr.checks.filter((c) => FAILING.includes(c.state)).length;
   const passed = pr.checks.filter((c) => !FAILING.includes(c.state) && !RUNNING.includes(c.state)).length;
   const [checksOpen, setChecksOpen] = useState(failing > 0);
@@ -511,6 +514,7 @@ function InlinePr({ pr, ready, held, actions }: { pr: PullRequest; ready: { ok: 
           )}
         </div>
       )}
+      {reviews}
       {pr.state === "OPEN" && !held && (
         <NextLine tone={tone} text={`${ready.label}${pr.reviewDecision ? ` · ${reviewLabel(pr.reviewDecision)}` : ""}`} actions={actions || undefined} />
       )}

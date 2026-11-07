@@ -2132,6 +2132,9 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
+  resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),
+  replyReview: (url: string, threadId: string, body: string) => invoke<void>("pr_review_reply", { url, threadId, body }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
