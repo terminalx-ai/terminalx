@@ -27,9 +27,10 @@ pub(crate) async fn review(app: &tauri::AppHandle, project: &str) -> CmdResult<b
     let project_path = project.to_string();
     let (repository, trust, layered) = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
         let repository = configuration::repository(std::path::Path::new(&project_path))?;
-        let resolution = Store::current()?.resolve(Some(&repository))?;
-        let layered = resolution.values.values().any(|value| !matches!(value.source, Layer::User | Layer::Defaults));
-        Ok((repository, resolution.trust, layered))
+        let files = Store::current()?.resolve(Some(&repository))?;
+        let layered = files.values.values().any(|value| !matches!(value.source, Layer::User | Layer::Defaults));
+        let trust = configuration::view(Some(&project_path))?.trust;
+        Ok((repository, trust, layered))
     }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
     use tauri::Manager;
     if layered { require_runtime(&app.state::<crate::AppState>())?; }

@@ -19,7 +19,12 @@ try {
         window.__PW_STUB__.answers.configuration_resolve = () => structuredClone(result);
         window.__PW_STUB__.answers.configuration_review = () => false;
         window.__PW_CONFIG_WRITES__ = [];
-        window.__PW_STUB__.answers.configuration_write = (request) => { window.__PW_CONFIG_WRITES__.push(request); return null; };`,
+        window.__PW_STUB__.answers.configuration_write = (request) => {
+          window.__PW_CONFIG_WRITES__.push(request);
+          result.values.branchPrefix = { value: request.value ?? "raccoon/", source: request.value === null ? "defaults" : request.layer, locked: false, redacted: false };
+          result.trust.required = false;
+          return null;
+        };`,
     });
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "General", exact: true }).click();
@@ -40,6 +45,7 @@ try {
     await editor.getByRole("button", { name: "Save prefix", exact: true }).click();
     await editor.getByText("Saved to Repository local.").waitFor();
     checks["writes only the chosen layer"] = await page.evaluate(() => window.__PW_CONFIG_WRITES__.length === 1 && window.__PW_CONFIG_WRITES__[0].layer === "repositoryLocal" && window.__PW_CONFIG_WRITES__[0].value === "mine/");
+    checks["reloads the effective local source"] = await editor.getByText("Source: Repository local", { exact: true }).count() === 1;
     checks["no horizontal overflow"] = await editor.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
     if (shots) await editor.screenshot({ path: join(shots, `configuration-${mode}.png`) });
     failed += report(`configuration ${mode}`, checks);

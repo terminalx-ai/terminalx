@@ -244,6 +244,12 @@ impl Store {
     }
 }
 impl Resolution {
+    pub(super) fn refresh_trust(&mut self) {
+        if let Some(trust) = &mut self.trust {
+            trust.keys.retain(|key| self.values.get(key).is_some_and(|value| value.source == Layer::RepositoryShared));
+            trust.required &= !trust.keys.is_empty();
+        }
+    }
     pub fn require_trust(&self) -> Result<()> {
         ensure!(!self.trust.as_ref().is_some_and(|trust| trust.required), "Repository configuration needs trust. Open Settings → General → Layered configuration and review this repository before starting work.");
         Ok(())
@@ -262,15 +268,22 @@ pub fn resolve(project: Option<&str>) -> Result<Resolution> {
 /// Read surfaces add Keychain names/sources, never their private values.
 pub fn view(project: Option<&str>) -> Result<Resolution> {
     let mut resolved = resolve(project)?;
-    super::environment::configuration_sources(project, &mut resolved.values)?;
+    if super::environment::configuration_sources(project, &mut resolved.values).is_err() {
+        // Preserve ordinary launches' existing missing-Keychain fallback. A
+        // layered environment still fails closed at launch; absent metadata
+        // never suppresses the shared-file consent requirement.
+        let warning = "Private environment sources are unavailable.".to_string();
+        log::warn!("{warning}");
+        resolved.warnings.push(warning);
+    }
+    resolved.refresh_trust();
     Ok(resolved.redacted())
 }
 
 /// Policy/read failures are errors, never an empty prefix that could classify
 /// arbitrary user branches as managed workspaces.
 pub fn branch_prefix(project: &Path) -> Result<String> {
-    let repository = repository(project)?;
-    let resolved = Store::current()?.resolve(Some(&repository))?;
+    let resolved = view(Some(project.to_str().context("Repository path must be UTF-8.")?))?;
     resolved.require_trust()?;
     resolved.values["branchPrefix"].value.as_str().map(str::to_owned).context("Invalid branch prefix.")
 }

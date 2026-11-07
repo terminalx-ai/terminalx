@@ -552,7 +552,12 @@ pub fn launch(_cwd: &str) -> Result<Launch> {
 
 /// Keychain repository entries are a legacy local layer: they override shared
 /// file values, while explicit local-file entries and managed policy win.
-fn apply_configuration(launch: &mut Launch, resolution: super::configuration::Resolution, local_names: Option<&BTreeSet<String>>) -> Result<()> {
+fn apply_configuration(launch: &mut Launch, mut resolution: super::configuration::Resolution, local_names: Option<&BTreeSet<String>>) -> Result<()> {
+    resolution.values.retain(|key, resolved| {
+        !(resolved.source == super::configuration::Layer::RepositoryShared
+            && key.strip_prefix("environment.").is_some_and(|name| local_names.is_some_and(|names| names.contains(name))))
+    });
+    resolution.refresh_trust();
     resolution.require_trust()?;
     // Preserve the existing all-or-nothing behavior for unavailable Keychain values.
     if launch.stamp.unavailable {
@@ -561,7 +566,6 @@ fn apply_configuration(launch: &mut Launch, resolution: super::configuration::Re
     }
     for (key, resolved) in resolution.values {
         let Some(name) = key.strip_prefix("environment.") else { continue; };
-        if resolved.source == super::configuration::Layer::RepositoryShared && local_names.is_some_and(|names| names.contains(name)) { continue; }
         if let Some(value) = resolved.value.as_str() { launch.values.insert(name.into(), value.into()); }
     }
     Ok(())
@@ -772,7 +776,7 @@ mod tests {
         assert!(apply_configuration(&mut launch, resolution(true), None).is_err());
         assert_eq!(launch.values["API_URL"], "private", "declining applies no shared value");
         let names = ["API_URL".into()].into();
-        apply_configuration(&mut launch, resolution(false), Some(&names)).unwrap();
+        apply_configuration(&mut launch, resolution(true), Some(&names)).unwrap();
         assert_eq!(launch.values["API_URL"], "private");
         apply_configuration(&mut launch, resolution(false), None).unwrap();
         assert_eq!(launch.values["API_URL"], "$(echo literal)");

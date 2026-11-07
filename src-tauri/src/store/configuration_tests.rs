@@ -202,3 +202,22 @@ fn legacy_empty_prefix_still_disables_cleanup_and_legacy_path_parser_is_respecte
     f.file(Layer::Managed, json!({"worktreeDir":"forbidden"}));
     assert!(f.store.resolve(None).is_err(), "non-lockable keys cannot be pinned by policy");
 }
+
+#[test]
+fn read_surfaces_include_private_sources_without_reading_secrets_or_requesting_shadowed_trust() {
+    let _home = super::super::temp_home();
+    let mut f = Fixture::new();
+    f.store = Store::current().unwrap();
+    f.file(Layer::RepositoryShared, json!({"environment":{"API_URL":"shared"}}));
+    let key = format!("repository:{}", f.repository().identity);
+    std::fs::write(f.store.home.join("environment.json"), serde_json::to_vec(&json!({key: {"names":["API_URL"],"revision":"no-secret-store-read"}})).unwrap()).unwrap();
+    let resolved = view(f.repo.path().to_str()).unwrap();
+    assert!(resolved.require_trust().is_ok());
+    assert_eq!(resolved.values["environment.API_URL"].source, Layer::RepositoryLocal);
+    assert!(resolved.values["environment.API_URL"].redacted);
+    assert!(resolved.values["environment.API_URL"].value.is_null());
+    std::fs::write(f.store.home.join("environment.json"), b"invalid").unwrap();
+    let resolved = view(f.repo.path().to_str()).unwrap();
+    assert!(resolved.require_trust().is_err(), "missing metadata cannot grant trust");
+    assert!(resolved.warnings.iter().any(|warning| warning.contains("Private environment")));
+}
