@@ -29,6 +29,8 @@ export interface TabEntry {
    */
   transport?: "experimentalCodexStdio";
   status: TabStatus;
+  /** A persisted reminder, independent of the agent status. */
+  markedUnread?: boolean;
   created: string;
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */

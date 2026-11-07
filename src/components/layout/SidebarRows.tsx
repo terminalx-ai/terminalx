@@ -142,12 +142,12 @@ export function WorkspaceFacts({ state, bytes }: { state?: WorkspaceState; bytes
 }
 
 /** Added and deleted lines plus unpushed commits. Draws nothing when all are zero. */
-export function DiffStats({ additions, deletions, unpushed }: { additions: number; deletions: number; unpushed: number }) {
+export function DiffStats({ additions, deletions, unpushed, coloured = true }: { additions: number; deletions: number; unpushed: number; coloured?: boolean }) {
   if (!additions && !deletions && !unpushed) return null;
   return (
     <span className={cn("flex shrink-0 items-center gap-1 tabular-nums", yieldsToRowActions)}>
-      {additions > 0 ? <span className="text-add">+{additions}</span> : null}
-      {deletions > 0 ? <span className="text-destructive">−{deletions}</span> : null}
+      {additions > 0 ? <span className={coloured ? "text-add" : "text-faint"}>+{additions}</span> : null}
+      {deletions > 0 ? <span className={coloured ? "text-destructive" : "text-faint"}>−{deletions}</span> : null}
       {unpushed > 0 ? (
         <span className="flex items-center text-warning" title={`${unpushed} unpushed commit${unpushed === 1 ? "" : "s"}`}>
           <ArrowUp className="size-3" />

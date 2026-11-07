@@ -263,3 +263,11 @@ describe("the terminal view's requests", () => {
     ]);
   });
 });
+
+it("clears a reminder on the host and preserves a refusal", async () => {
+  const request = vi.fn().mockResolvedValue({ ok: true, value: null });
+  await hostApi(request).markRead("session", "tab");
+  expect(request).toHaveBeenCalledWith("session.markRead", { sessionId: "session", tabId: "tab" });
+  request.mockResolvedValue({ ok: false, refusal: { message: "Device revoked" } });
+  await expect(hostApi(request).markRead("session", "tab")).rejects.toThrow("Device revoked");
+});

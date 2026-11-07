@@ -2041,13 +2041,16 @@ impl SessionManager {
         }
     }
 
-    fn set_display_status(&self, rt: &mut TabRuntime, status: TabStatus) {
-        if rt.status == status {
-            return;
-        }
+    fn announce_display_status(&self, rt: &mut TabRuntime, status: TabStatus) -> bool {
+        if rt.status == status { return false; }
         rt.status = status;
         self.observer.tab_status(rt.key(), status);
         self.sink.emit("tab_status", &TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status });
+        true
+    }
+
+    fn set_display_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        if !self.announce_display_status(rt, status) { return; }
         let (sid, tid) = (rt.session_id.clone(), rt.tab_id.clone());
         // Serialize status writes under the runtime lock so an old running
         // write cannot overwrite a newer waiting/idle state.
@@ -4011,11 +4014,22 @@ impl SessionManager {
     }
 
     pub fn mark_read(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        self.set_tab_unread(session_id, tab_id, false)
+    }
+
+    pub fn set_tab_unread(&self, session_id: &str, tab_id: &str, unread: bool) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        if rt.status == TabStatus::Completed {
-            self.set_status(&mut rt, TabStatus::Idle);
+        // Save before publishing; a failed write must not acknowledge the reminder.
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        if tab.marked_unread == unread && (unread || tab.status != TabStatus::Completed) { return Ok(()); }
+        index::set_tab_unread(session_id, tab_id, unread)?;
+        if !unread && rt.status == TabStatus::Completed {
+            // A read is not agent activity and must not reorder the dashboard.
+            self.announce_display_status(&mut rt, TabStatus::Idle);
         }
+        self.sink.emit("session_updated", &index::get(session_id)?);
         Ok(())
     }
 

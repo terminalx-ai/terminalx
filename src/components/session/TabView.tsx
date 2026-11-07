@@ -1,3 +1,4 @@
+import { useTabRead } from "@/lib/useTabRead";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type ImageInput } from "@/lib/api";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
@@ -243,13 +244,7 @@ export function TabView({
     [session.id, tab.id],
   );
 
-  // Viewing a finished tab marks it read.
-  useEffect(() => {
-    if (active && tab.status === "completed") {
-      void backendRef.current.markRead(tab.id);
-      backendRef.current.patchTab(tab.id, { status: "idle" });
-    }
-  }, [active, tab.status, backend.key, tab.id]);
+  useTabRead(active, backend.key, tab, backend.markRead);
 
   // Nothing is running in a conversation that is only being read.
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");

@@ -476,7 +476,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
@@ -670,7 +670,7 @@ describe("the archive (#718)", () => {
     const web = screen.getByRole("group", { name: "web" });
     const webArchive = within(web).getByTestId("archived-sessions");
     expect(within(webArchive).getByRole("button", { name: "Archived (1)" }).getAttribute("aria-expanded")).toBe("true");
-    expect(within(webArchive).getByRole("button", { name: /^Talk old-web/ }).textContent).toContain("dev");
+    expect(within(webArchive).getByRole("button", { name: /^dev/ }).textContent).toContain("dev");
     // The live list is as it was.
     expect(within(web).getByRole("button", { name: "main, Talk here" })).toBeTruthy();
 
@@ -683,7 +683,7 @@ describe("the archive (#718)", () => {
     expect(within(within(removed).getByTestId("archived-sessions")).getByRole("button", { name: /^Talk left/ })).toBeTruthy();
     expect(within(removed).queryByText("No chats yet")).toBeNull();
 
-    await act(async () => { fireEvent.click(within(webArchive).getByRole("button", { name: "Unarchive Talk old-web" })); });
+    await act(async () => { fireEvent.click(within(webArchive).getByRole("button", { name: "Unarchive dev" })); });
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "set_session_archived").map(([, args]) => args)).toEqual([{ sessionId: "old-web", archived: false }]);
     // Back among the live ones, alone on its branch, and the fold is gone.
     expect(within(web).getByRole("button", { name: "dev, Talk old-web" })).toBeTruthy();
@@ -705,7 +705,7 @@ describe("the archive (#718)", () => {
     const fold = within(screen.getByRole("group", { name: "web" })).getByRole("button", { name: "Archived (1)" });
     act(() => { fireEvent.click(fold); });
     expect(fold.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByRole("button", { name: /^Talk old/ }).getAttribute("aria-current")).toBe("true");
+    expect(screen.getByRole("button", { name: /^dev/ }).getAttribute("aria-current")).toBe("true");
   });
 
   it("picks several rows and archives, brings back or deletes them together", async () => {
@@ -785,5 +785,62 @@ describe("the archive (#718)", () => {
     act(() => { fireEvent.click(row); });
     expect(store.getSessions().selectedSessionId).toBe("b");
     expect(selection.getPickedSessions()).toEqual([]);
+  });
+});
+
+describe("row extras and unread reminders (PRO-179)", () => {
+  it.each(["simple", "list"] as const)("renders background count updates and live drafts in the %s layout", async (sidebarLayout) => {
+    const { setDraft, clearDrafts } = await import("@/lib/drafts");
+    const { setTabStatus } = await import("@/lib/agentEvents");
+    let additions = 12;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_workspaces") return [{ path: "/repos/web", name: "web", branch: "main", additions: 1, deletions: 1, branchAdditions: additions, branchDeletions: 4 }];
+      return base(command, args);
+    });
+    const row = session("background", "/repos/web", "2026-11-05T00:00:00Z");
+    row.tabs[0].status = "in_progress";
+    await boot([row]);
+    prefs.setPrefs({ sidebarLayout, colourLineCounts: false });
+    mount();
+    expect(await screen.findByText("+12")).toBeTruthy();
+    expect(store.getSessionStore().selectedSessionId).not.toBe("background");
+    additions = 27;
+    await act(async () => setTabStatus(row.id, row.tabs[0].id, "completed"));
+    expect(await screen.findByText("+27")).toBeTruthy();
+    expect(screen.getByText("−4")).toBeTruthy();
+    act(() => setDraft("background-tab", "Finish the\nregression test"));
+    expect(screen.getByTestId("row-draft").textContent).toBe("Draft: Finish the regression test");
+    expect(screen.getByRole("button", { name: "Archive Talk background" })).toBeTruthy();
+    act(() => clearDrafts((id) => id === "background-tab"));
+    expect(screen.queryByTestId("row-draft")).toBeNull();
+  });
+
+  it.each(["simple", "list"] as const)("toggles the persisted flag with R without changing waiting state in the %s layout", async (sidebarLayout) => {
+    const row = session("reminder", "/repos/web", "2026-11-05T00:00:00Z");
+    row.tabs[0].status = "waiting";
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "set_tab_unread") {
+        const { sessionId, tabId, unread } = args as { sessionId: string; tabId: string; unread: boolean };
+        sessions = sessions.map((entry) => entry.id !== sessionId ? entry : { ...entry, tabs: entry.tabs.map((tab) => tab.id !== tabId ? tab : { ...tab, markedUnread: unread }) });
+        return;
+      }
+      return base(command, args);
+    });
+    await boot([row]);
+    prefs.setPrefs({ sidebarLayout });
+    mount();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Menu for Talk reminder" }), { key: "ArrowDown" });
+    const menu = await screen.findByRole("menu");
+    fireEvent.keyDown(menu, { key: "r", metaKey: true });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "set_tab_unread")).toBe(false);
+    fireEvent.keyDown(menu, { key: "r" });
+    await screen.findByRole("menuitem", { name: "Mark as read" });
+    expect(mocks.invoke).toHaveBeenCalledWith("set_tab_unread", { sessionId: "reminder", tabId: "reminder-tab", unread: true });
+    expect(store.getSessionStore().sessions[0].tabs[0]).toMatchObject({ markedUnread: true, status: "waiting" });
+    fireEvent.keyDown(menu, { key: "r" });
+    await screen.findByRole("menuitem", { name: "Mark as unread" });
+    expect(store.getSessionStore().sessions[0].tabs[0]).toMatchObject({ markedUnread: false, status: "waiting" });
   });
 });

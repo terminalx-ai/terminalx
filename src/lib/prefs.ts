@@ -18,6 +18,7 @@ export interface Prefs {
   linkActions: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
+  colourLineCounts: boolean;
   panelOpen: boolean;
   /** A session's tabs as a row under the title bar. Off leaves them to the sidebar alone. */
   tabStrip: boolean;
@@ -136,6 +137,7 @@ const DEFAULTS: Prefs = {
   linkActions: true,
   sidebarOpen: true,
   sidebarWidth: 268,
+  colourLineCounts: false,
   panelOpen: false,
   tabStrip: true,
   branchSessions: "tabs",

@@ -188,6 +188,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "localStorage", location: "raccoon.prefs#branchSessions" },
   }),
   defineSetting({
+    id: "appearance.colourLineCounts", section: "appearance", title: "Colour line counts on every row",
+    description: "Use green and red for added and removed lines even when the sidebar row is not selected.",
+    searchTerms: ["sidebar", "diff", "lines", "color", "colour"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#colourLineCounts" },
+  }),
+  defineSetting({
     id: "appearance.openUsage", section: "appearance", title: "Usage",
     description: "Tokens, cost and rate limits across every agent, by day and by project.",
     searchTerms: ["appearance", "usage"], scope: "user",
