@@ -21,6 +21,8 @@ async function loadTerminalStore() {
 }
 
 beforeEach(() => {
+  // Reset persisted selections as well as modules: each test starts a new window.
+  localStorage.clear();
   vi.clearAllMocks();
   listen.mockResolvedValue(() => {});
 });
