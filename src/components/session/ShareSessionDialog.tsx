@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Eye, Link2, Plus, QrCode, Terminal, UserPlus, X } from "@/icons";
+import { ChevronDown, Copy, Eye, Link2, ShieldAlert, ShieldCheck, Plus, QrCode, Terminal, UserPlus, X } from "@/icons";
 import { Switch } from "@/components/ui/controls";
 import { Fold } from "@/components/ui/Fold";
 import { Button } from "@/components/ui/button";
@@ -270,7 +270,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
   const unguarded = agentTabs.some((tab) => modeIsUnguarded(tab.permissionMode) || (!!tab.requestedPermissionMode && modeIsUnguarded(tab.requestedPermissionMode)));
   const modes = [...new Set(agentTabs.map((tab) => tab.requestedPermissionMode || tab.permissionMode))];
   const sessionMode = modes.length === 1 ? modes[0] : MIXED;
-  const unguardedMode = sessionMode !== MIXED && modeIsUnguarded(sessionMode);
+
   const relay = usePairing().status.relay.phase === "connected";
   const [settings, setSettings] = useState(defaultShareSettings);
   const [editing, setEditing] = useState<string | null>(null);
@@ -357,17 +357,19 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                 with no sandbox) would let a guest have the agent do anything here, so the host settles it now. */}
             {unguarded && !editing && (
               <p role="status" className="rounded-lg bg-warning/10 px-3 py-2 text-[12px] leading-snug text-warning" data-testid="share-unguarded">
-                A tab here is in Bypass permissions, so a guest who drives could have the agent do anything on this computer.
-                Choose another mode to share.
+                In Bypass permissions a guest who drives could have the agent do anything on this computer, so a session
+                in it is not shared. Choose another mode to share.
               </p>
             )}
             <div className="flex items-center gap-2">
               {!editing && agentTabs.length > 0 && (
-                <label className="flex min-w-0 items-center gap-2 text-[12px] text-muted-foreground">
-                  Permissions
+                // One box: the shield, its name and the mode, the height of the button beside it.
+                <label className={cn("relative flex h-8 min-w-0 items-center gap-1.5 rounded-md border border-hairline bg-background pl-2.5 text-[12px] focus-within:ring-2 focus-within:ring-ring/40", unguarded && "border-warning/50")}>
+                  {unguarded ? <ShieldAlert className="size-3.5 shrink-0 text-warning" aria-hidden /> : <ShieldCheck className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+                  <span className="shrink-0 text-muted-foreground">Permissions</span>
                   <select
                     aria-label="Session permissions"
-                    className={field}
+                    className="h-full min-w-0 cursor-pointer appearance-none bg-transparent pr-5 text-[12px] text-foreground outline-none"
                     value={sessionMode}
                     onChange={(event) => void run(async () => {
                       const mode = event.target.value;
@@ -375,11 +377,13 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                     })}
                   >
                     {sessionMode === MIXED && <option value={MIXED} disabled>Mixed</option>}
-                    {unguardedMode && <option value={sessionMode} disabled>{modeLabel(sessionMode)}</option>}
-                    {PERMISSION_MODES.filter((mode) => !modeIsUnguarded(mode.id)).map((mode) => (
+                    {/* A mode the picker has no entry for (a Codex stance, say) is shown as it is. */}
+                    {sessionMode !== MIXED && !PERMISSION_MODES.some((mode) => mode.id === sessionMode) && <option value={sessionMode} disabled>{modeLabel(sessionMode)}</option>}
+                    {PERMISSION_MODES.map((mode) => (
                       <option key={mode.id} value={mode.id}>{mode.label}</option>
                     ))}
                   </select>
+                  <ChevronDown className="pointer-events-none absolute right-2 size-3 text-faint" aria-hidden />
                 </label>
               )}
               <div className="ml-auto flex flex-row-reverse gap-2">

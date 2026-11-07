@@ -41,8 +41,8 @@ describe("Share session", () => {
     expect(screen.getByRole("button", { name: "Create share link" }).matches(":disabled")).toBe(true);
     const picker = screen.getByLabelText("Session permissions") as HTMLSelectElement;
     expect(picker.value).toBe("__mixed__");
-    // Bypass is not offered while sharing.
-    expect([...picker.options].filter((option) => !option.disabled).map((option) => option.value)).not.toContain("bypassPermissions");
+    // Every mode is offered, Bypass too; Create waits while it is chosen.
+    expect([...picker.options].filter((option) => !option.disabled).map((option) => option.value)).toContain("bypassPermissions");
     fireEvent.change(picker, { target: { value: "acceptEdits" } });
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("set_tab_permission_mode", { sessionId: "local-session", tabId: "b", mode: "acceptEdits" }));
     expect(mocks.invoke).toHaveBeenCalledWith("set_tab_permission_mode", { sessionId: "local-session", tabId: "a", mode: "acceptEdits" });
