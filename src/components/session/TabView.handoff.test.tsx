@@ -48,11 +48,14 @@ beforeEach(async () => {
 });
 afterEach(() => { cleanup(); closeAgentHandoff(); vi.unstubAllGlobals(); });
 
-it("hands off the source and reviews the clicked historical turn without touching its draft or sending to it", async () => {
+it.each([undefined, "experimentalCodexStdio"] as const)("hands off a %s source and reviews its historical turn without touching its draft or sending to it", async (transport) => {
+  session.tabs[0].transport = transport;
+  upsertSession(session);
   render(<Harness />);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("load_tab_events", expect.anything()));
   fireEvent.click(screen.getByRole("button", { name: "Hand off to Claude Code" }));
   expect(request()).toMatchObject({ session: { id: session.id, cwd: session.cwd }, source: { id: session.tabs[0].id }, harness: "claude" });
+  expect(request().source.transport).toBe(transport);
   act(() => closeAgentHandoff());
   emit({ type: "user_message", queued: false, text: "First prompt" });
   emit({ type: "assistant_text", text: "First answer" });

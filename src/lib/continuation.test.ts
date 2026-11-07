@@ -40,6 +40,26 @@ describe("context", () => {
   });
 });
 describe("launch and actual send boundary", () => {
+  it.each(["continue", "review"] as const)("waits for a native Codex receipt when starting a %s tab", async (purpose) => {
+    const native = { ...tab, transport: "experimentalCodexStdio" as const };
+    mocks.add.mockResolvedValue(native);
+    let received!: (value: unknown) => void;
+    mocks.send.mockReturnValue(new Promise((resolve) => { received = resolve; }));
+    const created = vi.fn();
+    const settled = vi.fn();
+    const running = launchContinuation(context, { ...codex, permissionMode: "plan" }, "Review the saved turn", created, undefined, undefined, purpose).then((result) => { settled(result); return result; });
+    await vi.waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(1));
+    expect(created).toHaveBeenCalledExactlyOnceWith({ sessionId: context.sessionId, tab: native });
+    expect(mocks.start).toHaveBeenCalledExactlyOnceWith(context.sessionId, native.id);
+    expect(mocks.send).toHaveBeenCalledExactlyOnceWith(context.sessionId, native.id, "Review the saved turn", undefined, true);
+    expect(settled).not.toHaveBeenCalled();
+    // The native runtime confirms send only once Codex starts its turn.
+    received({ queued: false, events: [] });
+    expect(await running).toEqual({ stage: "delivered", launched: { sessionId: context.sessionId, tab: native } });
+    expect(mocks.add).toHaveBeenCalledTimes(1);
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(getDraft(native.id)).toBe("");
+  });
   it("opens exactly one review tab and sends the turn's diff once, without taking its pipeline", async () => {
     const turn: Turn = { key: "turn", seq: 1, ts: "", live: false, toolCount: 1, editedFiles: 1,
       prompt: { text: "Fix it", ts: "", seq: 1 }, completed: { status: "ok", ts: "" },

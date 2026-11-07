@@ -195,11 +195,14 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
       if (active.current) setStarting(false);
     }
   };
+  const readyReview = !!reviewPrompt && !loading && !error && !!settings;
   useEffect(() => {
-    if (!active.current || !reviewPrompt || loading || error || !settings || autoStarted.current) return;
+    if (!active.current || !readyReview || autoStarted.current) return;
     autoStarted.current = true;
     void start();
-  });
+    // Only the transition to a prepared review schedules a launch. Later
+    // settings/delivery renders must not schedule another; retries are explicit.
+  }, [readyReview]); // eslint-disable-line react-hooks/exhaustive-deps
   const pressEnter = async () => {
     if (!destination || !inInput || pressing) return;
     setPressing(true);
@@ -236,11 +239,14 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         <DialogHeader>
           <DialogTitle className="text-base font-semibold">{reviewPrompt ? "Second opinion" : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
           <DialogDescription className="text-sm text-muted-foreground">
-            {reviewPrompt ? `Ask ${agentName} to review the selected turn in a new tab in this workspace.` : into
+            {reviewPrompt ? `Share the selected turn's prompt, answer and recorded file diffs with ${agentName} for review in a new tab in this workspace.` : into
               ? `Start a new session in ${into.project.name} with context from this chat. The chat is archived once the new session has started.`
               : "Start a fresh agent conversation in this workspace with context from the current conversation."}
           </DialogDescription>
         </DialogHeader>
+        {reviewPrompt && !loading && settings && <p role="status" className="text-sm text-muted-foreground" data-testid="review-settings">
+          {agentName} · {selection.model?.label ?? (settings.model || "Agent default")} · Plan (read-only)
+        </p>}
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
           <dt className="text-muted-foreground">Source conversation</dt><dd className="break-words">{context?.title ?? source.title ?? session.title}</dd>
           <dt className="text-muted-foreground">Original provider</dt><dd>{providers.find((p) => p.id === source.harness)?.name ?? source.harness}</dd>

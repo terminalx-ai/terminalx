@@ -62,6 +62,8 @@ it("automatically asks once for a second opinion, without exporting history or c
   expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session.id, cwd: session.cwd }), { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan" }, "Review this recorded diff", expect.any(Function), undefined, expect.any(Function), "review");
   expect(mocks.prepare).not.toHaveBeenCalled();
   expect(screen.queryByRole("group", { name: "New session settings" })).toBeNull();
+  expect(screen.getByTestId("review-settings").textContent).toContain("Codex · GPT-6 Mini · Plan (read-only)");
+  expect(screen.getByText(/Share the selected turn's prompt, answer and recorded file diffs with Codex/)).toBeTruthy();
 });
 it("does not fall back to the source agent when the requested counterpart disappears", async () => {
   mocks.providers.mockResolvedValue([providers[0]]);
