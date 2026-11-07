@@ -217,3 +217,23 @@ it("keeps Share bound to its recipient across reorder and clears permissions whe
   expect(screen.queryByRole("combobox", { name: "Access level" })).toBeNull();
   expect((screen.getByRole("combobox", { name: "Person to share with" }) as HTMLSelectElement).value).toBe("");
 });
+
+it("clears a removed Share target after a confirmed empty roster but preserves it during loading", () => {
+  const props = { surface: "share" as const, data, state: "ready" as const, canAct: true, onAction: vi.fn() };
+  const view = render(<TeamSurfaceExample {...props} />);
+  openSurface("share");
+  fireEvent.change(screen.getByRole("combobox", { name: "Access level" }), { target: { value: "driver" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: /Can approve/ }));
+  view.rerender(<TeamSurfaceExample {...props} state="loading" data={{ ...data, people: [] }} />);
+  view.rerender(<TeamSurfaceExample {...props} />);
+  expect((screen.getByRole("combobox", { name: "Access level" }) as HTMLSelectElement).value).toBe("driver");
+  fireEvent.click(screen.getByRole("button", { name: "Review access changes" }));
+  // Successful ready data with no people is normalized to the empty design.
+  view.rerender(<TeamSurfaceExample {...props} data={{ ...data, people: [] }} />);
+  view.rerender(<TeamSurfaceExample {...props} />);
+  expect(screen.queryByText(/Review member: Can send/)).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "Access level" })).toBeNull();
+  fireEvent.change(screen.getByRole("combobox", { name: "Person to share with" }), { target: { value: data.people[0].id } });
+  expect((screen.getByRole("combobox", { name: "Access level" }) as HTMLSelectElement).value).toBe("viewer");
+  expect((screen.getByRole("checkbox", { name: /Can approve/ }) as HTMLInputElement).checked).toBe(false);
+});

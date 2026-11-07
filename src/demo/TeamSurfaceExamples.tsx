@@ -102,7 +102,7 @@ function ShareDialogExample({ data, state, canAct, onAction }: TeamExampleProps)
   useEffect(() => { if (discarding) keepEditing.current?.focus(); }, [discarding]);
   // Offline/error preserve choices; a revoked scope cannot keep a sensitive draft.
   useEffect(() => { if (state === "ready") setSeenReady(true); if (state === "no-access") { setSeenReady(false); setDraft(initialShareDraft); setDiscarding(false); setReviewing(false); dialogContent.current?.querySelector<HTMLButtonElement>('[aria-label="Close"]')?.focus(); } }, [state]);
-  useEffect(() => { if (state === "ready" && draft.recipientId && !recipient) { setDraft(initialShareDraft); setReviewing(false); } }, [state, draft.recipientId, recipient]);
+  useEffect(() => { if ((state === "ready" || state === "empty") && draft.recipientId && !recipient) { setDraft(initialShareDraft); setReviewing(false); } }, [state, draft.recipientId, recipient]);
   const requestOpen = (next: boolean) => { if (!next && dirty && state !== "no-access") setDiscarding(true); else setOpen(next); };
   const closeDiscarding = () => { setDraft({ ...initialShareDraft, recipientId: recipient?.id ?? null }); setDiscarding(false); setReviewing(false); setOpen(false); };
   const message = state !== "ready" ? <SurfaceState {...surfaceMessage("share", state)} action={state === "error" ? { label: "Try again", onAction: () => onAction("Retry share") } : undefined} /> : null;
