@@ -794,7 +794,11 @@ pub fn set_sidebar_order(patch: SidebarOrderPatch) -> Result<SidebarOrder> {
         if file.sidebar_order.is_none() {
             let mut sessions = file.sessions.clone();
             super::message_activity::project(&mut sessions)?;
-            let projects = sidebar_projects(&sessions, &attached)?;
+            // Section members are absent from the main project list, so their
+            // activity must not reshuffle that list when custom order is enabled.
+            let sectioned: std::collections::HashSet<_> = file.local_sections.iter().flat_map(|section| &section.sessions).collect();
+            let main_sessions: Vec<_> = sessions.iter().filter(|session| !sectioned.contains(&session.id)).cloned().collect();
+            let projects = sidebar_projects(&main_sessions, &attached)?;
             sessions.sort_by_cached_key(|s| (std::cmp::Reverse(s.pinned), std::cmp::Reverse(sidebar_message_time(s)), s.id.clone()));
             file.sidebar_order = Some(SidebarOrder { sessions: sessions.into_iter().map(|s| s.id).collect(), projects, ..Default::default() });
         }
@@ -1099,6 +1103,25 @@ mod tests {
         assert_eq!(get("a").unwrap().modified, sessions[0].modified);
         update(|sessions| { sessions.retain(|s| s.id != "a"); Ok(()) }).unwrap();
         assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "c"]);
+    }
+
+    #[test]
+    fn sidebar_seeds_project_order_from_sessions_outside_personal_sections() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("b"), entry("sectioned")];
+        for (session, (path, created)) in sessions.iter_mut().zip([
+            ("/a", "2026-01-01T00:00:00Z"), ("/b", "2026-02-01T00:00:00Z"), ("/a", "2026-03-01T00:00:00Z"),
+        ]) {
+            session.project_path = path.into();
+            session.created = created.into();
+        }
+        save(&sessions).unwrap();
+        local_sections::edit(local_sections::SectionEdit::Create {
+            name: "Release".into(), emoji: None, session_ids: vec!["sectioned".into()],
+        }).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(order.projects, ["/b", "/a"]);
+        assert_eq!(order.sessions, ["sectioned", "b", "a"]);
     }
 
     #[test]
