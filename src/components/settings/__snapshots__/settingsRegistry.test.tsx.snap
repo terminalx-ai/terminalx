@@ -31,6 +31,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "appearance.usageRefresh",
   "devices.pairing",
   "devices.paired",
+  "environment.variables",
   "experimental.nativeCodex",
   "general.dataPrivacy",
   "general.websiteLinks",

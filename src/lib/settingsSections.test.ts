@@ -21,6 +21,8 @@ describe("settings section search", () => {
   it("matches fuzzy titles, aliases, and terms across fields", () => {
     expect(searchSettingsSections("apprnc")[0].item.tab).toBe("appearance");
     expect(searchSettingsSections("hotkeys")[0].item.tab).toBe("shortcuts");
+    expect(searchSettingsSections("environment")[0].item.tab).toBe("environment");
+    expect(searchSettingsSections("variables")[0].item.tab).toBe("environment");
     expect(searchSettingsSections("appearance text")[0].item.tab).toBe("appearance");
     expect(searchSettingsSections("zzzz-no-such-setting")).toEqual([]);
   });

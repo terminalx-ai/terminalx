@@ -8,6 +8,7 @@ import { cn } from "@/lib/cn";
 import { closeLinkIssue, closeMoveToProject, closeRenameSession, useDialogs } from "@/lib/dialogs";
 import { conversationTitle, moveQuickChatToProject, renameConversation, useSessionStore } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
+import { LocalSectionDialogs } from "./LocalSectionDialogs";
 import { TabDialogs } from "./TabDialogs";
 import { LinkIssueDialog } from "./LinkIssueDialog";
 
@@ -29,6 +30,7 @@ export function SessionDialogs() {
       {moving && <MoveToProjectDialog key={moving.id} session={moving} onClose={closeMoveToProject} />}
       {linking && <LinkIssueDialog key={linking.id} session={linking} onClose={closeLinkIssue} />}
       <TabDialogs />
+      <LocalSectionDialogs />
     </>
   );
 }

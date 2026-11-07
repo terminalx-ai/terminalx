@@ -481,6 +481,7 @@ fn fresh_fixture(root: &Path) -> FetchFixture {
     real_git(&seed, &["remote", "add", "origin", root.join("fetch-origin.git").to_str().unwrap()]);
     let project = std::fs::canonicalize(root.join("fetch-project")).unwrap();
     let entry = crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        section_id: None,
         project_path: project.to_string_lossy().into_owned(), checkout_branch: None,
         title: Some("Fetch privacy".into()), use_worktree: true, base_ref: Some("main".into()),
         worktree_name: Some("privacy-fetch".into()), on_main: false, issue: None, automation: None, cwd: None,
