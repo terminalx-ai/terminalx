@@ -248,6 +248,7 @@ impl Rig {
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
+            environment: Default::default(),
             engine: Engine::Cli(CliTab {
                 usage_account: None,
                 harness: kind,

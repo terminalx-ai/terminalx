@@ -880,6 +880,7 @@ pub struct TabRuntime {
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
+    pub environment: crate::store::environment::Stamp,
     pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
     pub queued: Vec<QueuedMessage>,
@@ -1724,6 +1725,22 @@ impl SessionManager {
         crate::automations::RuntimeHost { sink: self.sink.clone(), sessions: self.clone() }
     }
 
+    pub fn environment_changed(&self, id: &str) -> Result<crate::store::environment::Status> {
+        if let Some(status) = self.terminals.environment_changed(id)? { return Ok(status); }
+        let Some(tab_id) = id.strip_prefix("tab:") else { return Ok(Default::default()); };
+        let tab = self.tabs.lock().unwrap().iter()
+            .find(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == tab_id))
+            .map(|(_, tab)| tab.clone());
+        if let Some(tab) = tab {
+            let stamp = {
+                let rt = tab.lock().unwrap();
+                rt.child.as_ref().filter(|child| child.terminal_receipt().is_none()).map(|_| rt.environment.clone())
+            };
+            if let Some(stamp) = stamp { return stamp.status(); }
+        }
+        Ok(Default::default())
+    }
+
     pub fn terminals(&self) -> &Arc<pty::Terminals> {
         &self.terminals
     }
@@ -1748,6 +1765,7 @@ impl SessionManager {
                 status: TabStatus::Idle,
                 child: None,
                 child_pid: None,
+                environment: Default::default(),
                 engine: Engine::None,
                 pending: HashMap::new(),
                 queued: Vec::new(),
@@ -2343,12 +2361,14 @@ impl SessionManager {
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let mut env = vec![
+        let environment = crate::store::environment::launch(cwd);
+        let mut env: Vec<_> = environment.values.into_iter().collect();
+        env.extend([
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
-        ];
+        ]);
         // A cloud workspace's agent credentials (`cloud_grants`). Only Cursor
         // runs this way, and its grant only sets a variable.
         let harness = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2357,6 +2377,7 @@ impl SessionManager {
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
+        rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())

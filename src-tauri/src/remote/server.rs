@@ -2444,6 +2444,7 @@ impl WorkspaceRpc {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
+                section_id: None,
                 project_path: root,
                 title: p.title,
                 use_worktree: p.use_worktree,
