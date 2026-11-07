@@ -13,6 +13,7 @@ import { DisclosureMemory, type Disclosures } from "./disclosures";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
 import { turnDivider } from "@/lib/turnDivider";
+import { GoalBanner } from "./GoalBanner";
 
 const NEAR_BOTTOM_PX = 40;
 /** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
@@ -389,6 +390,7 @@ export function Chat({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      {transcript.goal && <GoalBanner goal={transcript.goal} />}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
