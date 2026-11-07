@@ -33,6 +33,7 @@ import { BUSY_NOTICE, classifyRecovery, CONTINUE_PROMPT, isBusyRefusal, RECOVERY
 import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type RecoveryAction, type Surface } from "@/lib/recoveryReports";
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
+import { ResetChatDialog } from "./ResetChatDialog";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { useModels } from "@/lib/models";
 import { openWorkspaceDelete } from "@/lib/dialogs";
@@ -56,6 +57,9 @@ export function terminalViewRefusal(message: string): string {
 /**
  * One tab: its event log, the transcript built from it, and the composer.
  */
+/** How many prompts a conversation has had before its next steps (Commit, Create PR, Run it) are offered. */
+export const HANDOFF_AFTER_PROMPTS = 5;
+
 /**
  * After a turn that touched files, the obvious next steps as one-click
  * prompts. They only fill the composer; the reader still sends.
@@ -66,8 +70,9 @@ export function terminalViewRefusal(message: string): string {
  */
 export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: () => void): Handoff[] | undefined {
   const last = t.turns[t.turns.length - 1];
+  // Early in a conversation the work is still being shaped: the steps wait until it has had some prompts.
   const prompts: Handoff[] =
-    last?.completed?.status === "ok" && changed
+    last?.completed?.status === "ok" && changed && t.turns.length >= HANDOFF_AFTER_PROMPTS
       ? [
           { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
           { label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." },
@@ -129,6 +134,7 @@ export function TabView({
   // The composer says so with the message back in it; nothing is raised and the tab is left as it is.
   const sendBusy = local && sendState.error != null && isBusyRefusal(sendState.error);
   const [busyRefused, setBusyRefused] = useState(false);
+  const [resetTarget, setResetTarget] = useState<{ endSeq: number | null } | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
@@ -248,6 +254,8 @@ export function TabView({
   }, [active, tab.status, backend.key, tab.id]);
 
   // Nothing is running in a conversation that is only being read.
+  const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
+    && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
   const busyNotice = (sendBusy || busyRefused) && live ? BUSY_NOTICE : null;
@@ -652,6 +660,7 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
+      onReset={canReset ? (endSeq) => setResetTarget({ endSeq }) : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       footer={
         readOnly ? (
@@ -891,6 +900,10 @@ export function TabView({
     </div>}
     {permissionNotice && <p role="status" className="shrink-0 border-b border-hairline px-4 py-2 text-xs text-muted-foreground">{permissionNotice}</p>}
     {terminalMode && banner("top")}
+    {canReset && tab.resetBackupId && !live && <div className="border-b border-hairline px-4 py-2 text-xs">
+      <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo last chat reset</Button>
+    </div>}
+    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {
         dialogShown.end("submitted");

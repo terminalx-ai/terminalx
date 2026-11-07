@@ -9,6 +9,96 @@
   `settings.json`. Unknown keys and `$schema` survive saves, and an invalid
   field no longer resets valid credentials, permission choices, or other
   settings when the app starts. (Part of PRO-140)
+## 0.2.27
+
+### Sessions and sidebar
+
+- Group local sessions into your own sidebar sections, across projects, in
+  both Group by project and One list of chats. A section has a name, an
+  optional emoji and its place in the list. Rename it, change its emoji or
+  delete it, move a chat in with the chat's menu (**Move to section**) or ⌘K,
+  start a session from its header, and move sections up or down. Deleting a
+  section returns its chats to the main list without deleting or archiving
+  them. Sections are kept with the sessions on this Mac, and older session
+  lists carry over unchanged. Dragging chats between sections comes later.
+  (PRO-174, #824)
+- The sidebar no longer has a standing **New section…** row above the
+  projects. Make a section from a chat's menu (**Move to section → New
+  section…**, which also moves that chat in) or with **New local section…** in
+  ⌘K. (#840)
+- The session dashboard has a **Table** view beside **Board**, remembered
+  between visits. All ten columns sort either way, and the sort and the shown
+  columns are remembered; both views share search, filters and keyboard
+  selection. Status sorts in board order: Needs you, Working, Done, Not
+  started, Archived. New filters show archived sessions, sessions started by
+  an automation, and sessions by owner ("This Mac" for local ones, the creator
+  for cloud ones). Archived sessions stay out of badges and notifications, and
+  browsing never wakes a cloud workspace. Large tables draw only the rows in
+  view. (PRO-194, #823)
+
+### Environment variables
+
+- Set environment variables for local agents and shells in Settings →
+  Environment: your own, plus overrides for a repository that its worktrees
+  share. Values are kept in the macOS Keychain and shown masked, with reveal,
+  copy (the clipboard item is marked concealed and cleared again) and delete.
+  Paste a block to import it, with errors by line number, or import a
+  repository's `.env` file after reviewing it. Names like `HOME`, `DYLD_*`
+  and `LD_PRELOAD` are refused. A running tab keeps the values it started
+  with and offers **Restart to apply** after a change. When the values cannot
+  be read, a new tab starts without any of them and says so, and an
+  automation or issue pipeline stops with an error before sending its prompt.
+  (PRO-144, #807)
+
+### Branch, changes and pull requests
+
+- A design pass on the side panel, sidebar, session header, composer and
+  share dialog. The Branch tab now holds Changes: the panel's tabs are Branch,
+  Files, Browser and Computer, and Branch has Overview and Changes, reopening
+  on the one last shown; every link to Changes still lands there. Autopilot
+  moves from the header into the Branch tab, under the next step. Changed
+  files show their file-type icon. The sidebar has more room between rows,
+  shows a row's age only for its first six days and has a redrawn branch icon.
+  The header's New, Terminal, Panel and Share icons are redrawn as one family
+  and fill its height; in a header narrower than 360 px they are 32 px wide,
+  so the session title keeps its first characters. The line count and the
+  Automation label are gone from the header. The composer
+  drops the model chip's "latest" tag and offers Commit, Create PR and Run it
+  only after the fifth prompt, and the mode moves from a dot on its options
+  button to its tooltip and a red or blue shield on the Permissions row.
+  Signed out, Share shows what sharing allows and one **Sign in to share**
+  button. (#838)
+- The PR panel explains a blocked or behind-base branch, failed optional
+  checks and merge-queue progress; it and the Branch tab show the queue
+  position, checks running in the queue and blocked or locked entries. A
+  repository with a merge queue offers **Add to merge queue**. Checks share
+  one summary with Required and Optional labels, and deployment statuses link
+  to their pages. (PRO-207, #828)
+- Read and answer GitHub review threads in the PR panel. The patch view puts
+  each current thread at its line, base-side ones in the left column of a
+  split view, and lists outdated threads under the diff with their original
+  place. Resolve, unresolve, reply, copy a suggestion, or quote the reviewer's
+  text into the chat's draft. Thread text loads no remote images and links to
+  web pages only. Closed and merged pull requests are read-only. (PRO-234,
+  #832)
+- Diffs remember split or unified, and wrap, across the workspace, turn,
+  uncommitted and history views, with a per-file wrap setting. **Hide
+  whitespace changes** compares without whitespace and keeps the text shown
+  and copied as it is. Images, SVGs (rendered or as text) and PDFs compare
+  side by side with their own zoom and PDF pages; PDFs are drawn without
+  running anything in them. Files up to 16 MiB compare locally, and up to
+  512 KiB in a cloud workspace. (PRO-226, #833)
+
+### Motion
+
+- The sidebar and the right panel slide in and out instead of appearing at
+  once, and the chat beside them follows frame by frame. Opening takes 380 ms
+  and closing 320 ms; data-drawn views (Branch, Changes, the file tree) fade
+  in as they arrive. A panel already open at launch does not animate, and
+  Reduce motion makes it instant. Dialogs ease in and out the same way. (#847,
+  #838)
+
+### Native Codex
 
 - Native Codex no longer asks for attention while it is working. A turn
   that ran longer than five minutes was called stalled at every look of the
@@ -21,7 +111,19 @@
   Mac only) notes when a warning was raised and cleared, how long it was on
   screen, what was pressed and what became of the turn, as labels, counts and
   times only; it can be exported with sessions named by codes, or cleared.
-  (#815)
+  (#815, #820)
+- A Native Codex turn that keeps producing tool output is no longer called
+  timed out after five minutes: the reader now counts that output as
+  activity, and a stall the watcher raised is withdrawn when output arrives.
+  Real silence and an explicit sign-in failure still warn. (#859)
+
+### Development
+
+- An app whose bundled background runtime is no newer than the older runtime
+  it replaces (a development build left running while the version moved) no
+  longer hands the runtime over in a loop, dropping the chat's connection
+  each time. It logs one warning and keeps the runtime it has. (#841)
+- The Linux CI jobs run on the `instabox-medium` runner. (#814)
 
 ## 0.2.25
 

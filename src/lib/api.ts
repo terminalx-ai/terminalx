@@ -698,8 +698,10 @@ export const api = {
   headTree: (cwd: string) => invoke<string | null>("head_tree", { cwd }),
   reviewRange: (cwd: string, target: string | null, uncommitted: boolean) =>
     invoke<{ target: string; base: string; head: string }>("review_range", { cwd, target, uncommitted }),
-  changesBetween: (cwd: string, base: string, head: string | null) =>
-    invoke<ChangedFile[]>("changes_between", { cwd, base, head }),
+  changesBetween: (cwd: string, base: string, head: string | null, hideWhitespace = false) =>
+    invoke<ChangedFile[]>("changes_between", { cwd, base, head, hideWhitespace }),
+  diffMediaContent: (cwd: string, path: string, tree: string | null) =>
+    invoke<{ data: string; mime: string } | null>("diff_media_content", { cwd, path, tree }),
   fileContentsAt: (cwd: string, path: string, base: string, head: string | null) =>
     invoke<{ before: string | null; after: string | null }>("file_contents_at", { cwd, path, base, head }),
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
@@ -2002,6 +2004,8 @@ export const agent = {
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
+  resetChat: (sessionId: string, tabId: string, endSeq: number | null, resetFiles: boolean) =>
+    invoke<string | null>("reset_chat", { sessionId, tabId, endSeq, resetFiles }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
@@ -2102,6 +2106,14 @@ export interface PullRequest {
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Absent on older workspace runtimes. */
+  mergeState?: string;
+  mergeQueueEnabled?: boolean | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  autoMergeEnabled?: boolean;
+  requiredChecks?: string[] | null;
+  deployments?: { name: string; state: string; url?: string | null }[];
+  detailsError?: string | null;
   reviewDecision: string | null;
   checks: PrCheck[];
   body: string;
@@ -2114,7 +2126,7 @@ export const git = {
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
   discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
-  workingChanges: (cwd: string) => invoke<[string, ChangedFile[]]>("working_changes", { cwd }),
+  workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
   unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
   /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
@@ -2132,14 +2144,19 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  reviewFiles: (url: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile[]>("pr_review_files", { url, head, base }),
+  reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
+  resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),
+  replyReview: (url: string, threadId: string, body: string) => invoke<void>("pr_review_reply", { url, threadId, body }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
+  associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
   list: (cwd: string, branch: string) => invoke<PullRequest[]>("pr_list", { cwd, branch }),
   details: (cwd: string, number: number, url?: string) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
-  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
+  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
   ready: (cwd: string, number: number, url?: string) => invoke<void>("pr_ready", { cwd, number, ...(url ? { url } : {}) }),
 };
 

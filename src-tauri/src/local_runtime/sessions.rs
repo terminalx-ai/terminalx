@@ -218,6 +218,10 @@ impl Sessions {
         self.quick_tab("interrupt", session, tab, json!({}))
     }
 
+    pub fn reset_chat(&self, session: &str, tab: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
+        self.tab("resetChat", session, tab, json!({"endSeq":end_seq,"resetFiles":reset_files}))
+    }
+
     pub fn stop(&self, session: &str, tab: &str) -> Result<()> {
         self.tab("stop", session, tab, json!({}))
     }

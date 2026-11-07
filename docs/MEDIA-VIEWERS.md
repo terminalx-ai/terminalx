@@ -80,3 +80,41 @@ larger than 4 MiB and filenames containing spaces and non-ASCII characters. Open
 that repository in a separately built app using a temporary `TERMINALX_HOME`.
 Exercise Explorer/Open/Quick Open; switch, collapse, and close playing tabs;
 modify/delete a fixture externally and retry; and compare file hashes afterward.
+
+## Diff revisions (PRO-226)
+
+Changes, Uncommitted and History share `FileDiff`. The diff controls save the
+unified/split choice, whitespace filter and global wrap default in UI preferences.
+An explicit per-file wrap choice is keyed by source and relative path; Default
+returns that file to the global setting. Copy file uses the original new text,
+including its whitespace. Files beyond the text reader's limit cannot be copied
+as though their preview were the full file.
+
+The merge comparison normalizes horizontal ASCII whitespace and maps changes back
+to the original documents. Git statistics use `diff -w --numstat`, retaining the
+changed-file list so whitespace-only files remain selectable with zero counts.
+Line boundaries remain significant.
+
+Images and PDFs read immutable Git blobs as bounded binary data, never UTF-8.
+Each revision gets its own MediaPane preview, including absent sides of added or
+deleted files and the original path of renames. Local revisions are limited to
+16 MiB each; cloud revisions to 512 KiB each so base64 fits a 1 MiB relay frame.
+Oversized and unreadable media report an error rather than truncated previews.
+Cloud media requires a runtime with `git.mediaContent`; older runtimes report
+that the method is unavailable.
+
+SVG defaults to rendered images with a raw text toggle. Rendering uses blob URLs
+in `img`, never inline SVG or an iframe, so SVG scripts and external resources
+cannot execute in the app. Blob URLs are revoked on switching or closing.
+PDF.js is lazy-loaded, uses a bundled worker, fonts, CMaps and decoders, and
+renders one page at a time to a bounded canvas. It offers independent fit,
+actual size, zoom and page navigation on both sides. No PDF actions, links,
+attachments, JavaScript or form scripts are executed. Password-protected PDFs
+report an explicit error. The CSP permits WebAssembly for the bundled image
+decoders, without permitting JavaScript eval or remote scripts.
+
+`pnpm test:webkit-diff` exercises the actual components in headless WebKit:
+measured wrapping and horizontal scrolling in both modes, persisted settings,
+whitespace-only changes, distinct before/after PNG and PDF pixels, zoom, PDF
+pagination, and rendered/raw SVG with no script execution. It uses synthetic
+source replies; Rust tests cover the actual Git reads, bounds and containment.
