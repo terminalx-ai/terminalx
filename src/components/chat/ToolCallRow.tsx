@@ -7,6 +7,7 @@ import { LinkedText } from "./LinkedText";
 import type { ChatLinkContext } from "@/lib/chatLinks";
 import { useDisclosure } from "./disclosures";
 import { editLineCounts } from "@/lib/turnChanges";
+import { ReviewCommentCard, reviewComment } from "./ReviewCommentCard";
 
 function iconFor(toolType: string) {
   switch (toolType) {
@@ -84,6 +85,9 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
   // The agent's own safety check held this call for a person (#775): which one, and whether it was let past.
   const safetyCheck = call.result?.safetyCheck;
   const SafetyIcon = failed ? ShieldX : ShieldCheck;
+
+  const comment = reviewComment(call);
+  if (comment) return <ReviewCommentCard call={call} comment={comment} linkContext={linkContext} />;
 
   return (
     <div className="group/tool">
