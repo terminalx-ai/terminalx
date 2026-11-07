@@ -85,6 +85,14 @@ export interface RemotePullRequest {
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Absent on older workspace runtimes. */
+  mergeState?: string;
+  mergeQueueEnabled?: boolean | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  autoMergeEnabled?: boolean;
+  requiredChecks?: string[] | null;
+  deployments?: { name: string; state: string; url?: string | null }[];
+  detailsError?: string | null;
   reviewDecision: string | null;
   checks: { name: string; state: string; url?: string | null }[];
   body: string;
@@ -314,7 +322,7 @@ export class RemoteGit {
     return this.write("git.prReady", { number });
   }
 
-  mergePr(number: number, method: "merge" | "squash" | "rebase"): Promise<unknown> {
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<unknown> {
     return this.write("git.prMerge", { number, method });
   }
 }
