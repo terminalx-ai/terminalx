@@ -555,7 +555,7 @@ function ProjectGroup({
   return (
     <div role="group" aria-label={group.name} className="mb-3 last:mb-0">
       <DropdownMenu {...menu.root}>
-        <div {...menu.surface} className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md px-2 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
+        <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-8 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
           <button
             type="button"
@@ -641,7 +641,7 @@ function ProjectGroup({
         inert={!open}
         data-testid="project-branches"
       >
-        <div className="min-h-0 overflow-hidden">
+        <div className="-mx-2 min-h-0 overflow-hidden px-2">
       {/* Rows run the full width, so a selection spans it; their content is indented by `--indent` instead. */}
       <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:21px] [--indent-2:40px]">
         {shown.map(row)}
@@ -787,13 +787,13 @@ function BranchRow({
     <li>
       <ContextMenu>
       <ContextMenuTrigger asChild>
-      <div className={cn(actionRow, "relative flex h-8 items-center rounded-md pr-1 text-foreground/85 hover:bg-selected/50")}>
+      <div className={cn(actionRow, "relative -mx-2 flex h-8 items-center pr-3 text-foreground/85 hover:bg-selected/50")}>
         <button
           type="button"
           onClick={toggle}
           aria-expanded={expanded}
           title={named ? `${named} · ${branch}` : label}
-          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-[calc(0.5rem+var(--indent,0px))] pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-sm pl-[calc(1rem+var(--indent,0px))] pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <BranchGlyph merged={merged} />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch || "No branch"}</span>
@@ -1062,7 +1062,8 @@ function ConversationRow({
         <div
           className={cn(
             actionRow,
-            "relative flex h-8 items-center gap-2 rounded-md pl-[calc(0.5rem+var(--indent,0px))] pr-1",
+            // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
+            "relative -mx-2 flex h-8 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
             selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
