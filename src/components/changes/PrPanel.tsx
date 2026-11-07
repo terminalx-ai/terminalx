@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { NextLine } from "./NextStep";
+import { PrConversation, useDocumentVisible } from "./PrConversation";
 
 type WorkspaceCleanup = {
   projectPath: string;
@@ -68,6 +69,8 @@ export function PrPanel({
    */
   held?: boolean;
 }) {
+  const documentVisible = useDocumentVisible();
+  active = active && documentVisible;
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [rows, setRows] = useState<SessionPr[]>([]);
@@ -270,8 +273,11 @@ export function PrPanel({
           <button type="button" onClick={() => void openUrl(row.identity)} className="hover:underline">{row.identity}</button>
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
+        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={tick} onEdited={(title, body) => {
+          setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
+        }} />;
         const ready = mergeReadiness(pr);
-        if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
+        if (inline) return <div key={row.identity}><InlinePr pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -280,7 +286,7 @@ export function PrPanel({
             )}
             {ready.ok && <MergeMenu disabled={!!working || loading || !fresh} working={working === "merge"} onMerge={(method) => merge(row, method)} />}
           </>
-        )} />;
+        )} /><div className="px-4 pb-3">{conversation}</div></div>;
         return (
           <div key={row.identity} className="border-b border-hairline px-3 py-3">
             <div className="flex items-start gap-2">
@@ -345,6 +351,7 @@ export function PrPanel({
                 </div>
               </div>
             )}
+            {conversation}
           </div>
         );
       })}

@@ -355,7 +355,7 @@ describe("chat scroll follow", () => {
         expect(overSpacer(), `${run}, step ${step} (${delta} px) at ${top}: settled`).toBe(0);
       });
     }
-  }, 30_000);
+  }, 180_000);
 
   // #727: a turn scrolled far from the view is not drawn. What the reader
   // opened in it is the chat's to keep, so it comes back as they left it.

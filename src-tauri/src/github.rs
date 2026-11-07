@@ -1,6 +1,8 @@
 //! Pull requests through the `gh` CLI, which already holds auth and host
 //! configuration. Absent `gh` is one readable line, not a broken panel.
 
+pub mod conversation;
+
 use std::path::{Path, PathBuf};
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -219,6 +221,19 @@ pub fn recover_workspace_prs() -> Result<()> {
     }
     if !errors.is_empty() { bail!("{}", errors.join("; ")); }
     Ok(())
+}
+
+/// Read/write a conversation by full PR identity using the local gh account.
+pub fn pr_conversation(url: &str) -> Result<conversation::Conversation> {
+    conversation::read_with(&conversation::Target::new(url)?, |args| run(&outside_checkouts(), args))
+}
+
+pub fn pr_conversation_action(url: &str, action: conversation::Action) -> Result<()> {
+    conversation::act_with(&conversation::Target::new(url)?, action, |args| run(&outside_checkouts(), args))
+}
+
+pub fn pr_reviewer_search(url: &str, query: &str) -> Result<Vec<String>> {
+    conversation::search_with(&conversation::Target::new(url)?, query, |args| run(&outside_checkouts(), args))
 }
 
 /// One pull request by number, for command-palette task URLs.

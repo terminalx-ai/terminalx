@@ -614,3 +614,22 @@ fn remote_landed_verification_recognizes_rewritten_merges_but_not_new_work() {
         assert!(f.call("git.prLanded", json!({"repo":"app"})).is_err());
     }
 }
+
+#[test]
+fn conversation_uses_workspace_credentials_and_rejects_unrelated_repositories() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    std::fs::write(f.state.join("repo-url"), "https://github.com/acme/widgets").unwrap();
+    std::fs::write(f.state.join("conversation.json"), include_str!("../fixtures/github_pr_conversation.json")).unwrap();
+    let params = json!({ "repo": "app", "url": "https://github.com/acme/widgets/pull/799" });
+    let result = f.call("git.prConversation", params).unwrap();
+    assert_eq!(result["activity"].as_array().unwrap().len(), 11);
+    assert!(f.gh_calls().contains("graphql"));
+    let calls = f.gh_calls().lines().count();
+    for method in ["git.prConversation", "git.prReviewerSearch", "git.prConversationAction"] {
+        assert_eq!(f.code(method, json!({ "repo": "app", "url": "https://github.com/other/private/pull/799", "query": "ada", "action": {"kind":"approve"} })), "invalid_params");
+    }
+    // Only the repository identity lookup ran; no query, search or write did.
+    assert_eq!(f.gh_calls().lines().count(), calls + 3);
+}

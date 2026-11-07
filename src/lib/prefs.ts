@@ -57,6 +57,7 @@ export interface Prefs {
    * and Ask every time on a profile where they never picked one.
    */
   lastMode: string;
+  prActivityOrder: "newest" | "oldest";
   issueProvider: "github" | "linear";
   /** The cloud project the Issues view shows (`cloud:<orgId>:<identity>`); null for `lastProject`, a project on this computer. */
   issueCloudProject: string | null;
@@ -154,6 +155,7 @@ const DEFAULTS: Prefs = {
   lastModel: {},
   lastEffort: {},
   lastMode: FIRST_RUN_PERMISSION_MODE,
+  prActivityOrder: "newest",
   issueProvider: "github",
   issueCloudProject: null,
   cloudIssuePipelines: {},
@@ -215,6 +217,7 @@ function load(): Prefs {
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
     prefs.autocorrect = prefs.autocorrect === true;
+    prefs.prActivityOrder = prefs.prActivityOrder === "oldest" ? "oldest" : "newest";
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     prefs.issueCloudProject = typeof prefs.issueCloudProject === "string" && prefs.issueCloudProject.startsWith("cloud:") ? prefs.issueCloudProject : null;
     const pipelines = prefs.cloudIssuePipelines;

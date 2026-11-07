@@ -1,3 +1,4 @@
+import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -2130,6 +2131,11 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  conversation: (url: string): PrConversationAccess => ({
+    read: () => invoke("pr_conversation", { url }),
+    act: (action) => invoke("pr_conversation_action", { url, action }),
+    search: (query) => invoke("pr_reviewer_search", { url, query }),
+  }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
