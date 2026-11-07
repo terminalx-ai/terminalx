@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { listenForArchiveScripts } from "@/lib/archiveScript";
 import { api, type WorkspaceRemoveOptions } from "@/lib/api";
 import { getSessionStore, removeWorkspace } from "@/lib/sessions";
 import type { BranchOutcome } from "@/lib/worktreeConfirm";
@@ -59,7 +60,10 @@ export function localWorkspaceHost(projectPath: string, path: string): Workspace
   return {
     key: `local:${projectPath}\0${path}`,
     disposition: (options) => api.workspaceDisposition(projectPath, path, options),
-    remove: (options) => removeWorkspace(projectPath, path, options),
+    remove: async (options) => {
+      await listenForArchiveScripts();
+      return removeWorkspace(projectPath, path, options);
+    },
     turnRunning: (sessionIds) =>
       getSessionStore().sessions.some((session) => sessionIds.includes(session.id) && session.tabs.some((tab) => turnLive(tab.status))),
   };
