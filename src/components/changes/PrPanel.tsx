@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronDown, ChevronRight, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
+import { ChevronDown, ChevronRight, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type PullRequest } from "@/lib/api";
 import { sessionPrs, type SessionPr } from "@/lib/sessionPrs";
@@ -15,6 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
+import { PrChecks } from "./PrChecks";
+import { actionsRuns, FAILING_CHECKS, RUNNING_CHECKS, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
 import { NextLine } from "./NextStep";
 
 type WorkspaceCleanup = {
@@ -28,9 +30,9 @@ export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string } 
   if (pr.state === "CLOSED") return { ok: false, label: "Closed" };
   if (pr.isDraft) return { ok: false, label: "Draft" };
   if (pr.mergeable === "CONFLICTING") return { ok: false, label: "Has conflicts" };
-  const failing = pr.checks.some((c) => ["failure", "error", "cancelled", "timed_out", "action_required"].includes(c.state));
+  const failing = pr.checks.some((c) => FAILING_CHECKS.includes(c.state));
   if (failing) return { ok: false, label: "Checks failing" };
-  const running = pr.checks.some((c) => ["pending", "in_progress", "queued", "expected", "waiting"].includes(c.state));
+  const running = pr.checks.some((c) => RUNNING_CHECKS.includes(c.state));
   if (running) return { ok: false, label: "Checks running" };
   if (pr.mergeable === "UNKNOWN") return { ok: false, label: "Checking mergeability" };
   return { ok: true, label: "Ready to merge" };
@@ -47,8 +49,12 @@ export function PrPanel({
   workspace,
   inline = false,
   held = false,
+  onFixErrors,
+  fixBusy = false,
 }: {
   cwd?: string;
+  onFixErrors?: (pr: PullRequest) => Promise<unknown>;
+  fixBusy?: boolean;
   sessionId?: string;
   /** A cloud repository (PRO-27); without it, the local checkout at `cwd`. */
   source?: GitSource;
@@ -70,13 +76,16 @@ export function PrPanel({
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [pendingRuns, setPendingRuns] = useState<PendingCheckRun[]>([]);
   const [rows, setRows] = useState<SessionPr[]>([]);
   const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}`;
   const selected = useRef({ key: selection, generation: 0 });
   if (selected.current.key !== selection) selected.current = { key: selection, generation: selected.current.generation + 1 };
   const generation = selected.current.generation;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [loadedSelection, setLoadedSelection] = useState<string | null>(null);
-  const visibleRows = loadedSelection === selection ? rows : [];
+  const visibleRows = loadedSelection === selection ? rows.map((row) => row.pr ? { ...row, pr: withPendingChecks(row.pr, pendingRuns) } : row) : [];
   const prs = visibleRows.flatMap((row) => row.pr ? [row.pr] : []);
   const [landed, setLanded] = useState<Pick<Landed, "safe" | "head" | "branch"> | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
@@ -86,6 +95,7 @@ export function PrPanel({
   const [error, setError] = useState<string | null>(null);
   /** A failed read is said quietly inline; a failed click, plainly. */
   const [errorFrom, setErrorFrom] = useState<"load" | "action">("load");
+  const actionError = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -129,8 +139,8 @@ export function PrPanel({
         setStatus(workStatus);
         setLanded(landedWork);
         setCheckedWorkspace(workspaceCheck);
-        setError(pullRequests.error ?? null);
-        setErrorFrom("load");
+        setError(pullRequests.error ?? actionError.current);
+        setErrorFrom(pullRequests.error || !actionError.current ? "load" : "action");
       })
       .catch((e) => {
         if (cancelled) return;
@@ -145,6 +155,8 @@ export function PrPanel({
   }, [source, sessionId, selection, branch, active, available, tick, busy, workspaceKey]);
 
   useEffect(() => {
+    setPendingRuns([]);
+    actionError.current = null;
     setStatus(null);
     setLanded(null);
     setError(null);
@@ -178,31 +190,53 @@ export function PrPanel({
   // Also discover externally created follow-ups when all known PRs are closed.
   useEffect(() => {
     if (!active || loading || working) return;
-    const id = window.setTimeout(() => setTick((t) => t + 1), 30_000);
+    const id = window.setTimeout(() => setTick((t) => t + 1), pendingRuns.some((p) => p.until > Date.now()) ? 5_000 : 30_000);
     return () => window.clearTimeout(id);
-  }, [active, loading, working, tick]);
+  }, [active, loading, working, tick, pendingRuns]);
 
+  const actionLock = useRef<number | null>(null);
   const act = async (label: string, fn: () => Promise<string | null | void>) => {
+    if (actionLock.current === generation) return false;
+    actionLock.current = generation;
+    actionError.current = null;
     setWorking(label);
     setError(null);
     setNotice(null);
     try {
       const said = await fn();
-      if (selected.current.generation !== generation) return false;
+      if (!mounted.current || selected.current.generation !== generation) return false;
       if (said) setNotice(said);
       setTick((t) => t + 1);
       return true;
     } catch (e) {
-      if (selected.current.generation !== generation) return false;
-      setError(source.errorMessage(e));
+      if (!mounted.current || selected.current.generation !== generation) return false;
+      actionError.current = source.errorMessage(e);
+      setError(actionError.current);
       setErrorFrom("action");
       // A refusal may still have changed something (a lost answer): read GitHub again.
       setTick((t) => t + 1);
       return false;
     } finally {
-      if (selected.current.generation === generation) setWorking(null);
+      if (actionLock.current === generation) actionLock.current = null;
+      if (mounted.current && selected.current.generation === generation) setWorking(null);
     }
   };
+
+  const rerun = (pr: PullRequest, failedOnly: boolean) => void act("rerun", async () => {
+    if (!source.canWrite || !source.rerunCheck) throw new Error("Re-running checks is unavailable here.");
+    const checks = actionsRuns(pr, failedOnly);
+    for (const check of checks) {
+      // A navigation during a batch cancels the remaining outward actions.
+      if (!mounted.current || selected.current.generation !== generation) return;
+      await source.rerunCheck(pr.url, check.url!, failedOnly);
+      if (!mounted.current || selected.current.generation !== generation) return;
+      const runId = check.actions!.runId;
+      setPendingRuns((old) => [...old.filter((p) => p.until > Date.now() && !(p.prUrl === pr.url && p.runId === runId)), {
+        prUrl: pr.url, runId, failedOnly, signature: runSignature(pr, runId), until: Date.now() + 60_000,
+      }]);
+    }
+    return `Re-run requested for ${checks.length} Actions ${checks.length === 1 ? "run" : "runs"}.`;
+  });
 
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
   const merge = (row: SessionPr, method: "merge" | "squash" | "rebase") =>
@@ -221,7 +255,7 @@ export function PrPanel({
 
   const open = prs.filter((p) => p.state === "OPEN");
   const currentBranch = status?.branch ?? branch;
-  const fresh = loadedSelection === selection && !loading && !error && !visibleRows.some((row) => row.error);
+  const fresh = loadedSelection === selection && !loading && (!error || errorFrom === "action") && !visibleRows.some((row) => row.error);
   const currentOpen = visibleRows.some((row) => row.current && row.pr?.state === "OPEN");
   const workLanded = status?.aheadOfBase === 0 || !!(landed?.safe && landed.head === status?.head && landed.branch === currentBranch);
   const needsLandedProof = visibleRows.some((row) => row.current && row.pr?.state === "MERGED");
@@ -271,7 +305,10 @@ export function PrPanel({
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
         const ready = mergeReadiness(pr);
-        if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
+        const checks = <PrChecks pr={pr} source={source} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
+          onRerun={(failedOnly) => rerun(pr, failedOnly)}
+          onFix={onFixErrors && pr.state === "OPEN" ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
+        if (inline) return <InlinePr key={row.identity} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -305,22 +342,7 @@ export function PrPanel({
                 </div>
               </div>
             </div>
-            {pr.checks.length > 0 && (
-              <div className="mt-2 flex flex-col gap-0.5">
-                {pr.checks.map((c) => (
-                  <div key={c.name} aria-label={`${c.name}: ${c.state}`} className="flex items-center gap-2 text-xs">
-                    {["success", "neutral", "skipped"].includes(c.state) ? (
-                      <Check className="size-3.5 text-add" />
-                    ) : ["pending", "in_progress", "queued", "expected", "waiting"].includes(c.state) ? (
-                      <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-                    ) : (
-                      <CircleAlert className="size-3.5 text-destructive" />
-                    )}
-                    <span className="truncate text-muted-foreground">{c.name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+            {pr.checks.length > 0 && <div className="mt-2">{checks}</div>}
             {pr.state === "OPEN" && (
               <div className="mt-3 flex items-center gap-2">
                 <span className={cn("text-xs", ready.ok ? "text-add" : "text-muted-foreground")}>{ready.label}</span>
@@ -445,8 +467,8 @@ export function PrPanel({
   );
 }
 
-const FAILING = ["failure", "error", "cancelled", "timed_out", "action_required"];
-const RUNNING = ["pending", "in_progress", "queued", "expected", "waiting"];
+const FAILING = FAILING_CHECKS;
+const RUNNING = RUNNING_CHECKS;
 
 function reviewLabel(decision: string): string {
   return decision === "APPROVED" ? "approved" : decision === "CHANGES_REQUESTED" ? "changes requested" : decision === "REVIEW_REQUIRED" ? "review required" : decision.toLowerCase();
@@ -457,7 +479,7 @@ function reviewLabel(decision: string): string {
  * number and state, its checks folded into a count (unfolded when one fails),
  * then, unless the branch has a step first, what to do with it now.
  */
-function InlinePr({ pr, ready, held, actions }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode }) {
+function InlinePr({ pr, ready, held, actions, checks }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode }) {
   const failing = pr.checks.filter((c) => FAILING.includes(c.state)).length;
   const passed = pr.checks.filter((c) => !FAILING.includes(c.state) && !RUNNING.includes(c.state)).length;
   const [checksOpen, setChecksOpen] = useState(failing > 0);
@@ -493,22 +515,7 @@ function InlinePr({ pr, ready, held, actions }: { pr: PullRequest; ready: { ok: 
             Checks {passed}/{pr.checks.length}
             {failing > 0 && <span className="text-destructive"> · {failing} failing</span>}
           </button>
-          {checksOpen && (
-            <div className="mt-0.5 flex flex-col gap-0.5">
-              {pr.checks.map((c) => (
-                <div key={c.name} aria-label={`${c.name}: ${c.state}`} className="flex items-center gap-2 text-xs">
-                  {FAILING.includes(c.state) ? (
-                    <CircleAlert className="size-3.5 text-destructive" />
-                  ) : RUNNING.includes(c.state) ? (
-                    <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-                  ) : (
-                    <Check className="size-3.5 text-add" />
-                  )}
-                  <span className="truncate text-muted-foreground">{c.name}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          {checksOpen && <div className="mt-0.5">{checks}</div>}
         </div>
       )}
       {pr.state === "OPEN" && !held && (

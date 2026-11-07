@@ -2052,6 +2052,12 @@ export interface PrCheck {
   name: string;
   state: string;
   url?: string | null;
+  actions?: { runId: number; jobId: number | null } | null;
+}
+
+export interface CheckLog {
+  text: string;
+  truncated: boolean;
 }
 
 export interface BranchContributor {
@@ -2130,6 +2136,9 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  checkLog: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<CheckLog>("pr_check_log", { cwd, prUrl, checkUrl, failed }),
+  rerunCheck: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<void>("pr_check_rerun", { cwd, prUrl, checkUrl, failed }),
+  fixAttachment: (sessionId: string, tabId: string, prUrl: string) => invoke<{ path: string; truncated: boolean }>("pr_check_fix_attachment", { sessionId, tabId, prUrl }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),

@@ -2950,6 +2950,21 @@ pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdRes
 }
 
 #[tauri::command]
+pub async fn pr_check_log(cwd: String, pr_url: String, check_url: String, failed: bool) -> CmdResult<crate::github::checks::CheckLog> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::checks::log(Path::new(&cwd), &pr_url, &check_url, failed).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_check_rerun(cwd: String, pr_url: String, check_url: String, failed: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::checks::rerun(Path::new(&cwd), &pr_url, &check_url, failed).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_check_fix_attachment(session_id: String, tab_id: String, pr_url: String) -> CmdResult<crate::github::checks::FixAttachment> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::checks::prepare_fix(&session_id, &tab_id, &pr_url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_create(cwd: String, title: String, body: String, base: Option<String>, draft: bool, session_id: Option<String>) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let url = crate::github::create_pr(Path::new(&cwd), &title, &body, base.as_deref(), draft).map_err(err)?;
