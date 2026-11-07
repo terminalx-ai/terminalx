@@ -94,6 +94,10 @@ pub(crate) struct TabRecord {
     /// The app's own CLI in the tab's terminal, when it is running.
     #[serde(default)]
     pub cli: Option<CliRecord>,
+    /// The tab's open and last warning (#815), so the next runtime goes on
+    /// with the same incident rather than starting a second one for it.
+    #[serde(default)]
+    pub incidents: Option<crate::recovery_log::Handed>,
 }
 
 /// A permission or question card waiting on someone.
@@ -465,6 +469,7 @@ impl SessionManager {
             message_times: rt.message_times.clone(),
             left_at: rt.left_at.clone(),
             cli: None,
+            incidents: Some(rt.incidents.handed()),
         };
         let Engine::Cli(p) = &rt.engine else {
             // Nothing runs for it: only what is waiting goes over.
@@ -549,6 +554,8 @@ impl SessionManager {
         rt.last_activity = back(record.last_activity_ms);
         rt.recovery = record.recovery;
         rt.stalled_at = record.stalled_ms.map(back);
+        let handed = record.incidents.clone();
+        rt.incident(|incidents, ctx| incidents.adopt(ctx, handed));
         rt.reported_mode_to_judge = record.reported_mode_to_judge;
         rt.message_times = record.message_times;
         rt.left_at = record.left_at;
