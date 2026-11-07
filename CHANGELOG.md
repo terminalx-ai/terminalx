@@ -5,7 +5,10 @@
 - New chat opens the same composer from the sidebar and project menus, and
   creates nothing until the first prompt is sent. Both use the same saved
   agent, model, effort and permission mode, preferring an agent with a local
-  login. When neither agent is signed in, setup keeps the draft ready. (PRO-173)
+  login. Ordinary chats keep their history retention and automatic project
+  linking. Branch actions keep the requested project and source branch, and
+  login changes refresh when returning to the app or a sign-in terminal exits.
+  When neither agent is signed in, setup keeps the draft ready. (PRO-173)
 - Show the diff inside file-edit approvals. A Codex `apply_patch` request, and
   Claude Code's Edit, MultiEdit and Write, now list each file with its lines
   added and removed and the changed lines, marking new, deleted and renamed

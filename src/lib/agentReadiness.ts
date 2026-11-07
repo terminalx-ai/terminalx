@@ -50,8 +50,14 @@ export function useAgentReadiness(harness: string | null, poll = false) {
     void refresh();
     return () => { generation.current++; };
   }, [refresh]);
+  useReadinessRefresh(refresh, !!harness, poll);
+  return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
+}
+
+/** Both readiness views follow the same login-change signals and dispose them together. */
+function useReadinessRefresh(refresh: () => Promise<unknown>, enabled: boolean, poll = false) {
   useEffect(() => {
-    if (!harness) return;
+    if (!enabled) return;
     const recheck = () => { void refresh(); };
     const stopResume = onAppResume(recheck);
     // An embedded login (for example the Codex sign-in shell) exits its PTY
@@ -71,8 +77,7 @@ export function useAgentReadiness(harness: string | null, poll = false) {
       stopExit?.();
       clearInterval(timer);
     };
-  }, [harness, poll, refresh]);
-  return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
+  }, [enabled, poll, refresh]);
 }
 
 export type AgentReadinessMap = Readonly<Record<string, AgentReadiness>>;
@@ -102,6 +107,7 @@ export function useAgentReadinessList(harnesses: readonly Pick<HarnessInfo, "id"
     void refresh();
     return () => { generation.current++; };
   }, [refresh]);
+  useReadinessRefresh(refresh, enabled && harnesses.length > 0);
   return {
     values: answer?.key === key ? answer.values : null,
     checking: checking || answer?.key !== key,

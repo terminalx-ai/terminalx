@@ -136,6 +136,49 @@ describe("agent readiness", () => {
 describe("new-chat readiness discovery", () => {
   const harnesses = ["claude", "codex"].map((id) => ({ id, name: id, available: true, path: `/bin/${id}`, installHint: "", installUrl: "", description: "" }));
 
+  it("updates all composer defaults after login and logout on return to the app", async () => {
+    vi.useFakeTimers();
+    invoke.mockResolvedValue(answer("signed_out"));
+    const { result, unmount } = renderHook(() => useAgentReadinessList(harnesses));
+    await act(async () => {});
+    expect(result.current.values?.codex.state).toBe("signed_out");
+    invoke.mockImplementation((_cmd, { harness }) => Promise.resolve(answer(harness === "codex" ? "ready" : "signed_out")));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(result.current.values?.codex.state).toBe("ready");
+    expect(result.current.values?.claude.state).toBe("signed_out");
+    invoke.mockResolvedValue(answer("signed_out"));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(result.current.values?.codex.state).toBe("signed_out");
+    unmount();
+    invoke.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(exits.size).toBe(0);
+  });
+
+  it("rechecks the actual login after a sign-in terminal exits and removes its subscription", async () => {
+    invoke.mockResolvedValue(answer("signed_out"));
+    const { result, unmount } = renderHook(() => useAgentReadinessList(harnesses));
+    await waitFor(() => expect(result.current.values?.codex.state).toBe("signed_out"));
+    await act(async () => exits.forEach((notify) => notify()));
+    expect(result.current.values?.codex.state).toBe("signed_out");
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => exits.forEach((notify) => notify()));
+    expect(result.current.values?.codex.state).toBe("ready");
+    unmount();
+    expect(exits.size).toBe(0);
+  });
+
   it("waits for both probes before publishing defaults, then refreshes login changes", async () => {
     let claude: (value: AgentReadiness) => void = () => {};
     invoke.mockImplementation((_cmd, { harness }) => harness === "claude"
