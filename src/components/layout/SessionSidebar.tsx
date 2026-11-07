@@ -642,15 +642,16 @@ function ProjectGroup({
         data-testid="project-branches"
       >
         <div className="min-h-0 overflow-hidden">
-      <ul className="ml-[15px] mt-0.5 flex flex-col gap-0.5 pl-1.5">
+      {/* Rows run the full width, so a selection spans it; their content is indented by `--indent` instead. */}
+      <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:21px] [--indent-2:40px]">
         {shown.map(row)}
-        {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">No chats yet</li>}
+        {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint">No chats yet</li>}
         {more && (
           <li>
             <button
               type="button"
               onClick={toggleAll}
-              className="flex h-7 w-full items-center rounded-md px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="flex h-7 w-full items-center rounded-md pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               {all ? "Show less" : "View all"}
             </button>
@@ -704,7 +705,7 @@ export function RemovedWorkspaces({ id, count, opened, children }: { id: string;
         onClick={toggle}
         aria-expanded={expanded}
         title="Their workspaces were removed. The conversations are kept, and a message resumes one in its project's folder."
-        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <span className="min-w-0 truncate">Removed workspaces ({count})</span>
         <ChevronDown className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")} />
@@ -729,7 +730,7 @@ export function ArchivedSessions({ id, count, opened, children }: { id: string; 
         onClick={toggle}
         aria-expanded={expanded}
         title="Archived: out of the list and kept whole. Unarchive puts one back, and so does a message to it."
-        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <Archive className="size-3 shrink-0" />
         <span className="min-w-0 truncate">Archived ({count})</span>
@@ -792,7 +793,7 @@ function BranchRow({
           onClick={toggle}
           aria-expanded={expanded}
           title={named ? `${named} · ${branch}` : label}
-          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-[calc(0.5rem+var(--indent,0px))] pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <BranchGlyph merged={merged} />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch || "No branch"}</span>
@@ -821,7 +822,7 @@ function BranchRow({
       </ContextMenuContent>
       </ContextMenu>
       {expanded && (
-        <ul className="ml-[13px] mt-0.5 flex flex-col gap-0.5 pl-1.5">
+        <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:var(--indent-2)]">
           {sessions.map((session) => (
             <ConversationRow key={session.id} session={session} selected={selectedId === session.id} branch={null} linkTo={null} />
           ))}
@@ -1061,7 +1062,7 @@ function ConversationRow({
         <div
           className={cn(
             actionRow,
-            "relative flex h-8 items-center gap-2 rounded-md pl-2 pr-1",
+            "relative flex h-8 items-center gap-2 rounded-md pl-[calc(0.5rem+var(--indent,0px))] pr-1",
             selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
