@@ -484,6 +484,23 @@ it("starts a selected PR in its own worktree and keeps the user's first prompt",
   expect(onCreated.mock.calls[0][2]).toBe("Check the edge cases\n\nContinue work on pull request #12: Fix parser\nhttps://github.com/acme/app/pull/12");
 });
 
+it("allows Tab and starts with the literal issue number on Enter when PR search has no match", async () => {
+  Element.prototype.scrollIntoView = vi.fn();
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "pr_search" ? Promise.resolve([]) : original(command, args));
+  const { onCreated } = renderView();
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "fix #45" } });
+  await screen.findByText("No matching pull requests");
+  expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+  expect(onCreated).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.keyDown(field, { key: "Enter" });
+  await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+  expect(onCreated.mock.calls[0][2]).toBe("fix #45");
+  expect(invoke.mock.calls.some(([command]) => command === "pr_attach")).toBe(false);
+});
+
 it.each([false, true])("waits for PR context before creating a session, unless Escape cancels it (cancel=%s)", async (cancel) => {
   Element.prototype.scrollIntoView = vi.fn();
   let finish!: (path: string) => void;

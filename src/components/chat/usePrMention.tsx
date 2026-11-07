@@ -77,9 +77,10 @@ export function usePrMention(
       if (items.length) highlight((highlighted + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length);
       return true;
     }
-    if ((event.key === "Enter" || event.key === "Tab") && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+    const item = attaching ? undefined : items[highlighted];
+    if (item && (event.key === "Enter" || event.key === "Tab") && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
       event.preventDefault();
-      if (items[highlighted]) void pick(items[highlighted]);
+      void pick(item);
       return true;
     }
     return false;

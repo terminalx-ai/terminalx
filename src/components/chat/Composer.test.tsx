@@ -1186,6 +1186,42 @@ it("retains an image added while an earlier image is being sent", async () => {
   expect(onSend).toHaveBeenCalledExactlyOnceWith("", [{ name: "first.png", mediaType: "image/png", data: "AQID" }]);
 });
 
+describe.each([
+  { scenario: "search is loading", draft: "Review #12", query: "12", state: "loading" },
+  { scenario: "search has no match", draft: "use #fff", query: "fff", state: "empty" },
+  { scenario: "GitHub returns an error", draft: "Review #12", query: "12", state: "error" },
+  { scenario: "the number belongs to an issue", draft: "fix #45", query: "45", state: "empty" },
+])("PR mention fallback when $scenario", ({ draft, query, state }) => {
+  it.each(["Enter", "Tab"])("leaves %s to the composer or browser when no suggestion is highlighted", async (key) => {
+    Element.prototype.scrollIntoView = vi.fn();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "pr_search") {
+        if (state === "loading") return new Promise(() => {});
+        if (state === "error") throw new Error("GitHub unavailable");
+      }
+      return [];
+    });
+    const onSend = vi.fn();
+    render(<TestComposer cwd="/repo" onSend={onSend} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: draft } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("pr_search", { cwd: "/repo", query }));
+    await screen.findByText(state === "loading" ? "Searching pull requests…" : state === "error" ? "GitHub unavailable" : "No matching pull requests");
+    expect(screen.queryByRole("option")).toBeNull();
+
+    const allowedDefault = fireEvent.keyDown(field, { key });
+    if (key === "Enter") {
+      await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith(draft, []));
+      expect((field as HTMLTextAreaElement).value).toBe("");
+    } else {
+      expect(allowedDefault).toBe(true);
+      expect(onSend).not.toHaveBeenCalled();
+      expect((field as HTMLTextAreaElement).value).toBe(draft);
+    }
+    expect(invoke.mock.calls.some(([command]) => command === "pr_attach")).toBe(false);
+  });
+});
+
 it.each([false, true])("waits for PR context before sending, unless Escape cancels it (cancel=%s)", async (cancel) => {
   Element.prototype.scrollIntoView = vi.fn();
   let finish!: (path: string) => void;
@@ -1203,6 +1239,8 @@ it.each([false, true])("waits for PR context before sending, unless Escape cance
   const send = screen.getByRole("button", { name: "Send" });
   expect(send.hasAttribute("disabled")).toBe(true);
   fireEvent.click(send);
+  expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+  fireEvent.keyDown(field, { key: "Enter" });
   expect(onSend).not.toHaveBeenCalled();
   if (cancel) fireEvent.keyDown(field, { key: "Escape" });
   else await act(async () => finish("/context/pr-12.md"));

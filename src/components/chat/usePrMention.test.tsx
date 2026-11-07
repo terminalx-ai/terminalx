@@ -20,11 +20,11 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("searches #12 and inserts the fetched Markdown attachment with the keyboard", async () => {
+it.each(["Enter", "Tab"])("searches #12 and inserts the highlighted PR attachment with %s", async (key) => {
   render(<Harness />);
   await screen.findByRole("option", { name: /#12 Fix parser/ });
   expect(gh.search).toHaveBeenCalledWith("/repo", "12");
-  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  expect(fireEvent.keyDown(screen.getByRole("textbox"), { key })).toBe(false);
   await waitFor(() => expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Review @/context/pr-12.md "));
   expect(gh.attach).toHaveBeenCalledWith("/repo", 12);
 });
