@@ -67,11 +67,14 @@ const STEP_TEXT: Record<CreateStep, string> = {
  */
 export function CloudCreateWorkspace({
   organizationId,
+  persistenceScope,
   onOpen,
   onChanged,
   onProgress,
 }: {
   organizationId: string;
+  /** Account/profile/organization scope for pending creates, never an API identifier. */
+  persistenceScope?: string;
   /** Open a session in a workspace whose agent is running. */
   onOpen: (item: CloudWorkspaceListItem) => void;
   /** A workspace was created, canceled or retried: the list is stale. */
@@ -79,6 +82,14 @@ export function CloudCreateWorkspace({
   /** Each newer snapshot of the workspace being created, so the list shows what this form shows. */
   onProgress?: (snapshot: CloudWorkspaceSnapshot) => void;
 }) {
+  const storageScope = persistenceScope ?? organizationId;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const isCurrent = useCallback(() => {
+    const status = getAccount().status;
+    return mounted.current && (persistenceScope === undefined ||
+      (status.state === "signed-in" && (status.context?.scope ?? "signed-in") === persistenceScope));
+  }, [persistenceScope]);
   const [providers, setProviders] = useState<CloudProviderSummary[] | null>(null);
   const [selected, setSelected] = useState<CloudSelectedRepository[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -102,7 +113,7 @@ export function CloudCreateWorkspace({
   );
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
-  const [pending, setPending] = useState<PendingCreate | null>(() => loadPending(organizationId));
+  const [pending, setPending] = useState<PendingCreate | null>(() => loadPending(storageScope));
   const textProps = usePromptTextProps();
   // The price of this form, shown before anything is created; a change to the form asks for it again.
   const [quoted, setQuoted] = useState<{ pending: PendingCreate; quote: CloudWorkspaceQuote } | null>(null);
@@ -143,10 +154,11 @@ export function CloudCreateWorkspace({
 
   const keep = useCallback(
     (next: PendingCreate | null) => {
+      if (!isCurrent()) return;
       setPending(next);
-      savePending(organizationId, next);
+      savePending(storageScope, next);
     },
-    [organizationId],
+    [storageScope, isCurrent],
   );
 
   const update = <K extends keyof FormFields>(key: K, value: FormFields[K]) => setForm((current) => ({ ...current, [key]: value }));
@@ -167,7 +179,8 @@ export function CloudCreateWorkspace({
   const showPrice = async () => {
     setError(null);
     try {
-      setQuoted(await quoteCreate(api, request, { onStep: setStep, orgId: cloudOrgArg(organizationId) }));
+      const price = await quoteCreate(api, request, { onStep: setStep, orgId: cloudOrgArg(organizationId) });
+      if (isCurrent()) setQuoted(price);
     } catch (e) {
       fail(e);
     } finally {
@@ -185,10 +198,12 @@ export function CloudCreateWorkspace({
         pending: confirmed,
         onStep: setStep,
         onPending: keep,
-        onCreated: (created, request) => rememberCreatedWorkspace(created, request.repositories),
+        onCreated: (created, request) => { if (isCurrent()) rememberCreatedWorkspace(created, request.repositories); },
       });
-      setTracked(snapshot);
-      onChanged?.();
+      if (isCurrent()) {
+        setTracked(snapshot);
+        onChanged?.();
+      }
     } catch (e) {
       fail(e);
     } finally {

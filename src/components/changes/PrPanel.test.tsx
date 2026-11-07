@@ -341,7 +341,7 @@ it.each(["squash", "rebase"])("uses runtime landed evidence for a cloud panel-cr
     throw Error(method);
   });
   const mutate = vi.fn(async () => ({ pr: { ...mergedPr, state: "OPEN" }, created: true }));
-  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true });
   await source.createPr({ title: "Work", body: "", base: "main", draft: false, sessionId });
   render(<PrPanel source={source} sessionId={sessionId} branch={mergedPr.head} active busy={false} />);
   await screen.findByText(mergedPr.title);
@@ -361,7 +361,7 @@ it("keeps a merged cloud PR visible without offering creation when landed verifi
     if (method === "git.prAssociations") return { associations: [] };
     throw new WorkspaceRpcError("method_not_found", "old runtime", method);
   });
-  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true });
   render(<PrPanel source={source} sessionId="cloud:org:workspace:author" branch={mergedPr.head} active busy={false} />);
   await screen.findByText(mergedPr.title);
   expect(call).toHaveBeenCalledWith("git.prLanded", { repo: "app" });

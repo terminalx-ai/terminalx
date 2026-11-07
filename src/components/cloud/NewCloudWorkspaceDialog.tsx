@@ -35,7 +35,7 @@ export function NewCloudWorkspaceDialogHost() {
 
 function NewCloudWorkspaceDialog() {
   const { status } = useAccount();
-  if (status.state !== "signed-in") return null;
+  if (status.state !== "signed-in" || !status.identity?.organizationId) return null;
   const scope = status.context?.scope ?? "signed-in";
   const refresh = () => void refreshCloudCatalog();
   const close = () => {
@@ -51,7 +51,8 @@ function NewCloudWorkspaceDialog() {
         </DialogHeader>
         <CloudCreateWorkspace
           key={scope}
-          organizationId={scope}
+          organizationId={status.identity.organizationId}
+          persistenceScope={scope}
           onChanged={refresh}
           onProgress={(snapshot) => applyCloudSnapshot(snapshot)}
           onOpen={(item) => {

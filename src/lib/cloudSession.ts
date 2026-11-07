@@ -50,7 +50,7 @@ import {
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
 import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
-import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
+import { cloudGitSource, type GitSource } from "@/lib/gitSource";
 import { cloudWorkspaceHost } from "@/lib/cloudWorkspaceHost";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
@@ -542,7 +542,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     };
   }, [generation, client]);
   const gitSource = useMemo(
-    () => (connected && client && repository ? cloudGitSource({ workspaceKey, remote: new RemoteGit(client, repository), canWrite: manage, author: desktopGitIdentity }) : undefined),
+    () => (connected && client && repository ? cloudGitSource({ workspaceKey, remote: new RemoteGit(client, repository), canWrite: manage }) : undefined),
     [connected, client, repository, workspaceKey, manage],
   );
 

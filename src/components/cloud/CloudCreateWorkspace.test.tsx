@@ -4,6 +4,8 @@ import { api, type ModelInfo } from "@/lib/api";
 // First, as the app loads it: the session store reached earlier would load the
 // real account module inside its mock, and the cloud catalog would keep that one.
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
+import { NewCloudWorkspaceDialogHost, openNewCloudWorkspace } from "./NewCloudWorkspaceDialog";
+import { loadPending, setPendingCreateUser } from "@/lib/cloudCreate";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { refreshHarnesses } from "@/lib/sessions";
 import { BypassDialog } from "@/components/session/BypassDialog";
@@ -31,10 +33,11 @@ vi.mock("@/lib/api", () => ({
     listHarnesses: vi.fn(),
   },
 }));
-const account = vi.hoisted(() => ({ multiOrg: false }));
+const account = vi.hoisted(() => ({ multiOrg: false, scope: "hashed-account-a", email: "a@example.com" }));
 vi.mock("@/lib/account", async (original) => ({
   ...(await original<typeof import("@/lib/account")>()),
-  getAccount: () => ({ status: { state: "signed-in", identity: { email: "a@example.com", organizationId: "org-1" }, multiOrg: account.multiOrg }, ready: true, busy: false }),
+  getAccount: () => ({ status: { state: "signed-in", identity: { email: account.email, organizationId: "org-1" }, context: { scope: account.scope }, multiOrg: account.multiOrg }, ready: true, busy: false }),
+  useAccount: () => ({ status: { state: "signed-in", identity: { email: account.email, organizationId: "org-1" }, context: { scope: account.scope }, multiOrg: account.multiOrg }, ready: true, busy: false }),
 }));
 const catalog = vi.hoisted(() => ({ models: [] as ModelInfo[] }));
 vi.mock("@/lib/models", async (original) => ({
@@ -91,6 +94,9 @@ const snapshot = (phase: string, patch: { workspace?: object; operation?: object
 
 beforeEach(async () => {
   account.multiOrg = false;
+  account.scope = "hashed-account-a";
+  account.email = "a@example.com";
+  setPendingCreateUser(account.email);
   nativeCodex.on = false;
   nativeCodex.asked = [];
   localStorage.clear();
@@ -114,7 +120,9 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  act(() => openNewCloudWorkspace(false));
   cleanup();
+  setPendingCreateUser(null);
   vi.useRealTimers();
 });
 
@@ -499,4 +507,36 @@ it("groups owners, keeps missing repositories unselectable, and previews manual 
   fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
   expect(screen.getByRole("alert").textContent).toContain("without credentials");
   expect(screen.getAllByTestId("cloud-create-repository")).toHaveLength(2);
+});
+
+
+it("uses the real organisation from the production dialog and isolates pending requests across accounts", async () => {
+  account.multiOrg = true;
+  setPrefs({ bypassConfirmed: true });
+  mocked.cloudWorkspaceCreate.mockRejectedValue({ code: "network", retryWithSameIdempotencyKey: true });
+  act(() => openNewCloudWorkspace());
+  const view = render(<NewCloudWorkspaceDialogHost />);
+  await screen.findByRole("option", { name: "acme/app" });
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "https://github.com/acme/app.git" } });
+  fireEvent.change(screen.getByLabelText("Initial prompt"), { target: { value: "Build the feature" } });
+  await create();
+  await screen.findByRole("button", { name: "Retry" });
+  expect(mocked.cloudWorkspaceRepositories).toHaveBeenCalledWith("org-1");
+  expect(mocked.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), "org-1", "claude");
+  expect(mocked.cloudWorkspaceSetup).toHaveBeenCalledWith("box", "org-1");
+  expect(mocked.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.any(Object), "org-1");
+  expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledWith(expect.any(Object), "org-1");
+  expect(loadPending("hashed-account-a")).not.toBeNull();
+  expect(loadPending("org-1")).toBeNull();
+
+  // Same organisation, different signed-in account and native context hash.
+  account.email = "b@example.com";
+  account.scope = "hashed-account-b";
+  setPendingCreateUser(account.email);
+  view.rerender(<NewCloudWorkspaceDialogHost />);
+  await screen.findByRole("option", { name: "acme/app" });
+  expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+  expect(screen.queryByText(/was not confirmed/)).toBeNull();
+  expect(loadPending("hashed-account-b")).toBeNull();
+  expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
 });

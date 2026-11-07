@@ -10,7 +10,7 @@ import { mouseClick } from "@/test/press";
 
 const mocks = vi.hoisted(() => ({
   status: null as unknown as AccountStatus,
-  form: [] as { organizationId: string; onOpen: (item: CloudWorkspaceListItem) => void; onChanged?: () => void }[],
+  form: [] as { organizationId: string; persistenceScope: string; onOpen: (item: CloudWorkspaceListItem) => void; onChanged?: () => void }[],
   refreshCloudCatalog: vi.fn(async () => undefined),
   applyCloudSnapshot: vi.fn(),
   applied: vi.fn(),
@@ -56,7 +56,8 @@ describe("the new cloud workspace dialog", () => {
     act(() => openNewCloudWorkspace());
     expect(screen.getByTestId("cloud-new-workspace-dialog").textContent).toContain("A new machine in Acme");
     expect(screen.getByTestId("cloud-create-stub")).toBeTruthy();
-    expect(mocks.form.at(-1)!.organizationId).toBe("s");
+    expect(mocks.form.at(-1)!.organizationId).toBe("org-a");
+    expect(mocks.form.at(-1)!.persistenceScope).toBe("s");
   });
 
   it("opens the created workspace in the main slot and closes", () => {

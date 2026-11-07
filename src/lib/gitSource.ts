@@ -115,11 +115,11 @@ export class MissingIdentityError extends Error {
 }
 
 /**
- * One repository of a cloud workspace. `author` is read when committing
- * (the person's own Git identity from this computer); the workspace's GitHub
- * credentials never leave the runtime.
+ * One repository of a cloud workspace. Every commit resolves the target
+ * organization author, then the current global default if no override exists.
+ * The workspace's GitHub credentials never leave the runtime.
  */
-export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean; author: () => Promise<GitAuthor | null> }): GitSource {
+export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean }): GitSource {
   const { remote } = input;
   const statusOf = async (): Promise<SourceStatus> => {
     const status = await remote.status();
@@ -159,7 +159,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     logCommits: (from, limit) => remote.log(limit, from),
     branches: () => remote.branches().then((answer) => answer.branches),
     commit: async (message) => {
-      const author = await input.author();
+      const author = await cloudGitIdentity(input.workspaceKey);
       if (!author) throw new MissingIdentityError();
       await remote.commit(message, author);
       return null;

@@ -74,7 +74,7 @@ describe("session PR transport", () => {
     const call = vi.fn(async (method: string, args: { repo: string }) => method === "git.prAssociations" ? { associations: [] } : ({ prs: args.repo === "old-repo" ? [a, { ...b, number: 99, url: "https://github.com/acme/widgets/pull/99", head: a.head }] : [b] }));
     const mutate = vi.fn(async () => ({}));
     const remote = new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "new-repo");
-    const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote, canWrite: true, author: async () => null });
+    const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote, canWrite: true });
     const { rows } = await sessionPrs(source, "cloud:org:workspace:session", "followup");
     expect(rows.map((row) => row.identity)).toEqual([b.url, a.url]);
     expect(call).toHaveBeenCalledWith("git.prs", expect.objectContaining({ repo: "old-repo", branch: "initial", number: 1 }));
@@ -93,7 +93,7 @@ it("saves cloud creation immediately, before a later branch change or refresh", 
   invoke.mockResolvedValue([]);
   const mutate = vi.fn(async () => ({ pr: b, created: true, existing: false }));
   const remote = new RemoteGit({ mutate } as unknown as WorkspaceRpcClient, "repo/path");
-  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote, canWrite: true, author: async () => null });
+  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote, canWrite: true });
   await source.createPr({ title: b.title, body: "", base: "main", draft: false, sessionId: "author" });
   expect(invoke).toHaveBeenCalledWith("pr_associations", { sessionKey: "author", additions: [{ url: b.url, number: b.number, head: b.head, scope: { kind: "cloud", workspace: "cloud:org:workspace", repo: "repo/path" } }] });
 });
@@ -155,7 +155,7 @@ it("recovers runtime agent and pipeline PRs on a fresh desktop, retaining each c
     if (method === "git.prs") return { prs: args.number ? [args.repo === "app" ? b : other] : [] };
     throw Error(method);
   });
-  const source = () => cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  const source = () => cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true });
   for (let restart = 0; restart < 2; restart++) {
     saved = []; // A new desktop has none of the runtime's creation evidence.
     const { rows } = await sessionPrs(source(), sessionId, "next-branch");
@@ -171,7 +171,7 @@ it("recovers runtime agent and pipeline PRs on a fresh desktop, retaining each c
 });
 
 it("does not offer a fetching landed check to a read-only cloud viewer", () => {
-  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({} as WorkspaceRpcClient, "app"), canWrite: false, author: async () => null });
+  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({} as WorkspaceRpcClient, "app"), canWrite: false });
   expect(source.landed).toBeUndefined();
 });
 
@@ -185,7 +185,7 @@ it("keeps legacy runtime branch discovery and cached history without adopting br
     if (method === "git.prs") return { prs: params.repo === "history" ? [a] : [b] };
     throw Error(method);
   });
-  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true });
   for (let refresh = 0; refresh < 2; refresh++) {
     const result = await sessionPrs(source, sessionId, b.head);
     expect(result.rows.map((row) => row.pr?.number)).toEqual([2, 1]);
@@ -203,7 +203,7 @@ it.each(["permission_denied", "capability_not_granted", "network_error", "intern
     if (method === "git.prs") return { prs: [b] };
     throw new WorkspaceRpcError(code, "failure", method);
   });
-  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  const source = cloudGitSource({ workspaceKey: "cloud:org:workspace", remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true });
   await expect(sessionPrs(source, "cloud:org:workspace:author", b.head)).rejects.toMatchObject({ code });
   await expect(source.landed!()).rejects.toMatchObject({ code });
   expect(invoke).not.toHaveBeenCalled();

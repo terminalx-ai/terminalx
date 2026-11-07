@@ -81,7 +81,7 @@ export function CloudGitView({
 
   const remote = useMemo(() => (selected ? new RemoteGit(client, selected) : null), [client, selected]);
   const source = useMemo(
-    () => (remote ? cloudGitSource({ workspaceKey, remote, canWrite: manage, author: () => cloudGitIdentity(workspaceKey) }) : null),
+    () => (remote ? cloudGitSource({ workspaceKey, remote, canWrite: manage }) : null),
     [workspaceKey, remote, manage],
   );
 

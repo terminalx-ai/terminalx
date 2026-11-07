@@ -3,6 +3,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RpcWireRequest } from "@terminalx/portable/rpc";
 import { WorkspaceRpcClient, type WorkspaceConnectionState, type WorkspaceTransport } from "@terminalx/portable/workspace";
+import { ChangesPanel } from "@/components/changes/ChangesPanel";
+import { cloudGitSource } from "@/lib/gitSource";
+import { RemoteGit } from "@terminalx/portable/workspaceGit";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -170,6 +173,7 @@ describe("Git in a cloud workspace", () => {
       fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: message } });
       fireEvent.click(screen.getByRole("button", { name: /Commit/ }));
       await waitFor(() => expect(fake.calls("git.commit")).toHaveLength(message === "First" ? 1 : 2));
+      await waitFor(() => expect((screen.getByPlaceholderText("Commit message (⌘⏎ to commit)") as HTMLTextAreaElement).value).toBe("") );
       override = null;
     }
     expect(fake.calls("git.commit").map((call) => call.author)).toEqual([{ name: "Acme", email: "work@example.com" }, { name: "Personal", email: "personal@example.com" }]);
@@ -232,4 +236,52 @@ describe("Git in a cloud workspace", () => {
     await screen.findByText("app.txt");
     expect(screen.queryByPlaceholderText("Commit message (⌘⏎ to commit)")).toBeNull();
   });
+});
+
+
+it("uses the target organisation author in the session Changes panel, including removal and lookup failure", async () => {
+  let override: { name: string; email: string } | null = { name: "Target org", email: "target@example.com" };
+  let globalName = "Initial personal";
+  let denied = false;
+  mocks.invoke.mockImplementation(async (command: string, args: unknown) => {
+    // The target is fixed by the session, independently of any active organisation.
+    if (command === "cloud_git_identity") {
+      expect(args).toEqual({ orgId: "target-org" });
+      if (denied) throw new Error("organization membership lost");
+      return override;
+    }
+    if (command === "git_identity") return { name: globalName, email: "personal@example.com" };
+    throw new Error(`unexpected ${command}`);
+  });
+  const fake = runtime({
+    "git.reviewRange": () => ({ target: "main", base: "base", head: "head" }),
+    "git.changesBetween": () => ({ files: [] }),
+  });
+  const client = new WorkspaceRpcClient(fake);
+  fake.setState(manage);
+  const source = cloudGitSource({ workspaceKey: "cloud:target-org:ws-1", remote: new RemoteGit(client, "app"), canWrite: true });
+  render(<TooltipProvider><ChangesPanel source={source} events={[]} version={0} active live={false} /></TooltipProvider>);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  await screen.findByText("app.txt");
+  const commit = async (message: string, count: number) => {
+    fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: message } });
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Commit$/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /^Commit$/ }));
+    await waitFor(() => expect(fake.calls("git.commit")).toHaveLength(count));
+    await waitFor(() => expect((screen.getByPlaceholderText("Commit message (⌘⏎ to commit)") as HTMLTextAreaElement).value).toBe(""));
+  };
+  await commit("Organisation author", 1);
+  override = null;
+  globalName = "Current personal";
+  await commit("Removed override", 2);
+  expect(fake.calls("git.commit").map((call) => call.author)).toEqual([
+    { name: "Target org", email: "target@example.com" },
+    { name: "Current personal", email: "personal@example.com" },
+  ]);
+  denied = true;
+  fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Denied" } });
+  fireEvent.click(screen.getByRole("button", { name: /^Commit$/ }));
+  await screen.findByText(/organization membership lost/);
+  expect(fake.calls("git.commit")).toHaveLength(2);
+  client.close();
 });
