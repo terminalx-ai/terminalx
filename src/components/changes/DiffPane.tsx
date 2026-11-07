@@ -1,3 +1,5 @@
+import { useReviewComments } from "./ReviewComments";
+import { ReviewDiffPane } from "./ReviewDiffPane";
 import { useEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
@@ -10,7 +12,7 @@ import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
  * they highlight, collapse unchanged regions and never freeze the page on a
  * large file.
  */
-export function DiffPane({ path, before, after, mode }: { path: string; before: string; after: string; mode: "unified" | "split" }) {
+function ReadOnlyDiffPane({ path, before, after, mode }: { path: string; before: string; after: string; mode: "unified" | "split" }) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = host.current;
@@ -43,4 +45,9 @@ export function DiffPane({ path, before, after, mode }: { path: string; before: 
     return () => dispose();
   }, [path, before, after, mode]);
   return <div ref={host} className="diff-pane h-full min-h-0 overflow-auto scrollbar-thin select-text" />;
+}
+
+export function DiffPane(props: { path: string; before: string; after: string; mode: "unified" | "split"; base?: string; originalPath?: string }) {
+  const review = useReviewComments();
+  return review ? <ReviewDiffPane {...props} /> : <ReadOnlyDiffPane {...props} />;
 }

@@ -1,3 +1,4 @@
+import { ReviewCommentsProvider } from "./ReviewComments";
 import { useEffect, useId, useMemo, useState } from "react";
 import { Columns2, Rows2 } from "@/icons";
 import { changeRange, type ChangeRange } from "@/lib/changes";
@@ -31,6 +32,7 @@ function readChoice(source: GitSource): Choice {
  * Uncommitted is where a commit is made, and History opens past commits.
  */
 export function ChangesPanel(props: {
+  reviewTabId?: string | null;
   cwd?: string;
   source?: GitSource;
   events: AgentEvent[];
@@ -41,7 +43,8 @@ export function ChangesPanel(props: {
   workingTree?: boolean;
 }) {
   const source = useMemo(() => props.source ?? localGitSource(props.cwd ?? ""), [props.source, props.cwd]);
-  return <ScopedChanges key={source.key} {...props} source={source} />;
+  const panel = <ScopedChanges key={source.key} {...props} source={source} />;
+  return props.reviewTabId ? <ReviewCommentsProvider key={source.key} source={source} active={props.active} tabId={props.reviewTabId}>{panel}</ReviewCommentsProvider> : panel;
 }
 
 function ScopedChanges({ source, events, version, active, live, workingTree }: {
@@ -241,7 +244,7 @@ function ChangesBody({
       {current && !pair && !pairError && <div role="status" className="px-3 py-2 text-xs">Loading file diff…</div>}
       {pair && (
         <div className="min-h-0 flex-1">
-          <DiffPane path={pair.path} before={pair.before} after={pair.after} mode={mode} />
+          <DiffPane path={pair.path} before={pair.before} after={pair.after} mode={mode} base={range.base} originalPath={current?.oldPath} />
         </div>
       )}
     </div>

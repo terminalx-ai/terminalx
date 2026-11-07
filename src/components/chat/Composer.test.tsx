@@ -1185,3 +1185,34 @@ it("retains an image added while an earlier image is being sent", async () => {
   expect(screen.getByAltText("next.png")).toBeTruthy();
   expect(onSend).toHaveBeenCalledExactlyOnceWith("", [{ name: "first.png", mediaType: "image/png", data: "AQID" }]);
 });
+
+// PRO-230: the note is a draft until the send succeeds, even after editing it.
+describe("review comment delivery", () => {
+  it("marks the captured revision only after success, and restores it on refusal", async () => {
+    const { addReviewsToChat } = await import("@/lib/reviewComments");
+    const { getDraft, setDraft, useDraft } = await import("@/lib/drafts");
+    const reviewTab = { ...tab, id: "review-delivery" };
+    function Field({ onSend }: { onSend: () => Promise<void> }) {
+      const draft = useDraft(reviewTab.id);
+      return <Composer tab={reviewTab} busy={false} draft={draft} onDraftChange={(text) => setDraft(reviewTab.id, text)} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    invoke.mockResolvedValue([]);
+    setDraft(reviewTab.id, "");
+    addReviewsToChat("workspace", reviewTab.id, [{ id: "note", revision: 7, path: "a.ts", side: "after", startLine: 1, endLine: 1, lineText: "code", note: "Rename", sent: false, outdated: false }]);
+    let accept!: () => void, refuse!: (error: Error) => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve, reject) => { accept = resolve; refuse = reject; }));
+    render(<Field onSend={onSend} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: getDraft(reviewTab.id).replace("Rename", "Rename clearly") } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(getDraft(reviewTab.id)).toBe("");
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "review_comments")).toHaveLength(0);
+    await act(async () => refuse(new Error("not sent")));
+    expect(getDraft(reviewTab.id)).toContain("Rename clearly");
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "review_comments")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await act(async () => accept());
+    const calls = invoke.mock.calls.filter(([cmd]) => cmd === "review_comments");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toMatchObject({ workspace: "workspace", action: { type: "sent", comments: [{ id: "note", revision: 7 }] } });
+  });
+});

@@ -37,7 +37,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pair, setPair] = useState<{ path: string; before: string; after: string } | null>(null);
+  const [pair, setPair] = useState<{ path: string; before: string; after: string; base?: string; originalPath?: string } | null>(null);
+  const selectedOldPath = files.find((f) => f.path === selected)?.oldPath;
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,14 +78,18 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
       return;
     }
     let cancelled = false;
+    setPair(null);
     source
       .fileContentsAt(selected, head, null)
-      .then((r) => !cancelled && setPair({ path: selected, before: r.before ?? "", after: r.after ?? "" }))
+      .then(async (r) => {
+        const before = selectedOldPath ? (await source.fileContentsAt(selectedOldPath, head, null)).before : r.before;
+        if (!cancelled) setPair({ path: selected, before: before ?? "", after: r.after ?? "", base: head, originalPath: selectedOldPath });
+      })
       .catch((e) => !cancelled && setError(source.errorMessage(e)));
     return () => {
       cancelled = true;
     };
-  }, [source, selected, head, tick]);
+  }, [source, selected, selectedOldPath, head, tick]);
 
   const run = async (label: string, fn: () => Promise<string | null | void>) => {
     setBusy(label);
@@ -221,7 +226,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           </div>
           {pair && (
             <div className="min-h-0 flex-1">
-              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" />
+              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" base={pair.base} originalPath={pair.originalPath} />
             </div>
           )}
         </>
@@ -244,9 +249,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 }
 
 function CommitRow({ source, commit, open, onToggle }: { source: GitSource; commit: CommitInfo; open: boolean; onToggle: () => void }) {
-  const [files, setFiles] = useState<{ path: string; status: "added" | "modified" | "deleted" | "renamed"; additions: number; deletions: number }[]>([]);
+  const [files, setFiles] = useState<{ path: string; status: "added" | "modified" | "deleted" | "renamed"; oldPath?: string; additions: number; deletions: number }[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pair, setPair] = useState<{ path: string; before: string; after: string } | null>(null);
+  const [pair, setPair] = useState<{ path: string; before: string; after: string; base?: string; originalPath?: string } | null>(null);
   const EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
   useEffect(() => {
     if (!open) return;
@@ -269,15 +274,18 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
       return;
     }
     let cancelled = false;
+    setPair(null);
     (async () => {
       const parentTree = commit.parent ? (await source.logCommits(commit.parent, 1))[0]?.tree ?? EMPTY : EMPTY;
       const r = await source.fileContentsAt(selected, parentTree, commit.tree);
-      if (!cancelled) setPair({ path: selected, before: r.before ?? "", after: r.after ?? "" });
+      const originalPath = files.find((f) => f.path === selected)?.oldPath;
+      const before = originalPath ? (await source.fileContentsAt(originalPath, parentTree, commit.tree)).before : r.before;
+      if (!cancelled) setPair({ path: selected, before: before ?? "", after: r.after ?? "", base: parentTree, originalPath });
     })().catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [open, selected, source, commit.sha]);
+  }, [open, selected, source, commit.sha, files]);
   return (
     <div className="mb-0.5">
       <button
@@ -299,7 +307,7 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
           <FileList files={files} selected={selected} onSelect={setSelected} empty="No files." />
           {pair && (
             <div className="h-72 border-t border-hairline">
-              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" />
+              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" base={pair.base} originalPath={pair.originalPath} />
             </div>
           )}
         </div>

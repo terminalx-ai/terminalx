@@ -4936,3 +4936,10 @@ pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -
 pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<String>) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account, legacy_email.as_deref()).map_err(err)).await.map_err(err)?
 }
+
+#[tauri::command]
+pub async fn review_comments(workspace: String, action: crate::store::review_comments::Action) -> CmdResult<Vec<crate::store::review_comments::Comment>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::store::review_comments::apply(&crate::store::root().map_err(err)?, &workspace, action).map_err(err)
+    }).await.map_err(err)?
+}

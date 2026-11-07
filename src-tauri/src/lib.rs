@@ -624,6 +624,7 @@ pub fn run() {
             commands::changes_between,
             commands::review_range,
             commands::file_contents_at,
+            commands::review_comments,
             commands::log_commits,
             commands::load_tab_events,
             commands::prepare_continuation,
