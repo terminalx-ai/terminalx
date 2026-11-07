@@ -1,7 +1,8 @@
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { RemoteGit } from "@terminalx/portable/workspaceGit";
 import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { cloudGitSource } from "@/lib/gitSource";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PullRequest } from "@/lib/api";
 import type { WorkspaceDisposition } from "@/types/session";
@@ -12,6 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const { PrPanel } = await import("./PrPanel");
+const render = (ui: Parameters<typeof rtlRender>[0]) => rtlRender(ui, { wrapper: TooltipProvider });
 
 const cwd = "/repos/raccoon/.raccoon/worktrees/65-delete-workspace";
 const projectPath = "/repos/raccoon";

@@ -23,9 +23,10 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
   const [refreshing, setRefreshing] = useState(false);
   const [changed, setChanged] = useState(false);
   const [split, setSplit] = useState(false);
+  const [entire, setEntire] = useState(mode === "entire");
   const [editing, setEditing] = useState(mode === "edit");
   const [previewed, setPreviewed] = useState(mode === "preview");
-  useEffect(() => { if (mode === "edit") setEditing(true); if (mode === "preview") setPreviewed(true); }, [mode]);
+  useEffect(() => { if (mode === "entire") setEntire(true); if (mode === "edit") setEditing(true); if (mode === "preview") setPreviewed(true); }, [mode]);
   const fileEntry: FileEditorEntry = { ...entry, kind, name: entry.rel.split("/").pop() ?? entry.rel, viewMode: "source" };
 
   useEffect(() => {
@@ -41,6 +42,7 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
         ? (await source.changesBetween(range.base, range.head)).find((file) => file.path === entry.rel)?.oldPath
         : undefined);
       const before = previousPath ? (await source.fileContentsAt(previousPath, range.base, range.head)).before : next.before;
+      if (before === null && next.after === null) throw new Error("This file is not present in either snapshot.");
       if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "", deleted: next.after === null });
     })().catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
@@ -59,7 +61,14 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
         const now = await files.stat(entry.rel);
         if (initial === undefined) {
           initial = now;
-          const differs = pair && !media ? now === null ? !pair.deleted : (await files.readText(entry.rel)).content !== pair.after : false;
+          let differs = false;
+          if (pair && !media) {
+            if (now === null) differs = !pair.deleted;
+            else if (pair.after !== "<file too large to show>") {
+              const working = await files.readText(entry.rel);
+              differs = !working.truncated && !working.binary && working.content !== pair.after;
+            }
+          }
           if (!cancelled) setChanged(!!differs);
         } else if (!cancelled && (initial === null ? now !== null : changedSince(initial, now))) setChanged(true);
       } catch { /* The file surface reports read failures when opened. */ }
@@ -97,7 +106,7 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
     {changed && <div role="status" className="shrink-0 bg-warning/10 px-3 py-2 text-xs">This file changed on disk or differs from this snapshot. Edit and media preview use the current file.</div>}
     {error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}</div>}
     <div className="relative min-h-0 flex-1">
-      {(["diff", "entire"] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
+      {(["diff", ...(entire ? ["entire" as const] : [])] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
           : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{media && " Choose Preview to view the current file."}</p>
           : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} mode={surface === "entire" ? "entire" : split ? "split" : "unified"} />

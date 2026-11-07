@@ -14,11 +14,16 @@ import {
   setPaneCollapsed,
   toggleViewMode,
   useEditors,
+  isReviewEditor,
+  type ReviewEditorEntry,
 } from "@/lib/editors";
 import { DiffEditorPane } from "./DiffEditorPane";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { MediaPane } from "./MediaPane";
 import { EditorPane } from "./EditorPane";
+
+import { useTerminals, type SelectedSessionTab } from "@/lib/terminal";
+import { tabPanelId } from "@/lib/sessionTabIds";
 
 const MIN_W = 320;
 
@@ -29,13 +34,20 @@ const MIN_W = 320;
  * be closed to see the conversation again. In narrow columns, the editor
  * fills the column until hidden or closed, keeping both surfaces usable.
  */
-export function EditorSplit({ sessionId, active, fill = false }: { sessionId: string; active: boolean; fill?: boolean }) {
+export function EditorSplit({ sessionId, active, fill = false, selectedTab }: { sessionId: string; active: boolean; fill?: boolean; selectedTab?: SelectedSessionTab | null }) {
   const prefs = usePrefs();
   const ed = useEditors();
-  const editors = ed.editors.filter((e) => e.sessionId === sessionId);
-  const activeId = ed.active[sessionId] ?? editors[editors.length - 1]?.id ?? null;
+  const requested = useTerminals().selected[sessionId];
+  const selected = selectedTab === undefined ? requested : selectedTab;
+  const all = ed.editors.filter((e) => e.sessionId === sessionId);
+  // A checkout without a session has no workspace tab strip.
+  const standalone = sessionId.startsWith("checkout:");
+  const reviews = standalone ? [] : all.filter(isReviewEditor);
+  const editors = standalone ? all : all.filter((e) => !isReviewEditor(e));
+  const activeId = editors.find((e) => e.id === ed.active[sessionId])?.id ?? editors[editors.length - 1]?.id ?? null;
   const reviewActive = editors.some((e) => e.id === activeId && (e.kind === "diff" || e.kind === "pr"));
   const fullWidth = fill || reviewActive;
+  const reviewShown = reviews.some((e) => selected?.kind === "review" && selected.id === e.id);
   const collapsed = !!ed.collapsed[sessionId];
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; w: number; max: number } | null>(null);
@@ -81,12 +93,13 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
     },
     { enabled: active && !!activeId },
   );
-  useShortcut("files.closeAll", () => void closeAllEditors(sessionId), { enabled: active });
+  useShortcut("files.closeAll", () => void closeAllEditors(sessionId, !standalone), { enabled: active });
 
-  if (!editors.length) return null;
+  const reviewPanes = reviews.map((entry) => <ReviewTab key={entry.id} entry={entry} visible={active && selected?.kind === "review" && selected.id === entry.id} />);
 
   return <>
-    {collapsed && (
+    {reviewPanes}
+    {editors.length > 0 && collapsed && !reviewShown && (
       <div className="flex h-full w-8 shrink-0 flex-col items-center border-l border-hairline bg-well/30 pt-1.5">
         <WithTooltip label={`Show ${editors.length} open file${editors.length === 1 ? "" : "s"}`}>
           <Button variant="ghost" size="icon-xs" aria-label="Show editor pane" onClick={() => setPaneCollapsed(sessionId, false)}>
@@ -99,9 +112,12 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
     <div
       ref={root}
       tabIndex={-1}
+      role="region"
+      aria-hidden={!editors.length || collapsed || reviewShown}
+      aria-label={editors.find((e) => e.id === activeId)?.name ?? "Open files"}
       className={cn(
         "absolute inset-0 z-10 flex h-full w-full min-w-0 shrink-0 flex-col border-l border-hairline bg-background outline-none",
-        collapsed && "hidden",
+        (!editors.length || collapsed || reviewShown) && "hidden",
         // Beside a transcript it takes a resizable share; alone (a cloud workspace's files) it fills.
         !fullWidth && "@min-[768px]/editor-host:relative @min-[768px]/editor-host:w-(--editor-w) @min-[768px]/editor-host:max-w-[calc(100%-360px)]",
       )}
@@ -159,7 +175,7 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
           </Button>
         </WithTooltip>
         <WithTooltip label="Close all files" shortcut="files.closeAll">
-          <Button variant="ghost" size="icon-xs" aria-label="Close all files" onClick={() => void closeAllEditors(sessionId)}>
+          <Button variant="ghost" size="icon-xs" aria-label="Close all files" onClick={() => void closeAllEditors(sessionId, !standalone)}>
             <X />
           </Button>
         </WithTooltip>
@@ -167,10 +183,25 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
       <div className="relative min-h-0 flex-1">
         {editors.map((e) => (
           <div key={e.id} className={cn("absolute inset-0 flex flex-col", e.id !== activeId && "hidden")}>
-            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed} busy={false} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed} />}
+            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
           </div>
         ))}
       </div>
     </div>
   </>;
+}
+
+/** Review surfaces share the workspace selection and retain their buffers while hidden. */
+function ReviewTab({ entry, visible }: { entry: ReviewEditorEntry; visible: boolean }) {
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (visible) root.current?.focus({ preventScroll: true });
+  }, [visible]);
+  return <div ref={root} role="tabpanel" id={tabPanelId({ kind: "review", id: entry.id })}
+    aria-label={entry.name} aria-hidden={!visible} tabIndex={-1}
+    className={cn("absolute inset-0 z-10 flex min-h-0 flex-col bg-background outline-none", !visible && "hidden")}
+    onPointerDownCapture={() => setLastFocused("editor")} onFocusCapture={() => setLastFocused("editor")}>
+    {entry.kind === "diff" ? <DiffEditorPane entry={entry} visible={visible} />
+      : <PrPanel cwd={entry.root} sessionId={entry.sessionId} branch={entry.pr.head} selectedPr={entry.pr} active={visible} busy={false} />}
+  </div>;
 }

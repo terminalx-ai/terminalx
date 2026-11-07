@@ -3,6 +3,7 @@ import { Check, ChevronDown, ChevronRight, CircleAlert, CircleDot, ExternalLink,
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type PullRequest, type PrAssociation } from "@/lib/api";
 import { openPr } from "@/lib/editors";
+import { WithTooltip } from "@/components/ui/tooltip";
 import { Markdown } from "@/components/chat/Markdown";
 import { prIdentity, sessionPrs, type SessionPr } from "@/lib/sessionPrs";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
@@ -305,7 +306,7 @@ export function PrPanel({
               ) : (
                 <X className="mt-0.5 size-4 shrink-0 text-destructive" />
               )}
-              {openInTab && <Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={() => openInTab(row)}><Maximize2 /></Button>}
+              {openInTab && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={() => openInTab(row)}><Maximize2 /></Button></WithTooltip>}
               <div className="min-w-0 flex-1">
                 <button type="button" onClick={() => void openUrl(pr.url)} className="group flex items-center gap-1 text-left text-[13px] font-medium hover:underline">
                   <span className="truncate">{pr.title}</span>
@@ -318,7 +319,7 @@ export function PrPanel({
                 </div>
               </div>
             </div>
-            {selectedPr && pr.body && <div className="my-3 select-text"><Markdown text={pr.body} className="prose-chat" /></div>}
+            {selectedPr && pr.body && <div className="my-3 select-text"><Markdown text={pr.body} className="prose-chat" remoteImages={false} /></div>}
             {pr.checks.length > 0 && (
               <div className="mt-2 flex flex-col gap-0.5">
                 {pr.checks.map((c) => (
@@ -496,7 +497,7 @@ function InlinePr({ pr, ready, held, actions, onOpen }: { onOpen?: () => void; p
           <span className="truncate text-foreground">{pr.title}</span>
           <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
         </button>
-        {onOpen && <Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button>}
+        {onOpen && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button></WithTooltip>}
         <span className="shrink-0 text-[11px] text-faint">
           #{pr.number} · {state}
         </span>

@@ -1,9 +1,10 @@
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
-import type { ChatLinkContext } from "@/lib/chatLinks";
+import { openChatLink, type ChatLinkContext } from "@/lib/chatLinks";
 import { openDiff, reviewPath } from "@/lib/editors";
 import type { ChangeRange } from "@/lib/changes";
 import { fileName, shortPath } from "@/lib/paths";
 import type { TurnFileChange } from "@/lib/turnChanges";
+import { useState } from "react";
 import { File } from "@/icons";
 import { useDisclosure } from "./disclosures";
 
@@ -16,6 +17,7 @@ const SHOWN = 2;
  * shows them. A file’s chip opens its turn diff, including deleted files. A setting turns the row off.
  */
 export function TurnChanges({ changes, cwd, linkContext, range = null }: { changes: TurnFileChange[]; cwd?: string; linkContext?: ChatLinkContext; range?: ChangeRange | null }) {
+  const [error, setError] = useState<string | null>(null);
   const [all, setAll] = useDisclosure("changes");
   if (!changes.length) return null;
   const folded = !all && changes.length > SHOWN + 1;
@@ -24,6 +26,7 @@ export function TurnChanges({ changes, cwd, linkContext, range = null }: { chang
   const sum = (list: TurnFileChange[], key: "added" | "removed") => list.reduce((n, c) => n + c[key], 0);
   return (
     <div className="mb-3 flex flex-wrap gap-1.5" data-testid="turn-changes" aria-label="Files changed in this turn">
+      {error && <span role="alert" className="text-xs text-destructive">{error}</span>}
       {shown.map((change) => {
         const rel = linkContext ? reviewPath(linkContext.cwd, change.path) : null;
         const label = `${shortPath(change.path, cwd)}${change.kind === "create" ? " (new)" : change.kind === "delete" ? " (deleted)" : ""}`;
@@ -36,7 +39,11 @@ export function TurnChanges({ changes, cwd, linkContext, range = null }: { chang
             added={change.added}
             removed={change.removed}
             deleted={change.kind === "delete"}
-            onClick={linkContext && rel ? () => openDiff(linkContext.sessionId, linkContext.cwd, rel, { scope: "turn", range }) : undefined}
+            onClick={linkContext ? () => {
+              setError(null);
+              if (rel && range) openDiff(linkContext.sessionId, linkContext.cwd, rel, { scope: "turn", range, turnLabel: "Turn" });
+              else void openChatLink({ kind: "local", path: change.path, href: change.path }, linkContext).catch((e) => setError(String(e)));
+            } : undefined}
           />
         );
       })}

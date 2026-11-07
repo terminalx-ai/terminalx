@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
+import { pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
 afterEach(async () => {
@@ -75,7 +75,7 @@ describe("review tabs", () => {
     setPaneCollapsed("s", true);
     expect(openDiff("s", "/repo", "a.ts", { scope: "turn", range: { base: "base", head: "head" } })).toBe(diff);
     expect(getEditors().editors.find((e) => e.id === diff)).toMatchObject({ kind: "diff", dirty: true, name: "a.ts · Latest turn", diff: { mode: "edit" } });
-    expect(getEditors().collapsed.s).toBe(false);
+    expect(getEditors().collapsed.s).toBe(true);
     expect(openDiff("s", "/repo", "a.ts", { scope: "turn", range: { base: "next", head: "later" } })).not.toBe(diff);
     expect(openDiff("s", "/repo", "a.ts", { scope: "all", range: { base: "base", head: "head" } })).not.toBe(diff);
     expect(openFile("s", "/repo", "a.ts")).toBe(file);
@@ -115,9 +115,39 @@ describe("review tabs", () => {
     const restored = restoreReviewTabs(saved);
     expect(restored.editors.map((e) => e.kind)).toEqual(["pr", "diff"]);
     expect(restored.editors[1]).toMatchObject({ dirty: false, diff: { mode: "diff", oldPath: "old.ts", range: { base: "before", head: "after" } } });
-    expect(restored.active.s).toBe(id);
+    expect(restored.active.s).toBeNull();
     expect(restored.collapsed.s).toBe(true);
     expect(restoreReviewTabs("bad JSON").editors).toEqual([]);
     expect(restoreReviewTabs(JSON.stringify({ editors: [null, { kind: "diff" }, { ...restored.editors[1], diff: { mode: "edit", scope: "turn", range: 12 } }] })).editors).toEqual([]);
   });
+});
+
+
+it("does not select a saved review when the active editor was a file", () => {
+  openDiff("s", "/repo", "a.ts", { scope: "all", range: { base: "base", head: null } });
+  openFile("s", "/repo", "another.ts");
+  expect(restoreReviewTabs(serializeReviewTabs(getEditors())).active.s).toBeNull();
+});
+
+it("prunes restored review tabs for deleted sessions and removed worktrees after sessions load", () => {
+  for (const session of ["kept", "deleted", "removed"]) openDiff(session, "/repo", "a.ts", { scope: "all", range: { base: "base", head: null } });
+  pruneReviewTabs([{ id: "kept" }, { id: "removed", worktreeRemoved: true }]);
+  expect(getEditors().editors.map((e) => e.sessionId)).toEqual(["kept"]);
+  expect(restoreReviewTabs(localStorage.getItem("terminalx:review-tabs:v1")).editors.map((e) => e.sessionId)).toEqual(["kept"]);
+});
+
+it("labels uncommitted diffs accurately and rejects missing snapshot ranges", () => {
+  openDiff("s", "/repo", "a.ts", { scope: "all", uncommitted: true, range: { base: "base", head: null } });
+  expect(getEditors().editors[0].name).toBe("a.ts · Uncommitted changes");
+  expect(() => openDiff("s", "/repo", "missing.ts", { scope: "turn", range: null })).toThrow("No snapshots");
+  expect(getEditors().editors).toHaveLength(1);
+});
+
+
+it("keeps the file-pane selection independent from workspace reviews", async () => {
+  const file = openFile("s", "/repo", "a.ts");
+  const review = openDiff("s", "/repo", "b.ts", { scope: "all", range: { base: "base", head: null } });
+  expect(getEditors().active.s).toBe(file);
+  await closeAllEditors("s", true);
+  expect(getEditors().editors.map((e) => e.id)).toEqual([review]);
 });

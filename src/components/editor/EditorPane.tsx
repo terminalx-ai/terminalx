@@ -235,7 +235,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     let unregister: (() => void) | undefined;
     (async () => {
       try {
-        const stash = source.kind === "cloud" ? takeStashedBuffer(entry.id) : undefined;
+        const stash = source.kind === "cloud" || embedded ? takeStashedBuffer(entry.id) : undefined;
         let doc: string;
         if (stash) {
           doc = stash.text;
@@ -326,16 +326,16 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       window.clearTimeout(textTimer);
       unregister?.();
       const view = viewRef.current;
-      // A cloud buffer with unsaved text outlives its view while its editor
-      // is still open (the workspace page closed, or the source went away).
-      if (view && source.kind === "cloud" && view.state.doc.toString() !== savedDoc.current && getEditors().editors.some((e) => e.id === entry.id)) {
+      // A review can switch to another session through the workspace strip.
+      // Like cloud buffers, its unsaved text must outlive that unmounted view.
+      if (view && (source.kind === "cloud" || embedded) && view.state.doc.toString() !== savedDoc.current && getEditors().editors.some((e) => e.id === entry.id)) {
         stashBuffer(entry.id, { text: view.state.doc.toString(), saved: savedDoc.current, state: fileState.current });
       }
       view?.destroy();
       viewRef.current = null;
       setFind(null);
     };
-  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError]);
+  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded]);
 
   // Jump to a line when asked (from search results or the tree).
   useEffect(() => {

@@ -5,6 +5,7 @@ import { api, fs } from "@/lib/api";
 import { closeAllEditors, closeEditor, getEditors, openFile, openDiff, setActiveEditor, setLastFocused } from "@/lib/editors";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { liveEditorsFor } from "@/lib/editorViews";
+import { selectSessionTab } from "@/lib/terminal";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { EditorSplit } from "./EditorSplit";
 
@@ -62,7 +63,7 @@ it("pauses a player when a different tab is selected and unloads it on tab close
   expect(fs.closeMedia).toHaveBeenCalledWith("grant");
 });
 
-it("keeps the diff, entire file, and unsaved editor mounted across guarded mode changes and pane hiding", async () => {
+it("keeps the diff, entire file, and unsaved editor mounted across guarded mode changes and session tab selection", async () => {
   vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old\n", after: "new\n" });
   vi.mocked(fs.readText).mockResolvedValue({ content: "new\n", binary: false, truncated: false, mtimeMs: 1, size: 4 });
   const id = openDiff("split", "/workspace", "app.ts", { scope: "turn", range: { base: "before", head: "after" } });
@@ -71,6 +72,7 @@ it("keeps the diff, entire file, and unsaved editor mounted across guarded mode 
   expect(screen.queryByRole("separator")).toBeNull();
   expect(document.activeElement?.contains(screen.getByTestId("diff-editor"))).toBe(true);
   expect(getEditors().lastFocused).toBe("editor");
+  expect(container.querySelectorAll(".diff-pane")).toHaveLength(1);
   const diff = container.querySelector(".diff-pane")!;
   const scroller = diff.querySelector(".cm-scroller")!;
   scroller.scrollTop = 125;
@@ -90,8 +92,15 @@ it("keeps the diff, entire file, and unsaved editor mounted across guarded mode 
   expect(container.querySelector(".diff-pane")).toBe(diff);
   expect(scroller.scrollTop).toBe(125);
   expect(editor.state.doc.toString()).toBe("unsaved\n");
-  fireEvent.click(screen.getByRole("button", { name: "Hide editor pane" }));
-  fireEvent.click(screen.getByRole("button", { name: "Show editor pane" }));
+  let other = "";
+  act(() => { other = openFile("split", "/workspace", "other.ts"); });
+  await act(() => closeEditor(other));
+  act(() => setActiveEditor("split", id));
+  expect(liveEditorsFor("/workspace/app.ts")[0].view).toBe(editor);
+  expect(editor.state.doc.toString()).toBe("unsaved\n");
+  act(() => selectSessionTab("split", { kind: "agent", id: "agent" }));
+  expect(screen.queryByRole("tabpanel")).toBeNull();
+  act(() => setActiveEditor("split", id));
   expect(liveEditorsFor("/workspace/app.ts")[0].view).toBe(editor);
   fireEvent.click(screen.getByRole("radio", { name: "Edit" }));
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -126,4 +135,34 @@ it("recovers the before path for a renamed file opened by a turn chip", async ()
   expect(api.fileContentsAt).toHaveBeenCalledWith("/workspace", "old.ts", "before", "after");
   expect(container.querySelector(".diff-pane")?.textContent).toContain("old code");
   expect(container.querySelector(".diff-pane")?.textContent).toContain("new code");
+});
+
+
+it("does not compare a large-file placeholder with working-file contents", async () => {
+  vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old", after: "<file too large to show>" });
+  openDiff("split", "/workspace", "large.ts", { scope: "turn", range: { base: "before", head: "after" } });
+  render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
+  await screen.findByRole("radio", { name: "Edit" });
+  expect(screen.queryByText(/differs from this snapshot/)).toBeNull();
+  expect(fs.readText).not.toHaveBeenCalled();
+});
+
+
+it("retains unsaved review edits when another session unmounts the entire view", async () => {
+  vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old", after: "new" });
+  vi.mocked(fs.readText).mockResolvedValue({ content: "new", binary: false, truncated: false, mtimeMs: 1, size: 3 });
+  const id = openDiff("split", "/workspace", "session.ts", { scope: "turn", range: { base: "before", head: "after" } });
+  const first = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
+  fireEvent.click(await screen.findByRole("radio", { name: "Edit" }));
+  await waitFor(() => expect(liveEditorsFor("/workspace/session.ts")).toHaveLength(1));
+  act(() => liveEditorsFor("/workspace/session.ts")[0].view.dispatch({ changes: { from: 0, to: 3, insert: "unsaved" } }));
+  first.unmount();
+  expect(getEditors().editors.find((e) => e.id === id)?.dirty).toBe(true);
+  vi.mocked(fs.mtime).mockResolvedValue(2);
+  vi.mocked(fs.readText).mockResolvedValue({ content: "external", binary: false, truncated: false, mtimeMs: 2, size: 8 });
+  render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
+  await waitFor(() => expect(liveEditorsFor("/workspace/session.ts")).toHaveLength(1));
+  expect(liveEditorsFor("/workspace/session.ts")[0].view.state.doc.toString()).toBe("unsaved");
+  expect(getEditors().editors.find((e) => e.id === id)?.dirty).toBe(true);
+  await screen.findByText("This file changed on disk while you were editing.");
 });

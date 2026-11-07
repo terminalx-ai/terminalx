@@ -5,6 +5,7 @@ import { extOf, fileName } from "@/lib/paths";
 import type { ChangeRange } from "./changes";
 import type { PrAssociation } from "./api";
 import { discardStashedBuffers } from "@/lib/workspaceFiles";
+import { clearSelectedReview, getTerminalState, selectSessionTab } from "@/lib/terminal";
 
 /**
  * Files live beside the transcript; diff and PR tabs fill the centre. Nothing
@@ -23,6 +24,7 @@ export function fileKind(rel: string): FileKind {
 
 interface EditorBase {
   id: string;
+  created?: string;
   sessionId: string;
   /** Session workspace captured when the file was opened; browser links stay scoped here. */
   workspaceRoot: string;
@@ -53,11 +55,17 @@ export interface DiffEditorEntry extends EditorBase {
     /** A live workspace comparison can be explicitly refreshed. Turn snapshots stay fixed. */
     target?: string | null;
     uncommitted?: boolean;
+    /** Chips from historical turns must not be labelled as the latest turn. */
+    turnLabel?: "Turn" | "Latest turn";
     mode: DiffMode;
   };
 }
 export interface PrEditorEntry extends EditorBase { kind: "pr"; pr: PrAssociation }
 export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry;
+export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry;
+export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
+  return entry.kind === "diff" || entry.kind === "pr";
+}
 
 const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
 
@@ -82,20 +90,20 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
       if (e.kind === "diff") {
         const d = e.diff;
         if (!d || !["turn", "all"].includes(d.scope) || !["diff", "entire", "preview", "edit"].includes(d.mode)) continue;
-        if (d.range !== null && (!d.range || typeof d.range.base !== "string" || !(d.range.head === null || typeof d.range.head === "string"))) continue;
+        if (!d.range || typeof d.range.base !== "string" || !(d.range.head === null || typeof d.range.head === "string")) continue;
         if (d.oldPath !== undefined && (typeof d.oldPath !== "string" || !reviewPath(e.root, d.oldPath))) continue;
         if (!reviewPath(e.root, e.rel)) continue;
         if (d.target != null && typeof d.target !== "string") continue;
-        editors.push({ ...e, dirty: false, jump: undefined, viewMode: "source", diff: { ...d, mode: d.mode === "edit" ? "diff" : d.mode } });
+        editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined, viewMode: "source", diff: { ...d, mode: d.mode === "edit" ? "diff" : d.mode } });
       } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
         && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {
-        editors.push({ ...e, dirty: false, jump: undefined });
+        editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined });
       }
     }
     const active: State["active"] = {};
     const collapsed: State["collapsed"] = {};
     for (const e of editors) {
-      active[e.sessionId] = editors.some((tab) => tab.sessionId === e.sessionId && tab.id === saved.active?.[e.sessionId]) ? saved.active[e.sessionId] : e.id;
+      active[e.sessionId] = editors.some((tab) => tab.sessionId === e.sessionId && tab.id === saved.active?.[e.sessionId]) ? saved.active[e.sessionId] : null;
       collapsed[e.sessionId] = saved.collapsed?.[e.sessionId] === true;
     }
     return { editors, active, collapsed };
@@ -120,7 +128,9 @@ let state: State = { ...restoreReviewTabs((() => {
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
-  try { localStorage.setItem(REVIEW_TABS_KEY, serializeReviewTabs(state)); } catch { /* Optional persistence. */ }
+  if (patch.editors || patch.active || patch.collapsed) {
+    try { localStorage.setItem(REVIEW_TABS_KEY, serializeReviewTabs(state)); } catch { /* Optional persistence. */ }
+  }
   for (const l of listeners) l();
 }
 
@@ -151,6 +161,8 @@ let nonce = 0;
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
   const existing = state.editors.find((e) => e.kind !== "diff" && e.kind !== "pr" && e.sessionId === sessionId && e.root === root && e.rel === rel);
+  const selected = getTerminalState().selected[sessionId];
+  if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
   const kind = fileKind(rel);
   const jump = at && kind === "text" ? { ...at, nonce: ++nonce } : undefined;
   const collapsed = { ...state.collapsed, [sessionId]: false };
@@ -180,10 +192,10 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
   return id;
 }
 
-function openReview(entry: DiffEditorEntry | PrEditorEntry) {
+export function openReview(entry: ReviewEditorEntry) {
   // Reopening a review focuses its existing buffer without resetting its mode or scroll.
   const existing = state.editors.find((e) => e.id === entry.id);
-  if (!existing) set({ editors: [...state.editors, entry] });
+  if (!existing) set({ editors: [...state.editors, { ...entry, created: entry.created ?? new Date().toISOString() }] });
   else if (entry.kind === "diff" && existing.kind === "diff" && entry.diff.scope === "all") {
     updateDiffRange(entry.id, entry.diff.range, entry.diff.oldPath);
   }
@@ -205,7 +217,8 @@ export function openDiff(sessionId: string, root: string, rel: string, diff: Omi
   if (!path || (diff.oldPath && !reviewPath(root, diff.oldPath))) throw new Error("This file is outside the repository.");
   rel = path;
   const id = JSON.stringify([sessionId, root, "diff", rel, diff.scope, diff.scope === "turn" ? diff.range : [diff.target, diff.uncommitted]]);
-  return openReview({ id, sessionId, root, workspaceRoot: root, rel, name: `${fileName(rel)} · ${diff.scope === "turn" ? "Latest turn" : "All changes"}`,
+  if (!diff.range) throw new Error("No snapshots are available for this turn.");
+  return openReview({ id, sessionId, root, workspaceRoot: root, rel, name: `${fileName(rel)} · ${diff.scope === "turn" ? diff.turnLabel ?? "Latest turn" : diff.uncommitted ? "Uncommitted changes" : "All changes"}`,
     kind: "diff", dirty: false, viewMode: "source", diff: { ...diff, mode: "diff" } });
 }
 
@@ -248,29 +261,32 @@ async function confirmDiscard(names: string[]): Promise<boolean> {
 
 export async function closeEditor(id: string) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e) return;
-  if (e.dirty && !(await confirmDiscard([e.name]))) return;
+  if (!e) return true;
+  if (e.dirty && !(await confirmDiscard([e.name]))) return false;
   discardStashedBuffers([id]);
   const rest = state.editors.filter((x) => x.id !== id);
-  const siblings = rest.filter((x) => x.sessionId === e.sessionId);
+  const siblings = rest.filter((x) => x.sessionId === e.sessionId && (e.sessionId.startsWith("checkout:") || !isReviewEditor(x)));
   const wasActive = state.active[e.sessionId] === id;
   // The neighbour to the left takes over, like a browser closing a tab.
-  const idx = state.editors.filter((x) => x.sessionId === e.sessionId).findIndex((x) => x.id === id);
+  const idx = state.editors.filter((x) => x.sessionId === e.sessionId && (e.sessionId.startsWith("checkout:") || !isReviewEditor(x))).findIndex((x) => x.id === id);
   const next = siblings[Math.max(0, Math.min(idx, siblings.length - 1))]?.id ?? null;
   set({
     editors: rest,
     active: wasActive ? { ...state.active, [e.sessionId]: next } : state.active,
   });
+  clearSelectedReview(e.sessionId, id);
+  return true;
 }
 
 /** Close every editor of a session, asking once if any is unsaved. */
-export async function closeAllEditors(sessionId: string) {
-  const mine = state.editors.filter((x) => x.sessionId === sessionId);
+export async function closeAllEditors(sessionId: string, filesOnly = false) {
+  const mine = state.editors.filter((x) => x.sessionId === sessionId && (!filesOnly || !isReviewEditor(x)));
   if (!mine.length) return;
   if (!(await confirmDiscard(mine.filter((x) => x.dirty).map((x) => x.name)))) return;
   discardStashedBuffers(mine.map((x) => x.id));
+  for (const e of mine) clearSelectedReview(e.sessionId, e.id);
   set({
-    editors: state.editors.filter((x) => x.sessionId !== sessionId),
+    editors: state.editors.filter((x) => !mine.some((e) => e.id === x.id)),
     active: { ...state.active, [sessionId]: null },
   });
 }
@@ -280,13 +296,25 @@ export function dropEditors(match: (entry: EditorEntry) => boolean) {
   const gone = state.editors.filter(match);
   if (!gone.length) return;
   discardStashedBuffers(gone.map((e) => e.id));
+  for (const e of gone) clearSelectedReview(e.sessionId, e.id);
   const active = { ...state.active };
   for (const e of gone) if (active[e.sessionId] === e.id) active[e.sessionId] = null;
   set({ editors: state.editors.filter((e) => !match(e)), active });
 }
 
 export function setActiveEditor(sessionId: string, id: string | null) {
+  const entry = state.editors.find((e) => e.id === id && e.sessionId === sessionId);
+  if (entry && isReviewEditor(entry)) {
+    selectSessionTab(sessionId, { kind: "review", id: entry.id });
+    if (!sessionId.startsWith("checkout:")) return;
+  }
   set({ active: { ...state.active, [sessionId]: id }, collapsed: { ...state.collapsed, [sessionId]: false } });
+}
+
+/** Called only after the backend's complete session list has arrived. */
+export function pruneReviewTabs(sessions: readonly { id: string; worktreeRemoved?: boolean }[]) {
+  const kept = new Set(sessions.filter((s) => !s.worktreeRemoved).map((s) => s.id));
+  dropEditors((e) => isReviewEditor(e) && !e.sessionId.startsWith("checkout:") && !kept.has(e.sessionId));
 }
 
 export function setEditorDirty(id: string, dirty: boolean) {
