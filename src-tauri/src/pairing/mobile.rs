@@ -440,6 +440,12 @@ pub(super) fn dispatch(
         "sessions.create" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| create_session(manager, connection, params)))
         }
+        "configuration.resolve" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Params { #[serde(default)] project_id: Option<String> }
+            parse_params(params).and_then(|p: Params| connection.call("configuration", json!({"projectId": p.project_id})))
+        }
         "mac.settings" => no_params(&params).and_then(|_| connection.call("settings", json!({}))),
         "mac.setSettings" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params: MacSettingsPatch| connection.call("setSettings", json!({"nativeCodex": params.native_codex}))))
@@ -471,7 +477,7 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // as the desktop does. `macSettings`: `mac.settings` and `mac.setSettings`.
     // `terminal`: `terminal.open`, and terminal observations that carry the
     // pane's size, so the phone can emulate the screen and drive it.
-    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1)] {
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("layeredConfiguration", 1)] {
         if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
             named[feature] = json!(level);
         }
@@ -2318,7 +2324,9 @@ mod tests {
     #[test]
     fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
         let every = json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
-        assert_eq!(capabilities(&current_runtime()), every);
+        let mut current = every.clone();
+        current["layeredConfiguration"] = json!(1);
+        assert_eq!(capabilities(&current_runtime()), current);
         assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), every, "0.2.22 serves them all, without naming them");
         let app_only = json!({ "transcript": 1, "conditionalLists": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,

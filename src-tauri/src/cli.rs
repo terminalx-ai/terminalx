@@ -46,6 +46,7 @@ const HELP: &str = r#"terminalx — control a running TerminalX app
 Usage:
   terminalx status [--json]
   terminalx projects list [--json]
+  terminalx config show [--project PROJECT] [--json]
   terminalx sessions list [--project PROJECT|--quick] [--archived] [--json]
   terminalx sessions list --worktree WORKTREE [--project PROJECT] [--json]
   terminalx sessions archive|unarchive SESSION... [--json]
@@ -388,6 +389,11 @@ fn parse_with_stdin(
             } else {
                 rpc("projects.list", json!({}), &mut tokens)
             }
+        }
+        "config" => {
+            expect_word(&mut tokens, "show", "config")?;
+            let project = tokens.option("--project")?;
+            rpc("config.show", json!({"project": project}), &mut tokens)
         }
         "cloud" => parse_cloud(&mut tokens),
         "sessions" => parse_sessions(&mut tokens),
@@ -1180,6 +1186,14 @@ impl Tokens {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configuration_reads_select_a_project() {
+        assert_eq!(rpc_of(&["config", "show"]).0, "config.show");
+        let (command, params, _) = rpc_of(&["config", "show", "--project", "app", "--json"]);
+        assert_eq!(command, "config.show");
+        assert_eq!(params["project"], "app");
+    }
+
     use super::*;
 
     fn args(values: &[&str]) -> Vec<String> {

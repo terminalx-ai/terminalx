@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    // Keep layered keys written/reset by another window while an unrelated
+    // settings control holds a previously loaded snapshot. Not persisted.
+    #[serde(skip)]
+    pub(crate) loaded_configuration: Option<(String, String)>,
     /// Where new worktrees go, relative to the project root.
     pub worktree_dir: String,
     /// Branch prefix for session worktrees.
@@ -318,6 +322,7 @@ impl Default for StatusBarSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            loaded_configuration: None,
             worktree_dir: ".raccoon/worktrees".into(),
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
@@ -346,24 +351,38 @@ fn file_path() -> Result<PathBuf> {
 }
 
 pub fn load() -> Settings {
-    file_path()
+    let mut settings = file_path()
         .ok()
         .and_then(|p| super::read_json::<Settings>(&p).ok().flatten())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));
+    settings
 }
 
 pub fn save(s: &Settings) -> Result<()> {
     let path = file_path()?;
-    super::write_json(&path, s)?;
-    // A new file is already owner-only; this is what tightens one left loose
-    // by an older build, which matters because the file can hold a tracker
-    // API key. Raccoon owns this file, so narrowing it is ours to do.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    super::transaction::run(&super::root()?.join("configuration.lock"), std::time::Duration::from_secs(10), || {
+        let mut document = serde_json::to_value(s)?;
+        if let Some((prefix, directory)) = &s.loaded_configuration {
+            let latest = super::read_json::<serde_json::Value>(&path)?;
+            for (key, unchanged) in [("branchPrefix", prefix == &s.branch_prefix), ("worktreeDir", directory == &s.worktree_dir)] {
+                if unchanged {
+                    if let Some(value) = latest.as_ref().and_then(|value| value.get(key)) {
+                        document[key] = value.clone();
+                    } else {
+                        document.as_object_mut().unwrap().remove(key);
+                    }
+                }
+            }
+        }
+        super::write_json(&path, &document)?;
+        // Tighten files left loose by older builds; new ones are private from creation.
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ import { AgentIdleSettings } from "./AgentIdleSettings";
 import { CommandApprovalSettings } from "./CommandApprovalSettings";
 import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
+import { LayeredConfiguration } from "./LayeredConfiguration";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 
 export function GeneralTab() {
@@ -91,6 +92,7 @@ export function GeneralTab() {
         }
       />
       {cliError && <div className="-mt-2 mb-3 text-xs text-destructive">{cliError}</div>}
+      <LayeredConfiguration />
       <ComputerUseRows />
       <BrowserRuntimeRow />
       <RegisteredSetting setting="general.sounds"

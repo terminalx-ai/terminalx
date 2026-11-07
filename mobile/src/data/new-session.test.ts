@@ -91,3 +91,14 @@ describe("the Mac's side of a new session", () => {
     await expect(api(host).setNativeCodex(false)).rejects.toThrow("read-only");
   });
 });
+
+it("reads source and lock metadata only from a runtime advertising layered configuration", async () => {
+  const value = { values: { branchPrefix: { value: "team/", source: "managed", locked: true, redacted: false } }, registry: [], warnings: [], trust: null };
+  const request = vi.fn(async (method: string) => ({ ok: true, value: method === "sync.capabilities" ? { layeredConfiguration: 1 } : value }));
+  const host = new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
+  await expect(host.configuration("opaque-project")).resolves.toEqual(value);
+  expect(request).toHaveBeenCalledWith("configuration.resolve", { projectId: "opaque-project" });
+  const old = vi.fn(async () => ({ ok: true, value: {} }));
+  await expect(new HostApi({ request: old, onEvent: () => () => {} } as unknown as HostConnection).configuration()).resolves.toBeNull();
+  expect(old).toHaveBeenCalledTimes(1);
+});

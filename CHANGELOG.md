@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Branch prefixes and local launch environment can now inherit shared repository
+  configuration, local overrides and managed locks. Settings → General → Layered
+  configuration shows sources and offers explicit repository saves. Shared values
+  require native consent tied to the repository and file contents; changed files
+  need approval again. CLI and paired phones can inspect redacted sources. Script
+  execution and files to copy remain pending their repository settings features.
+
 - Native Codex no longer asks for attention while it is working. A turn
   that ran longer than five minutes was called stalled at every look of the
   watcher, because Codex's own progress did not count as activity, and a

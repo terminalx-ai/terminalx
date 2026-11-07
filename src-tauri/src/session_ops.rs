@@ -232,6 +232,10 @@ pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSessio
 }
 
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    if crate::git::is_repo(Path::new(&req.project_path)) {
+        crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
+            .map_err(|e| WorkspaceError::InvalidArguments(e.to_string()))?;
+    }
     let _naming = WORKSPACE_NAMING.lock();
     validate_session_target(&req)?;
     let project = projects::canonical_directory(&req.project_path).map_err(err)?;

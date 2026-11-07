@@ -200,6 +200,8 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  *    stays, and the location chip is left out instead: the sidebar row says
  *    where the session runs and has the same workspace menu.
  *
+ * At that narrow width, breadcrumb padding, gaps and chip margins tighten
+ * to keep the title readable beside the full-height 40px action buttons.
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
  * minimum.
@@ -543,7 +545,7 @@ export function SessionView({
             <div className="flex min-w-0 flex-1 items-center gap-1 text-sm" data-testid="session-compact-leading">{chrome?.leading}</div>
           ) : (
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
-          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden @max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0")} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
             {githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}

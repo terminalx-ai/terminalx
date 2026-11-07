@@ -1876,6 +1876,10 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// deletable.
 #[tauri::command]
 pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
+    if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
+        && !crate::configuration_commands::review(&app, &req.project_path).await? {
+        return Err("Repository configuration was not trusted. No workspace was created.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex_session(&mut req);
         create_session_blocking(&app, req)
@@ -3206,6 +3210,12 @@ pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label
 ///
 /// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
 pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+    cloud_control_question_with_details(app, title, message, None, ok_label).await
+}
+
+/// Optional reveal stays inside the native consent boundary. It never grants
+/// consent or extends the deadline; only the explicit agreement button does.
+pub(crate) async fn cloud_control_question_with_details(app: tauri::AppHandle, title: String, message: String, revealed: Option<String>, ok_label: String) -> crate::cloud_control::Answer {
     use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     // Kept short and on one line: the label comes from this app, but never trust its length.
@@ -3214,17 +3224,28 @@ pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String,
         return answer;
     }
     let message = format!("{message}\n\nIf this is not answered within {} seconds the request is dropped, and answering later does nothing.", QUESTION_TTL.as_secs());
+    let revealed = revealed.map(|text| format!("{text}\n\nThis request expires after {} seconds, including time spent reviewing values.", QUESTION_TTL.as_secs()));
+    let deadline = std::time::Instant::now() + QUESTION_TTL;
     let agree = ok_label.clone();
     let mut dialog = tauri::async_runtime::spawn_blocking(move || {
         let _open = Confirming::begin();
-        let pressed = app
-            .dialog()
-            .message(message)
-            .title(title)
-            .kind(MessageDialogKind::Warning)
-            .buttons(cloud_control_buttons(&ok_label))
-            .blocking_show_with_result();
-        cloud_control_agreed(&pressed, &agree)
+        let mut show_values = false;
+        loop {
+            if std::time::Instant::now() >= deadline { return false; }
+            let toggle = if show_values { "Hide values" } else { "Reveal values" };
+            let buttons = if revealed.is_some() {
+                cloud_control_review_buttons(toggle, &ok_label)
+            } else { cloud_control_buttons(&ok_label) };
+            let pressed = app.dialog()
+                .message(if show_values { revealed.as_ref().unwrap_or(&message) } else { &message })
+                .title(&title).kind(MessageDialogKind::Warning).buttons(buttons)
+                .blocking_show_with_result();
+            if revealed.is_some() && matches!(&pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == toggle) {
+                show_values = !show_values;
+                continue;
+            }
+            return cloud_control_agreed(&pressed, &agree);
+        }
     });
     match tokio::time::timeout(QUESTION_TTL, &mut dialog).await {
         Ok(pressed) => question_answered(pressed.unwrap_or(false), std::time::Instant::now()),
@@ -3256,6 +3277,12 @@ const CLOUD_CONTROL_CLOSE: &str = "Close";
 /// every dismissal would come back as agreement.
 fn cloud_control_buttons(agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
     tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(CLOUD_CONTROL_REFUSE.to_string(), agree.to_string(), CLOUD_CONTROL_CLOSE.to_string())
+}
+
+/// The review uses the default slot to toggle visibility, with the same
+/// explicit agreement and dismissal slots as ordinary native questions.
+fn cloud_control_review_buttons(toggle: &str, agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
+    tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(toggle.into(), agree.into(), CLOUD_CONTROL_CLOSE.into())
 }
 
 /// Whether the dialog's result is the explicit agree button, and nothing else.
@@ -3678,6 +3705,25 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn revealing_configuration_never_grants_consent() {
+        use tauri_plugin_dialog::MessageDialogResult;
+        for toggle in ["Reveal values", "Hide values"] {
+            let buttons = super::cloud_control_review_buttons(toggle, "Trust settings");
+            let agreed = |native| super::cloud_control_agreed(&as_the_dialog_layer_reports(native, &buttons), "Trust settings");
+            assert!(!agreed(Native::Yes), "Return toggles visibility, never approves");
+            assert!(!agreed(Native::Cancel), "Dismissal cannot approve");
+            assert!(agreed(Native::No), "Only explicit Trust settings approves");
+        }
+        for label in ["Reveal values", "Hide values", "Close", "Refuse"] {
+            assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom(label.into()), "Trust settings"));
+        }
+        for result in [MessageDialogResult::Yes, MessageDialogResult::No, MessageDialogResult::Cancel, MessageDialogResult::Ok] {
+            assert!(!super::cloud_control_agreed(&result, "Trust settings"));
+        }
+        assert!(super::cloud_control_agreed(&MessageDialogResult::Custom("Trust settings".into()), "Trust settings"));
+    }
+
     /// The idle sweep spares what a reader can see (#718): not what a closed
     /// window last showed, nor the floating window's session while it is put away.
     #[test]

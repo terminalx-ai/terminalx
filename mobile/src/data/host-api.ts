@@ -30,7 +30,7 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `sessionCreate`: it starts sessions as its new-session view does. `macSettings`: it shows and changes its settings.
  * `terminal`: `terminal.open`, and terminal output that says the pane's size, which the terminal view needs.
  */
-export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number }
+export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; layeredConfiguration?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -376,6 +376,13 @@ export class HostApi {
       ...(sent && typeof sent.queued === "boolean" ? { queued: sent.queued } : {}),
       ...(typeof value.sendError === "string" ? { sendError: value.sendError } : !sent ? { sendError: "The Mac did not say whether it sent the first message." } : {}),
     };
+  }
+
+  async configuration(projectId?: string): Promise<import("../../../src/types/configuration").Configuration | null> {
+    if ((await this.features()).layeredConfiguration !== 1) return null;
+    const result = await this.connection.request<import("../../../src/types/configuration").Configuration>("configuration.resolve", { projectId: projectId ?? null });
+    if (!result.ok) throw new Error(result.refusal.message);
+    return result.value;
   }
 
   /** This Mac's settings; null from a Mac that does not offer them to a phone. */

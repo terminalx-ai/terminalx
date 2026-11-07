@@ -657,7 +657,7 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        let environment = crate::store::environment::launch(cwd);
+        let environment = crate::store::environment::launch(cwd)?;
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
