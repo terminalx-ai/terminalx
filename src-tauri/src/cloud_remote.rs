@@ -77,8 +77,7 @@ impl SshFence {
 struct Attached {
     supervisor: Supervisor,
     workspace_id: Option<String>,
-    account_revision: Option<String>,
-    account_generation: u64,
+    session_epoch: u64,
     /// This connection's local port forwards (PRO-28).
     ports: PortForwarder,
     /// None only for a debug-build attach by pairing code, which no account owns.
@@ -193,7 +192,7 @@ impl CloudRemote {
     /// reads the scope as it is.)
     fn drop_previous_identity(&self) -> Vec<String> {
         let Some(scope) = self.account.settled_scope() else { return Vec::new() };
-        let generation = self.account.current_generation();
+        let session_epoch = self.account.current_session_epoch();
         // A port forward does not outlive a switch of the active
         // organization, even where the connection itself does (CS-18).
         {
@@ -207,7 +206,7 @@ impl CloudRemote {
             let mut connections = self.connections.lock().unwrap();
             let ids: Vec<String> = connections
                 .iter()
-                .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.account_generation != generation))
+                .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.session_epoch != session_epoch))
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter().filter_map(|id| connections.remove(&id).map(|attached| (id, attached))).collect()
@@ -229,17 +228,9 @@ impl CloudRemote {
         let connection_id = format!("cloud-{}", uuid::Uuid::new_v4().simple());
         let (events, mut receiver) = mpsc::unbounded_channel();
         let supervisor = Supervisor::start(source, activation, events);
-        let account_generation = self.account.current_generation();
-        let account_revision = identity.as_ref().and_then(|who| self.account.cloud_revision(&who.organization_id));
-        let ports = {
-            // Under the same rule as every frame the web view sends: nothing
-            // goes out for an identity that is no longer current, a pending
-            // sign-out included.
-            let (supervisor, account, made_for) = (supervisor.clone(), self.account.clone(), identity.clone());
-            let revision = account_revision.clone();
-            PortForwarder::new(move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref()) && account.cloud_revision(&identity.organization_id) == revision) && supervisor.send(frame))
-        };
-        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), workspace_id: workspace_id.clone(), account_revision, account_generation, identity: identity.clone() });
+        let session_epoch = self.account.current_session_epoch();
+        let ports = self.port_forwarder(supervisor.clone(), identity.clone(), session_epoch);
+        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), workspace_id: workspace_id.clone(), session_epoch, identity: identity.clone() });
         let app = app.clone();
         let id = connection_id.clone();
         let agents = self.agents.clone();
@@ -313,14 +304,24 @@ impl CloudRemote {
         connection_id
     }
 
+    fn port_forwarder(&self, supervisor: Supervisor, identity: Option<Identity>, session_epoch: u64) -> PortForwarder {
+        let account = self.account.clone();
+        // Pause sends while sign-out is unresolved, but resume the same
+        // transport if Keychain restores that session. A confirmed removal
+        // or new sign-in can never use this transport's epoch again.
+        PortForwarder::new(move |frame| identity.as_ref().is_none_or(|identity|
+            identity.allowed_by(account.current_scope().as_ref()) && account.current_session_epoch() == session_epoch
+        ) && supervisor.send(frame))
+    }
+
     /// The connection's port forwarder, under the same identity rule as
     /// [`Self::supervisor`].
     fn ports(&self, connection_id: &str) -> Result<PortForwarder, String> {
         let scope = self.scope();
-        let generation = self.account.current_generation();
+        let session_epoch = self.account.current_session_epoch();
         let connections = self.connections.lock().unwrap();
         let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
-        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.account_generation != generation) {
+        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.session_epoch != session_epoch) {
             return Err("cloud_remote_identity_changed".into());
         }
         Ok(attached.ports.clone())
@@ -328,13 +329,16 @@ impl CloudRemote {
 
     fn ssh_ports(&self, connection_id: &str, org: &str, workspace: &str, fence: &SshFence) -> Result<PortForwarder, String> {
         // Take only a copy under the map lock; account locks stay independent.
-        let (identity, revision, target, ports) = {
+        let (identity, session_epoch, target, ports) = {
             let connections = self.connections.lock().unwrap();
             let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
-            (attached.identity.clone(), attached.account_revision.clone(), attached.workspace_id.clone(), attached.ports.clone())
+            (attached.identity.clone(), attached.session_epoch, attached.workspace_id.clone(), attached.ports.clone())
         };
+        // The transport must still belong to the same established session.
+        // Each new SSH operation separately checks its exact request revision;
+        // an aborted sign-out preserves transports, not stale SSH requests.
         let valid = identity.as_ref().is_some_and(|who| who.organization_id == org && fence.matches(&self.account, who, workspace))
-            && target.as_deref() == Some(workspace) && revision.as_deref() == Some(fence.revision.as_str());
+            && target.as_deref() == Some(workspace) && session_epoch == self.account.current_session_epoch();
         if !valid { return Err("ssh_account_changed".into()); }
         Ok(ports)
     }
@@ -342,12 +346,12 @@ impl CloudRemote {
     fn supervisor(&self, connection_id: &str) -> Result<Supervisor, String> {
         // Read before the connections are locked: one lock at a time.
         let scope = self.scope();
-        let generation = self.account.current_generation();
+        let session_epoch = self.account.current_session_epoch();
         let connections = self.connections.lock().unwrap();
         let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
         // A connection made for another identity is never used, even before
         // the watcher has stopped it.
-        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.account_generation != generation) {
+        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.session_epoch != session_epoch) {
             return Err("cloud_remote_identity_changed".into());
         }
         Ok(attached.supervisor.clone())
@@ -702,7 +706,7 @@ mod intercept_tests {
         let (supervisor, _frames) = Supervisor::connected_for_test();
         let ports = PortForwarder::new(|_| true);
         ports.set_connected(Some(&["ports/1".into()]));
-        remote.connections.lock().unwrap().insert("connection".into(), Attached { supervisor, ports, identity: Some(made_in("org-a")), workspace_id: Some("workspace".into()), account_revision: Some(revision), account_generation: 1 });
+        remote.connections.lock().unwrap().insert("connection".into(), Attached { supervisor, ports, identity: Some(made_in("org-a")), workspace_id: Some("workspace".into()), session_epoch: 1 });
         assert!(remote.ssh_ports("connection", "org-a", "workspace", &fence).is_ok());
         assert!(remote.ssh_ports("connection", "org-a", "other-workspace", &fence).is_err());
         assert!(remote.ssh_ports("connection", "other-org", "workspace", &fence).is_err());
@@ -711,6 +715,8 @@ mod intercept_tests {
             match changed { "user" => replacement.user_id = "other".into(), "profile" => replacement.profile_id = "other".into(), _ => replacement.generation += 1 }
             account.set_context_for_test(Some(replacement));
             assert!(remote.ssh_ports("connection", "org-a", "workspace", &fence).is_err());
+            let fresh = SshFence { scope: fence.scope.clone(), revision: account.cloud_revision("org-a").unwrap() };
+            assert!(remote.ssh_ports("connection", "org-a", "workspace", &fresh).is_err(), "even a fresh revision cannot reuse a prior session's transport");
         }
     }
 
@@ -773,7 +779,7 @@ mod intercept_tests {
         ));
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents);
         let (supervisor, mut frames) = Supervisor::connected_for_test();
-        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, workspace_id: None, account_revision: None, account_generation: remote.account.current_generation(), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, workspace_id: None, session_epoch: remote.account.current_session_epoch(), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
 
         store.block_writes();
         let refreshing = {
@@ -815,11 +821,20 @@ mod intercept_tests {
     /// A sign-out the Keychain refuses leaves the person signed in. The
     /// watcher looking in the meantime must not have dropped their unsent
     /// commands, transcript cache and keys.
-    #[test]
-    fn a_refused_sign_out_drops_nothing_even_when_the_watcher_looks_in_the_middle_of_it() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_sign_out_drops_nothing_even_when_the_watcher_looks_in_the_middle_of_it() {
         use crate::account::AccountContext;
         use crate::cloud_agent_client::{KeyStore, MemoryKeys};
         use crate::keychain::testing::MemorySecrets;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use base64::Engine;
+
+        async fn frame(frames: &mut mpsc::UnboundedReceiver<Value>, method: &str) -> Value {
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(2), frames.recv()).await.unwrap().unwrap();
+                if next["method"] == method { return next; }
+            }
+        }
 
         const KEY_ID: &str = "key-aaaaaaaaaaaaaaaaaaaaaa";
         let account = Arc::new(AccountManager::default());
@@ -841,10 +856,24 @@ mod intercept_tests {
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents.clone());
         let attach = |id: &str| {
             let (supervisor, frames) = Supervisor::connected_for_test();
-            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, workspace_id: None, account_revision: None, account_generation: remote.account.current_generation(), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+            let session_epoch = account.current_session_epoch();
+            let ports = remote.port_forwarder(supervisor.clone(), Some(made_in("org-a")), session_epoch);
+            ports.set_connected(Some(&["ports/1".into()]));
+            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, workspace_id: Some("ws_1".into()), session_epoch, ports, identity: Some(made_in("org-a")) });
             frames
         };
-        let _frames = attach("cloud-1");
+        let mut frames = attach("cloud-1");
+        let ports = remote.ports("cloud-1").unwrap();
+        let preview = ports.forward(3000, None, false, Some("org-a".into())).await.unwrap();
+        let mut socket = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, preview.local_port)).await.unwrap();
+        socket.write_all(format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", preview.local_port).as_bytes()).await.unwrap();
+        let open = frame(&mut frames, "ports.open").await;
+        ports.on_message(&json!({"id":open["id"],"ok":true,"result":{"streamId":"preview-stream"}}));
+        frame(&mut frames, "ports.write").await;
+        let epoch = account.current_session_epoch();
+        let old_revision = account.cloud_revision("org-a").unwrap();
+        let old_fence = SshFence { scope: crate::workspace_ssh::scope("user", "org-a", "ws_1"), revision: old_revision.clone() };
+        assert!(remote.ssh_ports("cloud-1", "org-a", "ws_1", &old_fence).is_ok());
         let key = crate::cloud_agents::crypto::b64(&[7u8; 32]);
         let answer = json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": key, "createdAt": 1 }] });
         agents.store_keys("user", "org-a", "ws_1", &answer).unwrap();
@@ -879,6 +908,22 @@ mod intercept_tests {
         assert!(remote.drop_previous_identity().is_empty());
         assert!(intact());
         assert!(remote.supervisor("cloud-1").is_ok(), "and the connection is usable again");
+        assert_eq!(account.current_session_epoch(), epoch, "same restored transport lifetime");
+        assert_ne!(account.cloud_revision("org-a").as_deref(), Some(old_revision.as_str()), "request generation was not rolled back");
+        assert!(remote.ssh_ports("cloud-1", "org-a", "ws_1", &old_fence).is_err(), "old SSH operation remains fenced");
+        let fresh_fence = SshFence { revision: account.cloud_revision("org-a").unwrap(), ..old_fence };
+        assert!(remote.ssh_ports("cloud-1", "org-a", "ws_1", &fresh_fence).is_ok(), "a fresh request can use the restored session");
+        assert_eq!(remote.ports("cloud-1").unwrap().forwards(), vec![preview]);
+        remote.deliver(Outgoing::Frame { connection_id: "cloud-1".into(), frame: json!({"id":"resumed-command","method":"session.input"}) });
+        assert_eq!(frame(&mut frames, "session.input").await["id"], "resumed-command");
+        // Exercise the production send closure on the same live preview
+        // stream, not just the presence of a listener record.
+        socket.write_all(b"after-refusal").await.unwrap();
+        assert_eq!(frame(&mut frames, "ports.write").await["params"]["streamId"], "preview-stream");
+        ports.on_message(&json!({"event":"ports.data","params":{"streamId":"preview-stream","data":base64::engine::general_purpose::STANDARD.encode(b"still-live")}}));
+        let mut reply = [0u8; 10];
+        tokio::time::timeout(Duration::from_secs(2), socket.read_exact(&mut reply)).await.unwrap().unwrap();
+        assert_eq!(&reply, b"still-live");
 
         // A sign-out the Keychain confirms does drop it all.
         store.fail_writes(false);

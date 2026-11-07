@@ -352,6 +352,10 @@ struct Inner {
     pending: Option<PendingAuth>,
     signing_in: bool,
     generation: u64,
+    /// Established transport lifetime. Unlike request generation, an aborted
+    /// Keychain removal does not change this: the same session was restored.
+    /// Confirmed removal, expiry and a successful new sign-in do change it.
+    session_epoch: u64,
     last_error: Option<String>,
     /// The saved session could not be read at launch. Cleared by a sign-in
     /// or a sign-out, which are the person's own word on who is here.
@@ -432,6 +436,7 @@ impl AccountManager {
     pub(crate) fn set_context_for_test(&self, context: Option<AccountContext>) {
         let mut inner = self.inner.lock().unwrap();
         inner.loaded = true;
+        inner.session_epoch = inner.session_epoch.wrapping_add(1);
         inner.generation = context.as_ref().map_or_else(
             || inner.generation.wrapping_add(1),
             |context| context.generation,
@@ -686,6 +691,10 @@ impl AccountManager {
     }
 
     pub(crate) fn current_generation(&self) -> u64 { self.inner.lock().unwrap().generation }
+
+    /// For existing transports only. HTTP/SSH acquisition and stream-admission
+    /// fences continue to use the stricter request/context generation.
+    pub(crate) fn current_session_epoch(&self) -> u64 { self.inner.lock().unwrap().session_epoch }
 
     pub(crate) fn current_scope(&self) -> Option<CloudScope> {
         let inner = self.inner.lock().unwrap();
@@ -987,7 +996,13 @@ impl AccountManager {
         let mut inner = self.inner.lock().unwrap();
         // With the outcome, in one step: confirmed, or put back just below.
         inner.ending -= 1;
-        let Err(error) = stored else { return (session, generation) };
+        let Err(error) = stored else {
+            // A sign-in that raced this removal already owns its own epoch.
+            if inner.generation == generation {
+                inner.session_epoch = inner.session_epoch.wrapping_add(1);
+            }
+            return (session, generation);
+        };
         log::warn!("could not remove TerminalX account session from Keychain: {:#}", error.into_error());
         // A sign-in begun meanwhile owns the account now.
         if inner.generation == generation {
@@ -1085,6 +1100,7 @@ impl AccountManager {
             Ok(session) => {
                 inner.last_error = None;
                 inner.session_unreadable = false;
+                inner.session_epoch = inner.session_epoch.wrapping_add(1);
                 inner.set_session(Some(session));
             }
             Err(error) => {
@@ -1117,6 +1133,7 @@ impl AccountManager {
                 inner.set_session(Some(refreshed));
             }
             Err(CloudError::Http(400 | 401 | 403)) => {
+                inner.session_epoch = inner.session_epoch.wrapping_add(1);
                 inner.set_session(None);
                 inner.last_error = Some("Your TerminalX session expired. Sign in again.".into());
             }
@@ -1240,7 +1257,10 @@ impl AccountManager {
         match stored {
             // Nothing changes the session before it is loaded; if something
             // did, that is newer than what was stored.
-            Ok(Stored::Session(session)) if inner.revision == 0 => inner.session = session.map(|session| *session),
+            Ok(Stored::Session(session)) if inner.revision == 0 => {
+                inner.session = session.map(|session| *session);
+                if inner.session.is_some() { inner.session_epoch = inner.session_epoch.wrapping_add(1); }
+            }
             Ok(Stored::Session(_)) => {}
             // The Keychain answered, and what it holds is not a session this
             // app can use. It will be the same on every launch, so it is not
@@ -2478,6 +2498,36 @@ mod tests {
         assert!(manager.end_session().0.is_some());
         assert!(manager.current_scope().is_none());
         assert_eq!(stored_session(&store).map(|session| session.access_token), None);
+    }
+
+    #[test]
+    fn established_session_epoch_survives_refused_sign_out_but_never_a_new_sign_in() {
+        let (manager, store) = signed_in_with_store();
+        let context = manager.context().unwrap();
+        let epoch = manager.current_session_epoch();
+        let session = manager.inner.lock().unwrap().session.clone().unwrap();
+        store.fail_writes(true);
+        assert!(manager.end_session().0.is_none());
+        assert_eq!(manager.current_session_epoch(), epoch);
+        assert!(!manager.is_current(&context), "request generation must stay fenced after rollback");
+        store.fail_writes(false);
+        assert!(manager.end_session().0.is_some());
+        let signed_out_epoch = manager.current_session_epoch();
+        assert_ne!(signed_out_epoch, epoch);
+        // Complete an actual exchange for the same account/profile; even if
+        // a transport watcher missed the signed-out interval, its epoch dies.
+        let generation = {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.generation = inner.generation.wrapping_add(1);
+            inner.signing_in = true;
+            inner.generation
+        };
+        assert!(manager.apply_exchange(generation, Ok(session)));
+        assert_ne!(manager.current_session_epoch(), signed_out_epoch);
+        assert_ne!(manager.current_session_epoch(), epoch);
+        assert_eq!(manager.context().unwrap().user_id, context.user_id);
+        assert_eq!(manager.context().unwrap().profile_id, context.profile_id);
+        assert!(!manager.is_current(&context));
     }
 
     #[test]

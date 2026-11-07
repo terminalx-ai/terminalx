@@ -21,7 +21,10 @@ The ProxyCommand invokes `terminalx ssh-proxy --organization … --workspace …
 --scope …`. The checked account/profile revision travels through attachment acquisition and
 native stream admission. `ssh.info` and the forward must use the same captured
 connection id and native transport epoch; replacement or account transition
-refuses the open.
+refuses the open. Existing transports use a separate established-session epoch:
+a refused Keychain sign-out preserves ordinary connections and previews, while
+old SSH request revisions remain rejected. A confirmed removal or successful
+new sign-in invalidates the transport epoch, including for the same account.
 The app opens the existing authenticated E2EE `ports/1` stream, and the proxy
 copies raw stdin/stdout with half-close handling. Each proxy owns a separate loopback listener and its streams. Closing it
 releases those resources without touching other proxies, previews or workspace
@@ -47,7 +50,10 @@ key-only changes. Only `manager || (driver && canApprove)` qualifies. Missing,
 malformed or expired SSH grants authorize nothing. A server-issued 60-second
 absolute expiry is retained with each admitted key and ends new admission
 and live sessions. A monotonic deadline prevents clock rollback or replay
-from extending a grant; the local liveness limit can only shorten it. Changing
+from extending a grant; the local liveness limit can only shorten it.
+Bounded replay history survives active-key clearing and cancellation. It is
+pruned only once an advancing clock floor makes the absolute expiry permanently
+ineligible, so replay after expiry or clock rollback cannot restore a key. Changing
 keys closes sessions in the previous key generation; a rejected runtime
 credential clears keys. `ssh.info` and the port stream apply current runtime
 rights, even for previously issued manage attachments.

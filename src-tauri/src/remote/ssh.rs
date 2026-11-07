@@ -14,9 +14,19 @@ use tokio_util::sync::CancellationToken;
 use super::collab::{Access, Members};
 
 const LEASE: Duration = Duration::from_secs(90);
+// Normal 60-second grants refreshed every 15 seconds need at most four
+// generations per member. Never evict replay history to admit more grants.
+const MAX_GRANT_HISTORY: usize = super::collab::MAX_MEMBERS * 16;
 
 struct Grants {
     keys: BTreeMap<String, Grant>,
+    // Kept independently of active keys, including after expiry/removal/write
+    // failure. A cached (key, absolute expiry) must retain its first deadline.
+    history: BTreeMap<(String, u64), Instant>,
+    // Once an absolute expiry is known to have passed, clock rollback cannot
+    // make it future again. Only such history entries can be safely pruned.
+    wall_floor: u64,
+    clock_at: Option<(u64, Instant)>,
     cancel: CancellationToken,
 }
 
@@ -93,6 +103,9 @@ impl Ssh {
             host_public_key,
             grants: Mutex::new(Grants {
                 keys: BTreeMap::new(),
+                history: BTreeMap::new(),
+                wall_floor: 0,
+                clock_at: None,
                 cancel: CancellationToken::new(),
             }),
             changed: tokio::sync::Notify::new(),
@@ -190,18 +203,22 @@ impl Ssh {
 
     fn update_at(&self, members: Option<&Members>, wall: u64, now: Instant) {
         self.expire_at(wall, now);
-        let allowed = allowed_keys(members, wall);
         let mut grants = self.grants.lock().unwrap();
+        let allowed = allowed_keys(members, grants.wall_floor);
         let mut keys = BTreeMap::new();
         for (key, absolute_ms) in allowed {
-            let mut deadline = now + Duration::from_millis(absolute_ms - wall).min(LEASE);
-            // Replaying the same grant cannot move either clock's deadline.
-            if let Some(old) = grants
-                .keys
-                .get(&key)
-                .filter(|old| old.absolute_ms == absolute_ms)
-            {
-                deadline = deadline.min(old.deadline);
+            let candidate = now + Duration::from_millis(absolute_ms - grants.wall_floor).min(LEASE);
+            let id = (key.clone(), absolute_ms);
+            let deadline = match grants.history.get(&id) {
+                Some(previous) => candidate.min(*previous),
+                None if grants.history.len() < MAX_GRANT_HISTORY => candidate,
+                // Fail closed at the bound. Evicting an unexpired tombstone
+                // would allow an old cached grant to look new again.
+                None => continue,
+            };
+            grants.history.insert(id, deadline);
+            if deadline <= now {
+                continue;
             }
             keys.insert(
                 key,
@@ -238,10 +255,33 @@ impl Ssh {
 
     fn expire_at(&self, wall: u64, now: Instant) {
         let mut grants = self.grants.lock().unwrap();
+        // Continue advancing the last trusted wall observation with the
+        // monotonic clock. Rollback cannot extend either cached or newly
+        // issued grants; a forward wall correction can only shorten them.
+        let inferred = grants
+            .clock_at
+            .map(|(base, before)| {
+                let elapsed = now
+                    .saturating_duration_since(before)
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                base.saturating_add(elapsed)
+            })
+            .unwrap_or(0);
+        if grants.clock_at.is_none() || wall > inferred {
+            grants.clock_at = Some((wall, now));
+        }
+        // Keep the same anchor during rollback, so frequent sub-millisecond
+        // calls cannot discard fractional elapsed time and slow the floor.
+        grants.wall_floor = grants.wall_floor.max(wall).max(inferred);
+        let wall_floor = grants.wall_floor;
+        grants
+            .history
+            .retain(|(_, absolute_ms), _| *absolute_ms > wall_floor);
         if grants
             .keys
             .values()
-            .any(|grant| wall >= grant.absolute_ms || now >= grant.deadline)
+            .any(|grant| wall_floor >= grant.absolute_ms || now >= grant.deadline)
         {
             // OpenSSH owns authentication: expire the whole file/session epoch
             // at the earliest grant deadline. A fresh member update may restore
@@ -310,6 +350,9 @@ mod tests {
             host_public_key: String::new(),
             grants: Mutex::new(Grants {
                 keys: BTreeMap::new(),
+                history: BTreeMap::new(),
+                wall_floor: 0,
+                clock_at: None,
                 cancel: CancellationToken::new(),
             }),
             changed: tokio::sync::Notify::new(),
@@ -367,6 +410,69 @@ mod tests {
     }
 
     #[test]
+    fn replay_after_monotonic_expiry_cannot_rewrite_keys_or_create_a_live_epoch() {
+        for explicit_expiry in [false, true] {
+            let (dir, service) = fixture();
+            let now = Instant::now();
+            let cached = grant(1, 1_060_000);
+            service.update_at(Some(&cached), 1_000_000, now);
+            let epoch = service.grants.lock().unwrap().cancel.clone();
+            if explicit_expiry {
+                service.expire_at(900_000, now + Duration::from_secs(60));
+            }
+            // The implicit case expires inside update_at before it considers
+            // the identical cached response. The wall clock has rolled back.
+            service.update_at(Some(&cached), 900_001, now + Duration::from_millis(60_001));
+            assert!(epoch.is_cancelled());
+            assert!(service.grants.lock().unwrap().keys.is_empty());
+            assert!(service.grants.lock().unwrap().cancel.is_cancelled());
+            assert_eq!(
+                std::fs::read(dir.path().join("authorized_keys")).unwrap(),
+                b""
+            );
+            let marker = b"# expired; a cache replay must not rewrite this file\n";
+            std::fs::write(dir.path().join("authorized_keys"), marker).unwrap();
+            service.update_at(Some(&cached), 900_002, now + Duration::from_secs(61));
+            assert_eq!(
+                std::fs::read(dir.path().join("authorized_keys")).unwrap(),
+                marker
+            );
+            assert!(service.grants.lock().unwrap().cancel.is_cancelled());
+            // A separately issued expiry can renew the key, but not the old
+            // session. Rotation remains a new, cancellable epoch too.
+            service.update_at(
+                Some(&grant(1, 1_120_000)),
+                900_003,
+                now + Duration::from_secs(62),
+            );
+            assert!(!service.grants.lock().unwrap().keys.is_empty());
+            let renewal = service.grants.lock().unwrap().cancel.clone();
+            assert!(!renewal.is_cancelled());
+            assert!(epoch.is_cancelled());
+            service.update_at(
+                Some(&grant(2, 1_120_000)),
+                900_004,
+                now + Duration::from_secs(63),
+            );
+            assert!(renewal.is_cancelled());
+            assert!(!service.grants.lock().unwrap().cancel.is_cancelled());
+        }
+    }
+
+    #[test]
+    fn replay_history_pruned_after_absolute_expiry_stays_denied_after_clock_rollback() {
+        let (_dir, service) = fixture();
+        let now = Instant::now();
+        let cached = grant(1, 1_050);
+        service.update_at(Some(&cached), 1_000, now);
+        service.expire_at(1_050, now + Duration::from_millis(50));
+        assert!(service.grants.lock().unwrap().history.is_empty());
+        service.update_at(Some(&cached), 900, now + Duration::from_millis(51));
+        assert!(service.grants.lock().unwrap().keys.is_empty());
+        assert!(service.grants.lock().unwrap().cancel.is_cancelled());
+    }
+
+    #[test]
     fn rotation_cancels_old_sessions_and_renewed_grant_can_extend_only_valid_epoch() {
         let (_dir, service) = fixture();
         let now = Instant::now();
@@ -413,6 +519,62 @@ mod tests {
         );
         service.expire_at(91_000, now + LEASE);
         assert!(epoch.is_cancelled());
+        service.update_at(None, 900, now + LEASE);
+        for wall in [901, 91_001] {
+            service.update_at(
+                Some(&grant(1, 1_000_000)),
+                wall,
+                now + LEASE + Duration::from_millis(1),
+            );
+            assert!(service.grants.lock().unwrap().keys.is_empty());
+            assert!(service.grants.lock().unwrap().cancel.is_cancelled());
+        }
+        service.update_at(
+            Some(&grant(1, 1_100_000)),
+            91_002,
+            now + LEASE + Duration::from_millis(2),
+        );
+        assert!(!service.grants.lock().unwrap().keys.is_empty());
+        assert!(!service.grants.lock().unwrap().cancel.is_cancelled());
+        assert!(epoch.is_cancelled());
+    }
+
+    #[test]
+    fn bounded_history_never_evicts_an_expired_grant_to_admit_more_keys() {
+        let (_dir, service) = fixture();
+        let now = Instant::now();
+        let cached = grant(1, 1_000_000);
+        service.update_at(Some(&cached), 1_000, now);
+        service.expire_at(900, now + LEASE);
+        {
+            let mut grants = service.grants.lock().unwrap();
+            for index in 1..MAX_GRANT_HISTORY {
+                grants
+                    .history
+                    .insert((format!("already-seen-{index}"), 1_000_000), now);
+            }
+        }
+        service.update_at(
+            Some(&grant(2, 1_000_001)),
+            901,
+            now + LEASE + Duration::from_millis(1),
+        );
+        service.update_at(Some(&cached), 902, now + LEASE + Duration::from_millis(2));
+        assert_eq!(
+            service.grants.lock().unwrap().history.len(),
+            MAX_GRANT_HISTORY
+        );
+        assert!(service.grants.lock().unwrap().keys.is_empty());
+        assert!(service.grants.lock().unwrap().cancel.is_cancelled());
+        // Once a clock floor proves all old expiries ineligible, capacity is
+        // safely reclaimed and a new authoritative grant works again.
+        service.update_at(
+            Some(&grant(2, 2_000_060)),
+            2_000_000,
+            now + Duration::from_secs(1000),
+        );
+        assert_eq!(service.grants.lock().unwrap().history.len(), 1);
+        assert!(!service.grants.lock().unwrap().keys.is_empty());
     }
 
     #[test]
@@ -448,6 +610,9 @@ mod tests {
             host_public_key: key.clone(),
             grants: Mutex::new(Grants {
                 keys: BTreeMap::new(),
+                history: BTreeMap::new(),
+                wall_floor: 0,
+                clock_at: None,
                 cancel: CancellationToken::new(),
             }),
             changed: tokio::sync::Notify::new(),
