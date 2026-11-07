@@ -461,6 +461,10 @@ fn is_tree_id(s: &str) -> bool {
 /// Changed files between two trees (or a tree and the working tree when
 /// `head` is `None`), with per-file line counts.
 pub fn changes_between(cwd: &Path, base: &str, head: Option<&str>) -> Result<Vec<ChangedFile>> {
+    changes_between_options(cwd, base, head, false)
+}
+
+pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_whitespace: bool) -> Result<Vec<ChangedFile>> {
     if !is_tree_id(base) {
         bail!("bad base tree id");
     }
@@ -469,14 +473,16 @@ pub fn changes_between(cwd: &Path, base: &str, head: Option<&str>) -> Result<Vec
             bail!("bad head tree id");
         }
     }
-    let mut args = vec!["diff", "--numstat", "-M", "--name-status", "-z", base];
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--name-status", "-z", base];
     if let Some(h) = head {
         args.push(h);
     }
     args.push("--");
     // --numstat and --name-status can't be combined in one call; run both.
     let status_out = run(cwd, &args.iter().filter(|a| **a != "--numstat").cloned().collect::<Vec<_>>())?;
-    let num_out = run(cwd, &args.iter().filter(|a| **a != "--name-status").cloned().collect::<Vec<_>>())?;
+    let mut num_args = args.iter().filter(|a| **a != "--name-status").copied().collect::<Vec<_>>();
+    if hide_whitespace { num_args.insert(1, "-w"); }
+    let num_out = run(cwd, &num_args)?;
 
     let mut counts = std::collections::HashMap::new();
     let mut records = num_out.split('\0');
@@ -1452,6 +1458,28 @@ mod tests {
         let ws = work_status(p);
         assert!(ws.is_repo && ws.dirty);
         assert_eq!(ws.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn whitespace_stats_preserve_the_changed_file_list_and_count_real_edits() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("space.txt"), "  x = 1;\n\treturn x;\n").unwrap();
+        std::fs::write(p.join("real.txt"), "a\nb\n").unwrap();
+        let base = snapshot_tree(p).unwrap();
+        std::fs::write(p.join("space.txt"), "x=1;\nreturn  x;  \n").unwrap();
+        std::fs::write(p.join("real.txt"), " a \nc\n").unwrap();
+        let head = snapshot_tree(p).unwrap();
+        let normal = changes_between(p, &base, Some(&head)).unwrap();
+        let hidden = changes_between_options(p, &base, Some(&head), true).unwrap();
+        assert_eq!(normal.len(), 2);
+        assert_eq!(hidden.len(), 2);
+        let space = hidden.iter().find(|f| f.path == "space.txt").unwrap();
+        assert_eq!((space.additions, space.deletions), (0, 0));
+        assert!(normal.iter().find(|f| f.path == "space.txt").unwrap().additions > 0);
+        let real = hidden.iter().find(|f| f.path == "real.txt").unwrap();
+        assert_eq!((real.additions, real.deletions), (1, 1));
     }
 
     #[test]

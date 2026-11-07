@@ -197,20 +197,24 @@ export class RemoteGit {
     return this.read("git.status");
   }
 
-  workingChanges(): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
-    return this.read("git.workingChanges");
+  workingChanges(hideWhitespace = false): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
+    return this.read("git.workingChanges", hideWhitespace ? { hideWhitespace } : {});
   }
 
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }> {
     return this.read("git.reviewRange", { target, uncommitted });
   }
 
-  changesBetween(base: string, head: string | null): Promise<{ files: RemoteChangedFile[]; truncated?: boolean }> {
-    return this.read("git.changesBetween", head ? { base, head } : { base });
+  changesBetween(base: string, head: string | null, hideWhitespace = false): Promise<{ files: RemoteChangedFile[]; truncated?: boolean }> {
+    return this.read("git.changesBetween", { base, ...(head ? { head } : {}), ...(hideWhitespace ? { hideWhitespace } : {}) });
   }
 
   fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }> {
     return this.read("git.fileContents", head ? { path, base, head } : { path, base });
+  }
+
+  mediaContent(path: string, tree: string | null): Promise<{ data: string; mime: string } | null> {
+    return this.read("git.mediaContent", { path, ...(tree ? { tree } : {}) });
   }
 
   async log(limit = 60, from?: string | null): Promise<RemoteCommit[]> {
