@@ -292,7 +292,7 @@ function RootedFileTreeView({
       role="tree"
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className="h-full overflow-auto py-1 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
+      className="animate-panel-content h-full overflow-auto py-1 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
     >
       {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
       {rows.map((row) => {

@@ -3,7 +3,7 @@ import type { CloudDashboardSession } from "@/lib/cloudDashboard";
 
 /** Needs you spans every organization. Browsing Working and Done follows the sidebar; search spans all. */
 export function visibleDashboardSessions(sessions: readonly CloudDashboardSession[], visibleIds: ReadonlySet<string>, query = ""): CloudDashboardSession[] {
-  return sessions.filter((session) => query.trim() || visibleIds.has(session.orgId) || sessionColumn(session) === "needs");
+  return sessions.filter((session) => query.trim() || visibleIds.has(session.orgId) || (!session.archived && sessionColumn(session) === "needs"));
 }
 
 /** Empty-query palette recents follow the sidebar; typing can find any organization's sessions. */

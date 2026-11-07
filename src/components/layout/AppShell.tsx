@@ -53,6 +53,7 @@ import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
+import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
@@ -265,6 +266,7 @@ export function AppShell() {
           </Suspense>
         ) : (
           <>
+            <PanelPresence side="left" open={sidebarOpen}>
             {sidebarOpen && (
               <Sidebar
                 onToggle={toggleSidebar}
@@ -279,6 +281,7 @@ export function AppShell() {
                 onSearch={() => setPaletteOpen(true)}
               />
             )}
+            </PanelPresence>
 
             {cloudKey ? (
               <main className={MAIN}>
@@ -451,6 +454,7 @@ function UnselectedWorkspace({
           {checkoutEditorId && hasCheckoutEditors ? <EditorSplit sessionId={checkoutEditorId} active /> : null}
         </section>
       </main>
+      <PanelPresence side="right" open={!!(prefs.panelOpen && panelAvailable && cwd && project)}>
       {prefs.panelOpen && panelAvailable && cwd && project && (
         <RightPanel
           key={cwd}
@@ -463,6 +467,7 @@ function UnselectedWorkspace({
           workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
         />
       )}
+      </PanelPresence>
       {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
     </>
   );

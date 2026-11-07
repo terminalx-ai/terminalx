@@ -54,6 +54,7 @@ const SLOW_METHODS: &[&str] = &[
     "git.reviewRange",
     "git.changesBetween",
     "git.fileContents",
+    "git.mediaContent",
     "git.log",
     "git.branches",
     "git.prs",

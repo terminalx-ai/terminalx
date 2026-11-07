@@ -88,6 +88,7 @@ export {
   Terminal,
   TerminalSquare,
   SquareTerminal,
+  SessionContinue,
   Play,
   Pause,
   Square,
