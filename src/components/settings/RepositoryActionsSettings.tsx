@@ -113,14 +113,8 @@ function ActionDialog({ action, actions, isNew, busy, error, onClose, onSave }: 
               <textarea id={`${id}-command`} rows={5} spellCheck={false} autoCapitalize="off" autoCorrect="off" value={draft.command} aria-invalid={!!errors.command} aria-describedby={errors.command ? `${id}-command-error` : undefined} onChange={(event) => setDraft({ ...draft, command: event.target.value })} className={`${repositoryInputClass} resize-y font-mono`} />
               <RepositoryFieldError id={`${id}-command-error`} error={errors.command} />
             </div>
-            <label className="flex items-center justify-between gap-4 py-2 text-[13px] font-medium">
-              Run after setup
-              <Switch aria-label="Run after setup" checked={draft.runAfterSetup} onCheckedChange={(runAfterSetup) => setDraft({ ...draft, runAfterSetup })} />
-            </label>
-            <label className="flex items-center justify-between gap-4 py-2 text-[13px] font-medium">
-              Allow several at once
-              <Switch aria-label="Allow several at once" checked={draft.concurrent} onCheckedChange={(concurrent) => setDraft({ ...draft, concurrent })} />
-            </label>
+            <ActionSwitch id={`${id}-run-after-setup`} label="Run after setup" checked={draft.runAfterSetup} onCheckedChange={(runAfterSetup) => setDraft({ ...draft, runAfterSetup })} />
+            <ActionSwitch id={`${id}-concurrent`} label="Allow several at once" checked={draft.concurrent} onCheckedChange={(concurrent) => setDraft({ ...draft, concurrent })} />
           </fieldset>
           <RepositoryFieldError id={`${id}-save-error`} error={error} />
           <DialogFooter>
@@ -130,5 +124,16 @@ function ActionDialog({ action, actions, isNew, busy, error, onClose, onSave }: 
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** A field of the action being edited, laid out like a settings row. It is not a setting of its
+ * own: it is saved with the action, so it stays out of the settings registry and its search. */
+function ActionSwitch({ id, label, checked, onCheckedChange }: { id: string; label: string; checked: boolean; onCheckedChange: (checked: boolean) => void }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2">
+      <label htmlFor={id} className="min-w-0 text-[13px] font-medium">{label}</label>
+      <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} />
+    </div>
   );
 }
