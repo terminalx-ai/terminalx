@@ -698,6 +698,10 @@ export const api = {
   /** The person's global Git identity; it authors their commits in cloud workspaces. */
   gitIdentity: () => invoke<{ name: string; email: string } | null>("git_identity"),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
+  turnCheckpoint: (sessionId: string, tabId: string, seq: number) => invoke<TurnCheckpoint | null>("turn_checkpoint", { sessionId, tabId, seq }),
+  keepTurn: (sessionId: string, tabId: string, seq: number) => invoke<void>("keep_turn", { sessionId, tabId, seq }),
+  restoreUndo: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("restore_undo", { sessionId, tabId, seq, confirmed }),
+  undoTurn: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("undo_turn", { sessionId, tabId, seq, confirmed }),
   snapshotTree: (cwd: string) => invoke<string>("snapshot_tree", { cwd }),
   headTree: (cwd: string) => invoke<string | null>("head_tree", { cwd }),
   reviewRange: (cwd: string, target: string | null, uncommitted: boolean) =>
@@ -2128,7 +2132,7 @@ export const git = {
   commit: (cwd: string, message: string, paths?: string[]) => invoke<string>("git_commit", { cwd, message, paths: paths ?? null }),
   push: (cwd: string) => invoke<string>("git_push", { cwd }),
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
-  discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
+  discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
@@ -2948,3 +2952,6 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
     void pending.then((connection) => connection.close()).catch(() => undefined);
   }
 }
+
+export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
+export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }

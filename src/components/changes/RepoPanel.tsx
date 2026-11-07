@@ -1,5 +1,6 @@
+import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, RotateCcw, TriangleAlert } from "@/icons";
+import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
 import { useGitWorkingChanges } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   embedded?: boolean;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
+  const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
@@ -49,6 +51,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [openCommit, setOpenCommit] = useState<string | null>(null);
 
   useEffect(() => {
+    setDiscarding(null);
     setStatus(null);
     setCommits(null);
     setSelected(null);
@@ -96,6 +99,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <DiscardDialog source={source} file={discarding} onClose={() => setDiscarding(null)} onDiscarded={() => { setSelected(null); refresh(); }} />
       {!embedded && <div className="flex items-center gap-2 px-3 py-2">
         <Segmented<RepoView>
           aria-label="Repository view"
@@ -193,23 +197,12 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
               onSelect={(p) => setSelected((s) => (s === p ? null : p))}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
-                <span
-                  role="button"
-                  aria-label="Discard changes"
-                  title="Discard changes to this file"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (window.confirm(`Discard changes to ${f.path}? This cannot be undone.`)) void run("discard", () => source.discard!(f.path));
-                  }}
-                  className="hidden shrink-0 rounded p-0.5 text-faint hover:bg-veil-strong hover:text-destructive group-hover:inline-flex"
-                >
-                  <RotateCcw className="size-3" />
-                </span>
+                <DiscardButton path={f.path} onClick={() => setDiscarding(f)} />
               )}
             />
           </div>
           {current && head && <div className="min-h-0 flex-1">
-            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} />
+            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined} />
           </div>}
         </>
       )}

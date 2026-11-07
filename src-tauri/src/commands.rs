@@ -2924,8 +2924,8 @@ pub async fn git_pull(cwd: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
-pub async fn git_discard(cwd: String, path: String) -> CmdResult<()> {
-    tauri::async_runtime::spawn_blocking(move || git::discard_file(Path::new(&cwd), &path).map_err(err)).await.map_err(err)?
+pub async fn git_discard(cwd: String, path: String, base: Option<String>, old_path: Option<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::discard(&cwd, &path, base.as_deref(), old_path.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 /// The merge left in progress in a checkout, with what each of its
@@ -4989,4 +4989,24 @@ pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -
 #[tauri::command]
 pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<String>) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account, legacy_email.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn turn_checkpoint(session_id: String, tab_id: String, seq: u64) -> CmdResult<Option<crate::checkpoints::Checkpoint>> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::get(&session_id, &tab_id, seq).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn keep_turn(session_id: String, tab_id: String, seq: u64) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::keep(&session_id, &tab_id, seq).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn undo_turn(session_id: String, tab_id: String, seq: u64, confirmed: Option<String>) -> CmdResult<crate::checkpoints::UndoResult> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::undo(&session_id, &tab_id, seq, confirmed.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn restore_undo(session_id: String, tab_id: String, seq: u64, confirmed: Option<String>) -> CmdResult<crate::checkpoints::UndoResult> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::restore_undo(&session_id, &tab_id, seq, confirmed.as_deref()).map_err(err)).await.map_err(err)?
 }
