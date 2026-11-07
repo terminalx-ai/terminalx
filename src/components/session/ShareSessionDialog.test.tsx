@@ -23,6 +23,8 @@ afterEach(() => {
   closeSessionShare();
   cleanup();
 });
+/** More settings folds away what is chosen now and then; a host opens it to reach those. */
+const openMore = () => fireEvent.click(screen.getByRole("button", { name: "More settings" }));
 const open = async () => {
   render(<ShareSessionDialogHost />);
   act(() => openSessionShare("local-session"));
@@ -53,7 +55,7 @@ describe("Share session", () => {
   it("creates a read-only link that admits each person only once approved, with a finite expiry (PRO-162)", async () => {
     await open();
     // Limits are off until chosen: no people field until Limit people is on.
-    expect(screen.getByRole("switch", { name: "Limit people" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("switch", { name: "Limit people", hidden: true }).getAttribute("aria-checked")).toBe("false");
     expect(screen.queryByLabelText("Maximum people")).toBeNull();
     // A host who has shared before is not shown the introduction again, only offered it.
     expect(screen.queryByTestId("share-intro")).toBeNull();
@@ -61,8 +63,12 @@ describe("Share session", () => {
     // The form shows the defaults it will send.
     expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer");
     // Who, how and how long are out every time; the rest waits folded under More settings.
-    const more = screen.getByTestId("share-more-settings") as HTMLDetailsElement;
-    expect(more.open).toBe(false);
+    const more = screen.getByTestId("share-more-settings");
+    expect(more.getAttribute("data-state")).toBe("closed");
+    expect(screen.getByRole("button", { name: "More settings" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("switch", { name: "Approve each person" })).toBeNull();
+    openMore();
+    expect(more.getAttribute("data-state")).toBe("open");
     expect(more.contains(screen.getByRole("switch", { name: "Approve each person" }))).toBe(true);
     expect(more.contains(screen.getByLabelText("Who can join"))).toBe(false);
     expect(screen.getByRole("switch", { name: "Approve each person" }).getAttribute("aria-checked")).toBe("true");
@@ -98,6 +104,7 @@ describe("Share session", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add account" }));
     fireEvent.change(screen.getByLabelText("Account email 1"), { target: { value: "guest@example.com" } });
     fireEvent.change(screen.getByLabelText("Access for account 1"), { target: { value: "viewer" } });
+    openMore();
     fireEvent.click(screen.getByRole("switch", { name: "Guests may approve permissions" }));
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>
@@ -116,6 +123,7 @@ describe("Share session", () => {
   it("lets the host make a driver link that admits people unasked, and starts the next link from the defaults again", async () => {
     await open();
     fireEvent.change(screen.getByLabelText("Default access"), { target: { value: "driver" } });
+    openMore();
     fireEvent.click(screen.getByRole("switch", { name: "Approve each person" }));
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>

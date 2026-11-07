@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Copy, Eye, Link2, Plus, QrCode, Terminal, UserPlus, X } from "@/icons";
+import { Copy, Eye, Link2, Plus, QrCode, Terminal, UserPlus, X } from "@/icons";
 import { Switch } from "@/components/ui/controls";
+import { Fold } from "@/components/ui/Fold";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -98,10 +99,7 @@ function SettingsForm({ value, set, extra }: { value: ShareSettings; set: (value
         <RolePicker value={value.role} onChange={(role) => patch({ role })} label="Default access" />
       </Row>
     </div>
-    <details className="group" data-testid="share-more-settings">
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3 transition-transform group-open:rotate-90" aria-hidden /> More settings
-      </summary>
+    <Fold label="More settings" testId="share-more-settings">
       <div className={cn(sheet, "mt-2")}>
       <Row label="Custom expiry" hint={customExpiry ? undefined : "Off: until TerminalX restarts, 24 hours at most."}>
         <div className="flex items-center gap-2">
@@ -151,7 +149,7 @@ function SettingsForm({ value, set, extra }: { value: ShareSettings; set: (value
       </Row>
       {extra}
       </div>
-    </details>
+    </Fold>
     </div>
   );
 }
