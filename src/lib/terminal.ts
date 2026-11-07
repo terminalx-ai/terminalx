@@ -262,6 +262,8 @@ export function subscribeTerminals(): Promise<void> {
 
 /** List a shell tab another window opened, or one that was open before this page loaded. */
 function adoptShell(shell: ShellPane) {
+  // Setup has its own persisted status and dock tab; never also list it as a shell.
+  if (shell.id.split(":")[1]?.startsWith("workspace-setup-")) return;
   const known = state.panes.find((pane) => pane.id === shell.id);
   if (known) {
     // Its name may have changed in the other window. And the backend's word on when it was opened is

@@ -67,6 +67,34 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
   tone), a Dock badge, four themes in light and dark, and a pixel raccoon that
   potters about while you wait.
 
+## Workspace setup
+
+Set `scripts.setup` in `terminalx.json` at the attached repository's root, or
+edit it in Settings → Repositories → your repository → Workspace settings:
+
+```json
+{
+  "scripts": {
+    "setup": "bun install && cp \"$TERMINALX_REPO_ROOT/.env\" .env"
+  }
+}
+```
+
+TerminalX runs the command once when it creates a worktree, in a dedicated
+PTY with that worktree as its working directory. macOS and Linux use `/bin/sh`;
+Windows uses your configured shell. The command receives
+`TERMINALX_WORKSPACE_PATH`, `TERMINALX_REPO_ROOT` and `TERMINALX_BRANCH`.
+Agent tabs can start while setup runs.
+
+The terminal dock's **Setup** tab keeps the result and output. **Rerun** reads
+the current command from the attached repository's `terminalx.json`. Failed
+setup offers **Show log** and **Ask agent to fix**; the latter sends the log
+with a diagnostic prompt to the selected agent. Output retains the most recent
+512 KiB; a fix prompt includes at most the last 64 KiB of text. Finished logs
+survive a runtime restart, and an interrupted attempt requires an explicit rerun.
+Missing or empty `scripts.setup` disables setup for new worktrees. Opening an
+existing checkout does not run setup.
+
 ## What leaves your machine
 
 TerminalX has **no telemetry, no analytics and no crash reporting**. An account

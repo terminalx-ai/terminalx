@@ -6,6 +6,8 @@ const pty = vi.hoisted(() => ({
   kill: vi.fn().mockResolvedValue(undefined),
   detachAll: vi.fn().mockResolvedValue(undefined),
 }));
+const setups = vi.hoisted(() => ({ runs: [] as import("@/lib/workspaceSetup").WorkspaceSetup[], shown: null }));
+vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => setups, rerunSetup: vi.fn(), setupLog: vi.fn() }));
 vi.mock("@/lib/api", () => ({ pty, errorMessage: (e: unknown) => String(e) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock("./TerminalView", () => ({
@@ -28,11 +30,23 @@ beforeEach(() => {
   dropSessionTerminals(["s1"]);
   vi.clearAllMocks();
   setPrefs({ panelTerminalOpen: false });
+  setups.runs = [];
 });
 
 afterEach(cleanup);
 
 describe("the right panel's terminal dock", () => {
+  it("has no Setup tab without a configured run, and keeps a completed setup tab", () => {
+    const view = render(<TerminalDock sessionId="s1" cwd="/repo" />);
+    expect(screen.queryByRole("tab", { name: /Setup/ })).toBeNull();
+    setups.runs = [{ sessionId: "s1", paneId: "s1:workspace-setup-test", command: "bun install", status: "succeeded", exitCode: 0, error: null, hasPane: true }];
+    view.rerender(<TerminalDock sessionId="s1" cwd="/repo" />);
+    fireEvent.click(screen.getByRole("tab", { name: /Setup/ }));
+    expect(screen.getByRole("status").textContent).toContain("Setup succeeded");
+    expect(shown()).toEqual(["s1:workspace-setup-test"]);
+    expect(pty.spawn).not.toHaveBeenCalled();
+    expect(pty.kill).not.toHaveBeenCalled();
+  });
   it("starts folded and opens a shell in the session's folder when shown", async () => {
     render(<TerminalDock sessionId="s1" cwd="/repo" />);
     expect(screen.queryByTestId("terminal-view")).toBeNull();

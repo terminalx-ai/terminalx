@@ -176,7 +176,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                       <span className="truncate">{repository.name}</span>
                     </button>
                     <div id={childrenId} hidden={!isExpanded} className="pl-4">
-                      <button type="button" aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>Workspace cleanup</button>
+                      <button type="button" aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>Workspace settings</button>
                     </div>
                   </div>;
                 }) : <p className="px-2.5 py-2 text-xs text-faint">No repositories added.</p>

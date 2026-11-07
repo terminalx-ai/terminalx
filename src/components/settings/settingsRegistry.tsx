@@ -16,7 +16,7 @@ export const SETTINGS_SECTIONS = {
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
-  repositories: { title: "Workspace cleanup", group: "Repositories", entry: "repositories.mergedCleanup" },
+  repositories: { title: "Workspace settings", group: "Repositories", entry: "repositories.setup" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
   shortcuts: { title: "Shortcuts", group: "More", entry: "shortcuts.systemWide" },
@@ -450,6 +450,12 @@ export const SETTINGS_ROWS = [
     description: "Create or join an organization.",
     searchTerms: ["organizations", "create", "organization"], scope: "user",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.setup", section: "repositories", title: "Setup script",
+    description: "Run a setup script once in every new worktree.",
+    searchTerms: ["repositories", "workspace", "setup", "install", "scripts"], scope: "repository",
+    storage: { kind: "file", location: "terminalx.json#scripts.setup" }, layout: "content",
   }),
   defineSetting({
     id: "repositories.mergedCleanup", section: "repositories", title: "Workspace cleanup",

@@ -61,11 +61,11 @@ describe("registry navigation", () => {
     const group = within(screen.getByRole("group", { name: "Repositories" }));
     expect(group.queryByRole("button", { name: "Archived" })).toBeNull();
     expect(group.getByRole("button", { name: "Notes" })).toBeTruthy();
-    expect(group.queryByRole("button", { name: "Workspace cleanup" })).toBeNull();
+    expect(group.queryByRole("button", { name: "Workspace settings" })).toBeNull();
     fireEvent.click(group.getByRole("button", { name: "One" }));
     expect(group.getByRole("button", { name: "One" }).getAttribute("aria-expanded")).toBe("true");
     expect(group.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(group.getByRole("button", { name: "Workspace cleanup" }));
+    fireEvent.click(group.getByRole("button", { name: "Workspace settings" }));
     expect(screen.getByRole("heading", { name: "One" })).toBeTruthy();
     expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/one");
     expect(screen.getByRole("radiogroup", { name: "Delete merged workspaces of One" })).toBeTruthy();

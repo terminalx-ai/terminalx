@@ -65,7 +65,7 @@ pub(crate) fn notify_sessions_deleted(sink: &dyn EventSink, removed: &[SessionEn
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {
     pub harness: String,
@@ -79,7 +79,7 @@ pub struct NewTab {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     #[serde(default)]
@@ -310,6 +310,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     });
 
     index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
+    crate::workspace_setup::prepare(&entry).map_err(err)?;
     Ok(entry)
 }
 

@@ -1734,10 +1734,12 @@ impl SessionManager {
             "pty_exit",
             Box::new(move |payload| {
                 if let Ok(exit) = serde_json::from_str::<pty::PtyExit>(payload) {
+                    crate::workspace_setup::finished(&exited, &exit);
                     exited.pane_exited(&exit.id, exit.code);
                 }
             }),
         );
+        crate::workspace_setup::follow_creations(self);
     }
 
     pub(crate) fn pipeline(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {

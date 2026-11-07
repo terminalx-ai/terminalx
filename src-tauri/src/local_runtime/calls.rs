@@ -123,6 +123,16 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {
+        "create" => {
+            manager.accepting_work()?;
+            return Ok(serde_json::to_value(crate::session_ops::create_session_blocking(manager.sink().as_ref(), serde_json::from_value(params["req"].clone())?).map_err(anyhow::Error::msg)?)?);
+        }
+        "workspaceSetup" => return match string(&params, "operation")? {
+            "list" => Ok(serde_json::to_value(crate::workspace_setup::list(manager)?)?),
+            "rerun" => Ok(serde_json::to_value(crate::workspace_setup::start(manager, string(&params, "sessionId")?, true)?)?),
+            "log" => Ok(json!(crate::workspace_setup::log(manager, string(&params, "sessionId")?, string(&params, "paneId")?)?)),
+            _ => bail!("Unknown workspace setup operation"),
+        },
         "pipeline" => return manager.pipeline(string(&params, "operation")?, params["params"].clone()),
         "workspace" => return manager.workspace(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }

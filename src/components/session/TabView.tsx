@@ -40,6 +40,7 @@ import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type Removabl
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
 import { interruptUnanswered } from "@/types/events";
+import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
@@ -113,6 +114,7 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
+  const setup = useWorkspaceSetup(local ? session.id : null);
   const isGit = useSessionIsGit(session);
   const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
@@ -686,6 +688,7 @@ export function TabView({
           </div>
         )}
         <Composer
+          setupRunning={setup?.status === "running" || setup?.status === "pending"}
           sendScope={sendScope}
           tab={tab}
           cwd={local ? session.cwd : undefined}
