@@ -169,6 +169,11 @@ fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Du
     let request = ControlRequest { id: uuid::Uuid::new_v4().to_string(), token: token.into(), command: command.into(), params };
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
+    #[cfg(test)]
+    if command == "runtime.session.workspace" {
+        let hook = AFTER_WORKSPACE_WRITE.lock().unwrap().take();
+        if let Some(hook) = hook { hook(); }
+    }
     let mut line = String::new();
     if let Err(error) = BufReader::new(stream).take(MAX_RESPONSE + 1).read_line(&mut line) {
         if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) {
@@ -226,7 +231,14 @@ impl Client {
         let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
         let build = Build::read(&pinned, || request(&socket, &token, "status", json!({}), LIFECYCLE_TIMEOUT));
-        Ok(Arc::new(Self { socket, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT }))
+        let client = Arc::new(Self { socket, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT });
+        // Older owners can still serve local work. No receipt means no
+        // forwarded network authority; never synthesize it from a boolean.
+        if let Err(error) = client.refresh_data_privacy_within(LIFECYCLE_TIMEOUT) {
+            crate::data_privacy::install_forwarding(None);
+            log::warn!("local runtime privacy authority unavailable: {error:#}");
+        }
+        Ok(client)
     }
 
     /// A client of the event socket at `event_socket` alone, as discovery
@@ -245,6 +257,31 @@ impl Client {
     }
 
     pub(crate) fn ping_interval(&self) -> Duration { self.ping }
+
+    pub(crate) fn refresh_data_privacy(&self) -> Result<crate::data_privacy::Status> {
+        self.refresh_data_privacy_within(CALL_TIMEOUT)
+    }
+
+    fn refresh_data_privacy_within(&self, timeout: Duration) -> Result<crate::data_privacy::Status> {
+        let applied: crate::data_privacy::OwnerStatus = self.call_within("runtime.dataPrivacy.refresh", json!({}), timeout)?;
+        let authority = applied.network_authority.filter(|authority| authority.runtime == self.epoch);
+        crate::data_privacy::install_forwarding(authority);
+        Ok(applied.status)
+    }
+
+    pub(crate) fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value, origin: crate::data_privacy::Ticket) -> Result<T> {
+        let authority = origin.forwarded(&self.epoch);
+        let params = json!({"operation":operation,"params":params,"networkAuthority":authority,"networkAllowed":authority.is_some()});
+        // The immutable owner-issued generation travels all the way through
+        // serialization, unread backlog and handover. Neither endpoint may
+        // upgrade it, including if policy changes after this last local check.
+        #[cfg(test)]
+        {
+            let pause = BEFORE_WORKSPACE_SEND.lock().unwrap().take();
+            if let Some(pause) = pause { pause(); }
+        }
+        self.call("runtime.session.workspace", params)
+    }
 
     pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
         self.call_within(command, params, CALL_TIMEOUT)
@@ -482,3 +519,9 @@ mod tests {
         dir
     }
 }
+
+#[cfg(test)]
+pub(crate) static BEFORE_WORKSPACE_SEND: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) static AFTER_WORKSPACE_WRITE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

@@ -49,7 +49,7 @@ impl Sessions {
     }
 
     pub fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
-        self.call("runtime.session.workspace", json!({"operation":operation,"params":params,"networkAllowed":crate::github_process::ticket().valid()}))
+        self.0.workspace(operation, params, crate::github_process::ticket())
     }
 
     pub fn delete_session(&self, session: &str) -> Result<()> {

@@ -283,6 +283,8 @@ impl Lifetime {
         Ok(RequestGuard(self.clone()))
     }
 
+    pub(crate) fn epoch(&self) -> &str { &self.epoch }
+
     pub fn status(&self) -> Value {
         let mut state = self.state.lock().unwrap();
         let now = Instant::now();

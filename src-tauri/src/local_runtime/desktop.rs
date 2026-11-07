@@ -78,7 +78,7 @@ pub struct Desktop {
 impl Desktop {
     /// The owner drains already admitted remote writes before acknowledging.
     pub fn refresh_data_privacy(&self) -> Result<crate::data_privacy::Status> {
-        self.client.call_within("runtime.dataPrivacy.refresh", serde_json::json!({}), LOOP_STALL)
+        self.client.refresh_data_privacy()
     }
 
     pub fn connect(client: Arc<Client>, sink: Arc<dyn EventSink>) -> Result<Self> {

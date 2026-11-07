@@ -29,6 +29,7 @@ struct State {
     status: Status,
     epoch: u64,
     cancel: CancellationToken,
+    forwarding: Option<Forwarding>,
 }
 
 pub struct Policy {
@@ -43,7 +44,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
-            state: RwLock::new(State { status: Status::default(), epoch: 0, cancel: CancellationToken::new() }),
+            state: RwLock::new(State { status: Status::default(), epoch: 0, cancel: CancellationToken::new(), forwarding: None }),
             updating: Mutex::new(()), writers: Mutex::new(0), drained: Condvar::new(),
         }
     }
@@ -79,6 +80,45 @@ pub struct Ticket {
     policy: Arc<Policy>,
     owner: String,
     epoch: Option<u64>,
+    // Captured with the originating ticket, never looked up after queuing.
+    #[serde(skip)]
+    forwarding: Option<Forwarding>,
+}
+
+/// An owner-issued policy generation, bound to that runtime incarnation.
+/// Serializing the stamp does not transfer its local Arc/positive authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Forwarding {
+    pub runtime: String,
+    owner: String,
+    epoch: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OwnerStatus {
+    #[serde(flatten)]
+    pub status: Status,
+    #[serde(default)]
+    pub network_authority: Option<Forwarding>,
+}
+
+pub(crate) fn owner_status(runtime: &str) -> OwnerStatus {
+    let status = refresh();
+    let ticket = Ticket::default();
+    OwnerStatus { status, network_authority: Some(Forwarding { runtime: runtime.into(), owner: ticket.owner, epoch: ticket.epoch }) }
+}
+
+pub(crate) fn install_forwarding(authority: Option<Forwarding>) {
+    policy().state.write().unwrap().forwarding = authority;
+}
+
+impl Forwarding {
+    pub(crate) fn admit(self, runtime: &str) -> Ticket {
+        if self.runtime != runtime { return Ticket::denied(); }
+        Ticket { policy: policy().clone(), owner: self.owner, epoch: self.epoch, forwarding: None }
+    }
 }
 
 fn shared_policy() -> Arc<Policy> { policy().clone() }
@@ -105,8 +145,12 @@ impl Ticket {
     fn with_policy(policy: Arc<Policy>) -> Self {
         let state = policy.state.read().unwrap();
         let epoch = (!state.status.enabled).then_some(state.epoch);
+        let forwarding = state.forwarding.clone();
         drop(state);
-        Self { owner: policy.id.clone(), policy, epoch }
+        Self { owner: policy.id.clone(), policy, epoch, forwarding }
+    }
+    pub(crate) fn forwarded(&self, runtime: &str) -> Option<Forwarding> {
+        self.forwarding.clone().filter(|authority| self.valid() && authority.runtime == runtime)
     }
     pub fn valid(&self) -> bool {
         let state = self.policy.state.read().unwrap();

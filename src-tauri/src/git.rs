@@ -34,12 +34,44 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
 pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Duration) -> Result<()> {
     let mut command = git();
     command.current_dir(cwd).args(["fetch", "--quiet", "origin", branch]);
-    // Do not let an existing SSH master outlive the counted process group.
-    command.env("GIT_SSH_COMMAND", "ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no");
+    contain_ssh(cwd, &mut command)?;
     let output = crate::github_process::output(command, timeout, None)?;
     if !output.status.success() {
         bail!("git fetch: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
+    Ok(())
+}
+
+/// Preserve Git's effective transport selection, including shell arguments.
+/// OpenSSH's final `-S none` overrides an earlier -S/ControlPath and disables
+/// connection sharing, without changing keys, ports, proxies or the wrapper.
+/// Unlike appending `-o ControlMaster=no`, it also wins over explicit options
+/// in the configured command (OpenSSH uses the first value for -o settings).
+fn contain_ssh(cwd: &Path, command: &mut Command) -> Result<()> {
+    let variant = std::env::var("GIT_SSH_VARIANT").ok()
+        .or_else(|| run(cwd, &["config", "--get", "ssh.variant"]).ok().map(|value| value.trim().to_owned()));
+    if variant.as_deref().is_some_and(|variant| !matches!(variant, "ssh" | "auto")) {
+        // Git's explicitly selected non-OpenSSH protocol has its own argument
+        // grammar. Its child group is still owned and drained by the runner.
+        return Ok(());
+    }
+    let mut effective = match std::env::var_os("GIT_SSH_COMMAND") {
+        Some(command) => command,
+        None => match run(cwd, &["config", "--get", "core.sshCommand"]) {
+            Ok(value) => value.trim_end_matches('\n').into(),
+            Err(_) => match std::env::var_os("GIT_SSH") {
+                Some(path) => {
+                    // GIT_SSH is one executable path, not a shell expression.
+                    // Quote it when promoting it to GIT_SSH_COMMAND.
+                    let path = path.to_str().context("SSH wrapper path is not UTF-8")?;
+                    format!("'{}'", path.replace('\'', "'\\''")).into()
+                }
+                None => "ssh".into(),
+            },
+        },
+    };
+    effective.push(" -S none");
+    command.env("GIT_SSH_COMMAND", effective);
     Ok(())
 }
 

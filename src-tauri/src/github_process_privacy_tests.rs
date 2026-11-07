@@ -235,6 +235,7 @@ fn privacy_entry_points_child() {
     forwarded_cleanup_keeps_denial(&root, &fetch, managed);
     #[cfg(feature = "desktop")]
     queued_commands(&root, &ssh, &fetch, managed);
+    transport::run(&root, &fetch, managed);
     let observed = std::fs::read_to_string(root.join("launches")).unwrap();
     assert!(observed.contains("ControlMaster=no -o ControlPath=none -o ControlPersist=no"));
 }
@@ -734,3 +735,6 @@ fn forwarded_cleanup_keeps_denial(root: &Path, fixture: &FetchFixture, managed: 
     assert!(fixture.worktree.exists());
     assert!(store::index::get(&fixture.session).is_ok());
 }
+
+#[path = "github_transport_privacy_tests.rs"]
+mod transport;
