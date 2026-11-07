@@ -125,6 +125,14 @@ struct Inner {
     /// The runtime whose handover to this app's runtime has been found
     /// possible once: it is not checked again each time it is read.
     verified: Option<String>,
+    /// An older runtime was just handed over or stopped, and the next one
+    /// attached should be the runtime bundled with this app.
+    switched: bool,
+    /// The runtime that came up after a switch was older than this app too:
+    /// the bundled runtime itself is, as in a development build left running
+    /// across a version bump. Switching again would only bring it back, so
+    /// for as long as this app runs it is attached as it is.
+    bundled_older: bool,
 }
 
 impl Inner {
@@ -182,6 +190,22 @@ impl Replacement {
             inner.forced = false;
             inner.planned_stop.clear();
             inner.verified = None;
+            inner.switched = false;
+            return;
+        }
+        // Older again straight after a switch: what came up is the bundled
+        // runtime, and it is no newer. Replacing it would hand it over to
+        // itself, round and round, dropping the connection each time.
+        if std::mem::take(&mut inner.switched) && !inner.bundled_older {
+            let running = build.version.as_ref().map_or_else(|| "a version it would not say".to_string(), ToString::to_string);
+            log::warn!("the runtime bundled with this app ({running}) is older than the app ({app}); it is attached as it is and not replaced again");
+            inner.bundled_older = true;
+        }
+        if inner.bundled_older {
+            inner.pending = None;
+            inner.quiet_since = None;
+            inner.forced = false;
+            inner.planned_stop.clear();
             return;
         }
         let plan = plan.filter(|plan| plan.epoch == epoch && plan.current(clock));
@@ -316,7 +340,9 @@ impl Replacement {
     /// The older runtime has gone: the switch ends with the next attachment,
     /// or with a failure to make one.
     fn stopped(&self) {
-        self.inner.lock().unwrap().stopping = false;
+        let mut inner = self.inner.lock().unwrap();
+        inner.stopping = false;
+        inner.switched = true;
     }
 
     /// The runtime was left running, nothing of it stopped: work began after
@@ -747,6 +773,35 @@ mod tests {
         // Its replacement, of this app's version, clears it.
         replacement.attached("bundled", &build(Some(env!("CARGO_PKG_VERSION"))), None);
         assert_eq!(replacement.outdated("unsaid"), None);
+    }
+
+    /// A runtime that comes up older straight after a switch is the bundled
+    /// one, and no newer: it is attached as it is, not handed over to itself
+    /// again and again (a development build left running across a version bump).
+    #[test]
+    fn a_bundled_runtime_older_than_the_app_is_not_switched_round_and_round() {
+        let replacement = Replacement::default();
+        replacement.attached("old", &build(Some(&older())), None);
+        assert!(replacement.outdated("old").is_some());
+        assert!(replacement.begin("old"));
+        replacement.stopped();
+        // What came up in its place is just as old.
+        replacement.attached("bundled", &build(Some(&older())), None);
+        assert_eq!(replacement.outdated("bundled"), None, "not replaced again");
+        assert_eq!(replacement.switching(), None);
+        assert_eq!(replacement.next_now(), None, "nothing left to check");
+        // Nor on a later attachment, for as long as the app runs.
+        replacement.attached("bundled-again", &build(Some(&older())), None);
+        assert_eq!(replacement.outdated("bundled-again"), None);
+
+        // One older runtime replaced by a current one is the normal case: nothing is held back.
+        let normal = Replacement::default();
+        normal.attached("old", &build(Some(&older())), None);
+        assert!(normal.begin("old"));
+        normal.stopped();
+        normal.attached("bundled", &build(Some(env!("CARGO_PKG_VERSION"))), None);
+        normal.attached("older-later", &build(Some(&older())), None);
+        assert!(normal.outdated("older-later").is_some(), "a later older runtime is still replaced");
     }
 
     /// #730 review: anything the runtime would cut short is waited for, a

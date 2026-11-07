@@ -13,6 +13,12 @@ export function relativeTime(iso: string, now = Date.now()): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** `relativeTime` for the last six days, and nothing older: a row past that shows no age. */
+export function recentTime(iso: string, now = Date.now()): string {
+  const label = relativeTime(iso, now);
+  return /^(now|\d+[mhd])$/.test(label) ? label : "";
+}
+
 export function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
