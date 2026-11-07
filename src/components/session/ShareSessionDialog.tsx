@@ -3,6 +3,7 @@ import { ChevronRight, Copy, Eye, Link2, Plus, QrCode, Terminal, UserPlus, X } f
 import { Switch } from "@/components/ui/controls";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 import { CollaborationScene } from "./CollaborationScene";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { changeShare, closeSessionShare, createShare, defaultShareSettings, isWaitingGuest, longestShareExpiry, openSessionShare, refreshShare, type ShareLink, type ShareRole, type ShareSettings, useLocalShare, useShareDialog } from "@/lib/localSharing";
@@ -240,6 +241,10 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
   const share = useLocalShare(sessionId);
   const { status } = useAccount();
   const signedIn = status.state === "signed-in";
+  // Until the first link is made, signed in opens on the introduction; How sharing works opens it again.
+  const onboarded = usePrefs().shareOnboarded;
+  const [intro, setIntro] = useState(!onboarded);
+  const showIntro = !signedIn || intro;
   const relay = usePairing().status.relay.phase === "connected";
   const [settings, setSettings] = useState(defaultShareSettings);
   const [editing, setEditing] = useState<string | null>(null);
@@ -268,43 +273,47 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
         if (!open) closeSessionShare();
       }}
     >
-      {/* One card, signed in or out: the picture of a shared session, then the words, centred. Signed in it is a
-          little wider, for the link's settings. */}
-      <DialogContent width={signedIn ? "max-w-[30rem]" : "max-w-[26rem]"} className="max-h-[90vh] overflow-y-auto p-6">
-        <CollaborationScene className="mb-5 mt-6" />
-        <DialogHeader className="mb-5 items-center gap-0 text-center">
-          <span className="flex min-w-0 flex-col gap-1">
-            <DialogTitle className="text-[15px] font-medium text-foreground">Share this session</DialogTitle>
-            <DialogDescription className="text-[13px] leading-relaxed text-muted-foreground">
-              Invite people into this conversation. Sharing ends when TerminalX restarts.
-            </DialogDescription>
-          </span>
-        </DialogHeader>
-        {/* What sharing gives away, one fact a row. Signed out it is the case for signing in; signed in, it is folded
-            to a line, there when wanted, rather than standing over the form every time. */}
-        {(() => {
-          const terms = (
-            <ul className="flex flex-col divide-y divide-hairline rounded-xl bg-well hairline" data-testid="share-terms">
+      {/* Two views. The introduction (the picture of a shared session, what guests can do) greets anyone signed out,
+          and anyone signed in until their first link; How sharing works brings it back. After that, Share opens
+          straight on the link's settings, plainly. */}
+      <DialogContent width={showIntro ? "max-w-[26rem]" : "max-w-[30rem]"} className="max-h-[90vh] overflow-y-auto p-6">
+        {showIntro ? (
+          <div data-testid="share-intro">
+            <CollaborationScene className="mb-5 mt-6" />
+            <DialogHeader className="mb-5 items-center gap-0 text-center">
+              <span className="flex min-w-0 flex-col gap-1">
+                <DialogTitle className="text-[15px] font-medium text-foreground">{signedIn && onboarded ? "How sharing works" : "Share this session"}</DialogTitle>
+                <DialogDescription className="text-[13px] leading-relaxed text-muted-foreground">
+                  Invite people into this conversation. Sharing ends when TerminalX restarts.
+                </DialogDescription>
+              </span>
+            </DialogHeader>
+            <ul className="mb-5 flex flex-col divide-y divide-hairline rounded-xl bg-well hairline" data-testid="share-terms">
               <ShareTerm icon={<Eye />} title="Guests can watch">They see the transcript and terminal so far.</ShareTerm>
               <ShareTerm icon={<Terminal />} title="A driver can act">They can have the agent change files and run commands on this computer.</ShareTerm>
               <ShareTerm icon={<Link2 />} title="The link is the key">Anyone signed in with it can ask to join. While Approve each person is on, each waits until you admit them.</ShareTerm>
             </ul>
-          );
-          return signedIn ? (
-            <details className="group mb-4">
-              <summary className="flex cursor-pointer list-none items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
-                <ChevronRight className="size-3 transition-transform group-open:rotate-90" aria-hidden /> What guests can do
-              </summary>
-              <div className="mt-2">{terms}</div>
-            </details>
-          ) : <div className="mb-5">{terms}</div>;
-        })()}
-        {!signedIn ? (
-          <div className="flex flex-col items-stretch gap-2" data-testid="share-sign-in">
-            <Button onClick={() => void signIn()}>Sign in to share</Button>
-            <p className="text-center text-[11px] text-faint">Share links are made with your TerminalX account.</p>
+            {!signedIn ? (
+              <div className="flex flex-col items-stretch gap-2" data-testid="share-sign-in">
+                <Button onClick={() => void signIn()}>Sign in to share</Button>
+                <p className="text-center text-[11px] text-faint">Share links are made with your TerminalX account.</p>
+              </div>
+            ) : (
+              <Button className="w-full" onClick={() => setIntro(false)}>{onboarded ? "Back to sharing" : "Continue"}</Button>
+            )}
           </div>
         ) : (
+          <>
+            <DialogHeader className="mb-4 gap-0.5 pr-8">
+              <DialogTitle className="text-[15px] font-medium text-foreground">Share this session</DialogTitle>
+              <DialogDescription className="text-[12px] text-muted-foreground">
+                Sharing ends when TerminalX restarts.{" "}
+                <button type="button" className="text-foreground/80 underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => setIntro(true)}>
+                  How sharing works
+                </button>
+              </DialogDescription>
+            </DialogHeader>
+        {signedIn && (
           <fieldset disabled={busy} className="flex flex-col gap-4">
             <SettingsForm
               value={settings}
@@ -323,7 +332,11 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                 onClick={() =>
                   void run(async () => {
                     if (editing) await changeShare(sessionId, "edit", { linkId: editing, settings });
-                    else await createShare(sessionId, settings, directOnly);
+                    else {
+                      await createShare(sessionId, settings, directOnly);
+                      // The first link made: from now on Share opens on its settings.
+                      if (!onboarded) setPrefs({ shareOnboarded: true });
+                    }
                     setEditing(null);
                     setSettings(defaultShareSettings());
                   })
@@ -474,6 +487,8 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
               </Button>
             )}
           </div>
+        )}
+          </>
         )}
       </DialogContent>
     </Dialog>

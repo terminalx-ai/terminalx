@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalShareButton, ShareSessionDialogHost } from "./ShareSessionDialog";
 import { closeSessionShare, EMPTY_SHARE, openSessionShare, type ShareState } from "@/lib/localSharing";
+import { getPrefs, setPrefs } from "@/lib/prefs";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), signedIn: true }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
@@ -15,6 +16,8 @@ vi.mock("@/lib/pairing", () => ({ usePairing: () => ({ status: { relay: { phase:
 beforeEach(() => {
   mocks.invoke.mockReset().mockResolvedValue(EMPTY_SHARE);
   mocks.signedIn = true;
+  // Most of these are about the link's settings: a host who has shared before, so Share opens on them.
+  setPrefs({ shareOnboarded: true });
 });
 afterEach(() => {
   closeSessionShare();
@@ -26,9 +29,32 @@ const open = async () => {
   await screen.findByRole("button", { name: "Create share link" });
 };
 describe("Share session", () => {
+  it("introduces sharing on the first share, and then opens on the link's settings with the introduction a click away", async () => {
+    setPrefs({ shareOnboarded: false });
+    render(<ShareSessionDialogHost />);
+    act(() => openSessionShare("local-session"));
+    const intro = await screen.findByTestId("share-intro");
+    expect(intro.textContent).toContain("They see the transcript and terminal so far");
+    expect(screen.getByTestId("collaboration-scene")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create share link" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.queryByTestId("share-intro")).toBeNull();
+    expect(screen.queryByTestId("collaboration-scene")).toBeNull();
+    // Making the first link marks the host as introduced.
+    fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
+    await waitFor(() => expect(getPrefs().shareOnboarded).toBe(true));
+    // How sharing works brings the introduction back, and Back to sharing returns.
+    fireEvent.click(screen.getByRole("button", { name: "How sharing works" }));
+    expect(await screen.findByTestId("share-intro")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back to sharing" }));
+    expect(screen.getByRole("button", { name: "Create share link" })).toBeTruthy();
+  });
+
   it("creates a read-only link that admits each person only once approved, with a finite expiry (PRO-162)", async () => {
     await open();
-    expect(screen.getByText(/They see the transcript and terminal so far/)).toBeTruthy();
+    // A host who has shared before is not shown the introduction again, only offered it.
+    expect(screen.queryByTestId("share-intro")).toBeNull();
+    expect(screen.getByRole("button", { name: "How sharing works" })).toBeTruthy();
     // The form shows the defaults it will send.
     expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer");
     // Who, how and how long are out every time; the rest waits folded under More settings.
