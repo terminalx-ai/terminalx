@@ -71,7 +71,11 @@ try {
     await page.getByRole("dialog").waitFor({ state: "detached" });
     assert.equal(await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the section heading");
     assert.equal(await page.getByTestId("conversation-list").evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the sidebar");
-    await page.getByRole("button", { name: "New section…", exact: true }).click();
+    assert.equal(await page.getByRole("button", { name: "New section…", exact: true }).count(), 0, "the sidebar has no standing creation row");
+    await page.keyboard.press("Meta+K");
+    const palette = page.getByRole("dialog");
+    await palette.locator("input").fill("New local section");
+    await palette.getByRole("option", { name: /^New local section/ }).click();
     await page.getByLabel("Section name", { exact: true }).fill("Refactor");
     await page.getByRole("button", { name: "Create", exact: true }).click();
     await section("Refactor").waitFor();

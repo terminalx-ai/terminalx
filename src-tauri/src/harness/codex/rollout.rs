@@ -208,14 +208,15 @@ fn decode_event(p: &Value, out: &mut Vec<Payload>) {
             // `total` is cumulative over the turn and would over-report it
             // several times.
             let last = &info["last_token_usage"];
-            if let Some(used) = last["total_tokens"].as_u64() {
+            if last.is_object() || info["total_token_usage"].is_object() {
                 out.push(Payload::UsageUpdate(Usage {
                     input_tokens: last["input_tokens"].as_u64(),
                     output_tokens: last["output_tokens"].as_u64(),
-                    context_used: Some(used),
+                    context_used: last["total_tokens"].as_u64(),
                     context_max: info["model_context_window"].as_u64(),
                     cost_usd: None,
                     model: None,
+                    ..Default::default()
                 }));
             }
         }

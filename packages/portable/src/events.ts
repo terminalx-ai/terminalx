@@ -60,6 +60,9 @@ export interface ToolResult {
 export interface Usage {
   inputTokens?: number;
   outputTokens?: number;
+  /** Input is uncached; these cache counters are disjoint from it. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   contextUsed?: number;
   contextMax?: number;
   costUsd?: number;

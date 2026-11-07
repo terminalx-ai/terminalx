@@ -20,6 +20,7 @@ pub mod read_only;
 pub mod settings;
 pub mod setup;
 pub mod tui;
+pub mod metrics;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

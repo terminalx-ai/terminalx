@@ -888,6 +888,7 @@ pub struct TabRuntime {
     compact_completed: bool,
     compact_boundary_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     pub turn_started_at: Option<Instant>,
+    turn_usage: crate::harness::metrics::CompletedUsage,
     /// The open turn is a slash command's, with no work seen yet. The CLI
     /// runs `/help` or `/model` by itself and no `Stop` closes it, so the
     /// next prompt is where that prompt's time starts (`prompt_taken`).
@@ -1817,6 +1818,7 @@ impl SessionManager {
                 compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None,
                 stdio_retiring: None,
                 turn_started_at: None,
+                turn_usage: Default::default(),
                 turn_by_command: false,
                 signed_out_in_turn: false,
                 last_activity: Instant::now(),
@@ -1847,6 +1849,7 @@ impl SessionManager {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
             recovery::sanitize(&mut payload);
         }
+        if subagent.is_none() { rt.turn_usage.apply(&mut payload); }
         rt.seq += 1;
         let mut ts = rt.source_timestamp.clone().unwrap_or_else(index::now);
         let block_key = |block: &BlockRef| format!("{}:{}:{}", subagent.as_ref().map_or("", |agent| agent.id.as_str()), block.message_id, block.index);
