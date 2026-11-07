@@ -6,7 +6,7 @@ import { Button } from "./button";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 
 function DeferDialogNotices() {
-  useNoticeDeferral(true);
+  useNoticeDeferral(true, "modal");
   return null;
 }
 

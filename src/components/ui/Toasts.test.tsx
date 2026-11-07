@@ -18,7 +18,7 @@ vi.mock("@/lib/cloudDashboard", async (original) => ({
 const { Toasts } = await import("./Toasts");
 const { dismissNotice, notePipelineState, noteSessionStarted, noteStatusChange, useNotices } = await import("@/lib/notify");
 const { getSessionStore, openIssues, upsertSession } = await import("@/lib/sessions");
-const { useNoticeDeferral } = await import("@/lib/noticeDeferral");
+const { NoticeForeground, useNoticeDeferral } = await import("@/lib/noticeDeferral");
 const { Dialog, DialogContent, DialogTitle } = await import("./dialog");
 
 const session: SessionEntry = {
@@ -89,6 +89,47 @@ it("waits for the last decision, ignores inactive decisions, and keeps retained 
   fireEvent.click(screen.getByRole("status"));
   expect(getSessionStore().selectedSessionId).toBe(session.id);
   expect(screen.queryByRole("status")).toBeNull();
+});
+
+function PendingDecision({ active = true }: { active?: boolean }) {
+  useNoticeDeferral(active);
+  return null;
+}
+
+it("only defers for the foreground view and restores protection when a covering view leaves", () => {
+  const layout = (guest: boolean, pending = false) => <>
+    <Toasts /><PendingDecision />
+    {guest && <NoticeForeground><PendingDecision active={pending} /></NoticeForeground>}
+  </>;
+  const view = render(layout(false));
+  act(() => noteStatusChange(session, session.tabs[0], "in_progress", "waiting"));
+  expect(screen.queryByRole("status")).toBeNull();
+  view.rerender(layout(true));
+  expect(screen.getAllByRole("status")).toHaveLength(1);
+  act(() => noteSessionStarted("second-session", "second-tab", "codex", "Started behind the guest"));
+  expect(screen.getAllByRole("status")).toHaveLength(2);
+  view.rerender(layout(true, true));
+  act(() => vi.advanceTimersByTime(20_000));
+  expect(screen.queryByRole("status")).toBeNull();
+  view.rerender(layout(true));
+  expect(screen.getAllByRole("status")).toHaveLength(2);
+  view.rerender(layout(false));
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+it("keeps a modal protected above a covering view, including a portal from the covered workspace", () => {
+  const layout = (guest: boolean, dialog: boolean) => <>
+    <Toasts /><PendingDecision />
+    <Dialog open={dialog}><DialogContent aria-describedby={undefined}><DialogTitle>Approval</DialogTitle></DialogContent></Dialog>
+    {guest && <NoticeForeground>{null}</NoticeForeground>}
+  </>;
+  const view = render(layout(false, true));
+  act(() => noteStatusChange(session, session.tabs[0], "in_progress", "waiting"));
+  view.rerender(layout(true, true));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  expect(screen.queryByRole("status")).toBeNull();
+  view.rerender(layout(true, false));
+  expect(screen.getByRole("status")).toBeTruthy();
 });
 
 it("stacks starts, opens a session on click, and dismisses another without navigating", () => {

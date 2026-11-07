@@ -165,6 +165,49 @@ try {
     }
   }
 
+  // Joining a guest session covers, but does not unmount, the selected local tab.
+  // Its pending approval must only defer notices again once the guest leaves.
+  {
+    const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4, localSharing: "guest" }, { width: 760, height: 600 }, { extra: guestExtra + `
+      stub.answers.session_join_pending = null;
+      window.__PW_JOIN_GUEST__ = () => {
+        stub.answers.session_join_pending = "https://terminalx.ai/join#fixture";
+        stub.emit("session_join_requested", null);
+      };
+    ` });
+    page.setDefaultTimeout(10_000);
+    await openConversation(page, "claude tab");
+    await tab(page, "gemini tab").click();
+    const localApproval = page.locator("main").getByRole("button", { name: /^Allow/ }).filter({ visible: true });
+    await localApproval.waitFor();
+    await raise(page);
+    assert.equal(await notices(page).count(), 0);
+    await page.evaluate(() => window.__PW_JOIN_GUEST__());
+    const guest = page.getByRole("region", { name: "Shared session", exact: true });
+    await guest.getByText("Check the guest approval", { exact: true }).waitFor();
+    await painted(page);
+    assert.equal(await notices(page).count(), 4, "the covered local approval must release its retained notices");
+    await raise(page);
+    assert.equal(await notices(page).count(), 4, "new attention remains visible in the foreground guest session");
+    await page.evaluate(() => window.__PW_GUEST_ASK__());
+    const guestAllow = guest.getByRole("button", { name: /^Allow/ });
+    await guestAllow.waitFor();
+    assert.equal(await notices(page).count(), 0, "the foreground guest approval defers notices");
+    await unobscured(guestAllow, "foreground guest Allow");
+    await guestAllow.click();
+    await notices(page).first().waitFor();
+    assert.equal(await notices(page).count(), 4);
+    await guest.getByRole("button", { name: "Leave session" }).click();
+    await guest.waitFor({ state: "detached" });
+    assert.equal(await notices(page).count(), 0, "leaving restores protection for the still-pending local approval");
+    await unobscured(localApproval, "restored local Allow");
+    await localApproval.click();
+    await notices(page).first().waitFor();
+    assert.equal(await notices(page).count(), 4);
+    console.log("ok guest foreground: covered local approval releases notices; guest decisions and restored local decisions defer them");
+    await page.close();
+  }
+
   // A real permission-mode confirmation exercises the shared modal surface separately.
   for (const order of ["approval-first", "notification-first"]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4 }, { width: 760, height: 600 }, { extra: extra + `
