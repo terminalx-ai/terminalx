@@ -65,7 +65,7 @@ export function reviewFileReader(load: (snapshot: Pick<ReviewThreads, "headOid" 
     }
     const files = await cached.files;
     return files.find((file) => file.path === path) ?? files.find((file) => file.oldPath === path)
-      ?? { path, oldPath: null, ...snapshot, patch: null, changed: false };
+      ?? { path, oldPath: null, headOid: snapshot.headOid, baseOid: snapshot.baseOid, patch: null, changed: false };
   };
 }
 
