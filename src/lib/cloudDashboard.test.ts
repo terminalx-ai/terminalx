@@ -1,3 +1,4 @@
+import { visibleDashboardSessions } from "./organizationSessions";
 import { adjacentSession } from "./sessionNavigation";
 import { describe, expect, it } from "vitest";
 import type { RuntimeSession } from "@terminalx/portable/workspace";
@@ -359,4 +360,17 @@ describe("the palette finds cloud sessions", () => {
     const local = { sessions: [], workspaces: [], projects: [] };
     expect(withCloudSessions(local, [])).toBe(local);
   });
+});
+
+
+it("optionally projects archived sessions and owner/automation metadata without giving them live activity", () => {
+  const source = input({ workspaces: [item("ws-1", { createdBy: "amy", runtimeActivity: { online: true, activeTurns: 1, pendingApprovals: 1, reportedAt: 10 } })], cached: { "ws-1": [
+    session("live", "Current"),
+    session("old", "Archived", "idle", { archived: true, modified: "2026-11-01T00:00:00Z", automation: { id: "daily" } }),
+  ] } });
+  const all = projectCloudSessions({ ...source, includeArchived: true });
+  expect(all.find((s) => s.sessionId === "old")).toMatchObject({ archived: true, ownerId: "amy", automation: { id: "daily" }, tabs: [{ status: "idle" }] });
+  expect(all.find((s) => s.sessionId === "live")?.tabs[0].status).toBe("waiting");
+  expect(projectCloudSessions(source).map((s) => s.sessionId)).toEqual(["live"]);
+  expect(visibleDashboardSessions(all.map((s) => ({ ...s, tabs: s.tabs.map((t) => ({ ...t, status: "waiting" as const })) })), new Set()).map((s) => s.sessionId)).toEqual(["live"]);
 });

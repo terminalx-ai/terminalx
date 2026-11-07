@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Columns2, RefreshCw, Rows2 } from "@/icons";
+import { RefreshCw } from "@/icons";
 import { DiffPane } from "@/components/changes/DiffPane";
+import { DiffOptions } from "@/components/changes/DiffOptions";
+import { diffMediaKind, FileDiff } from "@/components/changes/FileDiff";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
+import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
 import { editorLinkContext, fileKind, isMarkdown, setDiffMode, updateDiffRange, type DiffEditorEntry, type DiffMode, type FileEditorEntry } from "@/lib/editors";
 import { localGitSource } from "@/lib/gitSource";
 import { changedSince, useFileSource } from "@/lib/workspaceFiles";
@@ -17,12 +20,12 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const files = useFileSource(undefined, entry.root);
   const kind = fileKind(entry.rel);
-  const media = kind !== "text";
+  const media = kind !== "text" || diffMediaKind(entry.rel) === "pdf";
+  const options = useDiffOptions(diffFileKey(source.key, entry.rel));
   const [pair, setPair] = useState<{ before: string; after: string; deleted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [changed, setChanged] = useState(false);
-  const [split, setSplit] = useState(false);
   const [entire, setEntire] = useState(mode === "entire");
   const [editing, setEditing] = useState(mode === "edit");
   const [previewed, setPreviewed] = useState(mode === "preview");
@@ -93,23 +96,24 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
   const binary = pair?.before.includes("\0") || pair?.after.includes("\0");
   const canEdit = !media && !binary && !!pair && !pair.deleted;
   const modes: { value: DiffMode; label: string }[] = [{ value: "diff", label: "Diff" }, { value: "entire", label: "Entire file" }];
-  if (media || isMarkdown(entry.rel)) modes.push({ value: "preview", label: "Preview" });
+  if (kind !== "text" || isMarkdown(entry.rel)) modes.push({ value: "preview", label: "Preview" });
   if (canEdit) modes.push({ value: "edit", label: "Edit" });
 
   return <div className="flex h-full min-h-0 flex-col" data-testid="diff-editor">
     <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-hairline px-3 py-1">
       <Segmented aria-label="Diff view" value={mode} onChange={(next) => void setDiffMode(entry.id, next)} options={modes} />
       <span className="ml-auto truncate text-xs text-faint" title={entry.rel}>{entry.rel}</span>
-      {mode === "diff" && !media && <Button variant="ghost" size="icon-xs" aria-label={split ? "Unified diff" : "Split diff"} onClick={() => setSplit((v) => !v)}>{split ? <Rows2 /> : <Columns2 />}</Button>}
       {scope === "all" && <Button variant="ghost" size="icon-xs" aria-label="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
     </div>
+    {mode === "diff" && <DiffOptions />}
     {changed && <div role="status" className="shrink-0 bg-warning/10 px-3 py-2 text-xs">This file changed on disk or differs from this snapshot. Edit and media preview use the current file.</div>}
     {error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}</div>}
     <div className="relative min-h-0 flex-1">
       {(["diff", ...(entire ? ["entire" as const] : [])] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
-          : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{media && " Choose Preview to view the current file."}</p>
-          : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} mode={surface === "entire" ? "entire" : split ? "split" : "unified"} />
+          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath} base={range.base} head={range.head} text={pair ?? undefined} />
+          : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{kind !== "text" && " Choose Preview to view the current file."}</p>
+          : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} mode="entire" wrap={options.wrap} />
           : !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading file diff…</p>}
       </div>)}
       {previewed && <div className={cn("absolute inset-0", mode !== "preview" && "hidden")}>
