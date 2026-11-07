@@ -5,6 +5,7 @@ import { defaultTabView, tabPaneId, tabViewIn, type TabViewMode } from "@/lib/ta
 import { adoptPane, closeTerminal, ensureTerminalAttached, followShellToTab, openTerminal } from "@/lib/terminal";
 import { getSessionStore } from "@/lib/sessions";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import { getTheme } from "@/lib/theme";
 
 /**
  * Which face a tab shows: the transcript, or the agent's own CLI in a terminal.
@@ -281,7 +282,14 @@ export async function enterTerminalView(session: SessionEntry, tab: TabEntry, pl
         category = "attach";
         note("attaching");
         await adoptTabPane(session.id, tab.id, token);
-        await ensureTerminalAttached(terminalPaneId(tab));
+        if (!valid()) return;
+        // The sidebar can switch a session this window has never mounted.
+        // Prepare its ordinary cached terminal now; a later view adopts the
+        // same instance and stream instead of requiring another handoff.
+        const paneId = terminalPaneId(tab);
+        const terminalView = await import("@/components/terminal/TerminalView");
+        if (!valid()) return;
+        await ensureTerminalAttached(paneId, () => terminalView.createInstance(paneId, getTheme().resolvedMode));
       } else {
         const info = await agent.tabHandoff(session.id, tab.id);
         if (!valid()) return;

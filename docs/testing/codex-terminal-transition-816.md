@@ -74,6 +74,13 @@ recreate an evicted parser. `createInstance.test.ts` exercises this path with th
 real xterm/feed and view-switch store, including delayed success, rejection,
 retry, and reuse of the successful attachment.
 
+Sidebar switches can target a session never mounted in this window. They
+create the same cached terminal instance when neither an instance nor a mounted
+factory exists, using the current palette, and still await real attachment.
+Opening that session later reuses its instance and stream. `TabMenu.test.tsx`
+exercises the actual menu action from another selected session for native
+Codex, PTY Codex, and Claude, with no target view mounted until after success.
+
 ## Regression seams
 
 - `src/lib/followTerminal.test.ts`: startup failure/retry, pending handoff,

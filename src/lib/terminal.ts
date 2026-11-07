@@ -146,8 +146,8 @@ export function peekInstance(id: string): TerminalInstance | undefined {
 }
 
 /** Pane registration alone does not establish the window's PTY stream. */
-export async function ensureTerminalAttached(id: string): Promise<void> {
-  const create = instanceFactories.get(id)?.values().next().value;
+export async function ensureTerminalAttached(id: string, fallback?: () => TerminalInstance): Promise<void> {
+  const create = instanceFactories.get(id)?.values().next().value ?? fallback;
   const inst = peekInstance(id) ?? (create ? getInstance(id, create) : undefined);
   if (!inst?.ensureAttached) throw new Error("The terminal view is not ready to attach. Keep using Chat and try again.");
   await inst.ensureAttached();
