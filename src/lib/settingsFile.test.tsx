@@ -126,6 +126,7 @@ describe("user preference files", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
     expect(screen.getByRole("alert").textContent).toContain("Invalid entries use their previous value or a default.");
+    expect(screen.getByRole("alert").textContent).toContain("when the file is a JSON object. Otherwise, previous settings or defaults are used.");
     expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).sounds).toBe(false);
     file.error = null;
     await act(async () => mocks.listeners.get("settings_file_changed")!());

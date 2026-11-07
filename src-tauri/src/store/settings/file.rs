@@ -45,6 +45,12 @@ static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
     value
 });
 
+// These object keys are user-defined, rather than settings field names.
+static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
+    ("mergedCleanup.projects", Value::Bool(false)),
+    ("preferences.shortcuts", serde_json::json!([""])),
+]));
+
 /// Retain duplicate members so an ambiguous field cannot silently become a
 /// new permission choice while valid fields elsewhere in the file are loaded.
 struct Members<'a>(BTreeMap<String, Vec<&'a RawValue>>);
@@ -114,12 +120,7 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
             let Members(members): Members = serde_json::from_str(raw.get()).map_err(|_| error("expected an object"))?;
             for (name, members) in members {
                 let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
-                let map_value = match key {
-                    "mergedCleanup.projects" => Some(Value::Bool(false)),
-                    "preferences.shortcuts" => Some(serde_json::json!([""])),
-                    _ => None,
-                };
-                let Some(kind) = map_value.as_ref().or_else(|| properties.get(&name)) else {
+                let Some(kind) = DYNAMIC_MAPS.get(key).or_else(|| properties.get(&name)) else {
                     // Future fields and editor metadata (including $schema)
                     // are inert to this build, and survive subsequent writes.
                     continue;
@@ -166,12 +167,8 @@ fn recover(source: &str, raw: &RawValue, expected: &Value, previous: Option<&Val
         let mut values = serde_json::Map::new();
         for (name, members) in members {
             let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
-            let map_value = match key {
-                "mergedCleanup.projects" => Some(Value::Bool(false)),
-                "preferences.shortcuts" => Some(serde_json::json!([""])),
-                _ => None,
-            };
-            if let Some(kind) = map_value.as_ref().or_else(|| properties.get(&name)) {
+            let map_value = DYNAMIC_MAPS.get(key);
+            if let Some(kind) = map_value.or_else(|| properties.get(&name)) {
                 let previous = previous.and_then(|value| value.get(&name));
                 if map_value.is_some() && previous.is_none()
                     && (members.len() > 1 || validate(source, members[0], kind, &path, true).is_err()) { continue; }
@@ -200,7 +197,9 @@ fn refresh(path: &Path, state: &mut FileState) {
                         let previous = serde_json::to_value(&state.good).expect("settings values");
                         let raw = serde_json::from_str::<&RawValue>(&source).expect("parsed source");
                         let recovered = recover(&source, raw, &TEMPLATE, Some(&previous), "");
-                        if let Ok(good) = serde_json::from_value(recovered) { state.good = good; }
+                        let good = serde_json::from_value(recovered);
+                        debug_assert!(good.is_ok(), "validated recovery must match the Settings type");
+                        if let Ok(good) = good { state.good = good; }
                     }
                     state.error = Some(error.to_string());
                 }
@@ -214,7 +213,7 @@ fn refresh(path: &Path, state: &mut FileState) {
 /// Settings serializes only fields understood by this build. Carry the others
 /// forward at every object level, without restoring deleted dynamic map keys.
 fn preserve_unknown(next: &mut Value, source: &Value, expected: &Value, key: &str) {
-    if matches!(key, "mergedCleanup.projects" | "preferences.shortcuts") { return; }
+    if DYNAMIC_MAPS.contains_key(key) { return; }
     if let (Some(next), Some(source), Some(properties)) = (next.as_object_mut(), source.as_object(), expected.as_object()) {
         for (name, value) in source {
             if let Some(kind) = properties.get(name) {
@@ -533,6 +532,20 @@ mod tests {
         let settings = parse(r#"{"quitBehavior":"future-policy","agents":{"readOnlyCommands":false}}"#).unwrap();
         assert_eq!(settings.quit_behavior, Some(super::super::QuitBehavior::KeepRunning));
         assert!(!settings.agents.read_only_commands);
+    }
+
+    #[test]
+    fn duplicate_fields_on_a_cold_start_use_defaults_without_resetting_valid_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"linearApiKey":"private-key","agents":{"readOnlyCommands":false,"readOnlyCommands":true},"notifications":false,"preferences":{"theme":"moss"}}"#).unwrap();
+        let mut state = FileState::default();
+        refresh(&path, &mut state);
+        assert!(state.error.as_deref().unwrap().contains("agents.readOnlyCommands"));
+        assert_eq!(state.good.agents.read_only_commands, Settings::default().agents.read_only_commands);
+        assert_eq!(state.good.linear_api_key.as_deref(), Some("private-key"));
+        assert!(!state.good.notifications);
+        assert_eq!(state.good.preferences["theme"], "moss");
     }
 
     #[test]
