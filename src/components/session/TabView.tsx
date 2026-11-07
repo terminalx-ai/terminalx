@@ -33,6 +33,7 @@ import { BUSY_NOTICE, classifyRecovery, CONTINUE_PROMPT, isBusyRefusal, RECOVERY
 import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type RecoveryAction, type Surface } from "@/lib/recoveryReports";
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
+import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { useModels } from "@/lib/models";
@@ -266,6 +267,9 @@ export function TabView({
   const transcript = useMemo(() => log.permissionResponses?.size
     ? { ...projected, pendingAsks: projected.pendingAsks.filter(ask => log.permissionResponses?.get(ask.requestId) !== "answered") }
     : projected, [projected, log.permissionResponses]);
+  // Includes requests in the agent's terminal and recovery controls. Hidden tabs
+  // must not hold notices meant for the conversation the reader is looking at.
+  useNoticeDeferral(active && !readOnly && (!!recovery || tab.status === "waiting"));
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(events, session.baseRef), [events, session.baseRef]);

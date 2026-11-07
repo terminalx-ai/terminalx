@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+// pnpm build && node scripts/webkit/attention-approvals.mjs
+// Real app notices and command approvals; native OS banners are recorded by the bridge.
+import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
+import { launch, open, openConversation, serve, sidebar, tab } from "./harness.mjs";
+
+const title = "TerminalX — Codex needs attention";
+const extra = `
+  const stub = window.__PW_STUB__;
+  stub.answers.list_sessions.slice(1).forEach(s => s.tabs[0].harness = "codex");
+  stub.answers.list_harnesses.push({ id: "codex", name: "Codex", available: true });
+  window.__APPROVAL_ANSWERS__ = [];
+  window.__NATIVE_NOTICES__ = [];
+  stub.answers["plugin:notification|notify"] = args => window.__NATIVE_NOTICES__.push(args);
+  stub.answers.respond_permission = args => {
+    window.__APPROVAL_ANSWERS__.push(args);
+    stub.emit("tab_status", { sessionId: args.sessionId, tabId: args.tabId, status: "completed" });
+  };
+`;
+const painted = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const notices = page => page.getByText(title, { exact: true });
+async function raise(page) {
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("focus"));
+    for (let i = 0; i < 4; i++) {
+      const tab = { sessionId: `many-s${i}`, tabId: `many-s${i}-t` };
+      window.__PW_STUB__.emit("tab_status", { ...tab, status: "in_progress" });
+      window.__PW_STUB__.emit("tab_status", { ...tab, status: "waiting" });
+    }
+  });
+  await painted(page);
+}
+async function unobscured(locator, name) {
+  const hits = await locator.evaluate(el => {
+    const r = el.getBoundingClientRect();
+    const points = [0.15, 0.5, 0.85].flatMap(x => [0.15, 0.5, 0.85].map(y => [r.left + r.width * x, r.top + r.height * y]));
+    return {
+      contained: r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
+      clear: points.every(([x, y]) => el.contains(document.elementFromPoint(x, y))),
+    };
+  });
+  assert.ok(hits.contained && hits.clear, `${name}: ${JSON.stringify(hits)}`);
+}
+
+const server = await serve();
+const screenshots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
+if (screenshots) await mkdir(screenshots, { recursive: true });
+let browser;
+try {
+  browser = await launch();
+  for (const [width, height, zoom] of [[1100, 800, 1], [760, 600, 1], [640, 480, 1], [760, 600, 1.5]]) {
+    for (const order of ["approval-first", "notification-first"]) {
+      const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4 }, { width, height }, { extra });
+      page.setDefaultTimeout(10_000);
+      await sidebar(page);
+      await page.evaluate(zoom => {
+        document.documentElement.style.zoom = String(zoom);
+        document.documentElement.style.setProperty("--fs-base", "14.5px");
+        document.documentElement.style.setProperty("--sidebar-w", "200px");
+      }, zoom);
+      if (order === "notification-first") {
+        await raise(page);
+        assert.equal(await notices(page).count(), 4);
+      }
+      await openConversation(page, "claude tab");
+      await tab(page, "gemini tab").click();
+      const allow = page.getByRole("button", { name: /^Allow/ }).filter({ visible: true });
+      const deny = page.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true });
+      const detail = page.getByTestId("permission-detail").filter({ visible: true });
+      await allow.waitFor();
+      await allow.focus();
+      await raise(page);
+      await raise(page); // Repeated attention replaces each tab's notice.
+      assert.equal(await notices(page).count(), 0, "notices defer while an approval is visible");
+      assert.ok(await allow.evaluate(el => el === document.activeElement), "arrival keeps approval focus");
+      await detail.scrollIntoViewIfNeeded();
+      await unobscured(detail, "command text");
+      await allow.scrollIntoViewIfNeeded();
+      await unobscured(allow, "Allow button");
+      await unobscured(deny, "Deny button");
+      await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+      assert.ok(await deny.evaluate(el => el === document.activeElement), `Tab reaches Deny: ${await page.evaluate(() => document.activeElement?.outerHTML)}`);
+      await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
+      assert.ok(await allow.evaluate(el => el === document.activeElement), "Shift+Tab reaches Allow");
+      const label = `${width}x${height}-${zoom}-${order}`;
+      if (screenshots) await page.screenshot({ path: `${screenshots}/attention-${label}.png` });
+      if (order === "approval-first") await allow.click({ position: { x: 8, y: 3 } });
+      else await page.keyboard.press("Enter");
+      await page.waitForFunction(() => window.__APPROVAL_ANSWERS__.length === 1);
+      await notices(page).first().waitFor();
+      assert.equal(await notices(page).count(), 4, "retained notices appear after answering, with no duplicates");
+      assert.equal(await page.evaluate(() => window.__APPROVAL_ANSWERS__[0].optionId), "allow");
+      assert.deepEqual(await page.evaluate(() => window.__NATIVE_NOTICES__), [], "the focused app used in-app toasts");
+      // The other, hidden tab still has a pending approval. It must not defer these.
+      await notices(page).first().click();
+      await tab(page, "Chat 0").waitFor();
+      console.log(`ok ${label}: command and actions clear, focus and pointer/keyboard answers work, notices retained`);
+      await page.close();
+    }
+  }
+
+  // A real permission-mode confirmation exercises the shared modal surface separately.
+  for (const order of ["approval-first", "notification-first"]) {
+    const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4 }, { width: 760, height: 600 }, { extra: extra + `
+      const load = stub.answers.load_tab_events;
+      stub.answers.load_tab_events = args => load(args).filter(e => e.payload.type !== "permission_requested");
+      stub.answers.list_sessions[0].tabs.forEach(t => t.status = "idle");
+    ` });
+    page.setDefaultTimeout(10_000);
+    await openConversation(page, "claude tab");
+    await tab(page, "gemini tab").click();
+    if (order === "notification-first") {
+      await raise(page);
+      assert.equal(await notices(page).count(), 4);
+    }
+    await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "More options" }).focus();
+    await page.keyboard.press("Enter");
+    await page.getByTestId("permission-mode").focus();
+    await page.keyboard.press("ArrowRight");
+    await page.getByRole("menuitemradio", { name: /Bypass permissions/ }).focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await dialog.waitFor();
+    await page.evaluate(() => { document.documentElement.style.zoom = "1.5"; });
+    const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
+    await cancel.focus();
+    await raise(page);
+    assert.equal(await notices(page).count(), 0);
+    assert.ok(await cancel.evaluate(el => el === document.activeElement));
+    await cancel.scrollIntoViewIfNeeded();
+    await unobscured(cancel, "confirmation Cancel");
+    await unobscured(dialog.getByRole("button", { name: "Bypass permissions", exact: true }), "confirmation action");
+    await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+    assert.ok(await dialog.evaluate(el => el.contains(document.activeElement)), "focus stays inside the modal");
+    await cancel.click();
+    await notices(page).first().waitFor();
+    assert.equal(await notices(page).count(), 4);
+    console.log(`ok modal ${order}: confirmation controls clear, focus retained, notices resume`);
+    await page.close();
+  }
+} finally {
+  await browser?.close();
+  server.close();
+}

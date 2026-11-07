@@ -18,6 +18,8 @@ vi.mock("@/lib/cloudDashboard", async (original) => ({
 const { Toasts } = await import("./Toasts");
 const { dismissNotice, notePipelineState, noteSessionStarted, noteStatusChange, useNotices } = await import("@/lib/notify");
 const { getSessionStore, openIssues, upsertSession } = await import("@/lib/sessions");
+const { useNoticeDeferral } = await import("@/lib/noticeDeferral");
+const { Dialog, DialogContent, DialogTitle } = await import("./dialog");
 
 const session: SessionEntry = {
   id: "started-session", projectPath: "/repo", cwd: "/repo/worktree", title: "#785 Stay on Issues",
@@ -34,11 +36,59 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup(); // Release any decision before clearing its retained notices.
   const { result } = renderHook(useNotices);
   act(() => result.current.forEach((notice) => dismissNotice(notice.id)));
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
+});
+
+it.each(["approval-first", "notification-first"])("retains stacked and repeated attention until the dialog closes (%s)", (order) => {
+  const notify = () => noteStatusChange(session, session.tabs[0], "in_progress", "waiting");
+  render(<Toasts />);
+  if (order === "notification-first") {
+    act(notify);
+    expect(screen.getByRole("status").textContent).toContain("needs attention");
+    act(() => vi.advanceTimersByTime(7000));
+  }
+  const approval = (open: boolean) => <Dialog open={open}><DialogContent aria-describedby={undefined}>
+    <DialogTitle>Approve command</DialogTitle><button>Allow command</button><button>Deny command</button>
+  </DialogContent></Dialog>;
+  const dialog = render(approval(true));
+  const allow = screen.getByRole("button", { name: "Allow command" });
+  allow.focus();
+  act(() => {
+    notify();
+    noteStatusChange({ ...session, id: "another-session" }, session.tabs[0], "in_progress", "waiting");
+    vi.advanceTimersByTime(20_000);
+    notify();
+  });
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(document.activeElement).toBe(allow);
+  expect(getSessionStore().view).toBe("issues");
+  dialog.rerender(approval(false));
+  expect(screen.getAllByRole("status")).toHaveLength(2);
+  act(() => vi.advanceTimersByTime(7999));
+  expect(screen.getAllByRole("status")).toHaveLength(2);
+  act(() => vi.advanceTimersByTime(1));
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+it("waits for the last decision, ignores inactive decisions, and keeps retained notices actionable", () => {
+  render(<Toasts />);
+  const first = renderHook(({ active }) => useNoticeDeferral(active), { initialProps: { active: false } });
+  act(() => noteSessionStarted(session.id, "started-tab", "codex", "Started while browsing"));
+  expect(screen.getByRole("status")).toBeTruthy();
+  first.rerender({ active: true });
+  const second = renderHook(() => useNoticeDeferral(true));
+  act(() => vi.advanceTimersByTime(30_000));
+  first.unmount();
+  expect(screen.queryByRole("status")).toBeNull();
+  second.unmount();
+  fireEvent.click(screen.getByRole("status"));
+  expect(getSessionStore().selectedSessionId).toBe(session.id);
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
 it("stacks starts, opens a session on click, and dismisses another without navigating", () => {
