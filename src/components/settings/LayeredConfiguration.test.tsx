@@ -2,12 +2,12 @@ import { StrictMode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { LayeredConfiguration } from "./LayeredConfiguration";
-const { resolve, write, review } = vi.hoisted(() => ({ resolve: vi.fn(), write: vi.fn(), review: vi.fn() }));
-vi.mock("@/lib/configuration", async (original) => ({ ...await original<typeof import("@/lib/configuration")>(), configuration: { resolve, write, review } }));
+const { resolve, write, review, watch } = vi.hoisted(() => ({ resolve: vi.fn(), write: vi.fn(), review: vi.fn(), watch: vi.fn() }));
+vi.mock("@/lib/configuration", async (original) => ({ ...await original<typeof import("@/lib/configuration")>(), configuration: { resolve, write, review, watch } }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: [{ path: "/repo", name: "App", kind: "git" }, { path: "cloud:o:w", name: "Remote", kind: "git" }] }) }));
 const fixture = (locked = false) => ({ values: { branchPrefix: { value: "team/", source: locked ? "managed" : "repositoryShared", locked, redacted: false } }, registry: [{ key: "branchPrefix", repositoryConfigurable: true, managedLockable: true, requiresTrust: true }], warnings: [], trust: null });
 afterEach(cleanup);
-beforeEach(() => { vi.clearAllMocks(); resolve.mockResolvedValue(fixture()); write.mockResolvedValue(undefined); review.mockResolvedValue(false); });
+beforeEach(() => { vi.clearAllMocks(); watch.mockResolvedValue(vi.fn()); resolve.mockResolvedValue(fixture()); write.mockResolvedValue(undefined); review.mockResolvedValue(false); });
 
 it("defaults every editor to user writes and explicitly selects repository local or shared", async () => {
   render(<LayeredConfiguration />);
@@ -64,4 +64,41 @@ it("loads in React StrictMode after the first effect is cancelled", async () => 
   render(<StrictMode><LayeredConfiguration /></StrictMode>);
   await screen.findByDisplayValue("team/");
   await waitFor(() => expect((screen.getByRole("button", { name: "Save prefix" }) as HTMLButtonElement).disabled).toBe(false));
+});
+
+it("refreshes sources and trust after file changes without erasing an unsaved prefix", async () => {
+  const stop = vi.fn();
+  watch.mockResolvedValue(stop);
+  const { unmount } = render(<LayeredConfiguration />);
+  await screen.findByDisplayValue("team/");
+  fireEvent.change(screen.getByLabelText("Branch prefix"), { target: { value: "draft/" } });
+  resolve.mockResolvedValue({ ...fixture(), trust: { hash: "changed", required: true, keys: ["branchPrefix"] } });
+  watch.mock.calls.at(-1)![1]();
+  await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2));
+  expect((screen.getByLabelText("Branch prefix") as HTMLInputElement).value).toBe("draft/");
+  resolve.mockResolvedValue(fixture(true));
+  watch.mock.calls.at(-1)![1]();
+  await screen.findByText(/Locked by managed configuration/);
+  expect((screen.getByLabelText("Branch prefix") as HTMLInputElement).value).toBe("team/");
+  unmount();
+  expect(stop).toHaveBeenCalledOnce();
+});
+
+it("disables stale editing when a watched policy becomes unreadable", async () => {
+  render(<LayeredConfiguration />);
+  await screen.findByDisplayValue("team/");
+  resolve.mockRejectedValueOnce(new Error("Cannot safely read managed configuration."));
+  watch.mock.calls.at(-1)![1]();
+  await screen.findByRole("alert");
+  expect((screen.getByRole("button", { name: "Save prefix" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("closes a watcher that finishes subscribing after unmount", async () => {
+  let ready!: (stop: () => void) => void;
+  watch.mockReturnValue(new Promise<() => void>((resolve) => { ready = resolve; }));
+  const { unmount } = render(<LayeredConfiguration />);
+  unmount();
+  const stop = vi.fn();
+  ready(stop);
+  await waitFor(() => expect(stop).toHaveBeenCalledOnce());
 });

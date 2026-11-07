@@ -16,6 +16,14 @@ try {
           branchPrefix: { value: "team/", source: "repositoryShared", locked: false, redacted: false },
           "environment.API_URL": { value: null, source: "managed", locked: true, redacted: true }
         }, registry: [{ key: "branchPrefix", repositoryConfigurable: true, managedLockable: true, requiresTrust: true }], warnings: [], trust: { hash: "fixture", required: true, keys: ["branchPrefix"] } };
+        const watchers = new Map();
+        let watchId = 0;
+        window.__PW_STUB__.answers.configuration_watch = ({ onChange }) => { watchers.set(++watchId, onChange); return watchId; };
+        window.__PW_STUB__.answers["plugin:resources|close"] = ({ rid }) => { watchers.delete(rid); return null; };
+        window.__PW_CONFIG_CHANGE__ = () => {
+          result.values.branchPrefix = { value: "admin/", source: "managed", locked: true, redacted: false };
+          for (const channel of watchers.values()) channel.onmessage(null);
+        };
         window.__PW_STUB__.answers.configuration_resolve = () => structuredClone(result);
         window.__PW_STUB__.answers.configuration_review = () => false;
         window.__PW_CONFIG_WRITES__ = [];
@@ -47,6 +55,9 @@ try {
     checks["writes only the chosen layer"] = await page.evaluate(() => window.__PW_CONFIG_WRITES__.length === 1 && window.__PW_CONFIG_WRITES__[0].layer === "repositoryLocal" && window.__PW_CONFIG_WRITES__[0].value === "mine/");
     checks["reloads the effective local source"] = await editor.getByText("Source: Repository local", { exact: true }).count() === 1;
     checks["no horizontal overflow"] = await editor.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
+    await page.evaluate(() => window.__PW_CONFIG_CHANGE__());
+    await page.waitForFunction(() => document.querySelector('[aria-label="Layered configuration"] input')?.value === "admin/");
+    checks["watched policy change refreshes and locks the editor"] = await editor.getByLabel("Branch prefix", { exact: true }).isDisabled();
     if (shots) await editor.screenshot({ path: join(shots, `configuration-${mode}.png`) });
     failed += report(`configuration ${mode}`, checks);
     await page.close();

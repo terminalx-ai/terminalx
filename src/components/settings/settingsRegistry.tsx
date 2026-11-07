@@ -65,7 +65,7 @@ export const SETTINGS_ROWS = [
     id: "general.layeredConfiguration", section: "general", title: "Layered configuration",
     description: "Resolve user, shared, local and managed settings; review repository trust and locked values.",
     searchTerms: ["configuration", "repository", "trust", "managed", "locked", "branch prefix"], scope: "user",
-    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json, managed-settings.json and .terminalx/settings*.json" }, layout: "content",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json, system managed policy and .terminalx/settings*.json" }, layout: "content",
   }),
   defineSetting({
     id: "about.updates", section: "about", title: "Updates",

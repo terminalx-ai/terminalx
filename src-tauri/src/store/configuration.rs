@@ -12,7 +12,6 @@ use super::config_files::Directory;
 
 pub const SHARED: &str = "settings.json";
 pub const LOCAL: &str = "settings.local.json";
-const MANAGED: &str = "managed-settings.json";
 const TRUST: &str = "repository-trust.json";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,9 +133,25 @@ fn apply(values: &mut BTreeMap<String, ResolvedValue>, document: Map<String, Val
     Ok(())
 }
 
-pub struct Store { home: PathBuf }
+pub struct Store {
+    home: PathBuf,
+    // Only resolver fixtures bypass ownership checks; production has no path override.
+    #[cfg(test)]
+    managed_fixture: Option<PathBuf>,
+}
 impl Store {
-    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonicalize()? }) }
+    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonicalize()?, #[cfg(test)] managed_fixture: None }) }
+    fn managed(&self) -> Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        if let Some(path) = &self.managed_fixture {
+            return match std::fs::read(path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            };
+        }
+        super::managed_configuration::read()
+    }
     fn home(&self) -> Result<Directory> { Directory::open(&self.home, false)?.context("Settings directory is missing.") }
     fn trusted(&self, repository: &Repository, hash: &str) -> bool {
         self.home().and_then(|dir| dir.read(TRUST)).ok().flatten()
@@ -182,7 +197,7 @@ impl Store {
                 apply(&mut values, object(&bytes)?, Layer::RepositoryLocal, &mut warnings)?;
             }
         }
-        if let Some(bytes) = home.read(MANAGED)? {
+        if let Some(bytes) = self.managed()? {
             apply(&mut values, object(&bytes).context("Invalid managed configuration; refusing to bypass policy.")?, Layer::Managed, &mut warnings)?;
         }
         if let Some(trust) = &mut trust {
@@ -267,7 +282,11 @@ pub fn resolve(project: Option<&str>) -> Result<Resolution> {
 }
 /// Read surfaces add Keychain names/sources, never their private values.
 pub fn view(project: Option<&str>) -> Result<Resolution> {
-    let mut resolved = resolve(project)?;
+    Ok(with_private_sources(project, resolve(project)?).redacted())
+}
+
+/// Keep raw shared values inside native code for the hash-bound consent review.
+pub(crate) fn with_private_sources(project: Option<&str>, mut resolved: Resolution) -> Resolution {
     if super::environment::configuration_sources(project, &mut resolved.values).is_err() {
         // Preserve ordinary launches' existing missing-Keychain fallback. A
         // layered environment still fails closed at launch; absent metadata
@@ -277,7 +296,7 @@ pub fn view(project: Option<&str>) -> Result<Resolution> {
         resolved.warnings.push(warning);
     }
     resolved.refresh_trust();
-    Ok(resolved.redacted())
+    resolved
 }
 
 /// Policy/read failures are errors, never an empty prefix that could classify

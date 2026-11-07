@@ -2,7 +2,7 @@
 
 TerminalX resolves supported keys in this order, highest first:
 
-1. `$TERMINALX_HOME/managed-settings.json` (read-only in the app)
+1. System managed policy (root-owned; fixed paths below)
 2. `<primary checkout>/.terminalx/settings.local.json` (ignored and untracked)
 3. `<primary checkout>/.terminalx/settings.json` (shared in Git)
 4. `$TERMINALX_HOME/settings.json` and existing private user environment
@@ -11,8 +11,8 @@ TerminalX resolves supported keys in this order, highest first:
 `TERMINALX_HOME` defaults to `~/.raccoon`. Each linked workspace inherits the
 **primary checkout's** files, including local overrides; checking out a branch in
 a workspace does not switch its executable configuration. Separate clones have
-separate trust decisions. File changes apply on the next resolution/launch; this
-change does not add watchers or restart existing processes.
+separate trust decisions. File changes apply on the next resolution/launch and
+refresh the open Settings view automatically. Existing processes are not restarted.
 
 ## Supported keys and dependency scope
 
@@ -50,9 +50,21 @@ Example shared file:
 
 A managed document uses the same shape. All eligible values it supplies are
 locked; deleting a managed key restores inheritance. Managed policy is provisioned
-outside the app. This is an application policy, not protection against programs
-already able to modify the user's files; admins must deploy filesystem protections
-appropriate to their installation.
+outside the app at a fixed system location:
+
+- macOS: `/Library/Application Support/TerminalX/managed-settings.json`
+- Linux: `/etc/terminalx/managed-settings.json`
+
+`TERMINALX_HOME`, `RACCOON_HOME` and repository files cannot relocate or replace
+this policy. The file **and every ancestor directory** must be owned by root and
+have no group/world write bits (typically file `0644`, directories `0755`). macOS
+extended ACLs are conservatively refused, including read-only ACLs. Each component
+is opened without following symlinks, and permissions are checked on the opened
+descriptor before reading. An unsafe, unreadable or malformed policy fails closed;
+a genuinely absent policy beneath protected parents means no managed overrides.
+The old user-home `managed-settings.json` is ignored. Windows managed policy is
+deferred until administrator ACL validation is implemented; it never falls back
+to user-writable policy storage.
 
 Existing Keychain user variables are below shared values. Existing repository
 Keychain variables are local overrides: above shared, below explicit local-file
@@ -66,7 +78,7 @@ existing editor. The Layered configuration view shows its lock and effective sou
 and absent from `origin/main` at implementation. This standalone increment uses
 the existing environment service and branch settings. Files-to-copy integration,
 setup/archive script fields and runners, comprehensive preference migration,
-settings-schema publication, per-row sources throughout Settings, and file watchers
+settings-schema publication and per-row sources throughout Settings
 remain with those changes. `scripts` is deliberately unsupported and cannot run;
 this PR does not duplicate their editors or storage. Changing any bytes, including
 an unsupported script field, invalidates a trust decision for effective shared
@@ -77,7 +89,11 @@ settings.
 The desktop asks before creating a session that would use shared environment or
 branch settings. Environment variables can cause programs to execute code, and a
 branch prefix changes which branches cleanup recognizes, so both require consent.
-The prompt identifies the primary checkout, file, and affected keys. Only its
+The prompt identifies the primary checkout, file, affected keys and their values.
+Environment values are masked initially; Reveal/Hide stays in the native dialog
+and never approves or resets its deadline. Values are escaped and bounded, with
+an explicit truncation notice for large values. The prompt warns about code-loading
+variables such as `NODE_OPTIONS`, `BASH_ENV` and `GIT_SSH_COMMAND`. Only its
 explicit Trust button grants consent. Cancel, close, timeout, and a stale file hash
 grant nothing. The existing bounded native-confirmation service prevents overlapping
 prompts and computer-use approval of its own requests.
@@ -96,7 +112,17 @@ Settings → General → Layered configuration selects a repository, shows sourc
 locks, and defaults writes to User. Eligible keys offer “Save for this repository
 (local)” and a shared-file destination, plus reset of the selected layer. Shared
 writes still require trust. Saving or granting trust requires a compatible attached
-local runtime; an older owner returns a restart instruction. Refresh reloads file changes without discarding them.
+local runtime; an older owner returns a restart instruction. Nonrecursive file
+watchers refresh the open view after user, shared, local, managed, private-environment
+index or trust-ledger changes, including atomic replacements and newly created
+configuration directories. Watchers close with the editor/window. Draft edits
+survive refresh unless a managed lock takes effect. Refresh is also available
+manually if watching is unavailable.
+
+Changing the branch prefix affects future branch names and cleanup classification;
+it does not rename existing workspace branches. Existing branches with the old
+prefix may need manual branch cleanup, and renaming those workspaces may fail
+until the old prefix is restored. Automatic prefix migration is outside this change.
 
 ```text
 terminalx config show --json

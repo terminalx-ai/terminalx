@@ -105,6 +105,8 @@ mod environment_commands;
 #[cfg(feature = "desktop")]
 mod configuration_commands;
 #[cfg(feature = "desktop")]
+mod configuration_watch;
+#[cfg(feature = "desktop")]
 mod secret_clipboard;
 mod landed;
 mod local_sharing;
@@ -407,6 +409,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             configuration_commands::configuration_resolve,
+            configuration_watch::configuration_watch,
             configuration_commands::configuration_write,
             configuration_commands::configuration_review,
             environment_commands::environment_list,

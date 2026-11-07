@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/lib/sessions";
 import { configuration, layerLabels, type Configuration, type ConfigurationLayer } from "@/lib/configuration";
@@ -24,6 +24,8 @@ export function LayeredConfiguration() {
 function ConfigurationEditor({ project }: { project: string | null }) {
   const layerId = useId();
   const [resolved, setResolved] = useState<Configuration | null>(null);
+  const dirty = useRef(false);
+  const generation = useRef(0);
   const [prefix, setPrefix] = useState("");
   const [layer, setLayer] = useState<ConfigurationLayer>("user");
   const [notice, setNotice] = useState<string | null>(null);
@@ -31,13 +33,40 @@ function ConfigurationEditor({ project }: { project: string | null }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const busy = loading || saving;
-  const install = (next: Configuration) => { setResolved(next); setPrefix(String(next.values.branchPrefix?.value ?? "")); };
+  const install = (next: Configuration, preserveDraft = false) => {
+    if (!preserveDraft) { generation.current++; setLoading(false); }
+    setResolved(next);
+    if (!preserveDraft || !dirty.current || next.values.branchPrefix?.locked) {
+      dirty.current = false;
+      setPrefix(String(next.values.branchPrefix?.value ?? ""));
+    }
+  };
   useEffect(() => {
     let live = true;
-    configuration.resolve(project).then((next) => { if (live) install(next); })
-      .catch((cause: unknown) => { if (live) setLoadError(cause instanceof Error ? cause.message : String(cause)); })
-      .finally(() => { if (live) setLoading(false); });
-    return () => { live = false; };
+    let stop: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const reload = async () => {
+      const request = ++generation.current;
+      try {
+        const next = await configuration.resolve(project);
+        if (live && request === generation.current) { install(next, true); setLoadError(null); }
+      } catch (cause) {
+        if (live && request === generation.current) {
+          setLoadError(cause instanceof Error ? cause.message : String(cause));
+          setResolved(null); // An unreadable policy must not leave stale writable controls.
+        }
+      } finally { if (live && request === generation.current) setLoading(false); }
+    };
+    const changed = () => { if (!live) return; clearTimeout(timer); timer = setTimeout(() => { void reload(); }, 150); };
+    // Subscribe before resolving so edits during the initial read are observed.
+    void configuration.watch(project, changed).then((unsubscribe) => {
+      if (!live) { unsubscribe(); return; }
+      stop = unsubscribe;
+      void reload();
+    }).catch(() => {
+      if (live) { setNotice("Automatic refresh is unavailable. Use Refresh configuration to reload changes."); void reload(); }
+    });
+    return () => { live = false; clearTimeout(timer); stop?.(); };
   }, [project]);
   const value = resolved?.values.branchPrefix;
   const repositoryAllowed = resolved?.registry.find((r) => r.key === "branchPrefix")?.repositoryConfigurable;
@@ -60,9 +89,10 @@ function ConfigurationEditor({ project }: { project: string | null }) {
       })}>Review repository trust</Button>
     </div>}
     <label className="flex flex-col gap-1 text-sm">Branch prefix
-      <input className={repositoryInputClass} value={prefix} disabled={busy || !value || value.locked} onChange={(e) => setPrefix(e.target.value)} placeholder="team/" />
+      <input className={repositoryInputClass} value={prefix} disabled={busy || !value || value.locked} onChange={(e) => { dirty.current = true; setPrefix(e.target.value); }} placeholder="team/" />
     </label>
     {value && <p className="text-xs text-muted-foreground">Source: {layerLabels[value.source]}{value.locked ? " · Locked by managed configuration" : ""}</p>}
+    {project && value && (value.source === "repositoryShared" || value.source === "repositoryLocal") && <p className="text-xs text-muted-foreground">This repository overrides the user prefix. Saving to User affects repositories that inherit it.</p>}
     <div className="flex flex-col gap-1 text-sm"><label htmlFor={layerId}>Save to</label>
       <select id={layerId} className={repositoryInputClass} value={layer} disabled={busy || value?.locked} onChange={(e) => setLayer(e.target.value as ConfigurationLayer)}>
         <option value="user">User</option>

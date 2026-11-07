@@ -630,11 +630,6 @@ pub fn worktree_path(project: &Path, name: &str) -> PathBuf {
     worktree_root(project).join(name)
 }
 
-#[cfg(test)]
-pub fn worktree_branch(name: &str) -> String {
-    format!("{}{}", crate::store::settings::load().branch_prefix, name)
-}
-
 pub fn worktree_branch_for(project: &Path, name: &str) -> Result<String> {
     Ok(format!("{}{}", crate::store::configuration::branch_prefix(project)?, name))
 }

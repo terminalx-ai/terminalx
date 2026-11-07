@@ -8,14 +8,14 @@ impl Fixture {
         git(repo.path(), &["init", "-q"]).unwrap();
         std::fs::create_dir(repo.path().join(".terminalx")).unwrap();
         std::fs::write(repo.path().join(".terminalx/.gitignore"), "/settings.local.json\n").unwrap();
-        let store = Store { home: home.path().canonicalize().unwrap() };
+        let store = Store { home: home.path().canonicalize().unwrap(), managed_fixture: Some(home.path().join("system-policy-fixture.json")) };
         Self { _home: home, repo, store }
     }
     fn repository(&self) -> Repository { repository(self.repo.path()).unwrap() }
     fn file(&self, layer: Layer, value: Value) {
         let path = match layer {
             Layer::User => self.store.home.join(SHARED),
-            Layer::Managed => self.store.home.join(MANAGED),
+            Layer::Managed => self.store.managed_fixture.clone().unwrap(),
             Layer::RepositoryShared => self.repo.path().join(".terminalx").join(SHARED),
             Layer::RepositoryLocal => self.repo.path().join(".terminalx").join(LOCAL),
             Layer::Defaults => unreachable!(),
@@ -85,9 +85,9 @@ fn malformed_and_unsafe_files_never_clear_managed_policy_or_overwrite_user_data(
         assert_eq!(f.resolve().values["branchPrefix"].value, "user/");
         assert_eq!(f.resolve().warnings.len(), 1);
         assert!(f.store.write(Some(&f.repository()), Layer::RepositoryShared, "branchPrefix", Some(json!("fixed/"))).is_err());
-        std::fs::write(f.store.home.join(MANAGED), bad).unwrap();
+        std::fs::write(f.store.managed_fixture.clone().unwrap(), bad).unwrap();
         assert!(f.store.resolve(Some(&f.repository())).is_err());
-        std::fs::remove_file(f.store.home.join(MANAGED)).unwrap();
+        std::fs::remove_file(f.store.managed_fixture.clone().unwrap()).unwrap();
     }
     f.file(Layer::Managed, json!({"branchPrefix": "invalid prefix"}));
     assert!(f.store.resolve(None).is_err());
@@ -220,4 +220,15 @@ fn read_surfaces_include_private_sources_without_reading_secrets_or_requesting_s
     let resolved = view(f.repo.path().to_str()).unwrap();
     assert!(resolved.require_trust().is_err(), "missing metadata cannot grant trust");
     assert!(resolved.warnings.iter().any(|warning| warning.contains("Private environment")));
+}
+
+#[test]
+fn user_state_cannot_supply_or_remove_system_policy() {
+    let f = Fixture::new();
+    f.file(Layer::Managed, json!({"branchPrefix": "admin/"}));
+    let impostor = f.store.home.join("managed-settings.json");
+    std::fs::write(&impostor, br#"{"branchPrefix":"bypass/"}"#).unwrap();
+    assert_eq!(f.resolve().values["branchPrefix"].value, "admin/");
+    std::fs::remove_file(impostor).unwrap();
+    assert_eq!(f.resolve().values["branchPrefix"].value, "admin/");
 }
