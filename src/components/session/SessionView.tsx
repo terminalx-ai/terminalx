@@ -1,6 +1,6 @@
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Server, Terminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Server, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -727,7 +727,7 @@ export function SessionView({
                   onClick={() => void toggleTabView(session, activeTab, viewPlace)}
                   className={cn(activeInTerminal && "bg-veil-strong text-foreground")}
                 >
-                  {activeInTerminal ? <MessageSquare /> : <Terminal />}
+                  {activeInTerminal ? <MessageSquare /> : <SquareTerminal />}
                 </Button>
               </WithTooltip>
             )}
@@ -744,7 +744,7 @@ export function SessionView({
                   className={cn("cursor-not-allowed opacity-40 hover:bg-transparent", cloud && HEADER_TIGHT)}
                   onClick={(event) => event.preventDefault()}
                 >
-                  <Terminal />
+                  <SquareTerminal />
                 </Button>
               </WithTooltip>
             )}

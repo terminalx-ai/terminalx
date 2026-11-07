@@ -104,15 +104,16 @@ export const GLYPHS: Record<string, Glyph> = {
   Activity: [["path", { d: "M1.5 8h2.8l2-5 3.4 10 2-5h2.8" }]],
 
   // ---- chat and agents
-  MessageSquare: [["path", { d: "M2.5 4A1.5 1.5 0 0 1 4 2.5h8A1.5 1.5 0 0 1 13.5 4v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5z" }]],
-  MessageSquarePlus: [["path", { d: "M2.5 4A1.5 1.5 0 0 1 4 2.5h8A1.5 1.5 0 0 1 13.5 4v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5zM8 5v4M6 7h4" }]],
+  MessageSquare: [["path", { d: "M3.5 3h9A1.5 1.5 0 0 1 14 4.5v6a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.25V12h-.5A1.5 1.5 0 0 1 2 10.5v-6A1.5 1.5 0 0 1 3.5 3z" }]],
+  // The header's family: the panel's 12×10 frame and 1.5 corner, here a bubble with its tail under the left.
+  MessageSquarePlus: [["path", { d: "M3.5 3h9A1.5 1.5 0 0 1 14 4.5v6a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.25V12h-.5A1.5 1.5 0 0 1 2 10.5v-6A1.5 1.5 0 0 1 3.5 3zM8 5.5v4M6 7.5h4" }]],
   MessageCircle: [["path", { d: "M8 13.5a5.75 5.75 0 1 0-5.1-3.1L2.25 13.75l3.4-.7A5.7 5.7 0 0 0 8 13.5z" }]],
   MessageCirclePlus: [["path", { d: "M8 13.5a5.75 5.75 0 1 0-5.1-3.1L2.25 13.75l3.4-.7A5.7 5.7 0 0 0 8 13.5zM8 5.5v4M6 7.5h4" }]],
   MessageCircleQuestion: [["path", { d: "M8 13.5a5.75 5.75 0 1 0-5.1-3.1L2.25 13.75l3.4-.7A5.7 5.7 0 0 0 8 13.5zM6.3 6.3a1.8 1.8 0 1 1 2.5 1.7c-.5.2-.8.6-.8 1.1" }], dot(8, 11, 0.7)],
   MessagesSquare: [["path", { d: "M2 3.5A1.5 1.5 0 0 1 3.5 2h5A1.5 1.5 0 0 1 10 3.5v3.5A1.5 1.5 0 0 1 8.5 8.5H5L2 11zM10 6h2.5A1.5 1.5 0 0 1 14 7.5V14l-3-2.5H7.5A1.5 1.5 0 0 1 6 10V8.5" }]],
   Terminal: [["path", { d: "M3 4l4 4-4 4M8.5 12H13" }]],
   TerminalSquare: [["rect", { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }], ["path", { d: "M5 6l2.5 2L5 10M8.5 10h2.5" }]],
-  SquareTerminal: [["rect", { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }], ["path", { d: "M5 6l2.5 2L5 10M8.5 10h2.5" }]],
+  SquareTerminal: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M5 6.5l2 1.5-2 1.5M8.5 9.5H11" }]],
   Play: [["path", { d: "M4.5 3.2v9.6a.5.5 0 0 0 .76.43l7.7-4.8a.5.5 0 0 0 0-.86l-7.7-4.8a.5.5 0 0 0-.76.43z" }]],
   Pause: [["path", { d: "M5 3v10M11 3v10" }]],
   Square: [["rect", { x: 3.5, y: 3.5, width: 9, height: 9, rx: 1.5 }]],
