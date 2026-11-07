@@ -360,8 +360,9 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
             {error}
           </p>
         )}
-        <div className="mt-5 space-y-3">
-          {share.links?.map((link) => (
+        {/* Only when there are links: empty, its top margin left a gap under the dialog's last line. */}
+        {!!share.links?.length && <div className="mt-5 space-y-3">
+          {share.links.map((link) => (
             <SecretLink
               key={link.id}
               link={link}
@@ -372,7 +373,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
               revoke={() => void run(() => changeShare(sessionId, "revoke", { linkId: link.id, removeGuests: true }))}
             />
           ))}
-        </div>
+        </div>}
         {share.people.length > 0 && (
           <div className="mt-5 space-y-2">
             <h3 className="text-sm font-medium">People</h3>
