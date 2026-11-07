@@ -106,7 +106,7 @@ const ACTIONS = [
   { id: "files.quickOpen", label: "Open file by name", group: "Files", keys: ["mod+p"] },
   { id: "files.search", label: "Search in project", group: "Files", keys: ["mod+shift+f"] },
   { id: "files.replace", label: "Replace in project", group: "Files", keys: ["mod+shift+h"] },
-  { id: "files.find", label: "Find in the open file", group: "Files", keys: ["mod+f"] },
+  { id: "files.find", label: "Find in the focused file or terminal", group: "Files", keys: ["mod+f"] },
   { id: "files.save", label: "Save the open file", group: "Files", keys: ["mod+s"] },
   { id: "files.togglePreview", label: "Preview or source for a markdown file", group: "Files", keys: ["mod+shift+p"] },
   { id: "files.closeAll", label: "Close all open files", group: "Files", keys: ["mod+alt+w"] },
