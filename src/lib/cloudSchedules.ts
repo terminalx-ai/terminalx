@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { api, type CloudSchedule, type CloudScheduleCreateInput, type CloudScheduleEstimate, type CloudScheduleRun, type CloudScheduleTiming } from "@/lib/api";
+import { api, type CloudSchedule, type CloudScheduleCreateInput, type CloudScheduleEstimate, type CloudScheduleRun, type CloudScheduleTiming, type GithubAutomationTrigger } from "@/lib/api";
 
 /**
  * Scheduled tasks of a cloud workspace (PRO-37, saas contract §24): what the
@@ -122,6 +122,7 @@ export function costLines(estimate: CloudScheduleEstimate, maxRunMinutes: number
 }
 
 const PAUSED: Record<string, string> = {
+  "github-repository-unavailable": "The configured GitHub App repository is no longer available. Reconnect it before resuming.",
   "by-user": "Paused by a person.",
   "paused-all": "Paused with every other scheduled task of the organization.",
   "creator-not-manager": "Paused: the person it ran for is no longer an owner or admin.",
@@ -209,6 +210,7 @@ export function whenText(at: number | undefined | null): string | null {
 }
 
 const ERRORS: Record<string, string> = {
+  github_repository_not_granted: "Select a repository connected through this organization’s GitHub App. Its installer may need to approve updated access.",
   organization_admin_required: "Only an owner or admin of the organization can manage scheduled tasks.",
   cloud_workspace_not_found: "That workspace or scheduled task no longer exists, or is private to someone else.",
   cloud_provider_connection_required: "The organization's compute provider is not connected, so nothing could be started.",
@@ -231,6 +233,7 @@ export function scheduleErrorMessage(code: string): string {
 }
 
 export interface ScheduleForm {
+  githubTrigger?: GithubAutomationTrigger;
   name: string;
   prompt: string;
   agent: string;
@@ -284,7 +287,8 @@ export function blankScheduleForm(): ScheduleForm {
 }
 
 /** The form's times as the API takes them, or null while they are not a time. */
-export function timingOf(form: Pick<ScheduleForm, "preset" | "time" | "weekdays" | "timezone">): CloudScheduleTiming | null {
+export function timingOf(form: Pick<ScheduleForm, "preset" | "time" | "weekdays" | "timezone" | "githubTrigger">): CloudScheduleTiming | null {
+  if (form.githubTrigger) return { preset: "hourly", hour: 0, minute: 0, weekdays: [], timezone: "UTC" };
   const match = /^(\d{1,2}):(\d{2})$/.exec(form.time);
   const hour = match ? Number(match[1]) : NaN;
   const minute = match ? Number(match[2]) : NaN;
@@ -299,7 +303,7 @@ export function validRunMinutes(minutes: number): boolean {
 }
 
 /** What is wrong with the form, by field; empty when it can be sent. Checked here so the person is told before anything is sent. */
-export function scheduleFormErrors(form: ScheduleForm): Partial<Record<"name" | "prompt" | "time" | "weekdays" | "maxRunMinutes" | "mode", string>> {
+export function scheduleFormErrors(form: ScheduleForm): Partial<Record<"name" | "prompt" | "time" | "weekdays" | "maxRunMinutes" | "mode" | "githubTrigger", string>> {
   const errors: ReturnType<typeof scheduleFormErrors> = {};
   const name = form.name.trim();
   if (!name) errors.name = "Give the task a name.";
@@ -309,7 +313,9 @@ export function scheduleFormErrors(form: ScheduleForm): Partial<Record<"name" | 
   if (!prompt.trim()) errors.prompt = "Write what the agent should do.";
   else if (new TextEncoder().encode(prompt).length > SCHEDULE_LIMITS.promptBytes) errors.prompt = "The prompt is longer than 32 KB.";
   else if (first.startsWith("!")) errors.prompt = scheduleErrorMessage("cloud_schedule_prompt_shell_command");
-  if (form.preset === "weekly" && form.weekdays.length === 0) errors.weekdays = "Pick at least one day.";
+  if (form.githubTrigger && !validGithubTrigger(form.githubTrigger)) errors.githubTrigger = "Choose a repository, at least one event, and a value for every filter.";
+  if (form.githubTrigger && new TextEncoder().encode(prompt).length > 16 * 1024) errors.prompt = "GitHub event tasks allow 16 KB for the configured prompt, leaving room for event details.";
+  if (!form.githubTrigger && form.preset === "weekly" && form.weekdays.length === 0) errors.weekdays = "Pick at least one day.";
   else if (!timingOf(form)) errors.time = "Enter a time such as 09:00.";
   if (!validRunMinutes(form.maxRunMinutes)) errors.maxRunMinutes = `Between ${SCHEDULE_LIMITS.minRunMinutes} and ${SCHEDULE_LIMITS.maxRunMinutes} minutes.`;
   if (!SCHEDULE_MODES.some((mode) => mode.id === form.mode)) errors.mode = "Pick a permission mode. A scheduled task cannot bypass permissions.";
@@ -317,6 +323,10 @@ export function scheduleFormErrors(form: ScheduleForm): Partial<Record<"name" | 
 }
 
 /** The create request for a form that has no errors; null otherwise. */
+export function validGithubTrigger(trigger: GithubAutomationTrigger): boolean {
+  return /^[A-Za-z0-9_.:-]{1,128}$/.test(trigger.repositoryId) && trigger.events.length > 0 && trigger.events.length <= 4 && new Set(trigger.events).size === trigger.events.length && trigger.events.every((event) => ["opened", "synchronize", "merged", "push"].includes(event)) && trigger.filters.length <= 12 && trigger.filters.every((filter) => ["label", "author", "baseBranch"].includes(filter.field) && ["is", "is-not"].includes(filter.operator) && filter.value.trim().length > 0 && filter.value === filter.value.trim() && filter.value.length <= 255 && !/[\p{Cc}\p{Cf}]/u.test(filter.value));
+}
+
 export function scheduleInput(form: ScheduleForm, workspaceId: string): CloudScheduleCreateInput | null {
   const schedule = timingOf(form);
   if (!schedule || Object.keys(scheduleFormErrors(form)).length > 0) return null;
@@ -329,6 +339,7 @@ export function scheduleInput(form: ScheduleForm, workspaceId: string): CloudSch
     mode: form.mode,
     prompt: form.prompt,
     schedule,
+    ...(form.githubTrigger ? { githubTrigger: form.githubTrigger } : {}),
     missedRunPolicy: form.missedRunPolicy,
     completionPolicy: form.completionPolicy,
     maxRunMinutes: form.maxRunMinutes,

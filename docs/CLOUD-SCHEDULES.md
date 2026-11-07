@@ -115,3 +115,30 @@ command, and the other modes end at the first thing they have to ask for.
 `cloud_schedule_delete`, `cloud_schedules_pause_all`. Like every cloud
 command they act in the named organization, check ids before a URL is
 built, and check that an answer is about what was asked for.
+
+## GitHub event triggers (PRO-231)
+
+When the server advertises `githubRepositories`, the same form offers GitHub
+events and scoped repository choices. PR opened, PR updated (`synchronize`), PR
+merged, and branch push are explicit choices. All label, author and base-branch
+filters must match, with `is` or `is-not`. Pushes have no PR labels, so both label
+operators exclude pushes. PR author differs from the push sender; base branch
+means the PR target or the pushed branch. The editor explains these semantics.
+
+The existing billed-compute confirmation, safe modes, owner/workspace admission
+and runtime claim remain in force. Selecting a repository, event or filter
+invalidates the displayed estimate and prior consent. Events can arrive at any
+time; the estimate uses the existing 24/day maximum. Active-run/daily caps can
+skip events. The prompt allows 16 KB and the server adds bounded encrypted event
+context with untrusted-data provenance. Event tasks never also run on a timer.
+
+The server operator must configure the existing App’s webhook and Pull request /
+Push subscriptions. Installers may need to approve requested permission changes;
+the form displays that notice and cannot approve on their behalf. A configured
+server capability is not proof of external delivery or installer approval.
+
+PRO-228 owns fresh-workspace lifecycle. PRO-231 uses the existing automation
+contract until that change is actually integrated; no unmerged sibling source
+counts as release integration. Paired server normal checks/review/CI/merge and
+healthy existing-poller deployment precede desktop publication. Real GitHub
+registration and external delivery validation remain outstanding.

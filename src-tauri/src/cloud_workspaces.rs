@@ -1465,6 +1465,8 @@ pub struct CloudScheduleRun {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSchedule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_trigger: Option<GithubAutomationTrigger>,
     pub id: String,
     pub workspace_id: String,
     pub name: String,
@@ -1499,6 +1501,8 @@ pub struct CloudSchedule {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CloudSchedules {
     pub schedules: Vec<CloudSchedule>,
+    #[serde(default, rename = "githubRepositories", skip_serializing_if = "Option::is_none")]
+    pub github_repositories: Option<Vec<GithubAutomationRepository>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1537,6 +1541,8 @@ pub struct CloudSchedulesPaused {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloudScheduleEstimateInput {
+    #[serde(default)]
+    pub github_trigger: Option<GithubAutomationTrigger>,
     pub workspace_id: String,
     pub schedule: CloudScheduleTiming,
     pub completion_policy: String,
@@ -1548,6 +1554,8 @@ pub struct CloudScheduleEstimateInput {
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloudScheduleCreateInput {
+    #[serde(default)]
+    pub github_trigger: Option<GithubAutomationTrigger>,
     pub workspace_id: String,
     pub name: String,
     pub agent: String,
@@ -1561,6 +1569,48 @@ pub struct CloudScheduleCreateInput {
     pub missed_run_policy: String,
     pub completion_policy: String,
     pub max_run_minutes: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GithubAutomationTrigger {
+    pub repository_id: String,
+    pub events: Vec<String>,
+    pub filters: Vec<GithubAutomationFilter>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GithubAutomationFilter {
+    pub field: String,
+    pub operator: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubAutomationRepository {
+    pub id: String,
+    pub full_name: String,
+}
+
+fn valid_github_trigger(trigger: &GithubAutomationTrigger) -> bool {
+    let mut events = trigger.events.clone();
+    events.sort();
+    events.dedup();
+    valid_resource_id(&trigger.repository_id)
+        && !events.is_empty()
+        && events.len() == trigger.events.len()
+        && events.iter().all(|event| ["opened", "synchronize", "merged", "push"].contains(&event.as_str()))
+        && trigger.filters.len() <= 12
+        && trigger.filters.iter().all(|filter| {
+            ["label", "author", "baseBranch"].contains(&filter.field.as_str())
+                && ["is", "is-not"].contains(&filter.operator.as_str())
+                && !filter.value.is_empty()
+                && filter.value.trim() == filter.value
+                && filter.value.chars().count() <= 255
+                && !filter.value.chars().any(char::is_control)
+        })
 }
 
 /// The modes a schedule may start its agent in: every launch mode but
@@ -2897,7 +2947,13 @@ impl CloudWorkspaceService {
         let (Some(timing), true) = (timing, valid_resource_id(&input.workspace_id) && valid_schedule_policies(None, &input.completion_policy, input.max_run_minutes)) else {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         };
-        let body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
+        let mut body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
+        if let Some(trigger) = &input.github_trigger {
+            if !valid_github_trigger(trigger) {
+                return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+            }
+            body["githubTrigger"] = json!(trigger);
+        }
         self.run_in(org, RequestRisk::Read, |client, context| {
             client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read).map_err(|mut error: CloudWorkspaceClientError| {
                 // A 404 that names no refusal is a server without the route
@@ -2933,7 +2989,11 @@ impl CloudWorkspaceService {
         {
             return invalid("cloud_workspace_request_invalid");
         }
-        if input.prompt.trim().is_empty() || input.prompt.len() > MAX_PROMPT_BYTES || input.prompt.contains('\0') {
+        if input.github_trigger.as_ref().is_some_and(|trigger| !valid_github_trigger(trigger)) {
+            return invalid("cloud_workspace_request_invalid");
+        }
+        let prompt_limit = if input.github_trigger.is_some() { MAX_PROMPT_BYTES / 2 } else { MAX_PROMPT_BYTES };
+        if input.prompt.trim().is_empty() || input.prompt.len() > prompt_limit || input.prompt.contains('\0') {
             return invalid("cloud_workspace_prompt_too_long");
         }
         let mut body = json!({
@@ -2948,6 +3008,9 @@ impl CloudWorkspaceService {
             "maxRunMinutes": input.max_run_minutes,
             "confirmProviderSpend": true,
         });
+        if let Some(trigger) = &input.github_trigger {
+            body["githubTrigger"] = json!(trigger);
+        }
         if let Some(model) = input.model.as_deref() {
             body["model"] = json!(model);
         }
@@ -5987,6 +6050,44 @@ mod tests {
 
     fn sent_body(captured: &CapturedRequest) -> Value {
         serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn github_automation_trigger_roundtrips_without_expanding_authority() {
+        let mut input = schedule_input();
+        let trigger = GithubAutomationTrigger {
+            repository_id: "selected-repository".into(),
+            events: vec!["opened".into(), "synchronize".into(), "merged".into(), "push".into()],
+            filters: vec![GithubAutomationFilter { field: "baseBranch".into(), operator: "is-not".into(), value: "archive".into() }],
+        };
+        input.github_trigger = Some(trigger.clone());
+        let mut answer = schedule_json(SCHEDULE, "workspace-1");
+        answer["githubTrigger"] = json!(trigger);
+        let body = json!({ "schedule": answer });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let created = service.schedule_create(None, &input).unwrap();
+        assert_eq!(created.github_trigger, input.github_trigger);
+        let sent = sent_body(&request.join().unwrap());
+        assert_eq!(sent["githubTrigger"], json!(trigger));
+        assert_eq!(sent["mode"], "acceptEdits");
+        assert_eq!(sent["workspaceId"], "workspace-1");
+        assert_eq!(sent["confirmProviderSpend"], true);
+        assert!(sent.get("credentials").is_none());
+    }
+
+    #[test]
+    fn github_automation_trigger_rejects_invalid_events_filters_and_authority_keys() {
+        let mut trigger: GithubAutomationTrigger = serde_json::from_value(json!({"repositoryId":"repo", "events":["opened"], "filters":[]})).unwrap();
+        assert!(valid_github_trigger(&trigger));
+        trigger.events.push("opened".into());
+        assert!(!valid_github_trigger(&trigger));
+        trigger.events = vec!["deleted".into()];
+        assert!(!valid_github_trigger(&trigger));
+        trigger.events = vec!["push".into()];
+        trigger.filters.push(GithubAutomationFilter { field: "label".into(), operator: "contains".into(), value: "docs".into() });
+        assert!(!valid_github_trigger(&trigger));
+        assert!(serde_json::from_value::<GithubAutomationTrigger>(json!({"repositoryId":"repo", "events":["opened"], "filters":[], "organizationId":"other"})).is_err());
     }
 
     #[test]

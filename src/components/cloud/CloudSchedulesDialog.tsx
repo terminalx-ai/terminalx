@@ -3,7 +3,7 @@ import { CalendarClock, Loader2, Pause, Play, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { api, type CloudSchedule, type CloudScheduleQuote } from "@/lib/api";
+import { api, type CloudSchedule, type CloudScheduleQuote, type GithubAutomationRepository } from "@/lib/api";
 import {
   PRESETS,
   SCHEDULE_LIMITS,
@@ -22,11 +22,13 @@ import {
   timezones,
   timingOf,
   validRunMinutes,
+  validGithubTrigger,
   whenText,
   type ScheduleForm,
 } from "@/lib/cloudSchedules";
 import { errorCode } from "@/lib/cloudTerminals";
 import { EFFORT_LABEL, modelOptionText, offeredOn, useModels } from "@/lib/models";
+import { GithubTriggerEditor, GITHUB_EVENTS } from "@/components/cloud/GithubTriggerEditor";
 import { usePromptTextProps } from "@/lib/autocorrect";
 
 /**
@@ -63,6 +65,7 @@ export interface SchedulesTarget {
 type Confirming = { kind: "resume" | "delete"; id: string } | { kind: "pause-all" } | null;
 
 export function CloudSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesTarget & { onClose: () => void }) {
+  const [githubRepositories, setGithubRepositories] = useState<GithubAutomationRepository[] | undefined>();
   const [schedules, setSchedules] = useState<CloudSchedule[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +79,9 @@ export function CloudSchedulesDialog({ orgId, workspaceId, name, onClose }: Sche
 
   const reload = useCallback(async () => {
     try {
-      setSchedules((await api.cloudSchedules(workspaceId, orgId)).schedules);
+      const result = await api.cloudSchedules(workspaceId, orgId);
+      setSchedules(result.schedules);
+      setGithubRepositories(result.githubRepositories);
       setLoadError(null);
     } catch (e) {
       setLoadError(scheduleErrorMessage(errorCode(e)));
@@ -179,6 +184,7 @@ export function CloudSchedulesDialog({ orgId, workspaceId, name, onClose }: Sche
           {/* The form opens where its button was, not under the list. */}
           {creating && (
             <NewScheduleForm
+            githubRepositories={githubRepositories}
               orgId={orgId}
               workspaceId={workspaceId}
               onCancel={() => setCreating(false)}
@@ -271,7 +277,7 @@ function ScheduleRow({
         </span>
       </div>
       <p className="text-muted-foreground">
-        {describeTiming(schedule.schedule)} · {schedule.agent}
+        {schedule.githubTrigger ? `GitHub: ${schedule.githubTrigger.events.map((event) => GITHUB_EVENTS.find((item) => item.value === event)?.label ?? event).join(", ")}` : describeTiming(schedule.schedule)} · {schedule.agent}
         {schedule.mode ? ` · ${SCHEDULE_MODES.find((mode) => mode.id === schedule.mode)?.label ?? schedule.mode}` : ""} · stops after {schedule.maxRunMinutes} minutes
       </p>
       {paused && <p>{paused}</p>}
@@ -317,7 +323,7 @@ function ScheduleRow({
   );
 }
 
-function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: string; workspaceId: string; onCancel: () => void; onCreated: () => void }) {
+function NewScheduleForm({ orgId, workspaceId, githubRepositories, onCancel, onCreated }: { orgId: string; workspaceId: string; githubRepositories?: GithubAutomationRepository[]; onCancel: () => void; onCreated: () => void }) {
   const [form, setForm] = useState<ScheduleForm>(blankScheduleForm);
   const textProps = usePromptTextProps();
   const [touched, setTouched] = useState(false);
@@ -345,15 +351,16 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
   // The cost depends on the times and two settings, not on the prompt: ask
   // again when one of those changes, after the form has rested a moment.
   const timing = timingOf(form);
-  const timingKey = timing ? JSON.stringify(timing) : null;
+  const timingKey = timing && (!form.githubTrigger || validGithubTrigger(form.githubTrigger)) ? JSON.stringify(timing) : null;
+  const triggerKey = form.githubTrigger ? JSON.stringify(form.githubTrigger) : null;
   const { completionPolicy, maxRunMinutes } = form;
-  const quoteKey = timingKey && validRunMinutes(maxRunMinutes) ? JSON.stringify([timingKey, completionPolicy, maxRunMinutes]) : null;
+  const quoteKey = timingKey && validRunMinutes(maxRunMinutes) ? JSON.stringify([timingKey, triggerKey, completionPolicy, maxRunMinutes]) : null;
   useEffect(() => {
     if (!timingKey || !quoteKey) return;
     let stale = false;
     const timer = setTimeout(() => {
       api
-        .cloudScheduleEstimate({ workspaceId, schedule: JSON.parse(timingKey), completionPolicy, maxRunMinutes }, orgId)
+        .cloudScheduleEstimate({ workspaceId, schedule: JSON.parse(timingKey), ...(triggerKey ? { githubTrigger: JSON.parse(triggerKey) } : {}), completionPolicy, maxRunMinutes }, orgId)
         .then(
           (answer) => {
             if (stale) return;
@@ -371,7 +378,7 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
       stale = true;
       clearTimeout(timer);
     };
-  }, [orgId, workspaceId, timingKey, quoteKey, completionPolicy, maxRunMinutes]);
+  }, [orgId, workspaceId, timingKey, triggerKey, quoteKey, completionPolicy, maxRunMinutes]);
   const quote = answered && answered.key === quoteKey ? answered.quote : null;
   const failed = quoteError && quoteError.key === quoteKey ? quoteError.message : null;
 
@@ -472,7 +479,12 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
           Nobody watches a scheduled run, so it cannot bypass permissions. {modeNote(form.mode)}
         </p>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <label>Trigger <select aria-label="Trigger" className={inputClass} value={form.githubTrigger ? "github" : "schedule"} onChange={(event) => update("githubTrigger", event.target.value === "github" ? { repositoryId: "", events: ["opened"], filters: [] } : undefined)}>
+        <option value="schedule">Schedule</option><option value="github" disabled={githubRepositories === undefined}>GitHub events</option>
+      </select></label>
+      {form.githubTrigger && <GithubTriggerEditor value={form.githubTrigger} repositories={githubRepositories ?? []} onChange={(value) => update("githubTrigger", value)} />}
+      {shown.githubTrigger && <p className="text-destructive">{shown.githubTrigger}</p>}
+      {!form.githubTrigger && <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">Runs</span>
         <Segmented aria-label="How often" value={form.preset} onChange={(value) => update("preset", value)} options={PRESETS} />
         <label className="flex items-center gap-1">
@@ -503,8 +515,8 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
           ) : (
             <input aria-label="Time zone" className={`${inputClass} w-40`} value={form.timezone} onChange={(event) => update("timezone", event.target.value)} />
           )}
-      </div>
-      {form.preset === "weekly" && (
+      </div>}
+      {!form.githubTrigger && form.preset === "weekly" && (
         <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Days">
           {WEEKDAYS.map((day) => (
             <label key={day.id} className="flex items-center gap-1">
@@ -543,16 +555,17 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
             <option value="keep">Leave it running</option>
           </select>
         </label>
-        <label className="flex flex-col gap-1">
+        {!form.githubTrigger && <label className="flex flex-col gap-1">
           <span className="font-medium">A missed run</span>
           <select aria-label="A missed run" className={inputClass} value={form.missedRunPolicy} onChange={(event) => update("missedRunPolicy", event.target.value as ScheduleForm["missedRunPolicy"])}>
             <option value="skip">Is skipped</option>
             <option value="run-once">Runs once, late</option>
           </select>
-        </label>
+        </label>}
       </div>
       <div className="rounded-md bg-well/40 px-3 py-2" data-testid="cloud-schedule-cost">
         <p className="font-medium">What it costs</p>
+        {form.githubTrigger && <p>Events can arrive at any time. The estimate allows up to 24 runs per day. Events during an active run are recorded as skipped.</p>}
         {quote ? (
           <ul className="text-muted-foreground">
             {costLines(quote.estimate, form.maxRunMinutes).map((line) => (

@@ -451,7 +451,7 @@ export const api = {
     invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId, orgId: orgId ?? null }),
   /** Scheduled tasks (PRO-37, saas contract §24): the organization's, or one workspace's. Owners and admins only; a server with the feature off answers 404. */
   cloudSchedules: (workspaceId?: string | null, orgId?: string | null) =>
-    invoke<{ schedules: CloudSchedule[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
+    invoke<{ schedules: CloudSchedule[]; githubRepositories?: GithubAutomationRepository[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
   /** One scheduled task and its newest runs. */
   cloudSchedule: (scheduleId: string, orgId?: string | null) => invoke<CloudScheduleDetail>("cloud_schedule", { scheduleId, orgId: orgId ?? null }),
   /** What a schedule would cost and when it would first run, before it is saved. Writes nothing. */
@@ -1239,6 +1239,18 @@ export interface CloudWorkspaceShare {
 }
 
 /** When a scheduled task runs. `hour` is ignored for `hourly`; `weekdays` belong to `weekly`. */
+export interface GithubAutomationFilter {
+  field: "label" | "author" | "baseBranch";
+  operator: "is" | "is-not";
+  value: string;
+}
+export interface GithubAutomationTrigger {
+  repositoryId: string;
+  events: ("opened" | "synchronize" | "merged" | "push")[];
+  filters: GithubAutomationFilter[];
+}
+export interface GithubAutomationRepository { id: string; fullName: string }
+
 export interface CloudScheduleTiming {
   preset: "hourly" | "daily" | "weekdays" | "weekly";
   hour: number;
@@ -1289,6 +1301,7 @@ export interface CloudSchedule {
   mode?: string;
   promptBytes: number;
   schedule: CloudScheduleTiming;
+  githubTrigger?: GithubAutomationTrigger;
   missedRunPolicy: "skip" | "run-once";
   completionPolicy: "suspend" | "keep";
   maxRunMinutes: number;
@@ -1317,6 +1330,7 @@ export interface CloudScheduleQuote {
 export interface CloudScheduleEstimateInput {
   workspaceId: string;
   schedule: CloudScheduleTiming;
+  githubTrigger?: GithubAutomationTrigger;
   completionPolicy: "suspend" | "keep";
   maxRunMinutes: number;
 }

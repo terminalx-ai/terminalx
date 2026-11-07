@@ -372,3 +372,30 @@ describe("the scheduled tasks dialog host", () => {
     expect(screen.queryByTestId("cloud-schedules-dialog")).toBeNull();
   });
 });
+
+it("quotes and saves a GitHub trigger only after fresh event-specific spend consent", async () => {
+  mocks.list.mockResolvedValue({ schedules: [], githubRepositories: [{ id: "selected-repo", fullName: "synthetic/docs" }] });
+  open();
+  await fillForm();
+  const consent = screen.getByRole("checkbox", { name: /I understand this task/ });
+  fireEvent.click(consent);
+  fireEvent.change(screen.getByLabelText("Trigger"), { target: { value: "github" } });
+  expect((consent as HTMLInputElement).checked).toBe(false);
+  expect((screen.getByRole("button", { name: "Create scheduled task" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText("GitHub repository"), { target: { value: "selected-repo" } });
+  await waitFor(() => expect(mocks.estimate).toHaveBeenLastCalledWith(expect.objectContaining({ githubTrigger: { repositoryId: "selected-repo", events: ["opened"], filters: [] }, schedule: expect.objectContaining({ preset: "hourly" }) }), "org-1"));
+  await waitFor(() => expect((consent as HTMLInputElement).disabled).toBe(false));
+  fireEvent.click(consent);
+  fireEvent.click(screen.getByLabelText("PR merged"));
+  expect((consent as HTMLInputElement).checked).toBe(false);
+  await waitFor(() => expect((consent as HTMLInputElement).disabled).toBe(false));
+  fireEvent.click(consent);
+  fireEvent.click(screen.getByRole("button", { name: "Create scheduled task" }));
+  await waitFor(() => expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", mode: "acceptEdits", githubTrigger: { repositoryId: "selected-repo", events: ["opened", "merged"], filters: [] } }), "org-1"));
+});
+
+it("does not offer GitHub triggers on a server that has not enabled them", async () => {
+  open();
+  await fillForm();
+  expect((screen.getByRole("option", { name: "GitHub events" }) as HTMLOptionElement).disabled).toBe(true);
+});
