@@ -20,7 +20,7 @@ mod config_files;
 // Dormant transactional journal primitive; no live event publisher uses it.
 #[allow(dead_code)]
 pub(crate) mod batch_journal;
-mod transaction;
+pub(crate) mod transaction;
 
 use std::fs;
 use std::io::Write;
