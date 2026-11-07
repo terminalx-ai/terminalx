@@ -335,6 +335,7 @@ impl WorkspaceGit {
             "git.reviewRange" => self.review_range(params),
             "git.changesBetween" => self.changes_between(params),
             "git.fileContents" => self.file_contents(params),
+            "git.mediaContent" => self.media_content(params),
             "git.log" => self.log(params),
             "git.branches" => self.branches(params),
             "git.checkout" => self.checkout(params),
@@ -581,7 +582,7 @@ impl WorkspaceGit {
         let repo = self.repo(params)?;
         let head = crate::git::head_tree(&repo.dir).map_err(git_error)?;
         let snapshot = crate::git::snapshot_tree(&repo.dir).map_err(git_error)?;
-        let mut files = if head == snapshot { Vec::new() } else { crate::git::changes_between(&repo.dir, &head, Some(&snapshot)).map_err(git_error)? };
+        let mut files = if head == snapshot { Vec::new() } else { crate::git::changes_between_options(&repo.dir, &head, Some(&snapshot), params.get("hideWhitespace").and_then(Value::as_bool).unwrap_or(false)).map_err(git_error)? };
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "head": head, "files": files, "truncated": truncated }))
@@ -602,10 +603,28 @@ impl WorkspaceGit {
         if !valid_object_id(base) || head.is_some_and(|head| !valid_object_id(head)) {
             return Err(RpcError::invalid("base and head are tree ids"));
         }
-        let mut files = crate::git::changes_between(&repo.dir, base, head).map_err(git_error)?;
+        let mut files = crate::git::changes_between_options(&repo.dir, base, head, params.get("hideWhitespace").and_then(Value::as_bool).unwrap_or(false)).map_err(git_error)?;
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "files": files, "truncated": truncated }))
+    }
+
+    fn media_content(&self, params: &Value) -> Result<Value, RpcError> {
+        let repo = self.repo(params)?;
+        let path = Self::repo_path(required_str(params, "path")?)?;
+        let tree = params.get("tree").and_then(Value::as_str);
+        // The same workspace containment check as text and fs/1, before any live read.
+        if tree.is_none() {
+            let relative = if repo.name == "." { path.clone() } else { format!("{}/{path}", repo.name) };
+            match self.files.existing_path(&relative) {
+                Ok(_) => {},
+                Err(error) if error.code == "not_found" => return Ok(Value::Null),
+                Err(error) => return Err(error),
+            }
+        }
+        // Base64 plus the envelope fits the relay's 1 MiB frame.
+        let content = crate::git_media::read(&repo.dir, &path, tree, 512 * 1024).map_err(git_error)?;
+        Ok(json!(content))
     }
 
     /// One file at tree `base` and at tree `head` (or in the working tree).

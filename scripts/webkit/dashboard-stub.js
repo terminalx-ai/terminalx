@@ -39,6 +39,7 @@
   const quota = { used: 4, limit: 10 };
   answers.cloud_catalog_load = { version: 1, createMemory: {}, orgs: { "org-a": { workspaces, sessions, repositories: [], quota, fetchedAt: now } } };
   answers.cloud_workspaces = { workspaces, quota };
+  answers.pr_associations_batch = ({ sessionKeys }) => Object.fromEntries(sessionKeys.map((id) => [id, []]));
   window.__PW_DASHBOARD_ACTIONS__ = [];
   answers.stop_tab = (args) => { window.__PW_DASHBOARD_ACTIONS__.push(args); };
 })();

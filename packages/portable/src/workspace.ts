@@ -431,6 +431,7 @@ export type CleanupProgress =
  * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
  */
 export interface RuntimeSession {
+  automation?: { id: string } | null;
   id: string;
   projectPath: string;
   cwd: string;

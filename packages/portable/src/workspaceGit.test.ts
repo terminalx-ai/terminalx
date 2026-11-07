@@ -68,6 +68,22 @@ function connect(handlers: Record<string, Handler>) {
 const refusal = (code: string, message = code) => Object.assign(new Error(message), { code });
 
 describe("workspace git", () => {
+  it("sends whitespace options and binary revision reads through the selected repository", async () => {
+    const { runtime, client } = connect({
+      "git.changesBetween": () => ({ files: [] }),
+      "git.workingChanges": () => ({ files: [], head: "base" }),
+      "git.mediaContent": () => ({ data: "AAH/", mime: "image/png" }),
+    });
+    const git = new RemoteGit(client, "app");
+    await git.changesBetween("base", "head", true);
+    await git.workingChanges(true);
+    expect(await git.mediaContent("image.png", "base")).toEqual({ data: "AAH/", mime: "image/png" });
+    expect(runtime.calls("git.changesBetween")[0]).toEqual({ repo: "app", base: "base", head: "head", hideWhitespace: true });
+    expect(runtime.calls("git.workingChanges")[0]).toEqual({ repo: "app", hideWhitespace: true });
+    expect(runtime.calls("git.mediaContent")[0]).toEqual({ repo: "app", path: "image.png", tree: "base" });
+    client.close();
+  });
+
   it("names the repository on every call and sends the author with a commit, never credentials", async () => {
     const { runtime, client } = connect({
       "git.repositories": () => ({ repositories: [{ repo: "app" }, { repo: "libs/core" }] }),
