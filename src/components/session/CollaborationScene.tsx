@@ -33,10 +33,10 @@ export function CollaborationScene({ className }: { className?: string }) {
         <span className="cs-ring cs-ring-me pointer-events-none absolute inset-0 rounded-lg" style={{ boxShadow: `inset 0 0 0 1.5px ${ME}` }} />
         <span className="cs-ring cs-ring-designer pointer-events-none absolute inset-0 rounded-lg" style={{ boxShadow: `inset 0 0 0 1.5px ${DESIGNER}` }} />
         <span className="cs-ring cs-ring-agent pointer-events-none absolute inset-0 rounded-lg" style={{ boxShadow: `inset 0 0 0 1.5px ${AGENT}` }} />
-        <span className="relative h-2 flex-1">
-          <span className="cs-typing cs-typing-me absolute left-0 top-0.5 h-1.5 rounded-full bg-foreground/30" />
-          <span className="cs-typing cs-typing-designer absolute left-0 top-0.5 h-1.5 rounded-full bg-foreground/30" />
-          <span className="cs-typing cs-typing-agent absolute left-0 top-0.5 h-1.5 rounded-full bg-foreground/30" />
+        <span className="relative h-1.5 flex-1">
+          <span className="cs-typing cs-typing-me absolute inset-y-0 left-0 rounded-full bg-foreground/30" />
+          <span className="cs-typing cs-typing-designer absolute inset-y-0 left-0 rounded-full bg-foreground/30" />
+          <span className="cs-typing cs-typing-agent absolute inset-y-0 left-0 rounded-full bg-foreground/30" />
         </span>
         <span className="cs-send size-4 shrink-0 rounded-full bg-foreground/80" />
       </div>
