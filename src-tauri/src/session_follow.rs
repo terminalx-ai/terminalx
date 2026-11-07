@@ -1029,7 +1029,8 @@ impl SessionManager {
             if entry.is_quick() && crate::store::quick::is_scratch(&entry.id, &entry.cwd) {
                 crate::store::quick::create(&entry.id).context("make the quick chat's scratch directory")?;
             }
-            let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: None, env: &[] };
+            let env = index::workspace_ports::environment(&entry.cwd)?;
+            let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: None, env: &env };
             self.terminals.respawn(self.sink.clone(), &pane, spec).context("open the tab's shell")?;
         }
         self.sink.emit("tab_pty", &Self::terminal_pane_event(&entry.id, tab));

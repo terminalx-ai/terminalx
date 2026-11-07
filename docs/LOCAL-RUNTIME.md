@@ -947,3 +947,34 @@ enough to pass 2 MiB. The guarantees below replace that.
   with its reason. It records failed attempts sparsely: the first, each with a
   new reason, and the 2nd, 4th, 8th and so on. Each recovery is recorded with
   how long the connection was down and how many attempts it took.
+
+## Workspace ports and local URLs (PRO-243)
+
+Before a local shell or agent starts, its checkout receives a block of ten
+ports. `TERMINALX_PORT` is the first port; `TERMINALX_PORTS` is the ten ports
+as a comma-separated list. For example, a shell can run
+`pnpm dev --port "$TERMINALX_PORT"`. Commands must use these variables to
+benefit from the allocation; existing running processes retain their old
+environment. The assignments do not reserve sockets against other applications.
+
+The first ports range from 20000 through 49000 in steps of ten. Assignments
+are shared by sessions in the same canonical checkout, distinct across
+checkouts, and persisted in `sessions/index.json` under `workspacePorts`.
+The index transaction lock protects simultaneous launches. Renaming a
+workspace retains its block; archived sessions retain theirs too. After the
+last session of a workspace is removed, a later allocation may reuse its
+block. No repository file supplies commands or port assignments.
+
+A visible local terminal offers **Open** for up to eight localhost URLs
+with explicit ports found in its bounded output tail. Opening one creates
+and selects a TerminalX browser tab for that pane's session. Discovery is
+read-only, ignores terminal control strings, and never opens a URL without
+a click. It polls only while the pane and window are visible. Older runtimes
+without `runtime.pty.localLinks` simply offer no links.
+
+This is the independent portion of PRO-243. Named actions, the header Run
+menu, Cmd+R and non-concurrent replacement must use PRO-131's
+`repositorySettings` (#804) and PRO-149's script runner (#808) when those
+land. Setup port injection and “run after setup” await PRO-240 (#836).
+The action editors from PRO-155 (#809) are already on main; this change
+does not introduce a competing action schema or script runner.
