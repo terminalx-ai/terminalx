@@ -35,6 +35,7 @@
     "test:webkit-dictation-edits": "node scripts/webkit/dictation-edits.mjs",
     "test:webkit-editor-toolbar": "node scripts/webkit/editor-toolbar.mjs",
     "test:webkit-context-menus": "node scripts/webkit/context-menus.mjs",
+    "test:webkit-branch-git": "node scripts/webkit/branch-git.mjs",
     "test:webkit-tab-strip": "node scripts/webkit/tab-strip.mjs",
     "build:local-runtime": "node scripts/build-local-runtime.mjs",
     "test:local-runtime-build": "vitest run scripts/build-local-runtime.test.mjs",

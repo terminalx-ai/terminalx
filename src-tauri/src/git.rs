@@ -291,7 +291,7 @@ pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
 }
 
 /// The paths `git status --porcelain -z` lists as unmerged.
-fn unmerged_in(porcelain: &str) -> Vec<String> {
+pub(crate) fn unmerged_in(porcelain: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut entries = porcelain.split('\0').filter(|entry| !entry.is_empty());
     while let Some(entry) = entries.next() {
@@ -581,17 +581,28 @@ pub struct WorkStatus {
     pub conflicted: Vec<String>,
 }
 
-pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
-    if run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).is_err() {
-        return (0, 0);
+/// Worktrees are created with --no-track. The published branch still counts
+/// even when Git has no branch.<name>.merge configuration.
+pub(crate) fn comparison_ref(cwd: &Path) -> Option<String> {
+    if let Ok(upstream) = run(cwd, &["rev-parse", "--symbolic-full-name", "@{upstream}"]) {
+        return Some(upstream.trim().into());
     }
-    run(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .ok()
-        .and_then(|s| {
-            let mut it = s.split_whitespace();
-            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
-        })
-        .unwrap_or((0, 0))
+    let branch = current_branch(cwd)?;
+    let remote = format!("refs/remotes/origin/{branch}");
+    run(cwd, &["rev-parse", "--verify", "--quiet", &remote]).ok()?;
+    Some(remote)
+}
+
+pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
+    comparison_ref(cwd).and_then(|reference| {
+        run(cwd, &["rev-list", "--left-right", "--count", &format!("HEAD...{reference}")]).ok()
+            .and_then(|s| parse_upstream_counts(&s))
+    }).unwrap_or((0, 0))
+}
+
+pub(crate) fn parse_upstream_counts(output: &str) -> Option<(u32, u32)> {
+    let mut it = output.split_whitespace();
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
 }
 
 /// One command answering everything the header and handoff row need, so no
@@ -1318,6 +1329,14 @@ pub fn push(cwd: &Path) -> Result<String> {
 }
 
 pub fn pull(cwd: &Path) -> Result<String> {
+    // The Branch tab also offers incoming commits for --no-track worktrees.
+    // Pull the published branch explicitly without changing its configuration.
+    if run(cwd, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).is_err()
+        && comparison_ref(cwd).is_some() {
+        if let Some(branch) = current_branch(cwd) {
+            return run(cwd, &["pull", "--ff-only", "--", "origin", &branch]);
+        }
+    }
     run(cwd, &["pull", "--ff-only"])
 }
 

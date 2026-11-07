@@ -81,6 +81,8 @@ mod floating;
 mod media;
 mod media_types;
 mod branch_overview;
+#[cfg(feature = "desktop")]
+mod branch_step;
 mod git;
 mod git_media;
 mod github;
@@ -673,6 +675,9 @@ pub fn run() {
             commands::cloud_mirror_claim_owner,
             commands::cloud_mirror_note_unreadable,
             commands::git_push,
+            commands::branch_step_refresh,
+            commands::branch_step_account,
+            commands::branch_step_action,
             commands::git_pull,
             commands::git_discard,
             commands::unfinished_merge,

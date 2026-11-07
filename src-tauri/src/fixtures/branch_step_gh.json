@@ -1,0 +1,69 @@
+{
+  "author": {
+    "login": "developer"
+  },
+  "baseRefName": "main",
+  "body": "",
+  "headRefName": "feature",
+  "headRefOid": "1111111111111111111111111111111111111111",
+  "isDraft": false,
+  "mergeStateStatus": "UNSTABLE",
+  "mergeable": "MERGEABLE",
+  "number": 7,
+  "reviewDecision": "",
+  "state": "OPEN",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-11-06T19:49:35Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/1",
+      "name": "check-1",
+      "startedAt": "2026-11-06T19:49:27Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-11-06T19:58:23Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/1",
+      "name": "check-2",
+      "startedAt": "2026-11-06T19:58:16Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/1",
+      "name": "check-3",
+      "startedAt": "2026-11-06T19:49:25Z",
+      "status": "QUEUED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-11-06T19:54:32Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/1",
+      "name": "check-4",
+      "startedAt": "2026-11-06T19:49:27Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-11-06T19:56:46Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/1",
+      "name": "check-5",
+      "startedAt": "2026-11-06T19:49:27Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    }
+  ],
+  "title": "Feature",
+  "url": "https://github.com/example/repo/pull/7"
+}
