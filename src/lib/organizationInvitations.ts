@@ -31,6 +31,9 @@ let sequence = 0;
 // List freshness and action feedback have different lifetimes: a membership read
 // may outlive its sibling list, but must never overwrite a later action's outcome.
 let actionVersion = 0;
+// An action can report its error after a read began during that same action.
+// Rows may still refresh, but that read no longer owns the displayed feedback.
+let feedbackVersion = 0;
 let flight: Promise<void> | null = null;
 let unsubscribe: (() => void) | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -86,19 +89,24 @@ export function refreshInvitations(): Promise<void> {
   const scope = state.scope;
   const started = epoch;
   const request = ++sequence;
+  const readingFeedback = feedbackVersion;
   const revision = getAccount().status.context!.revision;
   emit({ loading: true });
   if (state.membershipRefreshNeeded && !Object.values(state.pending).includes("accept")) {
     const recoveringAction = actionVersion;
     const context = getAccount().status.context!;
     void refreshMembershipsAfterInvite(context).then((fresh) => {
-      if (current(started, scope) && recoveringAction === actionVersion && fresh) emit({ membershipRefreshNeeded: false, notice: "Organizations refreshed.", error: null });
+      if (current(started, scope) && recoveringAction === actionVersion && readingFeedback === feedbackVersion && fresh) emit({ membershipRefreshNeeded: false, notice: "Organizations refreshed.", error: null });
     });
   }
   const work = invitationApi.list(revision).then(({ invites }) => {
-    if (current(started, scope) && request === sequence) emit({ invitations: invites.filter((invite) => invite.expiresAt > Date.now()), loaded: true, error: state.membershipRefreshNeeded ? "Your organization membership could not be refreshed. Refresh again to check whether the invitation was accepted." : null });
+    if (current(started, scope) && request === sequence) emit({
+      invitations: invites.filter((invite) => invite.expiresAt > Date.now()),
+      loaded: true,
+      ...(readingFeedback === feedbackVersion ? { error: state.membershipRefreshNeeded ? "Your organization membership could not be refreshed. Refresh again to check whether the invitation was accepted." : null } : {}),
+    });
   }).catch((error) => {
-    if (current(started, scope) && request === sequence) emit({ error: invitationError(error) });
+    if (current(started, scope) && request === sequence && readingFeedback === feedbackVersion) emit({ error: invitationError(error) });
   }).finally(() => {
     if (current(started, scope) && flight === work) { flight = null; emit({ loading: false }); }
   });
@@ -112,7 +120,7 @@ export async function respondToInvitation(id: string, action: "accept" | "declin
   const invite = state.invitations.find((candidate) => candidate.id === id);
   if (!scope || !invite || state.pending[id]) return;
   const respondingAction = ++actionVersion;
-  if (invite.expiresAt <= Date.now()) { emit({ invitations: state.invitations.filter((candidate) => candidate.id !== id), error: invitationError({ code: "invite_expired" }) }); return; }
+  if (invite.expiresAt <= Date.now()) { feedbackVersion++; emit({ invitations: state.invitations.filter((candidate) => candidate.id !== id), error: invitationError({ code: "invite_expired" }) }); return; }
   const started = epoch;
   const context = getAccount().status.context!;
   // A list started before a mutation must never resurrect its consumed invite.
@@ -147,7 +155,10 @@ export async function respondToInvitation(id: string, action: "accept" | "declin
       const fresh = await refreshMembershipsAfterInvite(context);
       if (current(started, scope) && respondingAction === actionVersion) emit({ membershipRefreshNeeded: !fresh });
     }
-    if (current(started, scope) && respondingAction === actionVersion) emit({ error: invitationError(error) });
+    if (current(started, scope) && respondingAction === actionVersion) {
+      feedbackVersion++;
+      emit({ error: invitationError(error) });
+    }
   } finally {
     if (current(started, scope)) {
       const pending = { ...state.pending }; delete pending[id]; emit({ pending });

@@ -109,6 +109,73 @@ describe("in-app organization invitations", () => {
     await act(() => refreshInvitations());
     expect(screen.getAllByTestId("organization-invitation")).toHaveLength(2);
   });
+  it.each([
+    { action: "decline", code: "forbidden", message: "Your account does not have permission" },
+    { action: "decline", code: "organization_members_outcome_unknown", message: "The response was lost" },
+    { action: "accept", code: "forbidden", message: "Your account does not have permission" },
+    { action: "accept", code: "organization_members_outcome_unknown", message: "The response was lost" },
+    { action: "accept", code: "email_unverified", message: "Verify your account email" },
+    { action: "accept", code: "invite_requires_pro", message: "Accepting this invitation requires TerminalX Pro" },
+  ].flatMap((scenario) => ["success", "failure"].map((listOutcome) => ({ ...scenario, listOutcome }))))("keeps $action $code feedback when a list started during the action finishes with $listOutcome", async ({ action, code, message, listOutcome }) => {
+    render(<><OrganizationInvitations sidebar /><OrganizationInvitations /></>);
+    await screen.findAllByText("Join Research & Development");
+    const mutation = deferred<unknown>(); const list = deferred<{ invites: ReturnType<typeof invite>[] }>();
+    mocks.invoke.mockImplementationOnce(() => mutation.promise).mockImplementationOnce(() => list.promise);
+    fireEvent.click(within(screen.getByTestId("sidebar-invitations")).getByRole("button", { name: action === "accept" ? "Accept" : "Decline" }));
+    expect(screen.getAllByRole("button", { name: action === "accept" ? "Accepting…" : "Declining…" }).every((button) => button.hasAttribute("disabled"))).toBe(true);
+    let refresh!: Promise<void>; act(() => { refresh = refreshInvitations(); });
+    await act(async () => { mutation.reject({ code }); });
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+    const errors = screen.getAllByRole("alert").map((alert) => alert.textContent);
+    expect(errors.every((error) => error?.includes(message))).toBe(true);
+    await act(async () => {
+      if (listOutcome === "success") list.resolve({ invites: [invite()] });
+      else list.reject({ code: "unavailable" });
+      await refresh;
+    });
+    expect(screen.getAllByRole("alert").map((alert) => alert.textContent)).toEqual(errors);
+    expect(screen.getAllByTestId("organization-invitation")).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /^(Accept|Decline)$/ }).every((button) => !button.hasAttribute("disabled"))).toBe(true);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === `account_invitation_${action}`)).toHaveLength(1);
+    expect(mocks.refresh).toHaveBeenCalledTimes(action === "accept" ? 1 : 0);
+    mocks.invoke.mockResolvedValueOnce({ invites: [{ ...invite("new"), organizationName: "Another team" }] });
+    await act(() => refreshInvitations());
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.getAllByText("Join Another team")).toHaveLength(2);
+  });
+  it("preserves an Accept refusal against a list started during its membership reconciliation", async () => {
+    render(<><OrganizationInvitations sidebar /><OrganizationInvitations /></>);
+    await screen.findAllByText("Join Research & Development");
+    const membership = deferred<boolean>(); const list = deferred<{ invites: ReturnType<typeof invite>[] }>();
+    mocks.refresh.mockImplementationOnce(() => membership.promise);
+    mocks.invoke.mockRejectedValueOnce({ code: "email_unverified" }).mockImplementationOnce(() => list.promise);
+    let response!: Promise<void>; let refresh!: Promise<void>;
+    act(() => { response = respondToInvitation("inv-1", "accept"); });
+    await waitFor(() => expect(mocks.refresh).toHaveBeenCalledOnce());
+    act(() => { refresh = refreshInvitations(); });
+    await act(async () => { membership.resolve(true); await response; });
+    await act(async () => { list.resolve({ invites: [invite()] }); await refresh; });
+    expect(screen.getAllByRole("alert").every((alert) => alert.textContent?.includes("Verify your account email"))).toBe(true);
+    expect(mocks.refresh).toHaveBeenCalledOnce();
+  });
+  it("preserves a Decline refusal against membership recovery started while that Decline was pending", async () => {
+    const first = invite(); const second = invite("second");
+    mocks.invoke.mockResolvedValueOnce({ invites: [first, second] }); mocks.refresh.mockResolvedValueOnce(false);
+    render(<><OrganizationInvitations sidebar /><OrganizationInvitations /></>);
+    await screen.findAllByText("Join Research & Development");
+    mocks.invoke.mockRejectedValueOnce({ code: "organization_members_outcome_unknown" });
+    await act(() => respondToInvitation(first.id, "accept"));
+    const mutation = deferred<unknown>(); const recovery = deferred<boolean>();
+    mocks.invoke.mockImplementationOnce(() => mutation.promise).mockResolvedValueOnce({ invites: [second] });
+    mocks.refresh.mockImplementationOnce(() => recovery.promise);
+    let response!: Promise<void>; act(() => { response = respondToInvitation(second.id, "decline"); });
+    await act(() => refreshInvitations());
+    await act(async () => { mutation.reject({ code: "forbidden" }); await response; });
+    await act(async () => { recovery.resolve(true); await recovery.promise; });
+    expect(screen.getAllByRole("alert").every((alert) => alert.textContent?.includes("Your account does not have permission"))).toBe(true);
+    expect(screen.queryAllByText("Organizations refreshed.")).toHaveLength(0);
+    expect(getInvitations().membershipRefreshNeeded).toBe(true);
+  });
   it("retains uncertain acceptance recovery through a failed membership read and list-only refresh", async () => {
     mocks.refresh.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     render(<OrganizationInvitations />); await screen.findByText("Join Research & Development");
