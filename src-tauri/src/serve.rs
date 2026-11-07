@@ -217,6 +217,7 @@ pub fn main() -> i32 {
 
 /// Everything a running runtime owns; dropped in `shutdown`.
 struct Runtime {
+    _settings_watcher: crate::store::settings::file::Watcher,
     lifetime: Option<Arc<crate::local_runtime::Lifetime>>,
     sink: Arc<BroadcastSink>,
     host: Arc<crate::harness::host::Host>,
@@ -537,6 +538,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     // local history before hooks can publish live activity.
     crate::store::activity::claim();
     let sink = Arc::new(BroadcastSink::new(1024));
+    let settings_watcher = crate::store::settings::file::Watcher::start(sink.clone())?;
     let host = Arc::new(crate::harness::host::Host::new());
     let terminals = Arc::new(crate::pty::Terminals::new());
     #[cfg(unix)]
@@ -654,6 +656,8 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     if let Some(lifetime) = &lifetime {
         #[cfg(all(target_os = "macos", feature = "local-ui"))]
         crate::local_runtime::platform::install(&manager,lifetime,&(sink.clone() as Arc<dyn crate::sink::EventSink>));
+        #[cfg(unix)]
+        crate::store::environment::start(lifetime)?;
         lifetime.ready();
         if options.relay_link.is_none() && !options.self_test {
             crate::local_runtime::workspaces::start_retention(manager.clone(), lifetime.clone());
@@ -674,7 +678,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     if adopted.is_some() {
         bridge.thaw();
     }
-    Ok(Runtime { lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines })
+    Ok(Runtime { _settings_watcher: settings_watcher, lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines })
 }
 
 /// The hook sockets a handover brought, the cards its hooks wait on, and
@@ -704,7 +708,7 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
         let master = adopted.take(pane.fd)?;
         let id = pane.id.clone();
         let frozen = crate::pty::FrozenPane {
-            id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, cwd: pane.cwd, created: pane.created,
+            id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: pane.environment.unwrap_or_else(|| crate::store::environment::Stamp::unconfigured(&pane.cwd)), cwd: pane.cwd, created: pane.created,
             tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback, printed: pane.printed, screen: pane.screen,
             quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed,
         };

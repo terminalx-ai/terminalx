@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { SessionChrome } from "@/components/session/SessionView";
 import type { SessionEntry } from "@/types/session";
+// Prepare the cold module graph before test timers start. mount() still resets
+// every store; a timed-out cold import could otherwise render after cleanup.
+import "./FloatingShell";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),

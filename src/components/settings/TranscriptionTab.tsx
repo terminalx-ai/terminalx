@@ -1,5 +1,6 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Download, ExternalLink, Trash2, X } from "@/icons";
@@ -38,21 +39,25 @@ function Score({ label, value }: { label: string; value: number }) {
  * reads it without a round trip through the webview.
  */
 export function TranscriptionTab() {
+  const { revision } = useSettingsFile();
   const [models, setModels] = useState<TranscriptionModel[]>([]);
   const [settings, setSettings] = useState<TranscriptionPreferences | null>(null);
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [error, setError] = useState<string | null>(null);
+  const request = useRef(0);
 
   const reload = useCallback(async () => {
+    const current = ++request.current;
     try {
       const [m, s] = await Promise.all([transcription.models(), transcription.preferences()]);
+      if (current !== request.current) return;
       setModels(m);
       setSettings(s);
       const p: Record<string, DownloadProgress> = {};
       for (const row of m) if (row.progress && !row.progress.done) p[row.id] = row.progress;
       setProgress(p);
     } catch (e) {
-      setError(errorMessage(e));
+      if (current === request.current) setError(errorMessage(e));
     }
   }, []);
 
@@ -78,9 +83,10 @@ export function TranscriptionTab() {
       .catch(() => {});
     return () => {
       live = false;
+      request.current++;
       unlisten?.();
     };
-  }, [reload]);
+  }, [reload, revision]);
 
   const choose = async (id: string) => {
     setError(null);

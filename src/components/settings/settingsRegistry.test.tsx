@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
+import preferenceDefaults from "@/lib/userPreferenceDefaults.json";
 import { RegisteredSetting, resolveSetting, SETTINGS_GROUPS, SETTINGS_ROWS, SETTINGS_SECTIONS, settingsInSection, type SettingsSection } from "./settingsRegistry";
 
 afterEach(cleanup);
@@ -37,6 +38,18 @@ describe("settings registry", () => {
     for (const action of SHORTCUT_ACTIONS) expect(resolveSetting(`shortcuts.${action.id}`).title).toBe(action.label);
   });
 
+  it("registers the file locator and records migrated preferences in their current store", () => {
+    expect(resolveSetting("general.settingsFile").storage).toEqual({ kind: "file", location: "$TERMINALX_HOME/settings.json" });
+    expect(resolveSetting("appearance.theme").storage.location).toBe("$TERMINALX_HOME/settings.json#preferences.theme");
+    expect(resolveSetting("appearance.mode").storage.location).toBe("$TERMINALX_HOME/settings.json#preferences.mode");
+    for (const row of SETTINGS_ROWS) {
+      const legacyKeys = row.storage.location.startsWith("raccoon.prefs#")
+        ? row.storage.location.slice("raccoon.prefs#".length).split(/,\s*/).map((key) => key.split(".")[0]) : [];
+      for (const key of legacyKeys) expect(key in preferenceDefaults, row.id).toBe(false);
+      if (row.storage.location.startsWith("$TERMINALX_HOME/settings.json#preferences.")) expect(row.storage.kind).toBe("file");
+    }
+  });
+
   it("preserves native list semantics and ref ownership for custom editors", () => {
     const ref = { current: null as HTMLLIElement | null };
     const view = render(<ul><RegisteredSetting setting="shortcuts.app.settings"><li ref={ref}>Settings shortcut</li></RegisteredSetting></ul>);
@@ -56,6 +69,9 @@ describe("settings registry", () => {
 });
 
 it("keeps standard settings rows in the registry; organization internals register as sections", () => {
-  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx"], { query: "?raw", import: "default", eager: true });
+  // PRO-155's controlled action editor is not mounted in Settings yet (see
+  // docs/repository-action-editors.md). Its dialog switches edit an unsaved
+  // action draft; registering them would advertise row links that cannot open.
+  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -48,8 +48,26 @@ impl Sessions {
         self.call("runtime.session.pipeline",json!({"operation":operation,"params":params}))
     }
 
+    /// An older owner ignores unknown project fields; it must not silently
+    /// remove a workspace whose new desktop saved an archive script.
+    pub fn require_archive_support(&self) -> Result<()> {
+        let supported: bool = self.quick("runtime.session.workspace", json!({"operation":"archiveSupport","params":{}}))
+            .context("Restart the local runtime before using archive scripts; older runtimes can discard saved scripts when updating projects")?;
+        anyhow::ensure!(supported, "Restart the local runtime before using archive scripts; older runtimes can discard saved scripts when updating projects");
+        Ok(())
+    }
+
     pub fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
-        self.call("runtime.session.workspace", json!({"operation":operation,"params":params}))
+        // Archive hooks may take five minutes each. Keep the caller waiting
+        // for the result rather than reporting a timeout while removal runs.
+        let seconds = match operation {
+            "removeWorkspace" => 480,
+            "remove" => 120 + 360 * params["items"].as_array().map_or(1, |items| items.len() as u64),
+            "removeLeftovers" => 120 + 360 * params["ids"].as_array().map_or(1, |items| items.len() as u64),
+            "mergedSweep" => 3600 + 360 * crate::merged_cleanup::ARCHIVES_PER_PASS as u64,
+            _ => 120,
+        };
+        self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
     }
 
     pub fn delete_session(&self, session: &str) -> Result<()> {
@@ -189,6 +207,11 @@ impl Sessions {
             "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
     }
 
+    /// A window's report of a tab's warning (`SessionManager::note_incident_ui`).
+    pub fn note_incident_ui(&self, session: &str, tab: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
+        self.quick_tab("incidentUi", session, tab, json!({"report": report}))
+    }
+
     pub fn send_confirmed(&self, session: &str, tab: &str, text: String) -> Result<SendOutcome> {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
     }
@@ -211,6 +234,10 @@ impl Sessions {
 
     pub fn interrupt(&self, session: &str, tab: &str) -> Result<bool> {
         self.quick_tab("interrupt", session, tab, json!({}))
+    }
+
+    pub fn reset_chat(&self, session: &str, tab: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
+        self.tab("resetChat", session, tab, json!({"endSeq":end_seq,"resetFiles":reset_files}))
     }
 
     pub fn stop(&self, session: &str, tab: &str) -> Result<()> {

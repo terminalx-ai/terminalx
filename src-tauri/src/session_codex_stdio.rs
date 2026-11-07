@@ -9,6 +9,20 @@ use crate::harness::codex::stdio::{Action as StdioAction, Outbound, Stdio};
 use crate::harness::host::TerminalReceipt;
 use crate::store::index::AgentTransport;
 
+/// A send refused because Codex is still on a turn, or a card waits on the
+/// reader (#815). The request is refused, not the turn: nothing is published
+/// and the tab goes on as it was. The sender keeps its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Busy;
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Codex is still working on this turn, so this message was not sent. Send it when the turn ends, or interrupt the turn first.")
+    }
+}
+
+impl std::error::Error for Busy {}
+
 pub(super) fn selected(tab: &TabEntry) -> bool {
     tab.transport == AgentTransport::ExperimentalCodexStdio
 }
@@ -190,7 +204,7 @@ impl SessionManager {
         anyhow::ensure!(!manual || images.is_empty(), "Compaction does not accept images");
         anyhow::ensure!(!manual || receipt.is_none(), "A continuation cannot be a compaction");
         anyhow::ensure!(tab.harness == "codex", "Experimental stdio requires Codex");
-        anyhow::ensure!(!rt.turn_open && rt.pending.is_empty(), "Experimental Codex is busy; wait or interrupt before sending again");
+        if rt.turn_open || !rt.pending.is_empty() { return Err(Busy.into()); }
         Stdio::validate_mode(&tab.permission_mode)?;
         self.reclaim_ended_codex_stdio(rt);
         if !matches!(rt.engine, Engine::CodexStdio(_)) {
@@ -298,12 +312,14 @@ impl SessionManager {
         let version = codex_version(&program).context("Could not verify experimental Codex stdio version. No prompt was sent.")?;
         anyhow::ensure!(codex::stdio::supported(&version), "Experimental stdio requires Codex {} or newer (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::MIN_VERSION, version.trim());
         current()?;
-        let mut env = vec![
+        let environment = crate::store::environment::launch(cwd);
+        let mut env: Vec<_> = environment.values.into_iter().collect();
+        env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
             ("RACCOON_HOOK_TOKEN".into(), uuid::Uuid::now_v7().to_string()),
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
-        ];
+        ]);
         // A cloud workspace's credential, route and configuration, from one
         // grant snapshot like a terminal launch's; read here, off every lock,
         // because the first grant sync may still be on its way.
@@ -332,6 +348,7 @@ impl SessionManager {
             // cancelled child must be installed as a cleanup witness, never
             // discarded on an error path or replaced by a key-based lookup.
             let cancelled = !same_launch(&rt, launch) || rt.stopping || matches!(&rt.engine, Engine::CodexStdio(e) if e.exited || e.blocked);
+            rt.environment = environment.stamp;
             rt.child_pid = Some(child.pid);
             rt.child = Some(child.clone());
             cancelled
@@ -509,7 +526,7 @@ impl SessionManager {
             Some(exit) if exit.sign_in_refused => {
                 self.apply(rt, Payload::Error { message: RecoveryKind::SignedOut.message().into(), fatal: false, detail: exit.detail }, None);
                 self.sign_in_refused(rt);
-                self.needs_recovery(rt, RecoveryKind::SignedOut);
+                self.needs_recovery(rt, RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
             }
             // Codex never took the prompt: it is the reader's to send again
             // ("Resend last prompt"), and its turn never ran.
@@ -517,12 +534,12 @@ impl SessionManager {
                 let detail = exit.and_then(|exit| exit.detail).or_else(|| recovery::detail(&said));
                 self.apply(rt, Payload::Error { message: format!("Codex did not receive this prompt: {}", said.trim_end_matches('.')), fatal: false, detail }, None);
                 self.close_open_turn(rt, TurnStatus::Aborted, None);
-                self.needs_recovery(rt, RecoveryKind::Unsent);
+                self.needs_recovery(rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent);
             }
             exit => {
                 let message = format!("Experimental Codex connection failed: {said}. Stop this session, then send again to resume it; input will not be replayed.");
                 self.apply(rt, Payload::Error { message, fatal: false, detail: exit.and_then(|exit| exit.detail) }, None);
-                self.needs_recovery(rt, RecoveryKind::Disconnected);
+                self.needs_recovery(rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
             }
         }
     }
@@ -666,7 +683,7 @@ impl SessionManager {
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
         if retiring(&rt, &launch) { rt.stdio_retiring = None; }
-        if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent); }
+        if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent); }
         else if !retire && !(keep_unread && rt.status == TabStatus::Completed) { self.set_status(&mut rt, TabStatus::Idle); }
         Ok(())
     }
@@ -740,8 +757,18 @@ impl Sink for StdioSink {
     fn stdout_line(&self, line: String) {
         let mut rt = self.rt.lock().unwrap();
         if !self.current(&rt) { return; }
+        // Every frame from Codex is the agent heard from, as every line is
+        // for the other headless engines (`on_line`). Without it the
+        // watcher counted silence from the send, and a turn working for
+        // over five minutes was called stalled at each of its looks (#815).
+        rt.last_activity = Instant::now();
         let Engine::CodexStdio(engine) = &mut rt.engine else { return };
         let actions = engine.handle(&line);
+        // The watcher judges this transport by events, not a PTY pane. Renew
+        // its silence clock on current-launch output, even when a frame has
+        // no visible chat action, and withdraw only a watcher-raised stall.
+        rt.last_activity = Instant::now();
+        self.manager.stall_disproved(&mut rt);
         let result = actions.and_then(|actions| self.manager.apply_codex_actions(&mut rt, actions));
         if let Err(error) = result { self.manager.codex_stdio_failed(&mut rt, &error, None); }
     }

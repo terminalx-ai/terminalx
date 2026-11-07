@@ -1,5 +1,6 @@
-//! Settings the Rust side needs before the webview exists. Anything the
-//! frontend can read for itself lives in localStorage instead.
+//! User settings shared by the runtime and every window.
+
+pub mod file;
 
 use std::path::PathBuf;
 
@@ -9,6 +10,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    /// User-facing webview preferences. Missing keys inherit app defaults.
+    pub preferences: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The first window copied the legacy localStorage choices successfully.
+    pub preferences_migrated: bool,
     /// Where new worktrees go, relative to the project root.
     pub worktree_dir: String,
     /// Branch prefix for session worktrees.
@@ -56,6 +61,24 @@ pub struct Settings {
     /// Settings → Experimental. Tabs are made by the Rust side, which reads
     /// these when it makes one, so they live here.
     pub experimental: ExperimentalSettings,
+    /// What the runtime keeps about the warnings tabs raise (#815,
+    /// `recovery_log.rs`). The runtime writes it, so it reads this itself.
+    pub diagnostics: DiagnosticsSettings,
+}
+
+/// Private evidence kept on this Mac only, for reports the reader makes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DiagnosticsSettings {
+    /// Record when a tab's warning was raised, shown, acted on and cleared:
+    /// labels, counts and times, never a message, code or a path.
+    pub recovery_incidents: bool,
+}
+
+impl Default for DiagnosticsSettings {
+    fn default() -> Self {
+        Self { recovery_incidents: true }
+    }
 }
 
 /// Agents the app started that sit idle are stopped after a while (#696),
@@ -300,6 +323,8 @@ impl Default for StatusBarSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            preferences: Default::default(),
+            preferences_migrated: false,
             worktree_dir: ".raccoon/worktrees".into(),
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
@@ -318,33 +343,21 @@ impl Default for Settings {
             agents: AgentSettings::default(),
             conversations: ConversationSettings::default(),
             experimental: ExperimentalSettings::default(),
+            diagnostics: DiagnosticsSettings::default(),
         }
     }
 }
 
-fn file_path() -> Result<PathBuf> {
+pub(super) fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("settings.json"))
 }
 
 pub fn load() -> Settings {
-    file_path()
-        .ok()
-        .and_then(|p| super::read_json::<Settings>(&p).ok().flatten())
-        .unwrap_or_default()
+    file::load()
 }
 
 pub fn save(s: &Settings) -> Result<()> {
-    let path = file_path()?;
-    super::write_json(&path, s)?;
-    // A new file is already owner-only; this is what tightens one left loose
-    // by an older build, which matters because the file can hold a tracker
-    // API key. Raccoon owns this file, so narrowing it is ours to do.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    file::save(s)
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
+import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, RotateCcw, TriangleAlert } from "@/icons";
+import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
 import { useGitWorkingChanges } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
@@ -7,8 +8,10 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { Segmented } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
-import type { CommitInfo } from "@/types/session";
-import { DiffPane } from "./DiffPane";
+import type { ChangedFile, CommitInfo } from "@/types/session";
+import { FileDiff } from "./FileDiff";
+import { DiffOptions } from "./DiffOptions";
+import { useDiffOptions } from "@/lib/diffOptions";
 import { FileList } from "./FileList";
 import { AddRemote, GitError } from "./GitRecovery";
 
@@ -35,13 +38,15 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const selectedSource = useRef({ source, generation: 0 });
   if (selectedSource.current.source !== source) selectedSource.current = { source, generation: selectedSource.current.generation + 1 };
   const generation = selectedSource.current.generation;
+  const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
+  const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
-  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick);
+  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick, hideWhitespace);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pair, setPair] = useState<{ path: string; before: string; after: string } | null>(null);
+  const current = files.find((file) => file.path === selected);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -52,6 +57,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [openCommit, setOpenCommit] = useState<string | null>(null);
 
   useEffect(() => {
+    setDiscarding(null);
     setStatus(null);
     setCommits(null);
     setSelected(null);
@@ -78,21 +84,6 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
       cancelled = true;
     };
   }, [source, active, sub, tick]);
-
-  useEffect(() => {
-    if (!selected || !head) {
-      setPair(null);
-      return;
-    }
-    let cancelled = false;
-    source
-      .fileContentsAt(selected, head, null)
-      .then((r) => !cancelled && setPair({ path: selected, before: r.before ?? "", after: r.after ?? "" }))
-      .catch((e) => !cancelled && setError(source.errorMessage(e)));
-    return () => {
-      cancelled = true;
-    };
-  }, [source, selected, head, tick]);
 
   const run = async (label: string, fn: () => Promise<string | null | void>) => {
     setOperation(label);
@@ -128,6 +119,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <DiscardDialog source={source} file={discarding} onClose={() => setDiscarding(null)} onDiscarded={() => { setSelected(null); refresh(); }} />
       {!embedded && <div className="flex items-center gap-2 px-3 py-2">
         <Segmented<RepoView>
           aria-label="Repository view"
@@ -144,6 +136,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           {status && status.behind > 0 && <span className="text-faint">↓{status.behind}</span>}
         </div>
       </div>}
+      {!embedded && <DiffOptions />}
       {needsRemote && source.addRemote && <AddRemote key={source.key} source={source} onDone={() => { setNeedsRemote(false); setError(null); setNotice("Remote added. Push when you’re ready."); refresh(); }} />}
       {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
@@ -218,33 +211,20 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
               </div>
             </div>
           </div>}
-          <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", pair ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
+          <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
             <FileList
               files={files}
               selected={selected}
               onSelect={(p) => setSelected((s) => (s === p ? null : p))}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
-                <span
-                  role="button"
-                  aria-label="Discard changes"
-                  title="Discard changes to this file"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (window.confirm(`Discard changes to ${f.path}? This cannot be undone.`)) void run("discard", () => source.discard!(f.path));
-                  }}
-                  className="hidden shrink-0 rounded p-0.5 text-faint hover:bg-veil-strong hover:text-destructive group-hover:inline-flex"
-                >
-                  <RotateCcw className="size-3" />
-                </span>
+                <DiscardButton path={f.path} onClick={() => setDiscarding(f)} />
               )}
             />
           </div>
-          {pair && (
-            <div className="min-h-0 flex-1">
-              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" />
-            </div>
-          )}
+          {current && head && <div className="min-h-0 flex-1">
+            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined} />
+          </div>}
         </>
       )}
 
@@ -265,40 +245,30 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
 }
 
 function CommitRow({ source, commit, open, onToggle }: { source: GitSource; commit: CommitInfo; open: boolean; onToggle: () => void }) {
-  const [files, setFiles] = useState<{ path: string; status: "added" | "modified" | "deleted" | "renamed"; additions: number; deletions: number }[]>([]);
+  const { hideWhitespace } = useDiffOptions();
+  const [files, setFiles] = useState<ChangedFile[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pair, setPair] = useState<{ path: string; before: string; after: string } | null>(null);
+  const [base, setBase] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const current = files.find((file) => file.path === selected);
   const EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     (async () => {
       const parentTree = commit.parent ? (await source.logCommits(commit.parent, 1))[0]?.tree ?? EMPTY : EMPTY;
-      const f = await source.changesBetween(parentTree, commit.tree);
+      const f = await source.changesBetween(parentTree, commit.tree, hideWhitespace);
       if (!cancelled) {
+        setBase(parentTree);
+        setError(null);
         setFiles(f);
-        setSelected(f[0]?.path ?? null);
+        setSelected((previous) => f.some((file) => file.path === previous) ? previous : f[0]?.path ?? null);
       }
-    })().catch(() => {});
+    })().catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => {
       cancelled = true;
     };
-  }, [open, source, commit.sha]);
-  useEffect(() => {
-    if (!open || !selected) {
-      setPair(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      const parentTree = commit.parent ? (await source.logCommits(commit.parent, 1))[0]?.tree ?? EMPTY : EMPTY;
-      const r = await source.fileContentsAt(selected, parentTree, commit.tree);
-      if (!cancelled) setPair({ path: selected, before: r.before ?? "", after: r.after ?? "" });
-    })().catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [open, selected, source, commit.sha]);
+  }, [open, source, commit.sha, hideWhitespace]);
   return (
     <div className="mb-0.5">
       <button
@@ -318,11 +288,10 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
         <div className="ml-3 border-l border-hairline">
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
           <FileList files={files} selected={selected} onSelect={setSelected} empty="No files." />
-          {pair && (
-            <div className="h-72 border-t border-hairline">
-              <DiffPane path={pair.path} before={pair.before} after={pair.after} mode="unified" />
-            </div>
-          )}
+          {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
+          {current && base && <div className="h-96 border-t border-hairline">
+            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />
+          </div>}
         </div>
       )}
     </div>

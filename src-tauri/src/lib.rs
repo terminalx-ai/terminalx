@@ -8,6 +8,7 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+mod archive_script;
 mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
@@ -82,6 +83,8 @@ mod media;
 mod media_types;
 mod branch_overview;
 mod git;
+mod checkpoints;
+mod git_media;
 mod github;
 mod unfinished_merge;
 mod pr_associations;
@@ -98,8 +101,11 @@ mod issue_ops;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
-#[cfg(feature = "desktop")]
 mod keychain;
+#[cfg(feature = "desktop")]
+mod environment_commands;
+#[cfg(feature = "desktop")]
+mod secret_clipboard;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
@@ -127,6 +133,7 @@ mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod recovery_log;
 mod continuation;
 pub mod skills;
 mod store;
@@ -382,6 +389,7 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
+            store::settings::file::install(app.handle())?;
             let state = app.state::<AppState>();
             state.runtime_supervisor.start(app.handle())?;
             match local_runtime::supervisor::attach(app.handle()) {
@@ -399,6 +407,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            environment_commands::environment_list,
+            environment_commands::environment_reveal,
+            environment_commands::environment_copy,
+            environment_commands::environment_save,
+            environment_commands::environment_delete,
+            environment_commands::environment_read_file,
+            environment_commands::environment_changed,
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
@@ -551,6 +566,8 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::local_sections,
+            commands::edit_local_section,
             commands::automations_list,
             commands::automation_runs,
             commands::automation_issue_states,
@@ -611,16 +628,19 @@ pub fn run() {
             commands::changes_between,
             commands::review_range,
             commands::file_contents_at,
+            commands::diff_media_content,
             commands::log_commits,
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_recovery_ui,
             commands::resend_unsent,
             commands::resend_message,
             commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
+            commands::reset_chat,
             commands::tab_handoff,
             commands::tab_to_terminal,
             commands::ensure_tab_started,
@@ -664,6 +684,10 @@ pub fn run() {
             commands::gh_create_repository,
             commands::git_pull,
             commands::git_discard,
+            commands::turn_checkpoint,
+            commands::keep_turn,
+            commands::undo_turn,
+            commands::restore_undo,
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,
@@ -671,7 +695,12 @@ pub fn run() {
             commands::working_changes,
             commands::pr_list,
             commands::pr_associations,
+            commands::pr_associations_batch,
             commands::pr_details,
+            commands::pr_review_threads,
+            commands::pr_review_files,
+            commands::pr_review_resolve,
+            commands::pr_review_reply,
             commands::pr_landed,
             commands::pr_create,
             commands::pr_merge,
@@ -748,9 +777,17 @@ pub fn run() {
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
             commands::set_read_only_commands,
+            commands::diagnostics_settings,
+            commands::set_recovery_incidents,
+            commands::recovery_incidents_summary,
+            commands::recovery_incidents_export,
+            commands::clear_recovery_incidents,
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,
+            store::settings::file::settings_file_status,
+            store::settings::file::update_user_preferences,
+            store::settings::file::create_settings_file,
             commands::set_experimental_settings,
             commands::organization_work_status,
             commands::set_organization_work_status,

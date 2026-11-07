@@ -7,8 +7,11 @@ import { GeneralTab, AppearanceTab, AgentsTab, IntegrationsTab, AboutTab } from 
 import { TranscriptionTab } from "./TranscriptionTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { StorageTab } from "./StorageTab";
+import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
+import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
+import { EnvironmentSettings } from "./EnvironmentSettings";
 
 interface SectionContext {
   onOpenSkills?: () => void;
@@ -25,10 +28,11 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   appearance: ({ onOpenUsage }) => <AppearanceTab onOpenUsage={onOpenUsage} />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
+  environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
-  repositories: ({ projectPath }) => projectPath ? <MergedCleanupSettings projectPath={projectPath} /> : <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>,
-  storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /></>,
+  repositories: ({ projectPath, row }) => projectPath ? row === "repositories.scripts" ? <RepositoryScriptsTab projectPath={projectPath} /> : <MergedCleanupSettings projectPath={projectPath} /> : <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>,
+  storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /><RecoveryIncidentSettings /></>,
   shortcuts: () => <ShortcutsTab />,
   experimental: () => <ExperimentalTab />,
   about: () => <AboutTab />,

@@ -1,3 +1,4 @@
+import { SettingsFileError } from "./SettingsFile";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, Search, X } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -106,10 +107,10 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     inputRef.current?.focus();
     inputRef.current?.select();
   }, { global: true });
-  const choose = (next: SettingsSection, path?: string) => {
+  const choose = (next: SettingsSection, path?: string, row?: SettingId) => {
     setSection(next);
     setProjectPath(path);
-    setTarget(null);
+    setTarget(row ?? null);
     changeQuery("");
     setSelectionRequest((request) => request + 1);
   };
@@ -176,7 +177,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                       <span className="truncate">{repository.name}</span>
                     </button>
                     <div id={childrenId} hidden={!isExpanded} className="pl-4">
-                      <button type="button" aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>Workspace cleanup</button>
+                      <button type="button" aria-current={selected && target !== "repositories.scripts" ? "page" : undefined} className={navClass(selected && target !== "repositories.scripts")} onClick={() => choose("repositories", repository.path)}>Workspace cleanup</button>
+                      {repository.kind !== "folder" && <button type="button" aria-current={selected && target === "repositories.scripts" ? "page" : undefined} className={navClass(selected && target === "repositories.scripts")} onClick={() => choose("repositories", repository.path, "repositories.scripts")}>Scripts</button>}
                     </div>
                   </div>;
                 }) : <p className="px-2.5 py-2 text-xs text-faint">No repositories added.</p>
@@ -187,6 +189,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
           ))}
         </nav>
         <section ref={content} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby={searching ? "settings-results-title" : "settings-section-title"}>
+          <div className="mx-auto w-full max-w-[48rem] px-6 pt-6 empty:hidden"><SettingsFileError /></div>
           {searching && <div className="mx-auto w-full max-w-[48rem] p-6">
             <h2 id="settings-results-title" className="mb-3 text-sm font-medium">Settings sections</h2>
             <div ref={resultsRef} id="settings-search-results" role="listbox" aria-label="Settings search results">
