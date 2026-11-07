@@ -36,7 +36,7 @@ pub fn pin(cwd: &Path, name: &str, tree: &str) -> Result<()> {
 fn pin_with_tree_limit(cwd: &Path, name: &str, tree: &str, max_tree_bytes: u64) -> Result<()> {
     let bytes = tree_bytes(cwd, tree)?;
     if bytes > max_tree_bytes {
-        return Err(LimitExceeded("Checkpoint exceeds the 256 MiB snapshot limit; no files were changed").into());
+        return Err(LimitExceeded("This checkpoint exceeds the 256 MiB snapshot limit.").into());
     }
     let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
     let path = Path::new(dir.trim()).join("raccoon-checkpoint-retention.json");
