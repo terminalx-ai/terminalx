@@ -670,7 +670,7 @@ describe("the archive (#718)", () => {
     const web = screen.getByRole("group", { name: "web" });
     const webArchive = within(web).getByTestId("archived-sessions");
     expect(within(webArchive).getByRole("button", { name: "Archived (1)" }).getAttribute("aria-expanded")).toBe("true");
-    expect(within(webArchive).getByRole("button", { name: /^dev/ }).textContent).toContain("dev");
+    expect(within(webArchive).getByRole("button", { name: /^Talk old-web/ }).textContent).toContain("dev");
     // The live list is as it was.
     expect(within(web).getByRole("button", { name: "main, Talk here" })).toBeTruthy();
 
@@ -683,7 +683,7 @@ describe("the archive (#718)", () => {
     expect(within(within(removed).getByTestId("archived-sessions")).getByRole("button", { name: /^Talk left/ })).toBeTruthy();
     expect(within(removed).queryByText("No chats yet")).toBeNull();
 
-    await act(async () => { fireEvent.click(within(webArchive).getByRole("button", { name: "Unarchive dev" })); });
+    await act(async () => { fireEvent.click(within(webArchive).getByRole("button", { name: "Unarchive Talk old-web" })); });
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "set_session_archived").map(([, args]) => args)).toEqual([{ sessionId: "old-web", archived: false }]);
     // Back among the live ones, alone on its branch, and the fold is gone.
     expect(within(web).getByRole("button", { name: "dev, Talk old-web" })).toBeTruthy();
@@ -705,7 +705,7 @@ describe("the archive (#718)", () => {
     const fold = within(screen.getByRole("group", { name: "web" })).getByRole("button", { name: "Archived (1)" });
     act(() => { fireEvent.click(fold); });
     expect(fold.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByRole("button", { name: /^dev/ }).getAttribute("aria-current")).toBe("true");
+    expect(screen.getByRole("button", { name: /^Talk old/ }).getAttribute("aria-current")).toBe("true");
   });
 
   it("picks several rows and archives, brings back or deletes them together", async () => {

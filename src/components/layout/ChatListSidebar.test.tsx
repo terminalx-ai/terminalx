@@ -69,7 +69,7 @@ describe("the chat list", () => {
   it("lists every conversation in one list, pinned first then newest, whatever project it is in", async () => {
     await boot([
       session("chat", chatsPath, at(3)),
-      session("work", "/repos/web", at(2), { worktreeName: "fix-login", branch: "raccoon/fix-login" }),
+      session("work", "/repos/web", at(2), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }),
       session("old", "/repos/web", at(1), { pinned: true }),
       session("gone", chatsPath, at(4), { archived: true }),
     ]);
@@ -88,7 +88,7 @@ describe("the chat list", () => {
       alone: { waitingOn: "Which file?" },
     };
     await boot([
-      session("asks", "/repos/web", at(4), { worktreeName: "fix-login", branch: "raccoon/fix-login" }, "waiting"),
+      session("asks", "/repos/web", at(4), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }, "waiting"),
       session("said", chatsPath, at(3), {}, "completed"),
       session("alone", chatsPath, at(2), {}, "waiting"),
       session("quiet", "/repos/web", at(1), { branch: "main" }),
@@ -199,7 +199,7 @@ describe("renaming a chat in the list", () => {
     };
     render(<Probe />);
     mount();
-    const row = screen.getByRole("button", { name: "payments" });
+    const row = screen.getByRole("button", { name: "Talk a" });
     fireEvent.doubleClick(row);
     expect(opened).toBe("a");
     act(() => closeRenameSession());

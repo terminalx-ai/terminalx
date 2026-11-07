@@ -90,22 +90,42 @@ fn serves(cwd: &Path, roots: &[PathBuf], listeners: &[PathBuf]) -> bool {
 struct ListenerCache {
     at: Instant,
     directories: Vec<PathBuf>,
+    roots: Option<DirectoryCache>,
 }
 
-pub fn listening_sessions() -> anyhow::Result<Vec<String>> {
+/// Live sessions from the window's existing list; polling must not reread histories.
+#[derive(serde::Deserialize, PartialEq, Eq)]
+pub struct SessionDirectory {
+    id: String,
+    cwd: String,
+}
+
+struct DirectoryCache {
+    sessions: Vec<SessionDirectory>,
+    rows: Vec<(String, PathBuf)>,
+}
+
+impl DirectoryCache {
+    fn new(sessions: Vec<SessionDirectory>) -> Self {
+        let mut paths = std::collections::HashMap::new();
+        let rows = sessions
+            .iter()
+            .filter_map(|session| {
+                paths
+                    .entry(&session.cwd)
+                    .or_insert_with(|| std::fs::canonicalize(&session.cwd).ok())
+                    .as_ref()
+                    .map(|cwd| (session.id.clone(), cwd.clone()))
+            })
+            .collect();
+        Self { sessions, rows }
+    }
+}
+
+pub fn listening_sessions(sessions: Vec<SessionDirectory>) -> Vec<String> {
     static CACHE: OnceLock<Mutex<Option<ListenerCache>>> = OnceLock::new();
-    let sessions = crate::store::index::load()?;
-    let rows: Vec<_> = sessions
-        .iter()
-        .filter(|session| !session.worktree_removed)
-        .filter_map(|session| {
-            std::fs::canonicalize(&session.cwd)
-                .ok()
-                .map(|cwd| (session.id.clone(), cwd))
-        })
-        .collect();
-    if rows.is_empty() {
-        return Ok(Vec::new());
+    if sessions.is_empty() {
+        return Vec::new();
     }
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
     if cache
@@ -118,15 +138,24 @@ pub fn listening_sessions() -> anyhow::Result<Vec<String>> {
                 .into_iter()
                 .filter_map(|path| std::fs::canonicalize(path).ok())
                 .collect(),
+            roots: None,
         });
     }
+    let cache = cache.as_mut().unwrap();
+    if cache
+        .roots
+        .as_ref()
+        .is_none_or(|roots| roots.sessions != sessions)
+    {
+        cache.roots = Some(DirectoryCache::new(sessions));
+    }
+    let rows = &cache.roots.as_ref().unwrap().rows;
     let roots: Vec<_> = rows.iter().map(|(_, cwd)| cwd.clone()).collect();
-    let listeners = &cache.as_ref().unwrap().directories;
-    Ok(rows
-        .into_iter()
+    let listeners = &cache.directories;
+    rows.iter()
         .filter(|(_, cwd)| serves(cwd, &roots, listeners))
-        .map(|(id, _)| id)
-        .collect())
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 #[cfg(test)]

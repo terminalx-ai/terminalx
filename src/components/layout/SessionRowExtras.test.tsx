@@ -70,15 +70,25 @@ describe("sidebar row extras", () => {
     await waitFor(() => expect(screen.queryByRole("img", { name: "Running command" })).toBeNull());
   });
   it("shows a detached server's open port even without any shell panes", async () => {
+    mocks.sessions = [session, { ...session, id: "archive", archived: true }, { ...session, id: "removed", worktreeRemoved: true }];
     mocks.ports.mockResolvedValue(["s"]);
     render(<SessionRowData><SessionRowExtras sessions={[session]} selected={false} /></SessionRowData>);
     expect(await screen.findByRole("img", { name: "Open port" })).toBeTruthy();
     expect(mocks.busy).not.toHaveBeenCalled();
+    expect(mocks.ports).toHaveBeenCalledExactlyOnceWith([{ id: "s", cwd: "/repo/topic" }]);
   });
   it("uses readable branch names and keeps explicit names and first requests when no useful branch exists", () => {
     expect(sidebarConversationTitle(session, "raccoon/fix-login_redirect")).toBe("fix login redirect");
     expect(sidebarConversationTitle(session, "raccoon/calm-ember-panda")).toBe("First request");
     expect(sidebarConversationTitle(session, "main")).toBe("First request");
+    expect(sidebarConversationTitle(session, "develop")).toBe("First request");
+    expect(sidebarConversationTitle(session, "trunk")).toBe("First request");
     expect(sidebarConversationTitle({ ...session, tabs: [{ ...session.tabs[0], title: "My task", titlePinned: true }] }, "feature/other")).toBe("My task");
+  });
+  it("keeps conversations distinguishable when they share a worktree or use the project checkout", () => {
+    const peer = { ...session, id: "peer", title: "Second request" };
+    expect(sidebarConversationTitle(session, "feature/login", [session, peer])).toBe("First request");
+    expect(sidebarConversationTitle(peer, "feature/login", [session, peer])).toBe("Second request");
+    expect(sidebarConversationTitle({ ...session, worktreeName: null }, "custom-default")).toBe("First request");
   });
 });

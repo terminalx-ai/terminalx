@@ -190,7 +190,8 @@ function ChatRow({
   /** Drawn under the Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
-  const title = sidebarConversationTitle(session, link?.branch);
+  const { sessions } = useSessionStore();
+  const title = sidebarConversationTitle(session, link?.branch, sessions);
   const draft = useSessionDraft([session]);
   const ids = [session.id];
   const pickedNow = usePickedSessions();

@@ -3031,8 +3031,8 @@ pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols
 
 
 #[tauri::command]
-pub async fn listening_sessions() -> CmdResult<Vec<String>> {
-    tauri::async_runtime::spawn_blocking(|| crate::sidebar_activity::listening_sessions().map_err(err)).await.map_err(err)?
+pub async fn listening_sessions(sessions: Vec<crate::sidebar_activity::SessionDirectory>) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::sidebar_activity::listening_sessions(sessions)).await.map_err(err)
 }
 
 /// Which of these shell tabs are running a command now, for a close that would end it.

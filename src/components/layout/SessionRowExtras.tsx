@@ -23,8 +23,10 @@ export function SessionRowData({ children }: { children: ReactNode }) {
     for (const path of JSON.parse(projects) as string[]) void refreshWorkspaces(path);
   }, [projects]);
   const shells = JSON.stringify(panes.filter((pane) => !pane.owned && !pane.exited).map((pane) => [pane.id, pane.sessionId]));
+  const directories = JSON.stringify(store.sessions.filter((session) => !session.archived && !session.worktreeRemoved).map(({ id, cwd }) => ({ id, cwd })).sort((a, b) => a.id.localeCompare(b.id)));
   useEffect(() => {
     const entries = JSON.parse(shells) as [string, string][];
+    const sessions = JSON.parse(directories) as Pick<SessionEntry, "id" | "cwd">[];
     let live = true;
     let reading = false;
     const read = async () => {
@@ -33,7 +35,7 @@ export function SessionRowData({ children }: { children: ReactNode }) {
       try {
         const [commands, ports] = await Promise.all([
           entries.length ? pty.busy(entries.map(([id]) => id)) : [],
-          pty.listeningSessions().catch(() => []),
+          pty.listeningSessions(sessions).catch(() => []),
         ]);
         const busy = new Set(commands);
         if (live) setRunning({ commands: new Set(entries.filter(([id]) => busy.has(id)).map(([, session]) => session)), ports: new Set(ports) });
@@ -43,20 +45,21 @@ export function SessionRowData({ children }: { children: ReactNode }) {
     void read();
     const timer = window.setInterval(() => void read(), 5_000);
     return () => { live = false; window.clearInterval(timer); };
-  }, [shells]);
+  }, [shells, directories]);
   return <RunningSessions.Provider value={running}>{children}</RunningSessions.Provider>;
 }
 
 /** Generated branch names and main checkouts say nothing about the task. */
 export function readableBranchName(branch?: string | null): string | null {
-  if (!branch || /^(main|master|HEAD)$/.test(branch) || isPlaceholderBranch(branch)) return null;
+  if (!branch || /^(main|master|develop|trunk|HEAD)$/.test(branch) || isPlaceholderBranch(branch)) return null;
   return branch.replace(/^[^/]+\//, "").replace(/[-_/]+/g, " ").trim() || null;
 }
 
-/** Explicit names win; PR titles will come from the shared row-status data. */
-export function sidebarConversationTitle(session: SessionEntry, branch?: string | null): string {
+/** Shared checkouts keep distinct conversation names; isolated workspaces may use their branch. */
+export function sidebarConversationTitle(session: SessionEntry, branch?: string | null, sessions: readonly SessionEntry[] = []): string {
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
-  if (tab?.titlePinned || session.worktreeRemoved) return conversationTitle(session);
+  const shared = !session.worktreeName || sessions.some((peer) => peer.id !== session.id && peer.cwd.replace(/\/+$/, "") === session.cwd.replace(/\/+$/, "") && !peer.archived && !peer.worktreeRemoved);
+  if (tab?.titlePinned || session.worktreeRemoved || shared) return conversationTitle(session);
   return readableBranchName(branch) || conversationTitle(session);
 }
 

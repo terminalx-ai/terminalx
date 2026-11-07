@@ -1085,7 +1085,8 @@ function ConversationRow({
   /** Drawn under an Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
-  const title = named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch);
+  const { sessions } = useSessionStore();
+  const title = named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
   const draft = useSessionDraft(peers);
   const unread = peers.some(isUnread);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
