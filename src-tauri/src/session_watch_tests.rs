@@ -209,6 +209,7 @@ impl Rig {
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
+            environment: Default::default(),
             engine: Engine::Cli(CliTab {
                 usage_account: None,
                 harness: kind,
@@ -256,6 +257,7 @@ impl Rig {
             signed_out_in_turn: false,
             last_activity: now,
             recovery: None,
+            incidents: Default::default(),
             stalled_at: None,
             last_settings_report: None,
             reported_mode_to_judge: None,
@@ -1358,7 +1360,7 @@ fn cloud_counts_distinguish_silence_from_errors_and_unconfirmed_delivery() {
     for kind in [RecoveryKind::Timeout, RecoveryKind::DeliveryUnconfirmed, RecoveryKind::Disconnected] {
         let rig = Rig::with_live_pane();
         rig.start_turn();
-        rig.manager.needs_recovery(&mut rig.rt.lock().unwrap(), kind);
+        rig.manager.needs_recovery(&mut rig.rt.lock().unwrap(), kind, crate::recovery_log::Source::AgentError);
         assert_eq!(rig.counts(), (0, 0), "a reported {kind:?} is not a silence guess");
         if kind == RecoveryKind::DeliveryUnconfirmed {
             rig.rt.lock().unwrap().stalled_at = Some(rig.now.get());

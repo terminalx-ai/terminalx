@@ -23,6 +23,19 @@ const NATIVE_RECOVERY_MESSAGES: Partial<Record<RecoveryKind, string>> = {
 };
 const NATIVE_WAITING = "Review the conversation above, then send a message or stop the session.";
 
+/**
+ * What native Codex says when a message arrives while its turn runs (#815,
+ * `session_codex_stdio.rs` `Busy`): the request is refused, never the turn.
+ * It is no recovery: the turn goes on, and the message is the sender's again.
+ */
+export const BUSY_REFUSAL = "Codex is still working on this turn, so this message was not sent.";
+/** What the composer says for it, with the message back in the composer. */
+export const BUSY_NOTICE = "Codex is still working on this turn, so your message was not sent. It is back in the composer: send it when the turn ends, or interrupt the turn first.";
+
+export function isBusyRefusal(error: unknown): boolean {
+  return (error instanceof Error ? error.message : String(error)).includes(BUSY_REFUSAL);
+}
+
 /** Never echo arbitrary IPC/provider errors in recovery controls. */
 export function classifyRecovery(message: string): RecoveryKind {
   // The agents' own sign-in wording only, as `recovery.rs` reads it: another service's 401 is that tool's failure.

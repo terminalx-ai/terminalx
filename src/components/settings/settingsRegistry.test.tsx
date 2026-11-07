@@ -55,17 +55,10 @@ describe("settings registry", () => {
   });
 });
 
-it("keeps standard settings rows in the registry, excluding nested editors", () => {
-  const adapters = import.meta.glob([
-    "./*.tsx",
-    "!./*.test.tsx",
-    "!./settingsRegistry.tsx",
-    // Organization-specific controls live inside a registered content section.
-    "!./WorkStatusSettings.tsx",
-    // These switches edit an action draft inside a dialog, not a settings row.
-    // Register the containing editor when repository settings are wired up
-    // (see docs/repository-action-editors.md).
-    "!./RepositoryActionsSettings.tsx",
-  ], { query: "?raw", import: "default", eager: true });
+it("keeps standard settings rows in the registry; organization internals register as sections", () => {
+  // PRO-155's controlled action editor is not mounted in Settings yet (see
+  // docs/repository-action-editors.md). Its dialog switches edit an unsaved
+  // action draft; registering them would advertise row links that cannot open.
+  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });
