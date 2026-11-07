@@ -212,6 +212,32 @@ fn working_changes_and_file_contents_mirror_the_desktop_commands() {
 }
 
 #[test]
+fn review_options_and_media_reads_use_the_selected_repository() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    std::fs::write(repo.join("README.md"), "  hello \n").unwrap();
+    let changes = f.call("git.workingChanges", json!({ "repo": "app", "hideWhitespace": true })).unwrap();
+    assert_eq!(changes["files"][0]["additions"], 0);
+    assert_eq!(changes["files"][0]["deletions"], 0);
+    std::fs::write(repo.join("image.png"), b"\0\xffPNG").unwrap();
+    let live = f.call("git.mediaContent", json!({ "repo": "app", "path": "image.png" })).unwrap();
+    assert_eq!(live, json!({ "data": "AP9QTkc=", "mime": "image/png" }));
+    let base = crate::git::snapshot_tree(&repo).unwrap();
+    std::fs::write(repo.join("image.png"), b"updated").unwrap();
+    assert_eq!(f.call("git.mediaContent", json!({ "repo": "app", "path": "image.png", "tree": base })).unwrap(), live);
+    assert!(f.call("git.mediaContent", json!({ "repo": "app", "path": "missing.pdf", "tree": base })).unwrap().is_null());
+    assert_eq!(f.code("git.mediaContent", json!({ "repo": "app", "path": "../escape.png" })), "path_forbidden");
+    std::fs::write(repo.join("large.pdf"), vec![0; 512 * 1024 + 1]).unwrap();
+    assert!(f.call("git.mediaContent", json!({ "repo": "app", "path": "large.pdf" })).is_err());
+    #[cfg(unix)] {
+        std::fs::write(f.base.join("secret.png"), "secret").unwrap();
+        std::os::unix::fs::symlink(f.base.join("secret.png"), repo.join("leak.png")).unwrap();
+        assert_eq!(f.code("git.mediaContent", json!({ "repo": "app", "path": "leak.png" })), "path_forbidden");
+    }
+}
+
+#[test]
 fn push_publishes_a_new_branch_and_a_repeat_is_reconciled_without_pushing_again() {
     let f = fixture();
     let remote = f.remote("origin");

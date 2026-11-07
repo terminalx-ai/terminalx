@@ -4,7 +4,7 @@ import type { AgentEvent } from "@/types/events";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@/lib/prefs", () => ({ usePrefs: () => ({ panelWidth: 360 }), setPrefs: vi.fn() }));
+vi.mock("@/lib/prefs", () => ({ usePrefs: () => ({ panelWidth: 360, diffMode: "unified", diffHideWhitespace: false, diffWrap: true, diffWrapFiles: {} }), setPrefs: vi.fn() }));
 vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), keycaps: () => [], useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/dialogs", () => ({ openSettle: vi.fn(), openWorkspaceDelete: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
@@ -59,7 +59,7 @@ it("shows workspace work after a status-only turn, and commits from its Uncommit
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
 
   await waitFor(() => expect(screen.getAllByRole("button", { name: /modified.ts/ })).toHaveLength(1));
-  expect(invoke).toHaveBeenCalledWith("working_changes", { cwd });
+  expect(invoke).toHaveBeenCalledWith("working_changes", { cwd, hideWhitespace: false });
 
   // History and back keep a commit draft.
   fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Keep my draft" } });
@@ -81,7 +81,7 @@ it("uses live-turn wording while an agent is running", async () => {
   openChanges();
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
   expect(await screen.findByText("This turn · 2 files")).toBeTruthy();
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("changes_between", { cwd, base: "snapshot", head: "live-snapshot" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("changes_between", { cwd, base: "snapshot", head: "live-snapshot", hideWhitespace: false }));
 });
 
 it("keeps the working-tree view scoped to the workspace", async () => {
