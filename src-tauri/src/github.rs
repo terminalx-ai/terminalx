@@ -2,6 +2,7 @@
 //! configuration. Absent `gh` is one readable line, not a broken panel.
 
 pub mod conversation;
+pub mod reviews;
 
 use std::path::{Path, PathBuf};
 use std::collections::BTreeSet;
