@@ -423,6 +423,7 @@ pub fn run() {
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
+            commands::account_paste_callback,
             commands::organization_console_open,
             commands::account_sign_out,
             commands::organization_create,

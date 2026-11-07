@@ -571,7 +571,7 @@ function ProjectGroup({
   return (
     <div role="group" aria-label={group.name} className="mb-3 last:mb-0">
       <DropdownMenu {...menu.root}>
-        <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-8 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
+        <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-9 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
           <button
             type="button"
@@ -803,7 +803,7 @@ function BranchRow({
     <li>
       <ContextMenu>
       <ContextMenuTrigger asChild>
-      <div className={cn(actionRow, "relative -mx-2 flex h-8 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
+      <div className={cn(actionRow, "relative -mx-2 flex h-9 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
         <button
           type="button"
           onClick={toggle}
@@ -1083,7 +1083,7 @@ function ConversationRow({
           className={cn(
             actionRow,
             // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
-            "relative -mx-2 flex h-8 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            "relative -mx-2 flex h-9 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
             selected ? "bg-selected text-foreground" : "text-foreground/90 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}

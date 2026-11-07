@@ -95,7 +95,7 @@ fn codex_stdout_renews_activity_and_clears_only_watcher_timeouts() {
 
     // An explicit provider failure is not a silence guess. Do not erase it
     // just because more transport output arrives.
-    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut);
+    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
     sink.stdout_line(frame);
     assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::SignedOut));
 }

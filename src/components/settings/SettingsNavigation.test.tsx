@@ -56,16 +56,17 @@ describe("registry navigation", () => {
     expect(screen.getByRole("heading", { name: "Environment" })).toBeTruthy();
   });
 
-  it("expands each repository independently and opens its existing cleanup controls", () => {
+  it("opens each repository's cleanup controls from its one row", () => {
     const view = render(<SettingsPage onBack={vi.fn()} />);
     const group = within(screen.getByRole("group", { name: "Repositories" }));
     expect(group.queryByRole("button", { name: "Archived" })).toBeNull();
     expect(group.getByRole("button", { name: "Notes" })).toBeTruthy();
+    // A row a repository, no expander holding a single item.
     expect(group.queryByRole("button", { name: "Workspace cleanup" })).toBeNull();
+    expect(group.getByRole("button", { name: "One" }).hasAttribute("aria-expanded")).toBe(false);
     fireEvent.click(group.getByRole("button", { name: "One" }));
-    expect(group.getByRole("button", { name: "One" }).getAttribute("aria-expanded")).toBe("true");
-    expect(group.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(group.getByRole("button", { name: "Workspace cleanup" }));
+    expect(group.getByRole("button", { name: "One" }).getAttribute("aria-current")).toBe("page");
+    expect(group.getByRole("button", { name: "Two" }).hasAttribute("aria-current")).toBe(false);
     expect(screen.getByRole("heading", { name: "One" })).toBeTruthy();
     expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/one");
     expect(screen.getByRole("radiogroup", { name: "Delete merged workspaces of One" })).toBeTruthy();
@@ -88,10 +89,10 @@ describe("registry navigation", () => {
   });
 });
 
-it("opens a repository row link on the named project and expands its navigation entry", () => {
+it("opens a repository row link on the named project and marks its row", () => {
   const view = render(<SettingsPage initialTab="repositories.mergedCleanup" initialProjectPath="/repos/two" onBack={vi.fn()} />);
   expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
   expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/two");
 });
 

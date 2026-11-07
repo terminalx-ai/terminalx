@@ -19,6 +19,8 @@ interface AccountState {
   status: AccountStatus;
   ready: boolean;
   busy: boolean;
+  /** The dev app's sign-in dialog is up, asking for the browser's link (a bare dev binary cannot be opened by it). */
+  pasteLink?: boolean;
 }
 
 const signedOut: AccountStatus = {
@@ -424,10 +426,39 @@ export async function signIn(): Promise<void> {
   set({ busy: true, status: { ...state.status, lastError: null } });
   try {
     applyStatus(await api.accountSignIn());
+    // Run with `tauri dev`, the app is a bare binary: the browser's Open TerminalX Dev button cannot reach it, so it
+    // asks for that button's link straight away. A built app is opened by the button and asks nothing.
+    if (import.meta.env.DEV) set({ pasteLink: true });
   } catch (error) {
     set({ status: { ...state.status, lastError: errorMessage(error) }, ready: true });
   } finally {
     set({ busy: false });
+  }
+}
+
+/** Puts away the dev app's sign-in link dialog; the sign-in itself stays under way. */
+export function closePasteLink(): void {
+  set({ pasteLink: false });
+}
+
+/** Brings the dev app's sign-in link dialog back for the sign-in under way, without starting another. */
+export function openPasteLink(): void {
+  set({ pasteLink: true });
+}
+
+/**
+ * Finishes the sign-in under way with the link the browser's Open button
+ * carries, pasted here because the button could not open this app (a
+ * development build has no URL scheme for it). Resolves to the problem, if
+ * the link was not this sign-in's; the exchange itself reports as a delivered
+ * link's does, through the account status.
+ */
+export async function pasteSignInLink(link: string): Promise<string | null> {
+  try {
+    await api.accountPasteCallback(link);
+    return null;
+  } catch (error) {
+    return errorMessage(error);
   }
 }
 
