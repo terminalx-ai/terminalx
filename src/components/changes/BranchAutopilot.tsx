@@ -28,7 +28,8 @@ export function BranchAutopilot({ sessionId, offer }: { sessionId?: string; offe
   const project = store.projects.find((candidate) => candidate.path === session.projectPath);
   return (
     // A box like the next step's above it: same well, corner and padding, so the two read as one set.
-    <section aria-label="Autopilot" className="flex flex-col rounded-lg bg-well" data-testid="branch-autopilot">
+    // Pulled up to 6px under the next step, so the two boxes read as a pair rather than separate sections.
+    <section aria-label="Autopilot" className="-mt-1.5 flex flex-col rounded-lg bg-well" data-testid="branch-autopilot">
       <button
         type="button"
         aria-expanded={expanded}
