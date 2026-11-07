@@ -37,3 +37,10 @@ it("offers it for any other session with both off, as before", () => {
   expect(switches()).toEqual(["false", "false"]);
   expect(screen.getByRole("button", { name: "Turn on autopilot" }).hasAttribute("disabled")).toBe(true);
 });
+
+it("in the Branch tab's plain form, offers nothing to press until a switch is on", () => {
+  render(<SessionPipelineControls session={session({})} project={project} tabId="tab-1" plain />);
+  expect(screen.queryByRole("button", { name: "Turn on autopilot" })).toBeNull();
+  fireEvent.click(screen.getByRole("switch", { name: "Merge when green" }));
+  expect(screen.getByRole("button", { name: "Turn on autopilot" })).toBeTruthy();
+});

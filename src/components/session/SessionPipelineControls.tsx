@@ -8,7 +8,7 @@ import type { IssuePipeline } from "@/types/issuePipeline";
 import type { Project, SessionEntry } from "@/types/session";
 
 /** Enable the same launch contract later, without interrupting an active turn. */
-export function SessionPipelineControls({ session, project, tabId, pipeline }: { session: SessionEntry; project?: Project; tabId?: string; pipeline?: IssuePipeline }) {
+export function SessionPipelineControls({ session, project, tabId, pipeline, plain = false }: { session: SessionEntry; project?: Project; tabId?: string; pipeline?: IssuePipeline; plain?: boolean }) {
   // Shown only while the session has no pipeline; one started from an issue offers the issue's defaults (#700).
   const launch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !tabId ? "Choose an agent conversation first." : undefined, undefined, session.issue ? "issue" : "session");
   const [busy, setBusy] = useState(false);
@@ -26,7 +26,14 @@ export function SessionPipelineControls({ session, project, tabId, pipeline }: {
   };
   return <>
     {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-    {pipeline ? <IssuePipelinePanel pipeline={pipeline} /> : <>
+    {pipeline ? <IssuePipelinePanel pipeline={pipeline} /> : plain ? <>
+      <PipelineLaunchControls launch={launch} disabled={busy} plain />
+      {/* Nothing to press until a switch is on; then one small button, and when it starts. */}
+      {chosen && tabId && <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-faint">Starts after the current turn</span>
+        <Button size="xs" variant="accent" disabled={busy} onClick={() => void enable()}>Turn on autopilot</Button>
+      </div>}
+    </> : <>
       <PipelineLaunchControls launch={launch} disabled={busy} />
       <p className="text-xs text-faint">It starts after the current turn. A session on the base branch cannot use it.</p>
       {/* Why the button cannot be pressed, beside it rather than in the faint note above. */}

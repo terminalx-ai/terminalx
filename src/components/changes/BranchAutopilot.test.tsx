@@ -18,7 +18,7 @@ it("is one line while off, and opens its switches in place", () => {
   render(<BranchAutopilot sessionId="s1" offer />);
   const line = screen.getByRole("button", { name: /Autopilot/ });
   expect(line.textContent).toContain("Off");
-  expect(line.textContent).toContain("Set up");
+  expect(line.getAttribute("aria-expanded")).toBe("false");
   expect(screen.queryByText("autopilot switches")).toBeNull();
   fireEvent.click(line);
   expect(screen.getByText("autopilot switches")).toBeTruthy();
