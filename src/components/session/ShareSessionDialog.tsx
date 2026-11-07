@@ -270,6 +270,8 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
   const unguarded = agentTabs.some((tab) => modeIsUnguarded(tab.permissionMode) || (!!tab.requestedPermissionMode && modeIsUnguarded(tab.requestedPermissionMode)));
   const modes = [...new Set(agentTabs.map((tab) => tab.requestedPermissionMode || tab.permissionMode))];
   const sessionMode = modes.length === 1 ? modes[0] : MIXED;
+  // Sharing where nothing asks takes a second, deliberate click: the first turns Create into Share in Bypass anyway.
+  const [bypassConfirmed, setBypassConfirmed] = useState(false);
 
   const relay = usePairing().status.relay.phase === "connected";
   const [settings, setSettings] = useState(defaultShareSettings);
@@ -355,12 +357,6 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
             />
             {/* The session's permissions, beside the link that shares it: a tab where nothing asks (Bypass, or Codex
                 with no sandbox) would let a guest have the agent do anything here, so the host settles it now. */}
-            {unguarded && !editing && (
-              <p role="status" className="rounded-lg bg-warning/10 px-3 py-2 text-[12px] leading-snug text-warning" data-testid="share-unguarded">
-                In Bypass permissions a guest who drives could have the agent do anything on this computer, so a session
-                in it is not shared. Choose another mode to share.
-              </p>
-            )}
             <div className="flex items-center gap-2">
               {!editing && agentTabs.length > 0 && (
                 // One box: the shield, its name and the mode, the height of the button beside it.
@@ -373,6 +369,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                     value={sessionMode}
                     onChange={(event) => void run(async () => {
                       const mode = event.target.value;
+                      setBypassConfirmed(false);
                       for (const tab of agentTabs) await agent.setPermissionMode(sessionId, tab.id, mode);
                     })}
                   >
@@ -388,8 +385,9 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
               )}
               <div className="ml-auto flex flex-row-reverse gap-2">
               <Button
-                disabled={unguarded && !editing}
-                onClick={() =>
+                className={cn(unguarded && !editing && bypassConfirmed && "bg-warning text-black hover:bg-warning/90")}
+                onClick={() => {
+                  if (unguarded && !editing && !bypassConfirmed) { setBypassConfirmed(true); return; }
                   void run(async () => {
                     if (editing) await changeShare(sessionId, "edit", { linkId: editing, settings });
                     else {
@@ -399,10 +397,11 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                     }
                     setEditing(null);
                     setSettings(defaultShareSettings());
-                  })
-                }
+                    setBypassConfirmed(false);
+                  });
+                }}
               >
-                {busy ? "Saving…" : editing ? "Save settings" : "Create share link"}
+                {busy ? "Saving…" : editing ? "Save settings" : unguarded && bypassConfirmed ? "Share in Bypass anyway" : "Create share link"}
               </Button>
               {editing && (
                 <Button
@@ -417,6 +416,12 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
               )}
               </div>
             </div>
+            {unguarded && !editing && (
+              <p role="status" className="rounded-lg bg-warning/10 px-3 py-2 text-[12px] leading-snug text-warning" data-testid="share-unguarded">
+                Bypass is on: a guest who can drive could have the agent do anything on this computer, with nothing
+                asking you first. Share only with people you trust, or choose another mode.
+              </p>
+            )}
           </fieldset>
         )}
         {error && signedIn && (

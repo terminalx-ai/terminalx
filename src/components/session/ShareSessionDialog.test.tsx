@@ -33,15 +33,19 @@ const open = async () => {
   await screen.findByRole("button", { name: "Create share link" });
 };
 describe("Share session", () => {
-  it("settles a tab in Bypass beside the link: says why, holds Create, and switches every agent tab", async () => {
+  it("warns of a tab in Bypass beside the link, leaves sharing to the host, and switches every agent tab", async () => {
     mocks.sessions = [{ id: "local-session", tabs: [{ id: "a", permissionMode: "bypassPermissions" }, { id: "b", permissionMode: "acceptEdits" }] }];
     render(<ShareSessionDialogHost />);
     act(() => openSessionShare("local-session"));
-    expect((await screen.findByTestId("share-unguarded")).textContent).toContain("Bypass permissions");
-    expect(screen.getByRole("button", { name: "Create share link" }).matches(":disabled")).toBe(true);
+    expect((await screen.findByTestId("share-unguarded")).textContent).toContain("Bypass is on");
+    // The host decides, with one more click: the first turns Create into a confirmation, the second shares.
+    fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
+    expect(mocks.invoke).not.toHaveBeenCalledWith("session_share_create", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Share in Bypass anyway" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("session_share_create", expect.anything()));
     const picker = screen.getByLabelText("Session permissions") as HTMLSelectElement;
     expect(picker.value).toBe("__mixed__");
-    // Every mode is offered, Bypass too; Create waits while it is chosen.
+    // Every mode is offered, Bypass too.
     expect([...picker.options].filter((option) => !option.disabled).map((option) => option.value)).toContain("bypassPermissions");
     fireEvent.change(picker, { target: { value: "acceptEdits" } });
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("set_tab_permission_mode", { sessionId: "local-session", tabId: "b", mode: "acceptEdits" }));
