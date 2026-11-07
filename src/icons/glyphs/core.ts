@@ -32,11 +32,8 @@ export const GLYPHS: Record<string, Glyph> = {
   Ellipsis: [dot(3.5, 8), dot(8, 8), dot(12.5, 8)],
   PanelLeft: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M6 3v10" }]],
   PanelRight: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M10 3v10" }]],
-  Settings: [
-    ["path", { d: "M2.5 4.5h5.5M11.5 4.5h2M2.5 11.5h2M8 11.5h5.5" }],
-    ["circle", { cx: 9.5, cy: 4.5, r: 1.6 }],
-    ["circle", { cx: 6, cy: 11.5, r: 1.6 }],
-  ],
+  // A gear: six rounded teeth around a hole, in the set's stroke. (Settings2 keeps the sliders, for options.)
+  Settings: [["path", { d: "M6.29 3.41 L6.29 1.62 L9.71 1.62 L9.71 3.41 L11.12 4.22 L12.67 3.33 L14.38 6.29 L12.83 7.18 L12.83 8.82 L14.38 9.71 L12.67 12.67 L11.12 11.78 L9.71 12.59 L9.71 14.38 L6.29 14.38 L6.29 12.59 L4.88 11.78 L3.33 12.67 L1.62 9.71 L3.17 8.82 L3.17 7.18 L1.62 6.29 L3.33 3.33 L4.88 4.22Z" }], ["circle", { cx: 8, cy: 8, r: 2 }]],
   ExternalLink: [["path", { d: "M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3" }]],
   Copy: [["rect", { x: 6, y: 6, width: 8, height: 8, rx: 1.5 }], ["path", { d: "M10 6V3.5A1.5 1.5 0 0 0 8.5 2h-5A1.5 1.5 0 0 0 2 3.5v5A1.5 1.5 0 0 0 3.5 10H6" }]],
   Pin: [["path", { d: "M6 2.5h4v3.6l1.9 1.9a.6.6 0 0 1-.42 1.02H4.52A.6.6 0 0 1 4.1 8L6 6.1zM8 9v4.5" }]],
